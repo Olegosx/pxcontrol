@@ -29,22 +29,37 @@ class ChannelInfo:
 def normalize_chat_ref(chat_ref: str) -> str | int:
 	"""Приводит ввод пользователя к виду для Bot API.
 
-	Принимает ``@имя``, ``имя``, ссылку ``t.me/имя`` или числовой ID
-	(для приватных каналов). Возвращает ``@имя`` или число.
+	Принимает ``@имя``, ``имя``, ссылки ``t.me/имя`` и ``t.me/c/<число>/…``,
+	числовой ID (в том числе с пробелами внутри). Возвращает ``@имя``
+	или число.
 
 	Raises:
-		ChannelCheckError: Пустая или бессмысленная ссылка.
+		ChannelCheckError: Пустая, инвайт- или неразборчивая ссылка.
 	"""
 	ref = chat_ref.strip()
 	for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
 		if ref.lower().startswith(prefix):
 			ref = ref[len(prefix):]
 			break
-	ref = ref.strip("/").lstrip("@")
+	ref = ref.strip("/")
+	if ref.startswith("+"):
+		raise ChannelCheckError(
+			"Инвайт-ссылка (t.me/+…) не подходит — укажите @имя канала "
+			"или его ID (начинается с -100)."
+		)
+	if ref.lower().startswith("c/"):
+		internal = ref[2:].split("/", 1)[0]
+		if internal.isdigit():
+			return int(f"-100{internal}")
+		raise ChannelCheckError(
+			"Не удалось разобрать ссылку t.me/c/… — укажите ID канала (-100…)."
+		)
+	ref = ref.lstrip("@")
+	digits = ref.replace(" ", "")
+	if digits.lstrip("-").isdigit() and digits.lstrip("-"):
+		return int(digits)
 	if not ref:
 		raise ChannelCheckError("Укажите @имя, ссылку t.me/… или ID канала.")
-	if ref.lstrip("-").isdigit():
-		return int(ref)
 	return f"@{ref}"
 
 
@@ -92,10 +107,15 @@ async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
 		raise ChannelCheckError("Telegram отклонил токен бота.") from exc
 	except TelegramForbiddenError as exc:
 		raise ChannelCheckError(
-			"Бот не добавлен в канал — добавьте его администратором."
+			"Бот не добавлен в канал — добавьте его администратором. "
+			f"(Telegram: {exc.message})"
 		) from exc
 	except TelegramBadRequest as exc:
-		raise ChannelCheckError("Канал не найден — проверьте @имя или ID.") from exc
+		raise ChannelCheckError(
+			"Канал не найден — проверьте @имя или ID; приватный канал "
+			"виден боту только после добавления его администратором. "
+			f"(Telegram: {exc.message})"
+		) from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
 	finally:

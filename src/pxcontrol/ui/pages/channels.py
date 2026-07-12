@@ -36,7 +36,9 @@ class _ConnectDialog(MessageBoxBase):
 		self.viewLayout.addWidget(SubtitleLabel("Подключить канал", self))
 		hint = BodyLabel(
 			"Перед подключением добавьте бота администратором канала\n"
-			"с правом публиковать сообщения.", self,
+			"с правом публиковать сообщения.\n"
+			"Приватный канал: укажите ID вида -100… (его покажет бот\n"
+			"@getidsbot, если переслать ему любой пост канала).", self,
 		)
 		self.viewLayout.addWidget(hint)
 		self._combo = ComboBox(self)
