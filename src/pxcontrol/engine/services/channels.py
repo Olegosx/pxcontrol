@@ -70,6 +70,10 @@ class ChannelsService:
 			ConnectionError: Нет связи с Telegram.
 		"""
 		bot = await self._get_bot(bot_id)
+		logger.info(
+			"Подключаю канал: ввод %r, бот «%s» (@%s, id=%s).",
+			chat_ref, bot.label, bot.username, bot.id,
+		)
 		info = await self._gateway.check_channel(bot.token, chat_ref)
 		async with self._db.session_factory() as session:
 			existing = await session.execute(

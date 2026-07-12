@@ -96,6 +96,7 @@ async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
 	)
 
 	ref = normalize_chat_ref(chat_ref)
+	logger.info("Проверка канала: ввод %r распознан как %r.", chat_ref, ref)
 	bot = Bot(token)
 	try:
 		chat = await bot.get_chat(ref)
