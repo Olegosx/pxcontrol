@@ -39,7 +39,7 @@ class _FakeLogin:
 
 
 class _FakeGateway:
-	"""Подмена шлюза: проверка токена и вход — без похода в сеть."""
+	"""Подмена шлюза: проверка токена, вход и события — без похода в сеть."""
 
 	def __init__(self) -> None:
 		self.login = _FakeLogin()
@@ -48,6 +48,9 @@ class _FakeGateway:
 		if token == "bad-token":
 			raise InvalidBotToken("Telegram отклонил токен (Unauthorized).")
 		return "test_bot"
+
+	async def bot_events(self, token: str) -> list[str]:
+		return ["01.07 12:00 — «Канал» (channel, id=-1001): статус бота «administrator»"]
 
 
 @pytest.fixture
@@ -92,6 +95,16 @@ async def test_tg_account_and_ai_key_lifecycle(db: Database) -> None:
 	await service.delete_ai_key(key.id)
 	assert await service.list_tg_accounts() == []
 	assert await service.list_ai_keys() == []
+
+
+async def test_bot_whereabouts(db: Database) -> None:
+	"""Диагностика возвращает строки событий; неизвестный бот — ошибка."""
+	service = AccountsService(db, _FakeGateway())
+	bot = await service.add_bot("Публикатор", "123456:AAAbbb")
+	lines = await service.bot_whereabouts(bot.id)
+	assert len(lines) == 1 and "administrator" in lines[0]
+	with pytest.raises(ValueError, match="Бот не найден"):
+		await service.bot_whereabouts(999)
 
 
 def test_mask_secret() -> None:

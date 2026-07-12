@@ -80,6 +80,55 @@ def ensure_bot_can_post(member: Any) -> None:
 		raise ChannelCheckError("У бота нет права публиковать сообщения в канале.")
 
 
+def describe_update(update: Any) -> str | None:
+	"""Человекочитаемое описание события бота (для лога и диагностики).
+
+	Понимает изменение статуса бота в чате (``my_chat_member``) и посты
+	в каналах (``channel_post``); прочие события пропускает.
+	"""
+	membership = getattr(update, "my_chat_member", None)
+	if membership is not None:
+		chat = membership.chat
+		new = membership.new_chat_member
+		rights = getattr(new, "can_post_messages", None)
+		rights_text = "—" if rights is None else ("есть" if rights else "нет")
+		return (
+			f"{membership.date:%d.%m %H:%M} — «{chat.title}» "
+			f"({chat.type}, id={chat.id}): статус бота «{new.status}», "
+			f"право публиковать: {rights_text}"
+		)
+	post = getattr(update, "channel_post", None)
+	if post is not None:
+		chat = post.chat
+		return f"{post.date:%d.%m %H:%M} — пост в канале «{chat.title}» (id={chat.id})"
+	return None
+
+
+async def get_bot_events(token: str) -> list[str]:
+	"""Читает необработанные события бота (getUpdates), не удаляя их.
+
+	Telegram хранит события 24 часа. По ним видно, в какие каналы/группы
+	бота добавляли и с какими правами — диагностика «бот не тот / не там».
+
+	Raises:
+		InvalidBotToken: Telegram отклонил токен.
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	from aiogram import Bot
+	from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+
+	bot = Bot(token)
+	try:
+		updates = await bot.get_updates(timeout=1)
+	except TelegramUnauthorizedError as exc:
+		raise InvalidBotToken("Telegram отклонил токен (Unauthorized).") from exc
+	except TelegramNetworkError as exc:
+		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
+	finally:
+		await bot.session.close()
+	return [line for update in updates if (line := describe_update(update))]
+
+
 async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
 	"""Проверяет канал: существует, бот в нём админ с правом публиковать.
 

@@ -15,6 +15,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	ChannelInfo,
 	check_channel,
 	check_token,
+	get_bot_events,
 )
 from pxcontrol.engine.telegram.mtproto import MtprotoLoginManager, MtprotoTransport
 
@@ -49,6 +50,10 @@ class TelegramGateway:
 	async def check_channel(self, token: str, chat_ref: str) -> ChannelInfo:
 		"""Проверяет канал и права бота в нём (getChat + getChatMember)."""
 		return await check_channel(token, chat_ref)
+
+	async def bot_events(self, token: str) -> list[str]:
+		"""Диагностика: события бота за 24 ч (getUpdates, без удаления)."""
+		return await get_bot_events(token)
 
 	async def publish(self, chat_id: str, text: str, video_path: str | None = None) -> None:
 		"""Публикует пост (по умолчанию через Bot API)."""

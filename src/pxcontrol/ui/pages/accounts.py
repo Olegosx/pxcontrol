@@ -11,6 +11,7 @@ from qfluentwidgets import (
 	CardWidget,
 	FluentIcon,
 	InfoBar,
+	MessageBox,
 	PushButton,
 	ScrollArea,
 	StrongBodyLabel,
@@ -132,10 +133,37 @@ class AccountsPage(ScrollArea):
 				bot.label,
 				f"@{bot.username or '—'} · {bot.token_masked}",
 				bind(self._delete_bot, bot),
+				trailing=self._diag_button(bot),
 			)
 			for bot in bots
 		]
 		self._bots.set_rows(rows, "Пока нет ботов — добавьте токен от @BotFather.")
+
+	def _diag_button(self, bot: BotDto) -> TransparentToolButton:
+		"""Кнопка диагностики «где состоит бот»."""
+		button = TransparentToolButton(FluentIcon.SEARCH, self)
+		button.setToolTip("Где состоит бот? События Telegram за 24 часа")
+		button.clicked.connect(bind(self._diagnose_bot, bot))
+		return button
+
+	def _diagnose_bot(self, bot: BotDto) -> None:
+		"""Запрашивает события бота и показывает результат."""
+		InfoBar.info("Диагностика", "Читаю события бота…", parent=self)
+		run_in_engine(
+			self._worker, self._worker.engine.accounts.bot_whereabouts(bot.id),
+			self, partial(self._show_diagnosis, bot), self._show_error,
+		)
+
+	def _show_diagnosis(self, bot: BotDto, lines: object) -> None:
+		"""Показывает, где состоит бот (или что событий не было)."""
+		text = "\n".join(lines) if lines else (  # type: ignore[arg-type]
+			"Событий за последние 24 часа нет — Telegram хранит их сутки.\n"
+			"Добавьте бота администратором канала и проверьте снова."
+		)
+		box = MessageBox(f"Где состоит @{bot.username or bot.label}", text, self.window())
+		box.yesButton.setText("Понятно")
+		box.cancelButton.hide()
+		box.exec()
 
 	def _on_add_bot(self) -> None:
 		dialog = FormDialog(
