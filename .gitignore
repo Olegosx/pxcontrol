@@ -1,0 +1,25 @@
+# --- секреты и данные (НЕ коммитить никогда) ---
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+*.session
+*.session-journal
+*.bak
+
+# --- локальное/личное ---
+_misc/
+.claude/settings.local.json
+CLAUDE.md
+
+# --- python/окружение ---
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
