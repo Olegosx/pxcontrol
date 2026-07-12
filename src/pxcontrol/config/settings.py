@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
 	database_url: str = Field(default_factory=default_db_url)
 	log_level: str = "INFO"
+	ffmpeg_path: str = "ffmpeg"
 
 	model_config = SettingsConfigDict(
 		env_file=app_dir() / ".env",

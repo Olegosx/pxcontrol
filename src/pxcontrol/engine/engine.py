@@ -12,6 +12,7 @@ from pxcontrol.engine.db.models import TgAccount
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.channels import ChannelsService
 from pxcontrol.engine.services.posts import PostsService
+from pxcontrol.engine.services.video import VideoService
 from pxcontrol.engine.telegram.gateway import TelegramGateway
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class Engine:
 		self.accounts = AccountsService(self.db, self.gateway)
 		self.channels = ChannelsService(self.db, self.gateway)
 		self.posts = PostsService(self.db, self.gateway)
+		self.video = VideoService(self.db, settings.ffmpeg_path)
 
 	async def start(self) -> None:
 		"""Запускает компоненты в правильном порядке."""

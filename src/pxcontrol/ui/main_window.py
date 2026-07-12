@@ -10,6 +10,7 @@ from pxcontrol.ui.pages.base import PlaceholderPage
 from pxcontrol.ui.pages.channels import ChannelsPage
 from pxcontrol.ui.pages.schedule import SchedulePage
 from pxcontrol.ui.pages.settings import SettingsPage
+from pxcontrol.ui.pages.video import VideoPage
 
 
 class MainWindow(FluentWindow):
@@ -25,6 +26,7 @@ class MainWindow(FluentWindow):
 	def _build_navigation(self) -> None:
 		"""Наполняет боковую навигацию разделами приложения."""
 		self.addSubInterface(ChannelsPage(self._worker, self), FluentIcon.HOME, "Каналы")
+		self.addSubInterface(VideoPage(self._worker, self), FluentIcon.VIDEO, "Видео")
 		self.addSubInterface(
 			SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание"
 		)

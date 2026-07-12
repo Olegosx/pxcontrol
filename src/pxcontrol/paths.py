@@ -29,3 +29,8 @@ def default_db_url() -> str:
 def logs_dir() -> Path:
 	"""Каталог файлов логов — подпапка ``logs`` в каталоге приложения."""
 	return app_dir() / "logs"
+
+
+def media_dir() -> Path:
+	"""Каталог медиа-файлов — подпапка ``media`` в каталоге приложения."""
+	return app_dir() / "media"
