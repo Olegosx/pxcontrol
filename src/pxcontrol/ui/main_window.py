@@ -8,6 +8,7 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.ui.pages.accounts import AccountsPage
 from pxcontrol.ui.pages.base import PlaceholderPage
 from pxcontrol.ui.pages.channels import ChannelsPage
+from pxcontrol.ui.pages.schedule import SchedulePage
 from pxcontrol.ui.pages.settings import SettingsPage
 
 
@@ -25,11 +26,7 @@ class MainWindow(FluentWindow):
 		"""Наполняет боковую навигацию разделами приложения."""
 		self.addSubInterface(ChannelsPage(self._worker, self), FluentIcon.HOME, "Каналы")
 		self.addSubInterface(
-			PlaceholderPage(
-				"schedule", "Расписание",
-				"Здесь появится календарь отложенных публикаций.", self,
-			),
-			FluentIcon.CALENDAR, "Расписание",
+			SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание"
 		)
 		self.addSubInterface(
 			PlaceholderPage(

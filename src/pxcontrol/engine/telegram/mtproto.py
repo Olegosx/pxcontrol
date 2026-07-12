@@ -1,14 +1,15 @@
 """Транспорт MTProto (через Telethon, отдельный аккаунт).
 
-Здесь же — пошаговый вход userbot: телефон → код → (пароль 2FA) →
-строка сессии. Клиент входа живёт между шагами, потому что одноразовый
-``phone_code_hash`` привязан к соединению.
+Роли: создание отложенных постов прямо в канале (серверное планирование
+Telegram, ADR-0010), чтение отложенных, в будущем — чтение каналов-источников.
+Здесь же — пошаговый вход userbot (код → 2FA → строка сессии).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -18,12 +19,16 @@ class LoginError(Exception):
 	"""Ошибка входа userbot с понятным человеку текстом."""
 
 
-def _default_client(api_id: int, api_hash: str) -> Any:
-	"""Создаёт клиента Telethon с пустой сессией (для входа)."""
+class UserbotUnavailable(Exception):
+	"""Userbot не подключён или не может выполнить операцию."""
+
+
+def _default_client(api_id: int, api_hash: str, session: str | None = None) -> Any:
+	"""Создаёт клиента Telethon (пустая сессия — для входа)."""
 	from telethon import TelegramClient
 	from telethon.sessions import StringSession
 
-	return TelegramClient(StringSession(), api_id, api_hash)
+	return TelegramClient(StringSession(session), api_id, api_hash)
 
 
 def _map_login_error(exc: Exception) -> str:
@@ -43,12 +48,105 @@ def _map_login_error(exc: Exception) -> str:
 	return f"Не удалось войти: {exc}"
 
 
+def _map_post_error(exc: Exception) -> str:
+	"""Переводит ошибки операций с постами в понятные сообщения."""
+	from telethon import errors
+
+	if isinstance(exc, errors.ChatAdminRequiredError):
+		return (
+			"Userbot не администратор канала — добавьте аккаунт userbot "
+			"администратором с правом публиковать."
+		)
+	if isinstance(exc, errors.FloodWaitError):
+		return f"Telegram просит подождать {exc.seconds} с."
+	if isinstance(exc, ValueError):
+		return (
+			"Userbot не видит этот канал — убедитесь, что аккаунт добавлен "
+			"в канал администратором."
+		)
+	return f"Telegram отклонил операцию: {exc}"
+
+
 async def _safe_disconnect(client: Any) -> None:
-	"""Закрывает клиента; ошибки закрытия не роняют процесс входа."""
+	"""Закрывает клиента; ошибки закрытия не роняют процесс."""
 	try:
 		await client.disconnect()
-	except Exception:  # noqa: BLE001 — закрытие не должно ронять вход
-		logger.debug("Не удалось корректно закрыть клиента входа.", exc_info=True)
+	except Exception:  # noqa: BLE001 — закрытие не должно ронять операцию
+		logger.debug("Не удалось корректно закрыть клиента.", exc_info=True)
+
+
+class MtprotoTransport:
+	"""Подключённый userbot: отложенные посты и чтение каналов."""
+
+	def __init__(
+		self,
+		client_factory: Callable[[int, str, str | None], Any] | None = None,
+	) -> None:
+		self._client_factory = client_factory or _default_client
+		self._creds: tuple[int, str, str] | None = None
+		self._client: Any | None = None
+
+	def configure(self, api_id: int, api_hash: str, session: str) -> None:
+		"""Задаёт реквизиты подключения (из БД, ADR-0009)."""
+		self._creds = (api_id, api_hash, session)
+
+	async def start(self) -> None:
+		"""Подключает клиента, если заданы реквизиты и ещё не подключён."""
+		if self._client is not None:
+			return
+		if self._creds is None:
+			logger.info("Аккаунт MTProto не настроен — userbot отключён.")
+			return
+		api_id, api_hash, session = self._creds
+		self._client = self._client_factory(api_id, api_hash, session)
+		await self._client.connect()
+		logger.info("MTProto клиент подключён.")
+
+	async def stop(self) -> None:
+		"""Отключает клиента MTProto."""
+		if self._client is not None:
+			await _safe_disconnect(self._client)
+			self._client = None
+
+	def _require_client(self) -> Any:
+		"""Возвращает подключённого клиента или объясняет, чего не хватает."""
+		if self._client is None:
+			raise UserbotUnavailable(
+				"Userbot не подключён — войдите в аккаунт: Настройки → Аккаунты."
+			)
+		return self._client
+
+	async def schedule_post(self, chat_id: str, text: str, when: datetime) -> None:
+		"""Создаёт отложенную запись прямо в канале (schedule_date).
+
+		Дальше пост хранит и публикует сервер Telegram — приложение
+		может быть выключено (ADR-0010).
+		"""
+		client = self._require_client()
+		try:
+			await client.send_message(int(chat_id), text, schedule=when)
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+			raise UserbotUnavailable(_map_post_error(exc)) from exc
+		logger.info("Создан отложенный пост в чате %s на %s.", chat_id, when)
+
+	async def get_scheduled(self, chat_id: str) -> list[Any]:
+		"""Читает отложенные записи канала (источник истины — Telegram)."""
+		from telethon.tl.functions.messages import GetScheduledHistoryRequest
+
+		client = self._require_client()
+		try:
+			entity = await client.get_input_entity(int(chat_id))
+			result = await client(GetScheduledHistoryRequest(peer=entity, hash=0))
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+			raise UserbotUnavailable(_map_post_error(exc)) from exc
+		return list(result.messages)
+
+	async def read_channel(self, username: str, limit: int = 20) -> list[Any]:
+		"""Читает последние сообщения канала-источника (для парсинга).
+
+		Каркас: реальная вычитка добавляется при реализации источников.
+		"""
+		raise NotImplementedError("Чтение канала через MTProto ещё не реализовано")
 
 
 class MtprotoLoginManager:
@@ -57,7 +155,9 @@ class MtprotoLoginManager:
 	def __init__(
 		self, client_factory: Callable[[int, str], Any] | None = None
 	) -> None:
-		self._client_factory = client_factory or _default_client
+		self._client_factory = client_factory or (
+			lambda api_id, api_hash: _default_client(api_id, api_hash, None)
+		)
 		self._pending: dict[int, tuple[Any, str, str]] = {}
 
 	async def start(
@@ -133,49 +233,3 @@ class MtprotoLoginManager:
 		self._pending.pop(account_id, None)
 		logger.info("Userbot id=%s: вход завершён.", account_id)
 		return session_string
-
-
-class MtprotoTransport:
-	"""Обёртка над userbot. В первую очередь — чтение каналов-источников.
-
-	Реквизиты аккаунта хранятся в БД в зашифрованном виде (таблица
-	``tg_accounts``, ADR-0009) и передаются при подключении аккаунта.
-	"""
-
-	def __init__(
-		self,
-		api_id: int | None = None,
-		api_hash: str | None = None,
-		session: str | None = None,
-	) -> None:
-		self._api_id = api_id
-		self._api_hash = api_hash
-		self._session = session
-		self._client: Any | None = None
-
-	async def start(self) -> None:
-		"""Подключает клиента MTProto, если заданы все реквизиты."""
-		if not (self._api_id and self._api_hash and self._session):
-			logger.info("Аккаунт MTProto не настроен — userbot отключён.")
-			return
-		from telethon import TelegramClient
-		from telethon.sessions import StringSession
-
-		self._client = TelegramClient(
-			StringSession(self._session), self._api_id, self._api_hash
-		)
-		await self._client.connect()
-		logger.info("MTProto клиент подключён.")
-
-	async def stop(self) -> None:
-		"""Отключает клиента MTProto."""
-		if self._client is not None:
-			await self._client.disconnect()
-			self._client = None
-
-	async def read_channel(self, username: str, limit: int = 20) -> list[Any]:
-		"""Читает последние сообщения канала-источника.
-
-		Каркас: реальная вычитка добавляется при реализации источников.
-		"""
-		raise NotImplementedError("Чтение канала через MTProto ещё не реализовано")

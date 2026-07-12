@@ -44,6 +44,10 @@ class _TelegramPort(Protocol):
 
 	async def bot_events(self, token: str) -> list[str]: ...
 
+	async def activate_userbot(
+		self, api_id: int, api_hash: str, session: str
+	) -> None: ...
+
 
 def mask_secret(secret: str) -> str:
 	"""Возвращает замаскированное представление секрета для показа в UI."""
@@ -231,14 +235,20 @@ class AccountsService:
 		return account
 
 	async def _save_session(self, account_id: int, session_string: str) -> None:
-		"""Сохраняет строку сессии (шифруется прозрачно, ADR-0009)."""
+		"""Сохраняет строку сессии (шифруется прозрачно, ADR-0009)
+		и сразу подключает userbot — без перезапуска приложения."""
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
 			if account is None:
 				raise LoginError("Аккаунт не найден.")
 			account.session = session_string
 			await session.commit()
+			api_id, api_hash = account.api_id, account.api_hash
 		logger.info("Userbot id=%s: сессия сохранена.", account_id)
+		try:
+			await self._gateway.activate_userbot(api_id, api_hash, session_string)
+		except Exception:  # noqa: BLE001 — вход удался, подключение не критично
+			logger.exception("Не удалось подключить userbot сразу после входа.")
 
 	# --- ключи ИИ -----------------------------------------------------------
 

@@ -43,6 +43,10 @@ class _FakeGateway:
 
 	def __init__(self) -> None:
 		self.login = _FakeLogin()
+		self.activated: tuple[int, str] | None = None
+
+	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None:
+		self.activated = (api_id, session)
 
 	async def check_bot_token(self, token: str) -> str:
 		if token == "bad-token":

@@ -1,34 +1,126 @@
-"""Сервис работы с постами и публикацией (каркас)."""
+"""Сервис постов: fire-and-forget, источник истины — сам канал (ADR-0010).
+
+Приложение создаёт пост и отправляет: «сейчас» — через бота (Bot API),
+отложенно — userbot создаёт отложенную запись прямо в канале, дальше её
+хранит и публикует сервер Telegram. Локальной таблицы постов нет;
+страница «Расписание» читает отложенные из Telegram.
+"""
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
+
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.scheduler.scheduler import Scheduler
-from pxcontrol.engine.telegram.gateway import TelegramGateway
+from pxcontrol.engine.db.models import Channel
 
 logger = logging.getLogger(__name__)
 
+#: Минимальный запас до времени публикации (Telegram не берёт «почти сейчас»).
+MIN_SCHEDULE_AHEAD = timedelta(seconds=60)
+
+
+class PostError(Exception):
+	"""Ошибка создания/отправки поста (с понятным человеку текстом)."""
+
+
+class _PostPort(Protocol):
+	"""Часть шлюза Telegram, нужная сервису (для подмены в тестах)."""
+
+	async def send_text(self, token: str, chat_id: str, text: str) -> int: ...
+
+	async def schedule_post(
+		self, chat_id: str, text: str, when: datetime
+	) -> None: ...
+
+	async def get_scheduled(self, chat_id: str) -> list[Any]: ...
+
+
+@dataclass(frozen=True)
+class ScheduledPostDto:
+	"""Отложенная запись канала (прочитана из Telegram) для интерфейса."""
+
+	channel_title: str
+	text_preview: str
+	scheduled_at: datetime
+
 
 class PostsService:
-	"""Создание постов, постановка в расписание и публикация."""
+	"""Создание постов: сразу через бота или отложенно через userbot."""
 
-	def __init__(self, db: Database, gateway: TelegramGateway, scheduler: Scheduler) -> None:
+	def __init__(self, db: Database, gateway: _PostPort) -> None:
 		self._db = db
 		self._gateway = gateway
-		self._scheduler = scheduler
 
-	async def publish_due(self, catch_up: bool = False) -> int:
-		"""Публикует посты, чьё время публикации наступило.
-
-		Args:
-			catch_up: Если ``True``, догоняет публикации, пропущенные за время
-				простоя приложения (вызывается при запуске движка).
+	async def send_now(self, channel_id: int, text: str) -> int:
+		"""Публикует пост немедленно через бота канала.
 
 		Returns:
-			Количество опубликованных постов.
+			ID сообщения в Telegram.
+
+		Raises:
+			PostError: Канал не найден или у него не назначен бот.
 		"""
-		if catch_up:
-			logger.info("Догон пропущенных публикаций — заглушка каркаса")
-		return 0
+		channel = await self._get_channel(channel_id)
+		if channel.bot is None:
+			raise PostError("У канала не назначен бот — переподключите канал.")
+		message_id = await self._gateway.send_text(
+			channel.bot.token, channel.tg_chat_id, text
+		)
+		logger.info(
+			"Пост опубликован в «%s» (message_id=%s).", channel.title, message_id
+		)
+		return message_id
+
+	async def schedule(self, channel_id: int, text: str, when: datetime) -> None:
+		"""Создаёт отложенную запись в канале (публикует сервер Telegram).
+
+		Raises:
+			PostError: Время не в будущем или канал не найден.
+			UserbotUnavailable: Userbot не подключён / не админ канала.
+		"""
+		if when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
+			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
+		channel = await self._get_channel(channel_id)
+		await self._gateway.schedule_post(channel.tg_chat_id, text, when)
+		logger.info("Отложенный пост создан в «%s» на %s.", channel.title, when)
+
+	async def list_scheduled(self) -> list[ScheduledPostDto]:
+		"""Собирает отложенные записи всех активных каналов из Telegram."""
+		async with self._db.session_factory() as session:
+			channels = (
+				(await session.execute(
+					select(Channel).where(Channel.enabled).order_by(Channel.id)
+				)).scalars().all()
+			)
+		items: list[ScheduledPostDto] = []
+		for channel in channels:
+			for message in await self._gateway.get_scheduled(channel.tg_chat_id):
+				items.append(self._dto(channel.title, message))
+		items.sort(key=lambda item: item.scheduled_at)
+		return items
+
+	async def _get_channel(self, channel_id: int) -> Channel:
+		"""Возвращает канал с ботом или объясняет, что канал не найден."""
+		async with self._db.session_factory() as session:
+			channel = (
+				await session.execute(
+					select(Channel)
+					.options(selectinload(Channel.bot))
+					.where(Channel.id == channel_id)
+				)
+			).scalar_one_or_none()
+		if channel is None:
+			raise PostError("Канал не найден — обновите список каналов.")
+		return channel
+
+	@staticmethod
+	def _dto(channel_title: str, message: Any) -> ScheduledPostDto:
+		text = getattr(message, "message", "") or "(медиа без текста)"
+		preview = text if len(text) <= 80 else f"{text[:77]}…"
+		return ScheduledPostDto(channel_title, preview, message.date)

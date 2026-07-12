@@ -29,6 +29,7 @@
 | [0007](0007-hybrid-botapi-mtproto.md) | Гибрид Bot API + MTProto | accepted |
 | [0008](0008-qfluentwidgets.md) | Компоненты интерфейса — QFluentWidgets | accepted |
 | [0009](0009-config-secrets-in-db.md) | Конфиг и секреты в БД, шифрование через keyring | accepted |
+| [0010](0010-posts-fire-and-forget.md) | Посты: истина — канал, доставка — сервер Telegram | accepted |
 
 ## Как добавить запись
 
