@@ -47,7 +47,6 @@ def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> Path:
 	root.handlers.clear()
 	root.addHandler(console)
 	root.addHandler(file_handler)
-	logging.getLogger("apscheduler").setLevel(logging.WARNING)
 	logging.getLogger(__name__).info(
 		"pXcontrol v%s: логирование настроено (уровень %s, файл %s).",
 		__version__, level.upper(), log_file,

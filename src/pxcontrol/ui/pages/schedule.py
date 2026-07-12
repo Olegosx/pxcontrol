@@ -24,7 +24,6 @@ from qfluentwidgets import (
 	PrimaryPushButton,
 	PushButton,
 	ScrollArea,
-	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
 	TextEdit,
@@ -35,7 +34,7 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import ScheduledPostDto
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import clear_layout
+from pxcontrol.ui.pages.common import clear_layout, row_card, show_error
 
 
 class _NewPostDialog(MessageBoxBase):
@@ -140,7 +139,8 @@ class SchedulePage(ScrollArea):
 		self.enableTransparentBackground()
 
 	def _show_error(self, message: str) -> None:
-		InfoBar.error("Ошибка", message, parent=self, duration=6000)
+		"""Показывает ошибку всплывающей плашкой."""
+		show_error(self, message)
 
 	# --- список отложенных (из Telegram) ---------------------------------------
 
@@ -162,19 +162,10 @@ class SchedulePage(ScrollArea):
 			self._list.addWidget(self._item_row(item))
 
 	def _item_row(self, item: ScheduledPostDto) -> CardWidget:
-		card = CardWidget(self)
-		layout = QHBoxLayout(card)
-		layout.setContentsMargins(16, 10, 16, 10)
-		column = QVBoxLayout()
-		column.setSpacing(2)
-		column.addWidget(StrongBodyLabel(item.text_preview, card))
+		"""Карточка отложенной записи: текст, канал и локальное время."""
 		when_local = item.scheduled_at.astimezone()
-		column.addWidget(CaptionLabel(
-			f"{item.channel_title} · {when_local:%d.%m.%Y %H:%M}", card,
-		))
-		layout.addLayout(column)
-		layout.addStretch()
-		return card
+		subtitle = f"{item.channel_title} · {when_local:%d.%m.%Y %H:%M}"
+		return row_card(self, item.text_preview, subtitle)
 
 	# --- создание поста ----------------------------------------------------------
 

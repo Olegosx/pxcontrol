@@ -29,8 +29,8 @@ def run_in_engine(
 	worker: EngineWorker,
 	coro: Coroutine[Any, Any, Any],
 	parent: QObject,
-	on_done: Callable[[Any], None],
-	on_error: Callable[[str], None],
+	on_done: Callable[..., None],
+	on_error: Callable[..., None],
 ) -> None:
 	"""Запускает корутину в движке; колбэки вызываются в потоке интерфейса.
 
@@ -38,8 +38,9 @@ def run_in_engine(
 		worker: Работающий носитель движка.
 		coro: Корутина движка (например, ``engine.accounts.list_bots()``).
 		parent: Владелец временного QObject (обычно страница).
-		on_done: Колбэк успеха — получает результат корутины.
-		on_error: Колбэк ошибки — получает текст ошибки.
+		on_done: Колбэк успеха. Может принимать результат корутины одним
+			аргументом или не принимать ничего — Qt усечёт лишнее.
+		on_error: Колбэк ошибки — получает текст ошибки (или ничего).
 	"""
 	call = _AsyncCall(parent)
 	call.done.connect(on_done)

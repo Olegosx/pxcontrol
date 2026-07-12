@@ -235,37 +235,3 @@ async def check_token(token: str) -> str:
 	finally:
 		await bot.session.close()
 
-
-class BotApiTransport:
-	"""Обёртка над Bot API. Тяжёлая зависимость импортируется лениво."""
-
-	def __init__(self, token: str | None) -> None:
-		self._token = token
-		self._bot: Any | None = None
-
-	async def start(self) -> None:
-		"""Создаёт клиента Bot API, если задан токен.
-
-		Токены хранятся в БД (таблица ``bots``, ADR-0009); подключение
-		конкретного бота — при реализации каналов.
-		"""
-		if not self._token:
-			logger.info("Бот не настроен — Bot API отключён.")
-			return
-		from aiogram import Bot
-
-		self._bot = Bot(self._token)
-		logger.info("Bot API клиент создан.")
-
-	async def stop(self) -> None:
-		"""Закрывает сессию клиента Bot API."""
-		if self._bot is not None:
-			await self._bot.session.close()
-			self._bot = None
-
-	async def publish(self, chat_id: str, text: str, video_path: str | None = None) -> None:
-		"""Публикует пост в канал.
-
-		Каркас: реальная отправка добавляется при реализации модуля.
-		"""
-		raise NotImplementedError("Публикация через Bot API ещё не реализована")

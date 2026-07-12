@@ -121,8 +121,7 @@ async def test_login_simple(db: Database) -> None:
 	"""Вход без 2FA: код подтверждён — сессия сохранена, статус обновился."""
 	service = AccountsService(db, _FakeGateway())
 	account = await service.add_tg_account("Личный", "+79000000000", 123, "hash")
-	phone = await service.start_login(account.id)
-	assert phone == "+79000000000"
+	await service.start_login(account.id)
 	assert await service.confirm_login_code(account.id, "12345") is True
 	updated = (await service.list_tg_accounts())[0]
 	assert updated.logged_in is True

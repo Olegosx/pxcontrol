@@ -6,7 +6,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
-	CaptionLabel,
 	CardWidget,
 	ComboBox,
 	FluentIcon,
@@ -15,16 +14,20 @@ from qfluentwidgets import (
 	MessageBoxBase,
 	PrimaryPushButton,
 	ScrollArea,
-	StrongBodyLabel,
 	SubtitleLabel,
-	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import bind, clear_layout, confirm_delete
+from pxcontrol.ui.pages.common import (
+	bind,
+	clear_layout,
+	confirm_delete,
+	row_card,
+	show_error,
+)
 
 
 class _ConnectDialog(MessageBoxBase):
@@ -97,7 +100,7 @@ class ChannelsPage(ScrollArea):
 
 	def _show_error(self, message: str) -> None:
 		"""Показывает ошибку всплывающей плашкой."""
-		InfoBar.error("Ошибка", message, parent=self, duration=6000)
+		show_error(self, message)
 
 	# --- список ---------------------------------------------------------------
 
@@ -133,20 +136,11 @@ class ChannelsPage(ScrollArea):
 
 	def _channel_row(self, channel: ChannelDto) -> CardWidget:
 		"""Карточка канала: название, @имя, бот, удаление."""
-		card = CardWidget(self)
-		layout = QHBoxLayout(card)
-		layout.setContentsMargins(16, 10, 10, 10)
-		column = QVBoxLayout()
-		column.setSpacing(2)
-		column.addWidget(StrongBodyLabel(channel.title, card))
 		subtitle = f"@{channel.username or '—'} · бот: {channel.bot_label or '—'}"
-		column.addWidget(CaptionLabel(subtitle, card))
-		layout.addLayout(column)
-		layout.addStretch()
-		delete_button = TransparentToolButton(FluentIcon.DELETE, card)
-		delete_button.clicked.connect(bind(self._delete_channel, channel))
-		layout.addWidget(delete_button)
-		return card
+		return row_card(
+			self, channel.title, subtitle,
+			on_delete=bind(self._delete_channel, channel),
+		)
 
 	# --- подключение -----------------------------------------------------------
 
@@ -187,5 +181,5 @@ class ChannelsPage(ScrollArea):
 			return
 		run_in_engine(
 			self._worker, self._worker.engine.channels.delete_channel(channel.id),
-			self, lambda _r: self._reload(), self._show_error,
+			self, self._reload, self._show_error,
 		)

@@ -185,8 +185,8 @@ class AccountsService:
 
 	# --- вход userbot ---------------------------------------------------------
 
-	async def start_login(self, account_id: int) -> str:
-		"""Просит Telegram отправить код входа; возвращает номер телефона.
+	async def start_login(self, account_id: int) -> None:
+		"""Просит Telegram отправить код входа на телефон аккаунта.
 
 		Raises:
 			LoginError: Нет телефона у аккаунта или Telegram отклонил запрос.
@@ -197,7 +197,6 @@ class AccountsService:
 		await self._gateway.login.start(
 			account.id, account.api_id, account.api_hash, account.phone
 		)
-		return account.phone
 
 	async def confirm_login_code(self, account_id: int, code: str) -> bool:
 		"""Подтверждает код. ``True`` — вход завершён; ``False`` — нужен 2FA.

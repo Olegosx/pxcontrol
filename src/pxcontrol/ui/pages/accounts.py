@@ -14,7 +14,6 @@ from qfluentwidgets import (
 	MessageBox,
 	PushButton,
 	ScrollArea,
-	StrongBodyLabel,
 	SubtitleLabel,
 	TransparentToolButton,
 )
@@ -22,7 +21,15 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import AiKeyDto, BotDto, TgAccountDto
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import FormDialog, bind, clear_layout, confirm_delete
+from pxcontrol.ui.pages.common import (
+	FormDialog,
+	bind,
+	clear_layout,
+	confirm_delete,
+	noop,
+	row_card,
+	show_error,
+)
 
 
 class _Section(QWidget):
@@ -83,35 +90,11 @@ class AccountsPage(ScrollArea):
 		self.setWidgetResizable(True)
 		self.enableTransparentBackground()
 
-	def _row(
-		self,
-		title: str,
-		subtitle: str,
-		on_delete: Callable[[], None],
-		trailing: QWidget | None = None,
-	) -> CardWidget:
-		"""Карточка-строка списка: название, подпись, удаление."""
-		card = CardWidget(self)
-		layout = QHBoxLayout(card)
-		layout.setContentsMargins(16, 10, 10, 10)
-		column = QVBoxLayout()
-		column.setSpacing(2)
-		column.addWidget(StrongBodyLabel(title, card))
-		column.addWidget(CaptionLabel(subtitle, card))
-		layout.addLayout(column)
-		layout.addStretch()
-		if trailing is not None:
-			layout.addWidget(trailing)
-		delete_button = TransparentToolButton(FluentIcon.DELETE, card)
-		delete_button.clicked.connect(on_delete)
-		layout.addWidget(delete_button)
-		return card
-
 	# --- общие помощники ------------------------------------------------------
 
 	def _show_error(self, message: str) -> None:
 		"""Показывает ошибку всплывающей плашкой."""
-		InfoBar.error("Ошибка", message, parent=self, duration=6000)
+		show_error(self, message)
 
 	def _reload_all(self) -> None:
 		"""Перезагружает все три списка из движка."""
@@ -129,11 +112,12 @@ class AccountsPage(ScrollArea):
 
 	def _show_bots(self, bots: list[BotDto]) -> None:
 		rows = [
-			self._row(
+			row_card(
+				self,
 				bot.label,
 				f"@{bot.username or '—'} · {bot.token_masked}",
-				bind(self._delete_bot, bot),
 				trailing=self._diag_button(bot),
+				on_delete=bind(self._delete_bot, bot),
 			)
 			for bot in bots
 		]
@@ -156,7 +140,8 @@ class AccountsPage(ScrollArea):
 
 	def _show_diagnosis(self, bot: BotDto, lines: object) -> None:
 		"""Показывает, где состоит бот (или что событий не было)."""
-		text = "\n".join(lines) if lines else (  # type: ignore[arg-type]
+		items = [str(line) for line in lines] if isinstance(lines, list) else []
+		text = "\n".join(items) or (
 			"Событий за последние 24 часа нет — Telegram хранит их сутки.\n"
 			"Добавьте бота администратором канала и проверьте снова."
 		)
@@ -192,7 +177,7 @@ class AccountsPage(ScrollArea):
 			return
 		run_in_engine(
 			self._worker, self._worker.engine.accounts.delete_bot(bot.id),
-			self, lambda _r: self._reload_bots(), self._show_error,
+			self, self._reload_bots, self._show_error,
 		)
 
 	# --- userbot (MTProto) ----------------------------------------------------
@@ -219,10 +204,10 @@ class AccountsPage(ScrollArea):
 		subtitle = (
 			f"{account.phone or 'без телефона'} · api_id {account.api_id} · {status}"
 		)
-		return self._row(
-			account.label, subtitle,
-			bind(self._delete_account, account),
+		return row_card(
+			self, account.label, subtitle,
 			trailing=trailing,
+			on_delete=bind(self._delete_account, account),
 		)
 
 	# --- вход userbot: телефон → код → (пароль 2FA) ---------------------------
@@ -235,10 +220,10 @@ class AccountsPage(ScrollArea):
 		)
 		run_in_engine(
 			self._worker, self._worker.engine.accounts.start_login(account.id),
-			self, partial(self._ask_code, account), self._show_error,
+			self, bind(self._ask_code, account), self._show_error,
 		)
 
-	def _ask_code(self, account: TgAccountDto, _phone: object = None) -> None:
+	def _ask_code(self, account: TgAccountDto) -> None:
 		"""Шаг 2: спрашиваем код, присланный Telegram."""
 		dialog = FormDialog(
 			f"Код отправлен ({account.phone})",
@@ -279,10 +264,10 @@ class AccountsPage(ScrollArea):
 			self._worker.engine.accounts.confirm_login_password(
 				account.id, dialog.value("password")
 			),
-			self, partial(self._after_password, account), self._show_error,
+			self, bind(self._after_password, account), self._show_error,
 		)
 
-	def _after_password(self, account: TgAccountDto, _result: object = None) -> None:
+	def _after_password(self, account: TgAccountDto) -> None:
 		"""Пароль принят — вход завершён."""
 		InfoBar.success("Вход выполнен", account.label, parent=self)
 		self._reload_accounts()
@@ -291,7 +276,7 @@ class AccountsPage(ScrollArea):
 		"""Пользователь закрыл диалог — прерываем незавершённый вход."""
 		run_in_engine(
 			self._worker, self._worker.engine.accounts.cancel_login(account.id),
-			self, lambda _r: None, self._show_error,
+			self, noop, self._show_error,
 		)
 
 	def _on_add_account(self) -> None:
@@ -320,7 +305,7 @@ class AccountsPage(ScrollArea):
 			return
 		run_in_engine(
 			self._worker, self._worker.engine.accounts.delete_tg_account(account.id),
-			self, lambda _r: self._reload_accounts(), self._show_error,
+			self, self._reload_accounts, self._show_error,
 		)
 
 	# --- ключи ИИ --------------------------------------------------------------
@@ -333,10 +318,11 @@ class AccountsPage(ScrollArea):
 
 	def _show_keys(self, keys: list[AiKeyDto]) -> None:
 		rows = [
-			self._row(
+			row_card(
+				self,
 				key.label or key.provider,
 				f"{key.provider} · {key.key_masked}",
-				bind(self._delete_key, key),
+				on_delete=bind(self._delete_key, key),
 			)
 			for key in keys
 		]
@@ -368,5 +354,5 @@ class AccountsPage(ScrollArea):
 			return
 		run_in_engine(
 			self._worker, self._worker.engine.accounts.delete_ai_key(key.id),
-			self, lambda _r: self._reload_keys(), self._show_error,
+			self, self._reload_keys, self._show_error,
 		)

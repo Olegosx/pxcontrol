@@ -23,7 +23,7 @@
 | [0001](0001-telegram-bot-api-only.md) | Telegram только через Bot API | superseded (→0007) |
 | [0002](0002-web-interface.md) | Веб-интерфейс с серверным бэкендом | superseded (→0006) |
 | [0003](0003-fastapi-backend.md) | Бэкенд на FastAPI | superseded (→0006) |
-| [0004](0004-apscheduler-tasks.md) | Планировщик/фон на APScheduler | accepted |
+| [0004](0004-apscheduler-tasks.md) | Планировщик/фон на APScheduler | superseded — частично (→0010) |
 | [0005](0005-frontend-htmx.md) | Фронтенд на Jinja2 + HTMX | superseded (→0006) |
 | [0006](0006-desktop-pyside6.md) | Десктоп: движок + PySide6 | accepted |
 | [0007](0007-hybrid-botapi-mtproto.md) | Гибрид Bot API + MTProto | accepted |

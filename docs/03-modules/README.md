@@ -15,7 +15,7 @@
 | **Обработка видео** | Подготовка видео под Телеграм через `ffmpeg`: FullHD, вотермарк, превью | 📋 планируется (наработки из `makeVideo`) |
 | Каналы | Подключение и хранение каналов, права, настройки | [channels.md](channels.md) |
 | Шлюз Telegram | Единая обёртка над Bot API и MTProto: постинг, чтение каналов, лимиты | [telegram-gateway.md](telegram-gateway.md) |
-| Планировщик | Отложенный постинг по расписанию | [scheduler.md](scheduler.md) |
+| Планировщик | Удалён (ADR-0010: отложки публикует сервер Telegram); вернётся с источниками | [scheduler.md](scheduler.md) |
 | Источники контента | Парсинг каналов/сайтов/RSS, нормализация | [content-sources.md](content-sources.md) |
 | Генерация ИИ | Создание текстов/медиа нейросетью | [ai-generation.md](ai-generation.md) |
 | Очередь модерации | Сбор заготовок и одобрение человеком | [moderation-queue.md](moderation-queue.md) |

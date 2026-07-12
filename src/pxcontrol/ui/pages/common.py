@@ -5,10 +5,25 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TypeVar
 
-from PySide6.QtWidgets import QLayout, QWidget
-from qfluentwidgets import InfoBar, LineEdit, MessageBox, MessageBoxBase, SubtitleLabel
+from PySide6.QtWidgets import QHBoxLayout, QLayout, QVBoxLayout, QWidget
+from qfluentwidgets import (
+	CaptionLabel,
+	CardWidget,
+	FluentIcon,
+	InfoBar,
+	LineEdit,
+	MessageBox,
+	MessageBoxBase,
+	StrongBodyLabel,
+	SubtitleLabel,
+	TransparentToolButton,
+)
 
 _T = TypeVar("_T")
+
+
+def noop(*_args: object) -> None:
+	"""Пустой колбэк для операций, результат которых не нужен интерфейсу."""
 
 
 def bind(action: Callable[[_T], None], item: _T) -> Callable[[], None]:
@@ -45,6 +60,35 @@ def confirm_delete(parent: QWidget, text: str) -> bool:
 def show_error(parent: QWidget, message: str) -> None:
 	"""Показывает ошибку всплывающей плашкой."""
 	InfoBar.error("Ошибка", message, parent=parent, duration=6000)
+
+
+def row_card(
+	parent: QWidget,
+	title: str,
+	subtitle: str,
+	trailing: QWidget | None = None,
+	on_delete: Callable[[], None] | None = None,
+) -> CardWidget:
+	"""Карточка-строка списка: название, подпись, хвостовые элементы.
+
+	Единый вид строк на всех страницах (аккаунты, каналы, расписание).
+	"""
+	card = CardWidget(parent)
+	layout = QHBoxLayout(card)
+	layout.setContentsMargins(16, 10, 10, 10)
+	column = QVBoxLayout()
+	column.setSpacing(2)
+	column.addWidget(StrongBodyLabel(title, card))
+	column.addWidget(CaptionLabel(subtitle, card))
+	layout.addLayout(column)
+	layout.addStretch()
+	if trailing is not None:
+		layout.addWidget(trailing)
+	if on_delete is not None:
+		delete_button = TransparentToolButton(FluentIcon.DELETE, card)
+		delete_button.clicked.connect(on_delete)
+		layout.addWidget(delete_button)
+	return card
 
 
 class FormDialog(MessageBoxBase):

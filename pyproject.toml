@@ -12,10 +12,6 @@ dependencies = [
 	"keyring>=25.0",
 	"aiogram>=3.0",
 	"telethon>=1.34",
-	"APScheduler>=3.10",
-	"httpx>=0.27",
-	"feedparser>=6.0",
-	"anthropic>=0.40",
 	"PySide6>=6.6",
 	"PySide6-Fluent-Widgets>=1.10",
 ]
@@ -54,7 +50,7 @@ exclude = "migrations/"
 
 # Библиотеки без аннотаций типов (не поставляют py.typed).
 [[tool.mypy.overrides]]
-module = ["qfluentwidgets.*", "telethon.*", "apscheduler.*"]
+module = ["qfluentwidgets.*", "telethon.*"]
 ignore_missing_imports = true
 
 # Классы Qt-обвязки наследуются от нетипизированных классов QFluentWidgets.

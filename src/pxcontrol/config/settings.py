@@ -23,8 +23,6 @@ class Settings(BaseSettings):
 	"""
 
 	database_url: str = Field(default_factory=default_db_url)
-	ffmpeg_path: str = "ffmpeg"
-	tz: str = "UTC"
 	log_level: str = "INFO"
 
 	model_config = SettingsConfigDict(

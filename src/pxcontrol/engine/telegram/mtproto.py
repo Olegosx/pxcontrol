@@ -141,13 +141,6 @@ class MtprotoTransport:
 			raise UserbotUnavailable(_map_post_error(exc)) from exc
 		return list(result.messages)
 
-	async def read_channel(self, username: str, limit: int = 20) -> list[Any]:
-		"""Читает последние сообщения канала-источника (для парсинга).
-
-		Каркас: реальная вычитка добавляется при реализации источников.
-		"""
-		raise NotImplementedError("Чтение канала через MTProto ещё не реализовано")
-
 
 class MtprotoLoginManager:
 	"""Пошаговый вход userbot. Держит незавершённые входы по id аккаунта."""

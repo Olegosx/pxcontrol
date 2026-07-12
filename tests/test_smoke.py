@@ -13,7 +13,7 @@ def test_settings_defaults() -> None:
 	"""Настройки создаются и имеют ожидаемые значения по умолчанию."""
 	settings = Settings(_env_file=None)
 	assert settings.database_url.startswith("sqlite")
-	assert settings.ffmpeg_path == "ffmpeg"
+	assert settings.log_level == "INFO"
 
 
 def test_stop_after_failed_start_is_safe(tmp_path: Path) -> None:

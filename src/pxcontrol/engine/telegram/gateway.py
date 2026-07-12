@@ -1,7 +1,8 @@
 """Единая точка доступа к Telegram поверх двух транспортов (ADR-0007).
 
 Остальной код не знает, каким транспортом выполнена операция. Ориентир:
-публикация «сейчас» — Bot API, отложенные посты и чтение — MTProto.
+публикация «сейчас» — Bot API (по токену на операцию), отложенные посты
+и чтение — MTProto (постоянно подключённый userbot).
 """
 
 from __future__ import annotations
@@ -10,9 +11,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from pxcontrol.config import Settings
 from pxcontrol.engine.telegram.bot_api import (
-	BotApiTransport,
 	ChannelInfo,
 	check_channel,
 	check_token,
@@ -27,23 +26,19 @@ logger = logging.getLogger(__name__)
 class TelegramGateway:
 	"""Объединяет транспорты Bot API и MTProto за общим интерфейсом."""
 
-	def __init__(self, settings: Settings) -> None:
+	def __init__(self) -> None:
 		# Реквизиты берутся из БД (таблицы bots / tg_accounts, ADR-0009):
 		# движок активирует userbot при старте, боты — по токену на операцию.
-		self._settings = settings
-		self.bot_api = BotApiTransport(token=None)
 		self.mtproto = MtprotoTransport()
 		self.login = MtprotoLoginManager()
 
 	async def start(self) -> None:
-		"""Запускает оба транспорта."""
-		await self.bot_api.start()
+		"""Подключает userbot (если настроен). Bot API соединений не держит."""
 		await self.mtproto.start()
 
 	async def stop(self) -> None:
-		"""Останавливает оба транспорта (в обратном порядке)."""
+		"""Останавливает подключения."""
 		await self.mtproto.stop()
-		await self.bot_api.stop()
 
 	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None:
 		"""Настраивает и подключает userbot (при старте или после входа)."""
@@ -77,7 +72,3 @@ class TelegramGateway:
 	async def get_scheduled(self, chat_id: str) -> list[Any]:
 		"""Читает отложенные записи канала из Telegram."""
 		return await self.mtproto.get_scheduled(chat_id)
-
-	async def read_channel(self, username: str, limit: int = 20) -> list[Any]:
-		"""Читает канал-источник (через MTProto)."""
-		return await self.mtproto.read_channel(username, limit)

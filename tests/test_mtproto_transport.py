@@ -51,7 +51,7 @@ async def test_requires_connected_userbot() -> None:
 		await transport.schedule_post("-1001", "x", datetime.now(UTC))
 
 
-async def test_start_connects_once(client: Any = None) -> None:
+async def test_start_connects_once() -> None:
 	"""start() подключает настроенного клиента и идемпотентен."""
 	fake = _FakeClient()
 	transport = _transport(fake)
