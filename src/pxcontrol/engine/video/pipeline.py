@@ -11,6 +11,7 @@ import logging
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pxcontrol.engine.video.filtergraph import WatermarkOptions, build_filter_complex
@@ -18,6 +19,9 @@ from pxcontrol.engine.video.frames import prepare_still
 from pxcontrol.engine.video.probe import VideoInfo, probe_video
 
 logger = logging.getLogger(__name__)
+
+#: Колбэк прогресса: доля готовности 0.0..1.0.
+ProgressCallback = Callable[[float], None]
 
 
 @dataclass(frozen=True)
@@ -97,8 +101,51 @@ def _assemble_command(
 	cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
 	if audio_label:
 		cmd += ["-c:a", "aac", "-b:a", "192k"]
-	cmd += ["-movflags", "+faststart", output]
+	# -progress pipe:1 — ffmpeg пишет ход кодирования в stdout (для прогресс-бара)
+	cmd += ["-progress", "pipe:1", "-nostats", "-movflags", "+faststart", output]
 	return cmd
+
+
+def _progress_seconds(line: str) -> float | None:
+	"""Извлекает секунды из строки прогресса ffmpeg.
+
+	Поле ``out_time_ms`` исторически содержит МИКРОсекунды (причуда ffmpeg,
+	проверено на 8.0); ``out_time_us`` — его честный синоним.
+	"""
+	for key in ("out_time_us=", "out_time_ms="):
+		if line.startswith(key):
+			value = line[len(key):].strip()
+			try:
+				return int(value) / 1_000_000
+			except ValueError:
+				return None
+	return None
+
+
+def _run_ffmpeg_streaming(
+	cmd: list[str],
+	what: str,
+	total_seconds: float,
+	on_progress: ProgressCallback | None,
+) -> None:
+	"""Запускает ffmpeg, транслируя ход кодирования в колбэк.
+
+	Raises:
+		RuntimeError: Если ffmpeg завершился с ненулевым кодом.
+	"""
+	logger.debug("ffmpeg (%s): %s", what, " ".join(cmd))
+	proc = subprocess.Popen(
+		cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+	)
+	assert proc.stdout is not None  # stdout=PIPE
+	for line in proc.stdout:
+		seconds = _progress_seconds(line)
+		if seconds is not None and on_progress is not None and total_seconds > 0:
+			on_progress(min(seconds / total_seconds, 1.0))
+	stderr = proc.stderr.read() if proc.stderr is not None else ""
+	proc.wait()
+	if proc.returncode != 0:
+		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {stderr.strip()}")
 
 
 def _run_ffmpeg(cmd: list[str], what: str) -> None:
@@ -114,7 +161,11 @@ def _run_ffmpeg(cmd: list[str], what: str) -> None:
 
 
 def _run_main(
-	opts: ProcessingOptions, info: VideoInfo, still_path: str | None, output: str
+	opts: ProcessingOptions,
+	info: VideoInfo,
+	still_path: str | None,
+	output: str,
+	on_progress: ProgressCallback | None,
 ) -> None:
 	"""Запускает основную обработку: FullHD, вотермарк, заставка, кодирование."""
 	inputs, wm_index, still_index = _build_inputs(opts, info, still_path)
@@ -129,7 +180,9 @@ def _run_main(
 		opts.ffmpeg_bin, inputs, graph.filter_complex,
 		graph.video_label, graph.audio_label, output,
 	)
-	_run_ffmpeg(cmd, "обработка видео")
+	# длительность итога = исходник + удержание кадра заставки (см. SPEC)
+	total = info.duration + (opts.intro_hold if opts.intro else 0.0)
+	_run_ffmpeg_streaming(cmd, "обработка видео", total, on_progress)
 
 
 def _attach_cover(
@@ -144,11 +197,17 @@ def _attach_cover(
 	_run_ffmpeg(cmd, "вшивание обложки")
 
 
-def process(opts: ProcessingOptions) -> None:
+def process(
+	opts: ProcessingOptions, on_progress: ProgressCallback | None = None
+) -> None:
 	"""Обрабатывает одно видео по заданным параметрам (блокирующе).
 
 	Вызывающая сторона отвечает за вынос в поток/executor — модуль
 	сознательно синхронный, как и его тесты.
+
+	Args:
+		opts: параметры обработки.
+		on_progress: необязательный колбэк хода кодирования (0.0..1.0).
 
 	Raises:
 		RuntimeError: Если ffprobe/ffmpeg завершились с ошибкой.
@@ -161,7 +220,7 @@ def process(opts: ProcessingOptions) -> None:
 			still_path = os.path.join(tmp, "still.png")
 			prepare_still(opts.input, opts.intro_source, info, still_path, opts.ffmpeg_bin)
 		main_output = opts.output if not opts.cover else os.path.join(tmp, "main.mp4")
-		_run_main(opts, info, still_path, main_output)
+		_run_main(opts, info, still_path, main_output, on_progress)
 		if opts.cover:
 			_attach_cover(opts.ffmpeg_bin, main_output, str(still_path), opts.output)
 	logger.info("Готово: %s", opts.output)

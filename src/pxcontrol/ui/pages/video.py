@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -19,11 +19,11 @@ from qfluentwidgets import (
 	ComboBox,
 	DoubleSpinBox,
 	FluentIcon,
-	IndeterminateProgressBar,
 	InfoBar,
 	LineEdit,
 	MessageBoxBase,
 	PrimaryPushButton,
+	ProgressBar,
 	PushButton,
 	ScrollArea,
 	SpinBox,
@@ -47,6 +47,12 @@ _INTRO_SOURCES = [
 	("Момент времени (сек)", "time"),
 	("Своя картинка (PNG)", "image"),
 ]
+
+
+class _ProgressRelay(QObject):
+	"""Мост прогресса: колбэк из потока движка → сигнал в поток интерфейса."""
+
+	progressed = Signal(float)
 
 
 class _PresetDialog(MessageBoxBase):
@@ -259,18 +265,34 @@ class VideoPage(ScrollArea):
 		run_row.addWidget(self._process_button)
 		run_row.addStretch()
 		layout.addLayout(run_row)
-		self._busy = IndeterminateProgressBar(self)
-		self._busy.hide()
-		layout.addWidget(self._busy)
+		self._progress = ProgressBar(self)
+		self._progress.setRange(0, 100)
+		self._progress.hide()
+		layout.addWidget(self._progress)
+		self._progress_label = CaptionLabel("", self)
+		self._progress_label.hide()
+		layout.addWidget(self._progress_label)
+		self._relay = _ProgressRelay(self)
+		self._relay.progressed.connect(self._on_progress)
 		self._result_box = QVBoxLayout()
 		layout.addLayout(self._result_box)
 
 	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку и гасит индикатор занятости."""
-		self._busy.hide()
-		self._busy.stop()
-		self._process_button.setEnabled(True)
+		"""Показывает ошибку и гасит индикатор прогресса."""
+		self._hide_progress()
 		show_error(self, message)
+
+	def _hide_progress(self) -> None:
+		"""Прячет полосу прогресса и возвращает кнопку."""
+		self._progress.hide()
+		self._progress_label.hide()
+		self._process_button.setEnabled(True)
+
+	def _on_progress(self, fraction: float) -> None:
+		"""Обновляет полосу и подпись хода кодирования (сигнал из движка)."""
+		percent = int(fraction * 100)
+		self._progress.setValue(percent)
+		self._progress_label.setText(f"Кодирование: {percent}%")
 
 	# --- пресеты -------------------------------------------------------------------
 
@@ -358,19 +380,21 @@ class VideoPage(ScrollArea):
 			self._show_error("Создайте и выберите пресет обработки.")
 			return
 		self._process_button.setEnabled(False)
-		self._busy.show()
-		self._busy.start()
-		InfoBar.info("Обработка", "ffmpeg работает, окно можно не закрывать…", parent=self)
+		self._progress.setValue(0)
+		self._progress.show()
+		self._progress_label.setText("Анализ файла и подготовка кадра заставки…")
+		self._progress_label.show()
 		run_in_engine(
 			self._worker,
-			self._worker.engine.video.prepare(source, self._presets[index].id),
+			self._worker.engine.video.prepare(
+				source, self._presets[index].id,
+				on_progress=self._relay.progressed.emit,
+			),
 			self, self._on_processed, self._show_error,
 		)
 
 	def _on_processed(self, output_path: object) -> None:
-		self._busy.hide()
-		self._busy.stop()
-		self._process_button.setEnabled(True)
+		self._hide_progress()
 		path = Path(str(output_path))
 		InfoBar.success("Готово", path.name, parent=self)
 		clear_layout(self._result_box)

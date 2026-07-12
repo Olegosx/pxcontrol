@@ -96,6 +96,19 @@ def test_resolve_timestamp_modes() -> None:
 		resolve_timestamp("bogus", INFO)
 
 
+# --- разбор прогресса ffmpeg -----------------------------------------------------
+
+
+def test_progress_seconds() -> None:
+	"""Строки out_time_us/out_time_ms дают секунды (оба поля — микросекунды)."""
+	from pxcontrol.engine.video.pipeline import _progress_seconds
+
+	assert _progress_seconds("out_time_us=2920000\n") == pytest.approx(2.92)
+	assert _progress_seconds("out_time_ms=2920000\n") == pytest.approx(2.92)
+	assert _progress_seconds("progress=continue\n") is None
+	assert _progress_seconds("out_time_us=N/A\n") is None
+
+
 # --- разбор fps ------------------------------------------------------------------
 
 

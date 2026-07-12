@@ -23,8 +23,15 @@ class _FakeProcessor:
 	def __init__(self) -> None:
 		self.calls: list[ProcessingOptions] = []
 
-	def __call__(self, options: ProcessingOptions) -> None:
+	def __call__(
+		self,
+		options: ProcessingOptions,
+		on_progress: object = None,
+	) -> None:
 		self.calls.append(options)
+		if callable(on_progress):
+			on_progress(0.5)
+			on_progress(1.0)
 		Path(options.output).parent.mkdir(parents=True, exist_ok=True)
 		Path(options.output).write_bytes(b"video")
 
@@ -82,6 +89,25 @@ async def test_prepare_maps_preset_to_options(
 	assert "processed" in options.output and "исходник" in options.output
 
 
+async def test_prepare_reports_progress(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Колбэк прогресса пробрасывается до процессора и получает доли."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	source = tmp_path / "src.mp4"
+	source.write_bytes(b"src")
+	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
+	preset = await service.save_preset(PresetFields(name="Простой"))
+	received: list[float] = []
+	await service.prepare(str(source), preset.id, on_progress=received.append)
+	assert received == [0.5, 1.0]
+
+
 async def test_prepare_validations(db: Database, tmp_path: Path) -> None:
 	"""Понятные ошибки: нет файла, нет ffmpeg, нет пресета."""
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
@@ -108,7 +134,7 @@ async def test_prepare_wraps_processor_errors(
 	source = tmp_path / "src.mp4"
 	source.write_bytes(b"src")
 
-	def _boom(_options: ProcessingOptions) -> None:
+	def _boom(_options: ProcessingOptions, _on_progress: object = None) -> None:
 		raise RuntimeError("ffmpeg (обработка видео) завершился с ошибкой: тест")
 
 	service = VideoService(db, "ffmpeg", processor=_boom)

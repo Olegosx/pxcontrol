@@ -20,6 +20,7 @@ from sqlalchemy import delete, select
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import VideoPreset
 from pxcontrol.engine.video import ProcessingOptions, process
+from pxcontrol.engine.video.pipeline import ProgressCallback
 from pxcontrol.paths import media_dir
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class VideoService:
 		self,
 		db: Database,
 		ffmpeg_path: str,
-		processor: Callable[[ProcessingOptions], None] = process,
+		processor: Callable[[ProcessingOptions, ProgressCallback | None], None] = process,
 	) -> None:
 		self._db = db
 		self._ffmpeg = ffmpeg_path
@@ -146,11 +147,17 @@ class VideoService:
 
 	# --- подготовка ----------------------------------------------------------
 
-	async def prepare(self, source_path: str, preset_id: int) -> str:
+	async def prepare(
+		self,
+		source_path: str,
+		preset_id: int,
+		on_progress: ProgressCallback | None = None,
+	) -> str:
 		"""Готовит видео по пресету; возвращает путь к результату.
 
 		Обработка блокирующая (ffmpeg) и выполняется в отдельном потоке,
-		чтобы не останавливать цикл событий движка.
+		чтобы не останавливать цикл событий движка. ``on_progress``
+		вызывается из этого потока с долей готовности 0.0..1.0.
 
 		Raises:
 			VideoError: Файл/пресет/ffmpeg не найдены или обработка упала.
@@ -166,7 +173,7 @@ class VideoService:
 		options = await self._build_options(source, preset_id)
 		logger.info("Обработка видео: %s (пресет id=%s)…", source.name, preset_id)
 		try:
-			await asyncio.to_thread(self._processor, options)
+			await asyncio.to_thread(self._processor, options, on_progress)
 		except (RuntimeError, ValueError) as exc:
 			raise VideoError(f"Обработка не удалась: {exc}") from exc
 		logger.info("Видео готово: %s", options.output)
