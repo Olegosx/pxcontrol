@@ -42,6 +42,8 @@ class _TelegramPort(Protocol):
 
 	async def check_bot_token(self, token: str) -> str: ...
 
+	async def bot_events(self, token: str) -> list[str]: ...
+
 
 def mask_secret(secret: str) -> str:
 	"""Возвращает замаскированное представление секрета для показа в UI."""
@@ -117,6 +119,29 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			await session.execute(delete(Bot).where(Bot.id == bot_id))
 			await session.commit()
+
+	async def bot_whereabouts(self, bot_id: int) -> list[str]:
+		"""Диагностика «где состоит бот»: события Telegram за 24 часа.
+
+		Строки пишутся в лог и возвращаются для показа в интерфейсе.
+
+		Raises:
+			ValueError: Бот не найден.
+		"""
+		bot = await self._require_bot(bot_id)
+		lines = await self._gateway.bot_events(bot.token)
+		logger.info("Диагностика бота @%s: событий за 24 ч — %d.", bot.username, len(lines))
+		for line in lines:
+			logger.info("  %s", line)
+		return lines
+
+	async def _require_bot(self, bot_id: int) -> Bot:
+		"""Возвращает бота или объясняет, что он не найден."""
+		async with self._db.session_factory() as session:
+			bot = await session.get(Bot, bot_id)
+		if bot is None:
+			raise ValueError("Бот не найден.")
+		return bot
 
 	@staticmethod
 	def _bot_dto(bot: Bot) -> BotDto:

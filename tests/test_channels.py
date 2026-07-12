@@ -118,6 +118,33 @@ def test_normalize_chat_ref_hardened() -> None:
 		normalize_chat_ref("t.me/c/abc/5")
 
 
+def test_describe_update() -> None:
+	"""Описание событий бота: членство, пост в канале, прочее — None."""
+	from datetime import datetime
+
+	from pxcontrol.engine.telegram.bot_api import describe_update
+
+	membership = SimpleNamespace(
+		date=datetime(2026, 7, 12, 16, 30),
+		chat=SimpleNamespace(title="Мой канал", type="channel", id=-1004344346478),
+		new_chat_member=SimpleNamespace(
+			status="administrator", can_post_messages=True
+		),
+	)
+	line = describe_update(SimpleNamespace(my_chat_member=membership, channel_post=None))
+	assert line is not None
+	assert "Мой канал" in line and "administrator" in line and "есть" in line
+
+	post = SimpleNamespace(
+		date=datetime(2026, 7, 12, 16, 31),
+		chat=SimpleNamespace(title="Мой канал", id=-1004344346478),
+	)
+	line = describe_update(SimpleNamespace(my_chat_member=None, channel_post=post))
+	assert line is not None and "пост в канале" in line
+
+	assert describe_update(SimpleNamespace(my_chat_member=None, channel_post=None)) is None
+
+
 def test_ensure_bot_can_post() -> None:
 	"""Право публиковать: владелец и админ с правом проходят, прочие — нет."""
 	ensure_bot_can_post(SimpleNamespace(status="creator"))
