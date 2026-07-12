@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
 from pxcontrol.engine import EngineWorker
+
+logger = logging.getLogger(__name__)
 
 
 class _AsyncCall(QObject):
@@ -49,6 +52,8 @@ def run_in_engine(
 		try:
 			call.done.emit(fut.result())
 		except Exception as exc:  # noqa: BLE001 — любую ошибку показываем в UI
+			# полный трейсбек — в лог; пользователю — только текст
+			logger.exception("Ошибка операции движка: %s", exc)
 			call.failed.emit(str(exc))
 
 	future.add_done_callback(_finished)

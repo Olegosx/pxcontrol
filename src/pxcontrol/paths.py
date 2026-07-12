@@ -24,3 +24,8 @@ def app_dir() -> Path:
 def default_db_url() -> str:
 	"""URL базы данных по умолчанию — файл SQLite в каталоге приложения."""
 	return f"sqlite+aiosqlite:///{app_dir() / 'pxcontrol.db'}"
+
+
+def logs_dir() -> Path:
+	"""Каталог файлов логов — подпапка ``logs`` в каталоге приложения."""
+	return app_dir() / "logs"
