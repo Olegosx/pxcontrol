@@ -106,6 +106,18 @@ def test_normalize_chat_ref() -> None:
 		normalize_chat_ref("   ")
 
 
+def test_normalize_chat_ref_hardened() -> None:
+	"""Пробелы в ID, ссылки t.me/c/… и инвайт-ссылки (правки 2026-07-12)."""
+	assert normalize_chat_ref("-100 2233 445 566") == -1002233445566
+	assert normalize_chat_ref(" -1002233445566 ") == -1002233445566
+	assert normalize_chat_ref("https://t.me/c/2233445566/5") == -1002233445566
+	assert normalize_chat_ref("t.me/c/2233445566") == -1002233445566
+	with pytest.raises(ChannelCheckError, match="Инвайт"):
+		normalize_chat_ref("https://t.me/+AbCdEfGh123")
+	with pytest.raises(ChannelCheckError, match="t.me/c"):
+		normalize_chat_ref("t.me/c/abc/5")
+
+
 def test_ensure_bot_can_post() -> None:
 	"""Право публиковать: владелец и админ с правом проходят, прочие — нет."""
 	ensure_bot_can_post(SimpleNamespace(status="creator"))
