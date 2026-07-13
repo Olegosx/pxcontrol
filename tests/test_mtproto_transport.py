@@ -1,4 +1,4 @@
-"""Тесты транспорта MTProto (отложенные посты) на подставном клиенте."""
+"""Тесты транспорта MTProto (публикация постов) на подставном клиенте."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ class _FakeClient:
 	def __init__(self) -> None:
 		self.connected = False
 		self.sent: list[tuple[Any, str, Any]] = []
+		self.files: list[dict[str, Any]] = []
 
 	async def connect(self) -> None:
 		self.connected = True
@@ -28,6 +29,13 @@ class _FakeClient:
 		self, entity: Any, text: str, schedule: Any = None
 	) -> None:
 		self.sent.append((entity, text, schedule))
+
+	async def send_file(self, entity: Any, file: str, **kwargs: Any) -> None:
+		progress = kwargs.pop("progress_callback", None)
+		if callable(progress):
+			progress(50, 100)
+			progress(100, 100)
+		self.files.append({"entity": entity, "file": file, **kwargs})
 
 	async def get_input_entity(self, entity_id: Any) -> str:
 		return f"entity:{entity_id}"
@@ -48,7 +56,7 @@ async def test_requires_connected_userbot() -> None:
 	"""Без подключения — понятная ошибка с инструкцией."""
 	transport = MtprotoTransport()
 	with pytest.raises(UserbotUnavailable, match="войдите"):
-		await transport.schedule_post("-1001", "x", datetime.now(UTC))
+		await transport.publish("-1001", "x", None, "none", datetime.now(UTC))
 
 
 async def test_start_connects_once() -> None:
@@ -62,14 +70,33 @@ async def test_start_connects_once() -> None:
 	assert fake.connected is False
 
 
-async def test_schedule_post_passes_schedule() -> None:
-	"""Отложка уходит с параметром schedule и числовым ID чата."""
+async def test_publish_text_passes_schedule() -> None:
+	"""Текст уходит send_message с параметром schedule и числовым ID чата."""
 	fake = _FakeClient()
 	transport = _transport(fake)
 	await transport.start()
 	when = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
-	await transport.schedule_post("-1001234", "текст", when)
+	await transport.publish("-1001234", "текст", None, "none", when)
 	assert fake.sent == [(-1001234, "текст", when)]
+	assert fake.files == []
+
+
+async def test_publish_media_maps_kind_to_hints() -> None:
+	"""Медиа уходит send_file: видео — потоковое, документ — force_document."""
+	fake = _FakeClient()
+	transport = _transport(fake)
+	await transport.start()
+	received: list[float] = []
+	await transport.publish(
+		"-1001234", "подпись", "/tmp/v.mp4", "video", None,
+		on_progress=received.append,
+	)
+	await transport.publish("-1001234", "", "/tmp/d.zip", "document", None)
+	video, doc = fake.files
+	assert video["file"] == "/tmp/v.mp4" and video["caption"] == "подпись"
+	assert video["supports_streaming"] and not video["force_document"]
+	assert doc["force_document"] and doc["caption"] is None
+	assert received == [0.5, 1.0]
 
 
 async def test_get_scheduled_returns_messages() -> None:

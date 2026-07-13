@@ -116,32 +116,21 @@ class MtprotoTransport:
 			)
 		return self._client
 
-	async def schedule_post(self, chat_id: str, text: str, when: datetime) -> None:
-		"""Создаёт отложенную запись прямо в канале (schedule_date).
-
-		Дальше пост хранит и публикует сервер Telegram — приложение
-		может быть выключено (ADR-0010).
-		"""
-		client = self._require_client()
-		try:
-			await client.send_message(int(chat_id), text, schedule=when)
-		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-			raise UserbotUnavailable(_map_post_error(exc)) from exc
-		logger.info("Создан отложенный пост в чате %s на %s.", chat_id, when)
-
-	async def send_video(
+	async def publish(
 		self,
 		chat_id: str,
-		video_path: str,
-		caption: str,
+		text: str,
+		media_path: str | None,
+		media_kind: str,
 		when: datetime | None,
 		on_progress: Callable[[float], None] | None = None,
 	) -> None:
-		"""Отправляет видео в канал: сразу (when=None) или отложенно.
+		"""Публикует пост: текст или медиа с подписью, сразу или отложенно.
 
-		Видео идёт через userbot в обоих режимах: лимит Bot API на отправку
-		файлов ботом — 50 МБ, у MTProto — 2 ГБ. ``on_progress`` получает
-		долю загрузки 0.0..1.0 (загрузка больших файлов занимает минуты).
+		Единый транспорт публикации — userbot (ADR-0011): лимит Bot API
+		на файлы (50 МБ) мал для видео, отложенные (schedule_date) хранит
+		и публикует сервер Telegram (ADR-0010). ``on_progress`` получает
+		долю загрузки файла 0.0..1.0 (большие файлы — это минуты).
 		"""
 		client = self._require_client()
 
@@ -150,16 +139,22 @@ class MtprotoTransport:
 				on_progress(sent / total)
 
 		try:
-			await client.send_file(
-				int(chat_id), video_path, caption=caption or None,
-				schedule=when, supports_streaming=True,
-				progress_callback=_progress,
-			)
+			if media_path is None:
+				await client.send_message(int(chat_id), text, schedule=when)
+			else:
+				await client.send_file(
+					int(chat_id), media_path, caption=text or None,
+					schedule=when,
+					supports_streaming=media_kind == "video",
+					force_document=media_kind == "document",
+					progress_callback=_progress,
+				)
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 			raise UserbotUnavailable(_map_post_error(exc)) from exc
 		logger.info(
-			"Видео отправлено в чат %s (%s).",
-			chat_id, f"отложено на {when}" if when else "сразу",
+			"Пост отправлен в чат %s (%s, %s).", chat_id,
+			media_kind if media_path else "текст",
+			f"отложено на {when}" if when else "сразу",
 		)
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]:

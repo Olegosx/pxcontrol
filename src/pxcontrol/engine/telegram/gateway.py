@@ -1,8 +1,9 @@
 """Единая точка доступа к Telegram поверх двух транспортов (ADR-0007).
 
 Остальной код не знает, каким транспортом выполнена операция. Ориентир:
-публикация «сейчас» — Bot API (по токену на операцию), отложенные посты
-и чтение — MTProto (постоянно подключённый userbot).
+публикация любого контента и чтение — MTProto (постоянно подключённый
+userbot, ADR-0011); Bot API — проверки, диагностика и законсервированная
+отправка текста ботом (пригодится для генерации ИИ).
 """
 
 from __future__ import annotations
@@ -66,23 +67,23 @@ class TelegramGateway:
 
 	# --- MTProto (userbot) -------------------------------------------------------
 
-	async def schedule_post(self, chat_id: str, text: str, when: datetime) -> None:
-		"""Создаёт отложенную запись прямо в канале (ADR-0010)."""
-		await self.mtproto.schedule_post(chat_id, text, when)
-
-	async def send_video(
+	async def publish(
 		self,
 		chat_id: str,
-		video_path: str,
-		caption: str,
+		text: str,
+		media_path: str | None,
+		media_kind: str,
 		when: datetime | None,
 		on_progress: Callable[[float], None] | None = None,
 	) -> None:
-		"""Публикует видео через userbot: сразу (when=None) или отложенно.
+		"""Публикует пост любого типа через userbot (ADR-0011).
 
-		Оба режима — MTProto: лимит Bot API (50 МБ на файл) мал для видео.
+		Текст или медиа с подписью; сразу (when=None) или отложенно —
+		отложенные хранит и публикует сервер Telegram (ADR-0010).
 		"""
-		await self.mtproto.send_video(chat_id, video_path, caption, when, on_progress)
+		await self.mtproto.publish(
+			chat_id, text, media_path, media_kind, when, on_progress
+		)
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]:
 		"""Читает отложенные записи канала из Telegram."""

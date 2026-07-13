@@ -11,38 +11,38 @@ import pytest
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Channel
-from pxcontrol.engine.services.posts import PostError, PostsService, ScheduledPostDto
+from pxcontrol.engine.services.posts import (
+	MediaKind,
+	PostDraft,
+	PostError,
+	PostsService,
+	ScheduledPostDto,
+)
 from pxcontrol.engine.telegram.mtproto import UserbotUnavailable
 
 
 class _FakeGateway:
-	"""Подмена шлюза: фиксирует отправки и отложки."""
+	"""Подмена шлюза: фиксирует отправки бота и публикации userbot."""
 
 	def __init__(self) -> None:
 		self.sent: list[tuple[str, str, str]] = []
-		self.scheduled: list[tuple[str, str, datetime]] = []
-		self.videos: list[tuple[str, str, str, datetime | None]] = []
+		self.published: list[tuple[str, str, str | None, str, datetime | None]] = []
 		self.userbot_ok = True
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
 		self.sent.append((token, chat_id, text))
 		return 42
 
-	async def schedule_post(self, chat_id: str, text: str, when: datetime) -> None:
-		if not self.userbot_ok:
-			raise UserbotUnavailable("Userbot не подключён — войдите в аккаунт.")
-		self.scheduled.append((chat_id, text, when))
-
-	async def send_video(
-		self, chat_id: str, video_path: str, caption: str,
-		when: datetime | None, on_progress: object,
+	async def publish(
+		self, chat_id: str, text: str, media_path: str | None,
+		media_kind: str, when: datetime | None, on_progress: object,
 	) -> None:
 		if not self.userbot_ok:
 			raise UserbotUnavailable("Userbot не подключён — войдите в аккаунт.")
-		if callable(on_progress):
+		if media_path is not None and callable(on_progress):
 			on_progress(0.5)
 			on_progress(1.0)
-		self.videos.append((chat_id, video_path, caption, when))
+		self.published.append((chat_id, text, media_path, media_kind, when))
 
 	async def get_scheduled(self, chat_id: str) -> list[object]:
 		return [SimpleNamespace(
@@ -96,69 +96,66 @@ async def test_send_now_requires_bot(db: Database) -> None:
 	assert gateway.sent == []
 
 
-async def test_schedule_via_userbot(db: Database) -> None:
-	"""Отложка уходит через userbot с точным временем."""
+async def test_publish_text_now_and_scheduled(db: Database) -> None:
+	"""Текст уходит через userbot: сразу (when=None) и отложенно."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
+	await service.publish(PostDraft(channel_id, text="сразу"))
 	when = datetime.now(UTC) + timedelta(hours=1)
-	await service.schedule(channel_id, "позже", when)
-	assert gateway.scheduled == [("-1001", "позже", when)]
+	await service.publish(PostDraft(channel_id, text="позже", when=when))
+	assert gateway.published == [
+		("-1001", "сразу", None, "none", None),
+		("-1001", "позже", None, "none", when),
+	]
 
 
-async def test_schedule_requires_future(db: Database) -> None:
-	"""Время «почти сейчас» отклоняется до похода в Telegram."""
-	gateway = _FakeGateway()
-	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
-	with pytest.raises(PostError, match="в будущем"):
-		await service.schedule(channel_id, "x", datetime.now(UTC))
-	assert gateway.scheduled == []
-
-
-async def test_schedule_userbot_unavailable(db: Database) -> None:
-	"""Неподключённый userbot — ошибка с инструкцией, что делать."""
-	gateway = _FakeGateway()
-	gateway.userbot_ok = False
-	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
-	when = datetime.now(UTC) + timedelta(hours=1)
-	with pytest.raises(UserbotUnavailable, match="войдите"):
-		await service.schedule(channel_id, "x", when)
-
-
-async def test_send_video_now_and_scheduled(db: Database, tmp_path: Path) -> None:
-	"""Видео уходит через userbot: сразу (when=None) и отложенно."""
+async def test_publish_media_with_progress(db: Database, tmp_path: Path) -> None:
+	"""Медиа уходит с типом и подписью, прогресс пробрасывается."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
 	video = tmp_path / "ролик.mp4"
 	video.write_bytes(b"video")
 	received: list[float] = []
-	await service.send_video(
-		channel_id, str(video), "подпись", on_progress=received.append
+	draft = PostDraft(
+		channel_id, text="подпись", media_path=str(video),
+		media_kind=MediaKind.VIDEO,
 	)
-	when = datetime.now(UTC) + timedelta(hours=2)
-	await service.send_video(channel_id, str(video), "", when)
-	assert gateway.videos == [
-		("-1001", str(video), "подпись", None),
-		("-1001", str(video), "", when),
-	]
+	await service.publish(draft, on_progress=received.append)
+	assert gateway.published == [("-1001", "подпись", str(video), "video", None)]
 	assert received == [0.5, 1.0]
 
 
-async def test_send_video_validations(db: Database, tmp_path: Path) -> None:
-	"""Нет файла или время «почти сейчас» — ошибка до похода в Telegram."""
+async def test_publish_validations(db: Database, tmp_path: Path) -> None:
+	"""Пустой черновик, битый путь, тип, «почти сейчас» — до похода в Telegram."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
+	with pytest.raises(PostError, match="пуст"):
+		await service.publish(PostDraft(channel_id))
+	with pytest.raises(PostError, match="не указан тип"):
+		await service.publish(PostDraft(channel_id, media_path="x.bin"))
 	with pytest.raises(PostError, match="не найден"):
-		await service.send_video(channel_id, str(tmp_path / "нет.mp4"))
-	video = tmp_path / "есть.mp4"
-	video.write_bytes(b"video")
+		await service.publish(PostDraft(
+			channel_id, media_path=str(tmp_path / "нет.jpg"),
+			media_kind=MediaKind.PHOTO,
+		))
 	with pytest.raises(PostError, match="в будущем"):
-		await service.send_video(channel_id, str(video), when=datetime.now(UTC))
-	assert gateway.videos == []
+		await service.publish(PostDraft(
+			channel_id, text="x", when=datetime.now(UTC)
+		))
+	assert gateway.published == []
+
+
+async def test_publish_userbot_unavailable(db: Database) -> None:
+	"""Неподключённый userbot — ошибка с инструкцией, что делать."""
+	gateway = _FakeGateway()
+	gateway.userbot_ok = False
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	with pytest.raises(UserbotUnavailable, match="войдите"):
+		await service.publish(PostDraft(channel_id, text="x"))
 
 
 async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
