@@ -21,6 +21,7 @@ class _FakeGateway:
 	def __init__(self) -> None:
 		self.sent: list[tuple[str, str, str]] = []
 		self.scheduled: list[tuple[str, str, datetime]] = []
+		self.videos: list[tuple[str, str, str, datetime | None]] = []
 		self.userbot_ok = True
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
@@ -31,6 +32,17 @@ class _FakeGateway:
 		if not self.userbot_ok:
 			raise UserbotUnavailable("Userbot не подключён — войдите в аккаунт.")
 		self.scheduled.append((chat_id, text, when))
+
+	async def send_video(
+		self, chat_id: str, video_path: str, caption: str,
+		when: datetime | None, on_progress: object,
+	) -> None:
+		if not self.userbot_ok:
+			raise UserbotUnavailable("Userbot не подключён — войдите в аккаунт.")
+		if callable(on_progress):
+			on_progress(0.5)
+			on_progress(1.0)
+		self.videos.append((chat_id, video_path, caption, when))
 
 	async def get_scheduled(self, chat_id: str) -> list[object]:
 		return [SimpleNamespace(
@@ -113,6 +125,40 @@ async def test_schedule_userbot_unavailable(db: Database) -> None:
 	when = datetime.now(UTC) + timedelta(hours=1)
 	with pytest.raises(UserbotUnavailable, match="войдите"):
 		await service.schedule(channel_id, "x", when)
+
+
+async def test_send_video_now_and_scheduled(db: Database, tmp_path: Path) -> None:
+	"""Видео уходит через userbot: сразу (when=None) и отложенно."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	video = tmp_path / "ролик.mp4"
+	video.write_bytes(b"video")
+	received: list[float] = []
+	await service.send_video(
+		channel_id, str(video), "подпись", on_progress=received.append
+	)
+	when = datetime.now(UTC) + timedelta(hours=2)
+	await service.send_video(channel_id, str(video), "", when)
+	assert gateway.videos == [
+		("-1001", str(video), "подпись", None),
+		("-1001", str(video), "", when),
+	]
+	assert received == [0.5, 1.0]
+
+
+async def test_send_video_validations(db: Database, tmp_path: Path) -> None:
+	"""Нет файла или время «почти сейчас» — ошибка до похода в Telegram."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	with pytest.raises(PostError, match="не найден"):
+		await service.send_video(channel_id, str(tmp_path / "нет.mp4"))
+	video = tmp_path / "есть.mp4"
+	video.write_bytes(b"video")
+	with pytest.raises(PostError, match="в будущем"):
+		await service.send_video(channel_id, str(video), when=datetime.now(UTC))
+	assert gateway.videos == []
 
 
 async def test_list_scheduled_reads_from_telegram(db: Database) -> None:

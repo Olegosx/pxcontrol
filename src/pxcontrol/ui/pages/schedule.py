@@ -7,14 +7,11 @@
 from __future__ import annotations
 
 from collections.abc import Coroutine
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QDate, QTime
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-	BodyLabel,
-	CalendarPicker,
 	CaptionLabel,
 	CardWidget,
 	ComboBox,
@@ -25,16 +22,14 @@ from qfluentwidgets import (
 	PushButton,
 	ScrollArea,
 	SubtitleLabel,
-	SwitchButton,
 	TextEdit,
-	TimePicker,
 )
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import ScheduledPostDto
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import clear_layout, row_card, show_error
+from pxcontrol.ui.pages.common import WhenRow, clear_layout, row_card, show_error
 
 
 class _NewPostDialog(MessageBoxBase):
@@ -52,33 +47,10 @@ class _NewPostDialog(MessageBoxBase):
 		self._text.setPlaceholderText("Текст поста…")
 		self._text.setMinimumHeight(120)
 		self.viewLayout.addWidget(self._text)
-		self._build_when_row()
+		self._when_row = WhenRow(self, self.viewLayout)
 		self.yesButton.setText("Отправить")
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(480)
-
-	def _build_when_row(self) -> None:
-		"""Переключатель «сейчас» и скрываемые дата+время."""
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Опубликовать сейчас", self))
-		self._now_switch = SwitchButton(self)
-		self._now_switch.setChecked(True)
-		self._now_switch.checkedChanged.connect(self._on_now_toggled)
-		row.addWidget(self._now_switch)
-		row.addStretch()
-		self._date = CalendarPicker(self)
-		self._date.setDate(QDate.currentDate())
-		self._time = TimePicker(self)
-		self._time.setTime(QTime.currentTime().addSecs(3600))
-		self._date.hide()
-		self._time.hide()
-		row.addWidget(self._date)
-		row.addWidget(self._time)
-		self.viewLayout.addLayout(row)
-
-	def _on_now_toggled(self, now: bool) -> None:
-		self._date.setVisible(not now)
-		self._time.setVisible(not now)
 
 	def channel_id(self) -> int:
 		"""Идентификатор выбранного канала."""
@@ -90,13 +62,7 @@ class _NewPostDialog(MessageBoxBase):
 
 	def when(self) -> datetime | None:
 		"""None — «сейчас», иначе выбранный момент (в UTC)."""
-		if self._now_switch.isChecked():
-			return None
-		date, time = self._date.getDate(), self._time.getTime()
-		local = datetime(
-			date.year(), date.month(), date.day(), time.hour(), time.minute()
-		)
-		return local.astimezone(UTC)
+		return self._when_row.when()
 
 
 class SchedulePage(ScrollArea):

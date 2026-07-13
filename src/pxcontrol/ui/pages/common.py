@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import TypeVar
 
+from PySide6.QtCore import QDate, QTime
 from PySide6.QtWidgets import QHBoxLayout, QLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
+	BodyLabel,
+	CalendarPicker,
 	CaptionLabel,
 	CardWidget,
 	FluentIcon,
@@ -16,6 +20,8 @@ from qfluentwidgets import (
 	MessageBoxBase,
 	StrongBodyLabel,
 	SubtitleLabel,
+	SwitchButton,
+	TimePicker,
 	TransparentToolButton,
 )
 
@@ -89,6 +95,46 @@ def row_card(
 		delete_button.clicked.connect(on_delete)
 		layout.addWidget(delete_button)
 	return card
+
+
+class WhenRow:
+	"""Строка «Опубликовать сейчас» + скрываемые дата и время.
+
+	Общий блок диалогов публикации (пост, видео): переключатель «сейчас»
+	и выбор момента для отложенной записи.
+	"""
+
+	def __init__(self, dialog: QWidget, layout: QVBoxLayout) -> None:
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Опубликовать сейчас", dialog))
+		self._now_switch = SwitchButton(dialog)
+		self._now_switch.setChecked(True)
+		self._now_switch.checkedChanged.connect(self._on_now_toggled)
+		row.addWidget(self._now_switch)
+		row.addStretch()
+		self._date = CalendarPicker(dialog)
+		self._date.setDate(QDate.currentDate())
+		self._time = TimePicker(dialog)
+		self._time.setTime(QTime.currentTime().addSecs(3600))
+		self._date.hide()
+		self._time.hide()
+		row.addWidget(self._date)
+		row.addWidget(self._time)
+		layout.addLayout(row)
+
+	def _on_now_toggled(self, now: bool) -> None:
+		self._date.setVisible(not now)
+		self._time.setVisible(not now)
+
+	def when(self) -> datetime | None:
+		"""None — «сейчас», иначе выбранный момент (в UTC)."""
+		if self._now_switch.isChecked():
+			return None
+		date, time = self._date.getDate(), self._time.getTime()
+		local = datetime(
+			date.year(), date.month(), date.day(), time.hour(), time.minute()
+		)
+		return local.astimezone(UTC)
 
 
 class FormDialog(MessageBoxBase):

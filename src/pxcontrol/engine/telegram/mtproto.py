@@ -129,6 +129,39 @@ class MtprotoTransport:
 			raise UserbotUnavailable(_map_post_error(exc)) from exc
 		logger.info("Создан отложенный пост в чате %s на %s.", chat_id, when)
 
+	async def send_video(
+		self,
+		chat_id: str,
+		video_path: str,
+		caption: str,
+		when: datetime | None,
+		on_progress: Callable[[float], None] | None = None,
+	) -> None:
+		"""Отправляет видео в канал: сразу (when=None) или отложенно.
+
+		Видео идёт через userbot в обоих режимах: лимит Bot API на отправку
+		файлов ботом — 50 МБ, у MTProto — 2 ГБ. ``on_progress`` получает
+		долю загрузки 0.0..1.0 (загрузка больших файлов занимает минуты).
+		"""
+		client = self._require_client()
+
+		def _progress(sent: int, total: int) -> None:
+			if on_progress is not None and total > 0:
+				on_progress(sent / total)
+
+		try:
+			await client.send_file(
+				int(chat_id), video_path, caption=caption or None,
+				schedule=when, supports_streaming=True,
+				progress_callback=_progress,
+			)
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+			raise UserbotUnavailable(_map_post_error(exc)) from exc
+		logger.info(
+			"Видео отправлено в чат %s (%s).",
+			chat_id, f"отложено на {when}" if when else "сразу",
+		)
+
 	async def get_scheduled(self, chat_id: str) -> list[Any]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""
 		from telethon.tl.functions.messages import GetScheduledHistoryRequest

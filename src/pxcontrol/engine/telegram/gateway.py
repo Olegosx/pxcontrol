@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -68,6 +69,20 @@ class TelegramGateway:
 	async def schedule_post(self, chat_id: str, text: str, when: datetime) -> None:
 		"""Создаёт отложенную запись прямо в канале (ADR-0010)."""
 		await self.mtproto.schedule_post(chat_id, text, when)
+
+	async def send_video(
+		self,
+		chat_id: str,
+		video_path: str,
+		caption: str,
+		when: datetime | None,
+		on_progress: Callable[[float], None] | None = None,
+	) -> None:
+		"""Публикует видео через userbot: сразу (when=None) или отложенно.
+
+		Оба режима — MTProto: лимит Bot API (50 МБ на файл) мал для видео.
+		"""
+		await self.mtproto.send_video(chat_id, video_path, caption, when, on_progress)
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]:
 		"""Читает отложенные записи канала из Telegram."""

@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 
 from sqlalchemy import select
@@ -24,6 +26,9 @@ logger = logging.getLogger(__name__)
 #: Минимальный запас до времени публикации (Telegram не берёт «почти сейчас»).
 MIN_SCHEDULE_AHEAD = timedelta(seconds=60)
 
+#: Колбэк прогресса загрузки: доля 0.0..1.0.
+ProgressCallback = Callable[[float], None]
+
 
 class PostError(Exception):
 	"""Ошибка создания/отправки поста (с понятным человеку текстом)."""
@@ -36,6 +41,11 @@ class _PostPort(Protocol):
 
 	async def schedule_post(
 		self, chat_id: str, text: str, when: datetime
+	) -> None: ...
+
+	async def send_video(
+		self, chat_id: str, video_path: str, caption: str,
+		when: datetime | None, on_progress: ProgressCallback | None,
 	) -> None: ...
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]: ...
@@ -89,6 +99,39 @@ class PostsService:
 		channel = await self._get_channel(channel_id)
 		await self._gateway.schedule_post(channel.tg_chat_id, text, when)
 		logger.info("Отложенный пост создан в «%s» на %s.", channel.title, when)
+
+	async def send_video(
+		self,
+		channel_id: int,
+		video_path: str,
+		caption: str = "",
+		when: datetime | None = None,
+		on_progress: ProgressCallback | None = None,
+	) -> None:
+		"""Публикует видео в канал: сразу (when=None) или отложенно.
+
+		Оба режима идут через userbot (MTProto): лимит Bot API на отправку
+		файлов ботом — 50 МБ, обработанные видео значительно больше.
+
+		Raises:
+			PostError: Файл/канал не найдены или время не в будущем.
+			UserbotUnavailable: Userbot не подключён / не админ канала.
+		"""
+		if not Path(video_path).is_file():
+			raise PostError(f"Видеофайл не найден: {video_path}")
+		if when is not None:
+			if when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
+				raise PostError(
+					"Время публикации должно быть хотя бы на минуту в будущем."
+				)
+		channel = await self._get_channel(channel_id)
+		await self._gateway.send_video(
+			channel.tg_chat_id, video_path, caption, when, on_progress
+		)
+		logger.info(
+			"Видео %s → «%s» (%s).", Path(video_path).name, channel.title,
+			f"отложено на {when}" if when else "опубликовано",
+		)
 
 	async def list_scheduled(self) -> list[ScheduledPostDto]:
 		"""Собирает отложенные записи всех активных каналов из Telegram."""

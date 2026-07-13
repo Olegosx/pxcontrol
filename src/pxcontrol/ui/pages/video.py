@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -29,12 +30,21 @@ from qfluentwidgets import (
 	SpinBox,
 	SubtitleLabel,
 	SwitchButton,
+	TextEdit,
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.video import PresetDto, PresetFields
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import bind, clear_layout, confirm_delete, row_card, show_error
+from pxcontrol.ui.pages.common import (
+	WhenRow,
+	bind,
+	clear_layout,
+	confirm_delete,
+	row_card,
+	show_error,
+)
 
 #: Углы вотермарка: подпись → код.
 _CORNERS = [
@@ -53,6 +63,39 @@ class _ProgressRelay(QObject):
 	"""Мост прогресса: колбэк из потока движка → сигнал в поток интерфейса."""
 
 	progressed = Signal(float)
+
+
+class _PublishDialog(MessageBoxBase):
+	"""Диалог публикации видео: канал, подпись, «сейчас» или дата+время."""
+
+	def __init__(self, channels: list[ChannelDto], parent: QWidget) -> None:
+		super().__init__(parent)
+		self._channels = channels
+		self.viewLayout.addWidget(SubtitleLabel("Публикация видео", self))
+		self._combo = ComboBox(self)
+		for channel in channels:
+			self._combo.addItem(channel.title)
+		self.viewLayout.addWidget(self._combo)
+		self._caption = TextEdit(self)
+		self._caption.setPlaceholderText("Подпись к видео (необязательно)…")
+		self._caption.setMinimumHeight(80)
+		self.viewLayout.addWidget(self._caption)
+		self._when_row = WhenRow(self, self.viewLayout)
+		self.yesButton.setText("Отправить")
+		self.cancelButton.setText("Отмена")
+		self.widget.setMinimumWidth(480)
+
+	def channel_id(self) -> int:
+		"""Идентификатор выбранного канала."""
+		return self._channels[int(self._combo.currentIndex())].id
+
+	def caption(self) -> str:
+		"""Подпись к видео без крайних пробелов."""
+		return str(self._caption.toPlainText()).strip()
+
+	def when(self) -> datetime | None:
+		"""None — «сейчас», иначе выбранный момент (в UTC)."""
+		return self._when_row.when()
 
 
 class _PresetDialog(MessageBoxBase):
@@ -299,6 +342,7 @@ class VideoPage(ScrollArea):
 		layout.addWidget(self._progress_label)
 		self._relay = _ProgressRelay(self)
 		self._relay.progressed.connect(self._on_progress)
+		self._progress_prefix = "Кодирование"
 		self._result_box = QVBoxLayout()
 		layout.addLayout(self._result_box)
 
@@ -314,10 +358,10 @@ class VideoPage(ScrollArea):
 		self._process_button.setEnabled(True)
 
 	def _on_progress(self, fraction: float) -> None:
-		"""Обновляет полосу и подпись хода кодирования (сигнал из движка)."""
+		"""Обновляет полосу и подпись хода операции (сигнал из движка)."""
 		percent = int(fraction * 100)
 		self._progress.setValue(percent)
-		self._progress_label.setText(f"Кодирование: {percent}%")
+		self._progress_label.setText(f"{self._progress_prefix}: {percent}%")
 
 	# --- пресеты -------------------------------------------------------------------
 
@@ -405,6 +449,7 @@ class VideoPage(ScrollArea):
 			self._show_error("Создайте и выберите пресет обработки.")
 			return
 		self._process_button.setEnabled(False)
+		self._progress_prefix = "Кодирование"
 		self._progress.setValue(0)
 		self._progress.show()
 		self._progress_label.setText("Анализ файла и подготовка кадра заставки…")
@@ -427,14 +472,60 @@ class VideoPage(ScrollArea):
 		open_btn.clicked.connect(bind(self._open_path, str(path)))
 		folder_btn = PushButton(FluentIcon.FOLDER, "Показать в папке", self)
 		folder_btn.clicked.connect(bind(self._open_path, str(path.parent)))
+		publish_btn = PrimaryPushButton(FluentIcon.SEND, "Опубликовать…", self)
+		publish_btn.clicked.connect(bind(self._on_publish, str(path)))
 		buttons = QWidget(self)
 		buttons_layout = QHBoxLayout(buttons)
 		buttons_layout.setContentsMargins(0, 0, 0, 0)
 		buttons_layout.addWidget(open_btn)
 		buttons_layout.addWidget(folder_btn)
+		buttons_layout.addWidget(publish_btn)
 		self._result_box.addWidget(row_card(
 			self, path.name, f"Результат: {path.parent}", trailing=buttons,
 		))
+
+	# --- публикация ---------------------------------------------------------------
+
+	def _on_publish(self, path: str) -> None:
+		"""Открывает диалог публикации, подтянув список каналов."""
+		run_in_engine(
+			self._worker, self._worker.engine.channels.list_channels(),
+			self, partial(self._open_publish_dialog, path), self._show_error,
+		)
+
+	def _open_publish_dialog(self, path: str, channels: list[ChannelDto]) -> None:
+		"""Спрашивает канал/подпись/время и запускает отправку через userbot."""
+		if not channels:
+			self._show_error("Сначала подключите канал на странице «Каналы».")
+			return
+		dialog = _PublishDialog(channels, self.window())
+		if not dialog.exec():
+			return
+		when = dialog.when()
+		self._progress_prefix = "Загрузка в Telegram"
+		self._progress.setValue(0)
+		self._progress.show()
+		self._progress_label.setText("Отправка видео…")
+		self._progress_label.show()
+		run_in_engine(
+			self._worker,
+			self._worker.engine.posts.send_video(
+				dialog.channel_id(), path, dialog.caption(), when,
+				on_progress=self._relay.progressed.emit,
+			),
+			self, partial(self._on_published, when), self._show_error,
+		)
+
+	def _on_published(self, when: datetime | None, _result: object = None) -> None:
+		"""Показывает итог публикации и гасит прогресс."""
+		self._hide_progress()
+		if when is None:
+			InfoBar.success("Видео опубликовано", "Отправлено в канал.", parent=self)
+		else:
+			InfoBar.success(
+				"Отложенная публикация создана",
+				"Публикацию выполнит сервер Telegram.", parent=self,
+			)
 
 	@staticmethod
 	def _open_path(path: str) -> None:
