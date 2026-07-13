@@ -71,9 +71,16 @@ def test_watermark_adds_overlay() -> None:
 	assert "[main]split[bg][wm_ref]" in graph.filter_complex
 	assert "[1:v][wm_ref]scale=w=rw*0.15:h=-2[wm_s]" in graph.filter_complex
 	assert "colorchannelmixer=aa=1.0" in graph.filter_complex
-	assert "overlay=W-w-24:24" in graph.filter_complex
+	assert "overlay=W-w-24:24:format=yuv444" in graph.filter_complex
 	assert "scale2ref" not in graph.filter_complex  # устарел, искажал пропорции
 	assert graph.video_label == "[vout]"
+
+
+def test_watermark_converts_colors_correctly() -> None:
+	"""RGB→YUV вотермарка — матрицей bt709 и без потери разрешения цветности."""
+	graph = _build(has_watermark=True, wm=WM, wm_index=1)
+	assert "scale=out_color_matrix=bt709:out_range=tv" in graph.filter_complex
+	assert "format=yuva444p" in graph.filter_complex
 
 
 def test_audio_delayed_with_intro() -> None:

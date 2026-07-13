@@ -13,7 +13,7 @@
 import logging
 from dataclasses import dataclass
 
-from pxcontrol.engine.video.constants import TARGET_PIX_FMT
+from pxcontrol.engine.video.constants import TARGET_COLOR_MATRIX, TARGET_PIX_FMT
 
 logger = logging.getLogger(__name__)
 
@@ -127,16 +127,22 @@ def _watermark_chains(
 	Фон дублируется (split): одна копия служит эталоном размера для scale
 	(rw — ширина эталона, высота -2 сохраняет пропорции вотермарка), вторая
 	идёт под наложение. scale2ref не используется: он устарел и в ffmpeg 8
-	искажает размер и пропорции. Затем colorchannelmixer задаёт прозрачность,
-	и overlay кладёт картинку в нужный угол.
+	искажает размер и пропорции. colorchannelmixer задаёт прозрачность.
+
+	Цвета: RGB→YUV — явно матрицей bt709 (по умолчанию ffmpeg берёт bt601,
+	и плеер сдвигал оттенки), смешивание — в yuv444 (по умолчанию yuv420:
+	цветность в четверть разрешения, и тонкие штрихи вотермарка перенимали
+	цвет соседей — красный зеленел).
 	"""
 	position = _overlay_position(wm.corner, wm.margin)
 	enable = _enable_expr(wm, offset)
 	chains = [
 		f"{base}split[bg][wm_ref]",
 		f"[{wm_index}:v][wm_ref]scale=w=rw*{wm.scale}:h=-2[wm_s]",
-		f"[wm_s]format=rgba,colorchannelmixer=aa={wm.opacity}[wm_a]",
-		f"[bg][wm_a]overlay={position}{enable}[vout]",
+		f"[wm_s]format=rgba,colorchannelmixer=aa={wm.opacity},"
+		f"scale=out_color_matrix={TARGET_COLOR_MATRIX}:out_range=tv,"
+		f"format=yuva444p[wm_a]",
+		f"[bg][wm_a]overlay={position}:format=yuv444{enable}[vout]",
 	]
 	return chains, "[vout]"
 
