@@ -13,7 +13,7 @@
 import logging
 from dataclasses import dataclass
 
-from pxcontrol.engine.video.constants import FULLHD_FIT, TARGET_PIX_FMT
+from pxcontrol.engine.video.constants import TARGET_PIX_FMT
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,13 @@ def _prep(label_in: str, fps: str, label_out: str) -> str:
 	)
 
 
-def _main_chain(fps: str) -> str:
-	"""Цепочка приведения основного видео к FullHD и единому формату."""
-	return f"[0:v]{FULLHD_FIT}," + _prep("", fps, "[main]")
+def _main_chain(fps: str, width: int, height: int) -> str:
+	"""Цепочка приведения основного видео к целевому размеру и формату.
+
+	Размер задаётся явными числами (см. fitted_size): кадр заставки
+	готовится под тот же размер, а xfade требует точного совпадения.
+	"""
+	return f"[0:v]scale={width}:{height}," + _prep("", fps, "[main]")
 
 
 def _intro_chains(fps: str, hold: float, xfade: float, still_index: int) -> list[str]:
@@ -148,6 +152,8 @@ def _audio_chains(has_intro: bool, hold: float) -> tuple[list[str], str]:
 def build_filter_complex(
 	*,
 	fps: str,
+	width: int,
+	height: int,
 	has_intro: bool,
 	hold: float,
 	xfade: float,
@@ -161,6 +167,8 @@ def build_filter_complex(
 
 	Args:
 		fps: кадровая частота строкой (например '29.97003').
+		width: ширина итогового кадра (fitted_size).
+		height: высота итогового кадра (fitted_size).
 		has_intro: включена ли заставка.
 		hold: сколько секунд держать кадр заставки сплошняком.
 		xfade: длительность растворения заставки в видео.
@@ -173,7 +181,7 @@ def build_filter_complex(
 	Returns:
 		FilterGraph со строкой -filter_complex и метками видео/звука.
 	"""
-	chains = [_main_chain(fps)]
+	chains = [_main_chain(fps, width, height)]
 	base, offset = "[main]", 0.0
 	if has_intro:
 		if still_index is None:

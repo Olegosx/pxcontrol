@@ -24,8 +24,9 @@ INFO = VideoInfo(width=1920, height=1080, duration=100.0, fps=25.0, has_audio=Tr
 def _build(**kwargs: object) -> object:
 	"""Хелпер: вызывает build_filter_complex со значениями по умолчанию."""
 	defaults: dict[str, object] = dict(
-		fps="25.00000", has_intro=False, hold=1.0, xfade=0.5, still_index=None,
-		has_watermark=False, wm=None, wm_index=None, has_audio=False,
+		fps="25.00000", width=1920, height=1080, has_intro=False, hold=1.0,
+		xfade=0.5, still_index=None, has_watermark=False, wm=None,
+		wm_index=None, has_audio=False,
 	)
 	defaults.update(kwargs)
 	return build_filter_complex(**defaults)  # type: ignore[arg-type]
@@ -82,6 +83,36 @@ def test_audio_delayed_with_intro() -> None:
 	assert with_intro.audio_label == "[aout]"
 	plain = _build(has_audio=True)
 	assert plain.audio_label == "0:a"
+
+
+def test_main_chain_uses_explicit_size() -> None:
+	"""Основное видео масштабируется на явный размер (общий с заставкой)."""
+	graph = _build(width=608, height=1080)
+	assert "[0:v]scale=608:1080," in graph.filter_complex
+
+
+# --- геометрия кадра --------------------------------------------------------------
+
+
+def test_fitted_size() -> None:
+	"""Вписывание в FullHD: пропорции сохраняются, стороны чётные."""
+	from pxcontrol.engine.video.constants import fitted_size
+
+	assert fitted_size(1920, 1080) == (1920, 1080)  # уже FullHD
+	assert fitted_size(1280, 720) == (1920, 1080)  # растяжение 16:9
+	assert fitted_size(720, 1280) == (608, 1080)  # вертикальное
+	assert fitted_size(3840, 2160) == (1920, 1080)  # уменьшение 4K
+	assert fitted_size(853, 480) == (1920, 1080)  # почти 16:9, округление
+
+
+def test_fit_pad_filter_letterboxes() -> None:
+	"""Кадр заставки приводится к точному размеру с полями по центру."""
+	from pxcontrol.engine.video.frames import _fit_pad_filter
+
+	assert _fit_pad_filter(608, 1080) == (
+		"scale=608:1080:force_original_aspect_ratio=decrease,"
+		"pad=608:1080:(ow-iw)/2:(oh-ih)/2"
+	)
 
 
 # --- кадр заставки --------------------------------------------------------------

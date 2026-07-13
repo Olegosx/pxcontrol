@@ -14,6 +14,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from pxcontrol.engine.video.constants import fitted_size
 from pxcontrol.engine.video.filtergraph import WatermarkOptions, build_filter_complex
 from pxcontrol.engine.video.frames import prepare_still
 from pxcontrol.engine.video.probe import VideoInfo, probe_video
@@ -187,8 +188,9 @@ def _run_main(
 	"""Запускает основную обработку: FullHD, вотермарк, заставка, кодирование."""
 	inputs, wm_index, still_index = _build_inputs(opts, info, still_path)
 	has_audio = info.has_audio and not opts.no_audio
+	width, height = fitted_size(info.width, info.height)
 	graph = build_filter_complex(
-		fps=_fps_arg(info.fps), has_intro=opts.intro,
+		fps=_fps_arg(info.fps), width=width, height=height, has_intro=opts.intro,
 		hold=opts.intro_hold, xfade=opts.xfade, still_index=still_index,
 		has_watermark=bool(opts.watermark), wm=_watermark_options(opts),
 		wm_index=wm_index, has_audio=has_audio,

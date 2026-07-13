@@ -122,6 +122,13 @@ class _PresetDialog(MessageBoxBase):
 		src_row.addWidget(self._intro_kind)
 		src_row.addWidget(self._intro_value)
 		self.viewLayout.addLayout(src_row)
+		self._intro.checkedChanged.connect(self._toggle_intro_controls)
+		self._toggle_intro_controls(False)
+
+	def _toggle_intro_controls(self, enabled: bool) -> None:
+		"""Поля заставки активны только при включённом переключателе."""
+		for widget in (self._hold, self._xfade, self._intro_kind, self._intro_value):
+			widget.setEnabled(enabled)
 
 	def _build_flags_row(self) -> None:
 		"""Обложка и звук."""

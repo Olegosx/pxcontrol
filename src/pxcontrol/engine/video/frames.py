@@ -6,7 +6,7 @@ import logging
 import random
 import subprocess
 
-from pxcontrol.engine.video.constants import FULLHD_FIT
+from pxcontrol.engine.video.constants import fitted_size
 from pxcontrol.engine.video.probe import VideoInfo
 
 logger = logging.getLogger(__name__)
@@ -38,17 +38,35 @@ def resolve_timestamp(source: str, info: VideoInfo) -> float:
 	raise ValueError(f"Неизвестный источник кадра: {source}")
 
 
+def _fit_pad_filter(width: int, height: int) -> str:
+	"""Фильтр: вписать в точный размер кадра, недостающее добить чёрными полями.
+
+	Размер кадра заставки обязан совпадать с основным видео (требование
+	xfade). Для кадра из того же видео поля не появляются; для чужой
+	картинки с иными пропорциями — letterbox по центру.
+	"""
+	return (
+		f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+		f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+	)
+
+
 def extract_still(
-	input_path: str, timestamp: float, output_path: str, ffmpeg_bin: str = "ffmpeg"
+	input_path: str,
+	timestamp: float,
+	output_path: str,
+	width: int,
+	height: int,
+	ffmpeg_bin: str = "ffmpeg",
 ) -> None:
-	"""Извлекает один кадр в момент timestamp, вписанный в FullHD.
+	"""Извлекает один кадр в момент timestamp, приведённый к размеру кадра.
 
 	Raises:
 		RuntimeError: Если ffmpeg не смог извлечь кадр.
 	"""
 	cmd = [
 		ffmpeg_bin, "-y", "-ss", f"{timestamp:.3f}", "-i", input_path,
-		"-frames:v", "1", "-vf", FULLHD_FIT, output_path,
+		"-frames:v", "1", "-vf", _fit_pad_filter(width, height), output_path,
 	]
 	result = subprocess.run(cmd, capture_output=True, text=True)
 	if result.returncode != 0:
@@ -64,17 +82,19 @@ def prepare_still(
 	output_path: str,
 	ffmpeg_bin: str = "ffmpeg",
 ) -> None:
-	"""Готовит картинку-заставку по выбранному источнику, вписанную в FullHD.
+	"""Готовит картинку-заставку точно под размер итогового кадра.
 
-	Поддерживает режим 'image:ПУТЬ' (масштабирование готовой картинки) и все
-	режимы извлечения кадра из видео (см. :func:`resolve_timestamp`).
+	Поддерживает режим 'image:ПУТЬ' (чужая картинка вписывается с чёрными
+	полями) и все режимы извлечения кадра из видео
+	(см. :func:`resolve_timestamp`).
 
 	Raises:
 		RuntimeError: Если ffmpeg не смог подготовить картинку.
 		ValueError: Если режим источника не распознан.
 	"""
+	width, height = fitted_size(info.width, info.height)
 	if source.startswith("image:"):
-		extract_still(source.split(":", 1)[1], 0.0, output_path, ffmpeg_bin)
+		extract_still(source.split(":", 1)[1], 0.0, output_path, width, height, ffmpeg_bin)
 		return
 	timestamp = resolve_timestamp(source, info)
-	extract_still(input_path, timestamp, output_path, ffmpeg_bin)
+	extract_still(input_path, timestamp, output_path, width, height, ffmpeg_bin)
