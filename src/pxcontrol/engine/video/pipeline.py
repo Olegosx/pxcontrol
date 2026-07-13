@@ -26,10 +26,15 @@ ProgressCallback = Callable[[float], None]
 
 @dataclass(frozen=True)
 class ProcessingOptions:
-	"""Параметры обработки одного видео (зеркалят пресет `video_presets`)."""
+	"""Параметры обработки одного видео (зеркалят пресет `video_presets`).
+
+	``video_bitrate_kbps``: целевой битрейт видео в кбит/с; None — «как
+	в оригинале» (битрейт исходника, а если он неизвестен — CRF 20).
+	"""
 
 	input: str
 	output: str
+	video_bitrate_kbps: int | None = None
 	watermark: str | None = None
 	wm_corner: str = "tr"
 	wm_margin: int = 24
@@ -90,15 +95,27 @@ def _build_inputs(
 	return inputs, wm_index, still_index
 
 
+def _video_quality_args(opts: ProcessingOptions, info: VideoInfo) -> list[str]:
+	"""Аргументы качества видео: заданный битрейт, битрейт исходника или CRF.
+
+	Приоритет: явный битрейт пресета → битрейт исходника («как в оригинале»,
+	режим по умолчанию) → CRF 20, если ffprobe битрейт не сообщил.
+	"""
+	kbps = opts.video_bitrate_kbps or info.bitrate_kbps
+	if kbps:
+		return ["-b:v", f"{kbps}k"]
+	return ["-crf", "20"]
+
+
 def _assemble_command(
 	ffmpeg_bin: str, inputs: list[str], filter_complex: str, video_label: str,
-	audio_label: str | None, output: str,
+	audio_label: str | None, quality: list[str], output: str,
 ) -> list[str]:
 	"""Собирает полную команду ffmpeg для основной обработки."""
 	cmd = [ffmpeg_bin, "-y", *inputs, "-filter_complex", filter_complex, "-map", video_label]
 	if audio_label:
 		cmd += ["-map", audio_label]
-	cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
+	cmd += ["-c:v", "libx264", "-preset", "medium", *quality, "-pix_fmt", "yuv420p"]
 	if audio_label:
 		cmd += ["-c:a", "aac", "-b:a", "192k"]
 	# -progress pipe:1 — ffmpeg пишет ход кодирования в stdout (для прогресс-бара)
@@ -177,8 +194,8 @@ def _run_main(
 		wm_index=wm_index, has_audio=has_audio,
 	)
 	cmd = _assemble_command(
-		opts.ffmpeg_bin, inputs, graph.filter_complex,
-		graph.video_label, graph.audio_label, output,
+		opts.ffmpeg_bin, inputs, graph.filter_complex, graph.video_label,
+		graph.audio_label, _video_quality_args(opts, info), output,
 	)
 	# длительность итога = исходник + удержание кадра заставки (см. SPEC)
 	total = info.duration + (opts.intro_hold if opts.intro else 0.0)

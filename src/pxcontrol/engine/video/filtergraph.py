@@ -120,14 +120,17 @@ def _watermark_chains(
 ) -> tuple[list[str], str]:
 	"""Цепочки вотермарка: масштабирование под кадр, прозрачность, наложение.
 
-	scale2ref масштабирует вотермарк относительно фона (main_w — ширина фона),
-	сохраняя пропорции вотермарка (ow/a). Затем colorchannelmixer задаёт
-	прозрачность, и overlay кладёт картинку в нужный угол.
+	Фон дублируется (split): одна копия служит эталоном размера для scale
+	(rw — ширина эталона, высота -2 сохраняет пропорции вотермарка), вторая
+	идёт под наложение. scale2ref не используется: он устарел и в ffmpeg 8
+	искажает размер и пропорции. Затем colorchannelmixer задаёт прозрачность,
+	и overlay кладёт картинку в нужный угол.
 	"""
 	position = _overlay_position(wm.corner, wm.margin)
 	enable = _enable_expr(wm, offset)
 	chains = [
-		f"[{wm_index}:v]{base}scale2ref=w=main_w*{wm.scale}:h=ow/a[wm_s][bg]",
+		f"{base}split[bg][wm_ref]",
+		f"[{wm_index}:v][wm_ref]scale=w=rw*{wm.scale}:h=-2[wm_s]",
 		f"[wm_s]format=rgba,colorchannelmixer=aa={wm.opacity}[wm_a]",
 		f"[bg][wm_a]overlay={position}{enable}[vout]",
 	]

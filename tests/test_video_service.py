@@ -14,6 +14,7 @@ from pxcontrol.engine.video import ProcessingOptions
 FIELDS = PresetFields(
 	name="Бренд", watermark_path="/tmp/logo.png", wm_corner="br",
 	wm_opacity=0.8, intro=True, intro_source="time:5.0", cover=True,
+	video_bitrate_kbps=2500,
 )
 
 
@@ -51,8 +52,10 @@ async def test_preset_crud(db: Database) -> None:
 	preset = await service.save_preset(FIELDS)
 	assert preset.name == "Бренд"
 	assert "вотермарк (br)" in preset.summary and "заставка" in preset.summary
+	assert "2.5 Мбит/с" in preset.summary
 	fields = await service.get_preset_fields(preset.id)
 	assert fields.intro_source == "time:5.0" and fields.wm_opacity == 0.8
+	assert fields.video_bitrate_kbps == 2500
 	updated = await service.save_preset(
 		PresetFields(name="Бренд-2", no_audio=True), preset.id
 	)
@@ -86,6 +89,7 @@ async def test_prepare_maps_preset_to_options(
 	assert options.wm_corner == "br" and options.wm_opacity == 0.8
 	assert options.intro and options.intro_source == "time:5.0"
 	assert options.cover is True
+	assert options.video_bitrate_kbps == 2500
 	assert "processed" in options.output and "исходник" in options.output
 
 

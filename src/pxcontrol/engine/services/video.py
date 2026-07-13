@@ -41,7 +41,11 @@ class PresetDto:
 
 @dataclass(frozen=True)
 class PresetFields:
-	"""Поля пресета для создания/правки (зеркалят таблицу video_presets)."""
+	"""Поля пресета для создания/правки (зеркалят таблицу video_presets).
+
+	``video_bitrate_kbps``: целевой битрейт видео в кбит/с;
+	None — «как в оригинале» (по умолчанию).
+	"""
 
 	name: str
 	watermark_path: str | None = None
@@ -55,6 +59,7 @@ class PresetFields:
 	xfade: float = 0.5
 	cover: bool = False
 	no_audio: bool = False
+	video_bitrate_kbps: int | None = None
 
 
 def _summary(preset: VideoPreset) -> str:
@@ -68,6 +73,8 @@ def _summary(preset: VideoPreset) -> str:
 		parts.append("обложка")
 	if preset.no_audio:
 		parts.append("без звука")
+	if preset.video_bitrate_kbps:
+		parts.append(f"{preset.video_bitrate_kbps / 1000:g} Мбит/с")
 	return " · ".join(parts)
 
 
@@ -135,6 +142,7 @@ class VideoService:
 			intro=preset.intro, intro_source=preset.intro_source,
 			intro_hold=preset.intro_hold, xfade=preset.xfade,
 			cover=preset.cover, no_audio=preset.no_audio,
+			video_bitrate_kbps=preset.video_bitrate_kbps,
 		)
 
 	async def delete_preset(self, preset_id: int) -> None:
@@ -200,6 +208,7 @@ class VideoService:
 			wm_end=preset.wm_end, intro=preset.intro,
 			intro_source=preset.intro_source, intro_hold=preset.intro_hold,
 			xfade=preset.xfade, cover=preset.cover, no_audio=preset.no_audio,
+			video_bitrate_kbps=preset.video_bitrate_kbps,
 			ffmpeg_bin=self._ffmpeg, ffprobe_bin=ffprobe,
 		)
 

@@ -21,6 +21,7 @@ class VideoInfo:
 		duration: длительность в секундах.
 		fps: кадровая частота (кадров в секунду).
 		has_audio: есть ли в файле звуковая дорожка.
+		bitrate_kbps: битрейт видеопотока в кбит/с (None — ffprobe не отдал).
 	"""
 
 	width: int
@@ -28,6 +29,7 @@ class VideoInfo:
 	duration: float
 	fps: float
 	has_audio: bool
+	bitrate_kbps: int | None = None
 
 
 def _run_ffprobe(path: str, ffprobe_bin: str) -> dict[str, Any]:
@@ -59,6 +61,22 @@ def _parse_fps(rate: str) -> float:
 	return float(rate)
 
 
+def _parse_bitrate_kbps(video: dict[str, Any], fmt: dict[str, Any]) -> int | None:
+	"""Битрейт видеопотока в кбит/с: из потока, иначе из контейнера.
+
+	Битрейт контейнера включает и звук, поэтому это лишь приближение сверху —
+	используется, когда поток своего значения не сообщает (типично для mkv/webm).
+	"""
+	for raw in (video.get("bit_rate"), fmt.get("bit_rate")):
+		try:
+			bps = int(str(raw))
+		except (TypeError, ValueError):
+			continue
+		if bps > 0:
+			return round(bps / 1000)
+	return None
+
+
 def probe_video(path: str, ffprobe_bin: str = "ffprobe") -> VideoInfo:
 	"""Возвращает метаданные видео: размеры, длительность, fps, наличие звука.
 
@@ -75,10 +93,12 @@ def probe_video(path: str, ffprobe_bin: str = "ffprobe") -> VideoInfo:
 	)
 	if fps <= 0:
 		raise RuntimeError(f"Не удалось определить кадровую частоту для '{path}'")
+	fmt = dict(data.get("format", {}))
 	return VideoInfo(
 		width=int(video["width"]),
 		height=int(video["height"]),
-		duration=float(data.get("format", {}).get("duration", 0.0)),
+		duration=float(fmt.get("duration", 0.0)),
 		fps=fps,
 		has_audio=any(s.get("codec_type") == "audio" for s in streams),
+		bitrate_kbps=_parse_bitrate_kbps(video, fmt),
 	)

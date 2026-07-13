@@ -80,6 +80,7 @@ class _PresetDialog(MessageBoxBase):
 		self._build_watermark_block()
 		self._build_intro_block()
 		self._build_flags_row()
+		self._build_quality_row()
 
 	def _build_watermark_block(self) -> None:
 		"""Вотермарк: файл, угол, отступ, прозрачность, масштаб."""
@@ -135,6 +136,15 @@ class _PresetDialog(MessageBoxBase):
 		row.addStretch()
 		self.viewLayout.addLayout(row)
 
+	def _build_quality_row(self) -> None:
+		"""Качество видео: целевой битрейт (0 — как в оригинале)."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Качество видео, Мбит/с:", self))
+		self._bitrate = self._dspin(row, "битрейт видео", 0.0, 50.0, 0.0, 0.5)
+		row.addWidget(CaptionLabel("0 — как в оригинале", self))
+		row.addStretch()
+		self.viewLayout.addLayout(row)
+
 	def _spin(self, row: QHBoxLayout, tip: str, lo: int, hi: int, val: int) -> SpinBox:
 		box = SpinBox(self)
 		box.setRange(lo, hi)
@@ -183,6 +193,8 @@ class _PresetDialog(MessageBoxBase):
 		self._intro_value.setText(value)
 		self._cover.setChecked(fields.cover)
 		self._no_audio.setChecked(fields.no_audio)
+		kbps = fields.video_bitrate_kbps
+		self._bitrate.setValue(kbps / 1000 if kbps else 0.0)
 
 	def _intro_source(self) -> str:
 		"""Собирает строку источника кадра ('random-middle'/'time:…'/'image:…')."""
@@ -206,7 +218,13 @@ class _PresetDialog(MessageBoxBase):
 			xfade=round(float(self._xfade.value()), 2),
 			cover=self._cover.isChecked(),
 			no_audio=self._no_audio.isChecked(),
+			video_bitrate_kbps=self._bitrate_kbps(),
 		)
+
+	def _bitrate_kbps(self) -> int | None:
+		"""Битрейт из регулятора: Мбит/с → кбит/с; 0 — «как в оригинале»."""
+		mbps = float(self._bitrate.value())
+		return int(round(mbps * 1000)) if mbps > 0 else None
 
 
 class VideoPage(ScrollArea):

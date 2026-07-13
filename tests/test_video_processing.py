@@ -65,10 +65,13 @@ def test_intro_adds_xfade_with_offset() -> None:
 
 
 def test_watermark_adds_overlay() -> None:
-	"""Вотермарк добавляет scale2ref и overlay, меняет метку видео."""
+	"""Вотермарк масштабируется по эталону с сохранением пропорций (h=-2)."""
 	graph = _build(has_watermark=True, wm=WM, wm_index=1)
-	assert "scale2ref=w=main_w*0.15" in graph.filter_complex
+	assert "[main]split[bg][wm_ref]" in graph.filter_complex
+	assert "[1:v][wm_ref]scale=w=rw*0.15:h=-2[wm_s]" in graph.filter_complex
+	assert "colorchannelmixer=aa=1.0" in graph.filter_complex
 	assert "overlay=W-w-24:24" in graph.filter_complex
+	assert "scale2ref" not in graph.filter_complex  # устарел, искажал пропорции
 	assert graph.video_label == "[vout]"
 
 
@@ -118,3 +121,37 @@ def test_parse_fps() -> None:
 	assert _parse_fps("25/1") == 25.0
 	assert _parse_fps("24") == 24.0
 	assert _parse_fps("0/0") == 0.0
+
+
+# --- качество видео ---------------------------------------------------------------
+
+
+def test_parse_bitrate_prefers_stream_over_format() -> None:
+	"""Битрейт берётся из видеопотока, контейнер — запасной вариант."""
+	from pxcontrol.engine.video.probe import _parse_bitrate_kbps
+
+	assert _parse_bitrate_kbps({"bit_rate": "2500000"}, {"bit_rate": "9"}) == 2500
+	assert _parse_bitrate_kbps({}, {"bit_rate": "1500000"}) == 1500
+	assert _parse_bitrate_kbps({"bit_rate": "N/A"}, {}) is None
+	assert _parse_bitrate_kbps({}, {}) is None
+
+
+def test_video_quality_args_modes() -> None:
+	"""Приоритет: битрейт пресета → битрейт исходника → CRF."""
+	from pxcontrol.engine.video.pipeline import (
+		ProcessingOptions,
+		_video_quality_args,
+	)
+
+	def _opts(kbps: int | None) -> ProcessingOptions:
+		return ProcessingOptions(input="a", output="b", video_bitrate_kbps=kbps)
+
+	def _info(kbps: int | None) -> VideoInfo:
+		return VideoInfo(
+			width=1920, height=1080, duration=10.0, fps=25.0,
+			has_audio=True, bitrate_kbps=kbps,
+		)
+
+	assert _video_quality_args(_opts(3000), _info(1500)) == ["-b:v", "3000k"]
+	assert _video_quality_args(_opts(None), _info(1500)) == ["-b:v", "1500k"]
+	assert _video_quality_args(_opts(None), _info(None)) == ["-crf", "20"]

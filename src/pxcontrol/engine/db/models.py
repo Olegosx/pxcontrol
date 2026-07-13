@@ -104,6 +104,8 @@ class VideoPreset(TimestampMixin, Base):
 	xfade: Mapped[float] = mapped_column(Float, default=0.5)
 	cover: Mapped[bool] = mapped_column(Boolean, default=False)
 	no_audio: Mapped[bool] = mapped_column(Boolean, default=False)
+	# NULL — «как в оригинале»: целевой битрейт берётся из исходника
+	video_bitrate_kbps: Mapped[int | None] = mapped_column(Integer, default=None)
 
 	channels: Mapped[list["Channel"]] = relationship(back_populates="video_preset")
 
