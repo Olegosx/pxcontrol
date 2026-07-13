@@ -75,14 +75,16 @@ class TelegramGateway:
 		media_kind: str,
 		when: datetime | None,
 		on_progress: Callable[[float], None] | None = None,
+		thumb_path: str | None = None,
 	) -> None:
 		"""Публикует пост любого типа через userbot (ADR-0011).
 
 		Текст или медиа с подписью; сразу (when=None) или отложенно —
 		отложенные хранит и публикует сервер Telegram (ADR-0010).
+		``thumb_path`` — JPEG-миниатюра для видео.
 		"""
 		await self.mtproto.publish(
-			chat_id, text, media_path, media_kind, when, on_progress
+			chat_id, text, media_path, media_kind, when, on_progress, thumb_path
 		)
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]:

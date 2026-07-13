@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,6 +24,8 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.video.frames import make_thumbnail, resolve_timestamp
+from pxcontrol.engine.video.probe import probe_video
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,7 @@ class _PostPort(Protocol):
 		self, chat_id: str, text: str, media_path: str | None,
 		media_kind: str, when: datetime | None,
 		on_progress: ProgressCallback | None,
+		thumb_path: str | None,
 	) -> None: ...
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]: ...
@@ -89,11 +94,14 @@ class ScheduledPostDto:
 
 
 class PostsService:
-	"""Создание постов: сразу через бота или отложенно через userbot."""
+	"""Публикация постов через userbot; путь через бота законсервирован."""
 
-	def __init__(self, db: Database, gateway: _PostPort) -> None:
+	def __init__(
+		self, db: Database, gateway: _PostPort, ffmpeg_path: str = "ffmpeg"
+	) -> None:
 		self._db = db
 		self._gateway = gateway
+		self._ffmpeg = ffmpeg_path  # для миниатюры видео
 
 	async def send_now(self, channel_id: int, text: str) -> int:
 		"""Публикует текст немедленно через бота канала (законсервировано).
@@ -132,15 +140,52 @@ class PostsService:
 		"""
 		self._validate(draft)
 		channel = await self._get_channel(draft.channel_id)
-		await self._gateway.publish(
-			channel.tg_chat_id, draft.text, draft.media_path,
-			draft.media_kind, draft.when, on_progress,
-		)
+		with tempfile.TemporaryDirectory() as tmp:
+			thumb: str | None = None
+			if draft.media_kind is MediaKind.VIDEO and draft.media_path:
+				thumb = await asyncio.to_thread(
+					self._video_thumbnail, draft.media_path, tmp
+				)
+			await self._gateway.publish(
+				channel.tg_chat_id, draft.text, draft.media_path,
+				draft.media_kind, draft.when, on_progress, thumb,
+			)
 		logger.info(
 			"Пост (%s) → «%s» (%s).",
 			draft.media_kind if draft.media_path else "текст", channel.title,
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
+
+	def _video_thumbnail(self, video_path: str, tmp_dir: str) -> str | None:
+		"""Готовит JPEG-миниатюру видео для Telegram (вписана в 320×320).
+
+		Источник: кадр-превью конвейера (сосед видео с расширением .png),
+		а без него — случайный кадр из середины видео. Миниатюра —
+		вспомогательная: любой сбой не мешает публикации (None + лог).
+		"""
+		thumb = str(Path(tmp_dir) / "thumb.jpg")
+		preview = Path(video_path).with_suffix(".png")
+		try:
+			if preview.is_file():
+				make_thumbnail(str(preview), thumb, self._ffmpeg)
+			else:
+				info = probe_video(video_path, self._ffprobe_bin())
+				timestamp = resolve_timestamp("random-middle", info)
+				make_thumbnail(video_path, thumb, self._ffmpeg, timestamp)
+		except (OSError, RuntimeError, ValueError):
+			logger.warning(
+				"Миниатюра для %s не получилась — публикуем без неё.",
+				video_path, exc_info=True,
+			)
+			return None
+		return thumb
+
+	def _ffprobe_bin(self) -> str:
+		"""ffprobe ищем рядом с заданным ffmpeg (или в PATH)."""
+		ffmpeg = Path(self._ffmpeg)
+		if ffmpeg.is_absolute():
+			return str(ffmpeg.with_name("ffprobe"))
+		return "ffprobe"
 
 	@staticmethod
 	def _validate(draft: PostDraft) -> None:

@@ -32,7 +32,7 @@ class Engine:
 		self.gateway = TelegramGateway()
 		self.accounts = AccountsService(self.db, self.gateway)
 		self.channels = ChannelsService(self.db, self.gateway)
-		self.posts = PostsService(self.db, self.gateway)
+		self.posts = PostsService(self.db, self.gateway, settings.ffmpeg_path)
 		self.video = VideoService(self.db, settings.ffmpeg_path)
 
 	async def start(self) -> None:

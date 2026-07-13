@@ -75,6 +75,35 @@ def extract_still(
 		)
 
 
+def make_thumbnail(
+	source_path: str,
+	output_jpg: str,
+	ffmpeg_bin: str = "ffmpeg",
+	timestamp: float = 0.0,
+) -> None:
+	"""Делает JPEG-миниатюру для Telegram: кадр, вписанный в 320×320.
+
+	Пропорции кадра сохраняются (Telegram растягивает миниатюру до
+	пропорций видео — квадратный кроп исказил бы картинку). Источник —
+	картинка или видео (кадр берётся в момент ``timestamp``).
+
+	Raises:
+		RuntimeError: Если ffmpeg не смог сделать миниатюру.
+	"""
+	cmd = [
+		ffmpeg_bin, "-y", "-ss", f"{timestamp:.3f}", "-i", source_path,
+		"-frames:v", "1",
+		"-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+		"-q:v", "4", output_jpg,
+	]
+	result = subprocess.run(cmd, capture_output=True, text=True)
+	if result.returncode != 0:
+		raise RuntimeError(
+			f"Не удалось сделать миниатюру из '{source_path}': "
+			f"{result.stderr.strip()}"
+		)
+
+
 def prepare_still(
 	input_path: str,
 	source: str,

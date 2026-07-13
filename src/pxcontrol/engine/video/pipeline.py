@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from pxcontrol.engine.video.constants import fitted_size
 from pxcontrol.engine.video.filtergraph import WatermarkOptions, build_filter_complex
-from pxcontrol.engine.video.frames import prepare_still
+from pxcontrol.engine.video.frames import extract_still, prepare_still
 from pxcontrol.engine.video.probe import VideoInfo, probe_video
 
 logger = logging.getLogger(__name__)
@@ -216,13 +218,37 @@ def _attach_cover(
 	_run_ffmpeg(cmd, "вшивание обложки")
 
 
+def _save_preview(
+	opts: ProcessingOptions, info: VideoInfo, still_path: str | None
+) -> None:
+	"""Сохраняет кадр-превью рядом с результатом (тот же стем, .png).
+
+	Кадр заставки/обложки, если готовился (он и задуман «лицом» ролика),
+	иначе — первый кадр результата. Превью — вспомогательный артефакт:
+	его отказ не роняет успешную обработку, только предупреждение в лог.
+	Публикация берёт из него миниатюру для Telegram.
+	"""
+	preview = str(Path(opts.output).with_suffix(".png"))
+	try:
+		if still_path is not None:
+			shutil.copyfile(still_path, preview)
+		else:
+			width, height = fitted_size(info.width, info.height)
+			extract_still(opts.output, 0.0, preview, width, height, opts.ffmpeg_bin)
+	except (OSError, RuntimeError):
+		logger.warning("Не удалось сохранить превью %s.", preview, exc_info=True)
+	else:
+		logger.info("Превью сохранено: %s", preview)
+
+
 def process(
 	opts: ProcessingOptions, on_progress: ProgressCallback | None = None
 ) -> None:
 	"""Обрабатывает одно видео по заданным параметрам (блокирующе).
 
 	Вызывающая сторона отвечает за вынос в поток/executor — модуль
-	сознательно синхронный, как и его тесты.
+	сознательно синхронный, как и его тесты. Рядом с результатом
+	сохраняется кадр-превью (см. :func:`_save_preview`).
 
 	Args:
 		opts: параметры обработки.
@@ -242,4 +268,5 @@ def process(
 		_run_main(opts, info, still_path, main_output, on_progress)
 		if opts.cover:
 			_attach_cover(opts.ffmpeg_bin, main_output, str(still_path), opts.output)
+		_save_preview(opts, info, still_path)
 	logger.info("Готово: %s", opts.output)

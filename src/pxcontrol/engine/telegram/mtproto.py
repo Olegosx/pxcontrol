@@ -124,6 +124,7 @@ class MtprotoTransport:
 		media_kind: str,
 		when: datetime | None,
 		on_progress: Callable[[float], None] | None = None,
+		thumb_path: str | None = None,
 	) -> None:
 		"""Публикует пост: текст или медиа с подписью, сразу или отложенно.
 
@@ -131,6 +132,9 @@ class MtprotoTransport:
 		на файлы (50 МБ) мал для видео, отложенные (schedule_date) хранит
 		и публикует сервер Telegram (ADR-0010). ``on_progress`` получает
 		долю загрузки файла 0.0..1.0 (большие файлы — это минуты).
+
+		``thumb_path`` — JPEG-миниатюра видео (Telegram принимает её,
+		только когда известны размеры видео — их извлекает hachoir).
 		"""
 		client = self._require_client()
 
@@ -148,6 +152,7 @@ class MtprotoTransport:
 					supports_streaming=media_kind == "video",
 					force_document=media_kind == "document",
 					progress_callback=_progress,
+					thumb=thumb_path,
 				)
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 			raise UserbotUnavailable(_map_post_error(exc)) from exc

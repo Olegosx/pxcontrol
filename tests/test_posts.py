@@ -27,6 +27,7 @@ class _FakeGateway:
 	def __init__(self) -> None:
 		self.sent: list[tuple[str, str, str]] = []
 		self.published: list[tuple[str, str, str | None, str, datetime | None]] = []
+		self.thumbs: list[str | None] = []
 		self.userbot_ok = True
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
@@ -36,6 +37,7 @@ class _FakeGateway:
 	async def publish(
 		self, chat_id: str, text: str, media_path: str | None,
 		media_kind: str, when: datetime | None, on_progress: object,
+		thumb_path: str | None,
 	) -> None:
 		if not self.userbot_ok:
 			raise UserbotUnavailable("Userbot не подключён — войдите в аккаунт.")
@@ -43,6 +45,7 @@ class _FakeGateway:
 			on_progress(0.5)
 			on_progress(1.0)
 		self.published.append((chat_id, text, media_path, media_kind, when))
+		self.thumbs.append(thumb_path)
 
 	async def get_scheduled(self, chat_id: str) -> list[object]:
 		return [SimpleNamespace(
@@ -146,6 +149,84 @@ async def test_publish_validations(db: Database, tmp_path: Path) -> None:
 			channel_id, text="x", when=datetime.now(UTC)
 		))
 	assert gateway.published == []
+
+
+async def test_video_thumbnail_from_neighbor_preview(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Миниатюра видео режется из кадра-превью конвейера (сосед .png)."""
+	sources: list[tuple[str, float]] = []
+
+	def _fake_thumb(
+		source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0
+	) -> None:
+		sources.append((source, timestamp))
+		Path(out).write_bytes(b"jpg")
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.posts.make_thumbnail", _fake_thumb
+	)
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	video = tmp_path / "ролик.mp4"
+	video.write_bytes(b"video")
+	(tmp_path / "ролик.png").write_bytes(b"png")
+	await service.publish(PostDraft(
+		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+	))
+	assert sources == [(str(tmp_path / "ролик.png"), 0.0)]
+	assert gateway.thumbs[0] is not None and gateway.thumbs[0].endswith(".jpg")
+
+
+async def test_video_thumbnail_random_middle_without_preview(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Без превью-соседа миниатюра — случайный кадр из середины видео."""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	def _fake_thumb(
+		source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0
+	) -> None:
+		assert source.endswith(".mp4") and 25.0 <= timestamp <= 75.0
+		Path(out).write_bytes(b"jpg")
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.posts.make_thumbnail", _fake_thumb
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.posts.probe_video",
+		lambda _p, _b: VideoInfo(1920, 1080, 100.0, 25.0, True),
+	)
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	video = tmp_path / "чужой.mp4"
+	video.write_bytes(b"video")
+	await service.publish(PostDraft(
+		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+	))
+	assert gateway.thumbs == [gateway.thumbs[0]] and gateway.thumbs[0] is not None
+
+
+async def test_video_thumbnail_failure_does_not_block_publish(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Сбой миниатюры не мешает публикации: уходит без неё."""
+	def _boom(*_args: object, **_kwargs: object) -> None:
+		raise RuntimeError("ffmpeg сломался")
+
+	monkeypatch.setattr("pxcontrol.engine.services.posts.make_thumbnail", _boom)
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	video = tmp_path / "ролик.mp4"
+	video.write_bytes(b"video")
+	(tmp_path / "ролик.png").write_bytes(b"png")
+	await service.publish(PostDraft(
+		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+	))
+	assert len(gateway.published) == 1 and gateway.thumbs == [None]
 
 
 async def test_publish_userbot_unavailable(db: Database) -> None:
