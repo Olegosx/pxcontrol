@@ -10,9 +10,16 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Signal
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtWidgets import (
+	QButtonGroup,
+	QFileDialog,
+	QGridLayout,
+	QHBoxLayout,
+	QVBoxLayout,
+	QWidget,
+)
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
@@ -28,10 +35,11 @@ from qfluentwidgets import (
 	SpinBox,
 	SubtitleLabel,
 	SwitchButton,
+	TogglePushButton,
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.video import PresetDto, PresetFields
+from pxcontrol.engine.services.video import FrameCandidate, PresetDto, PresetFields
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	ProgressPanel,
@@ -50,9 +58,13 @@ _CORNERS = [
 #: Источники кадра заставки: подпись → код.
 _INTRO_SOURCES = [
 	("Случайный кадр из середины", "random-middle"),
+	("Случайные кадры на выбор", "random-choice"),
 	("Момент времени (сек)", "time"),
 	("Своя картинка (PNG)", "image"),
 ]
+
+#: Режимы источника кадра без значения (поле «секунды/путь» не нужно).
+_SOURCES_WITHOUT_VALUE = {"random-middle", "random-choice"}
 
 
 class _PresetDialog(MessageBoxBase):
@@ -206,7 +218,7 @@ class _PresetDialog(MessageBoxBase):
 	def _intro_source(self) -> str:
 		"""Собирает строку источника кадра ('random-middle'/'time:…'/'image:…')."""
 		kind = _INTRO_SOURCES[int(self._intro_kind.currentIndex())][1]
-		if kind == "random-middle":
+		if kind in _SOURCES_WITHOUT_VALUE:
 			return kind
 		return f"{kind}:{str(self._intro_value.text()).strip()}"
 
@@ -232,6 +244,98 @@ class _PresetDialog(MessageBoxBase):
 		"""Битрейт из регулятора: Мбит/с → кбит/с; 0 — «как в оригинале»."""
 		mbps = float(self._bitrate.value())
 		return int(round(mbps * 1000)) if mbps > 0 else None
+
+
+class _FramePickerDialog(MessageBoxBase):
+	"""Выбор кадра заставки из случайных кандидатов (плиткой).
+
+	Кандидаты извлечены движком в финальном качестве; выбранный файл
+	уходит в обработку как есть (`image:<путь>`) — без повторного
+	извлечения и риска соседнего кадра.
+	"""
+
+	def __init__(
+		self, worker: EngineWorker, source_path: str, parent: QWidget
+	) -> None:
+		super().__init__(parent)
+		self._worker = worker
+		self._source = source_path
+		self._chosen: str | None = None
+		self._group = QButtonGroup(self)
+		self._group.setExclusive(True)
+		self.viewLayout.addWidget(SubtitleLabel("Выберите кадр заставки", self))
+		self._build_controls_row()
+		self._grid_box = QWidget(self)
+		self._grid = QGridLayout(self._grid_box)
+		self.viewLayout.addWidget(self._grid_box)
+		self.yesButton.setText("Использовать кадр")
+		self.yesButton.setEnabled(False)
+		self.cancelButton.setText("Отмена")
+		self.widget.setMinimumWidth(760)
+		self._reload()
+
+	def _build_controls_row(self) -> None:
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Кадров:", self))
+		self._count = SpinBox(self)
+		self._count.setRange(2, 12)
+		self._count.setValue(6)
+		row.addWidget(self._count)
+		refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
+		refresh.clicked.connect(self._reload)
+		row.addWidget(refresh)
+		row.addStretch()
+		self.viewLayout.addLayout(row)
+
+	def chosen_path(self) -> str | None:
+		"""Путь к выбранному кадру (None — не выбран)."""
+		return self._chosen
+
+	def _reload(self) -> None:
+		"""Запрашивает новую партию случайных кадров."""
+		self.yesButton.setEnabled(False)
+		self._chosen = None
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.extract_random_frames(
+				self._source, int(self._count.value())
+			),
+			self, self._show_frames, self._show_error,
+		)
+
+	def _show_frames(self, frames: list[FrameCandidate]) -> None:
+		"""Перерисовывает плитку кандидатов."""
+		while self._grid.count():
+			item = self._grid.takeAt(0)
+			widget = item.widget() if item else None
+			if widget is not None:
+				widget.deleteLater()
+		for button in self._group.buttons():
+			self._group.removeButton(button)
+		for index, frame in enumerate(frames):
+			self._grid.addWidget(self._frame_button(frame), index // 3, index % 3)
+		self.widget.adjustSize()
+
+	def _frame_button(self, frame: FrameCandidate) -> TogglePushButton:
+		"""Кликабельная миниатюра кадра (выбранная заливается акцентом)."""
+		button = TogglePushButton(self._grid_box)
+		button.setIcon(QIcon(QPixmap(frame.path)))
+		button.setIconSize(QSize(208, 117))
+		button.setMinimumSize(QSize(232, 136))  # кнопке — высота под миниатюру
+		minutes, seconds = divmod(int(frame.timestamp), 60)
+		button.setText(f"{minutes}:{seconds:02d}")
+		button.toggled.connect(partial(self._on_toggled, frame.path))
+		self._group.addButton(button)
+		return button
+
+	def _on_toggled(self, path: str, checked: bool) -> None:
+		if checked:
+			self._chosen = path
+			self.yesButton.setEnabled(True)
+
+	def _show_error(self, message: str) -> None:
+		"""Показывает ошибку всплывающей плашкой."""
+		show_error(self, message)
 
 
 class VideoPage(ScrollArea):
@@ -385,6 +489,7 @@ class VideoPage(ScrollArea):
 			self._source.setText(path)
 
 	def _on_process(self) -> None:
+		"""Проверяет форму и читает пресет: вдруг нужен выбор кадра."""
 		source = str(self._source.text()).strip()
 		if not source:
 			self._show_error("Выберите исходный видеофайл.")
@@ -393,12 +498,38 @@ class VideoPage(ScrollArea):
 		if index < 0 or index >= len(self._presets):
 			self._show_error("Создайте и выберите пресет обработки.")
 			return
+		preset_id = self._presets[index].id
+		run_in_engine(
+			self._worker, self._worker.engine.video.get_preset_fields(preset_id),
+			self, partial(self._maybe_pick_frame, source, preset_id),
+			self._show_error,
+		)
+
+	def _maybe_pick_frame(
+		self, source: str, preset_id: int, fields: PresetFields
+	) -> None:
+		"""Открывает выбор кадра, если пресет в режиме «кадры на выбор»."""
+		needs_choice = fields.intro_source == "random-choice" and (
+			fields.intro or fields.cover
+		)
+		if not needs_choice:
+			self._start_prepare(source, preset_id, None)
+			return
+		dialog = _FramePickerDialog(self._worker, source, self.window())
+		if not dialog.exec() or dialog.chosen_path() is None:
+			return
+		self._start_prepare(source, preset_id, f"image:{dialog.chosen_path()}")
+
+	def _start_prepare(
+		self, source: str, preset_id: int, intro_source: str | None
+	) -> None:
+		"""Запускает обработку (с подменой источника кадра или без)."""
 		self._process_button.setEnabled(False)
 		self._progress.begin("Кодирование", "Анализ файла и подготовка кадра заставки…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.prepare(
-				source, self._presets[index].id,
+				source, preset_id, intro_source=intro_source,
 				on_progress=self._progress.emit_progress,
 			),
 			self, self._on_processed, self._show_error,

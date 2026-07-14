@@ -133,6 +133,8 @@ def test_resolve_timestamp_modes() -> None:
 	random.seed(0)
 	for _ in range(100):
 		assert 25.0 <= resolve_timestamp("random-middle", INFO) <= 75.0
+		# random-choice без человека — запасной случайный кадр из 5–95 %
+		assert 5.0 <= resolve_timestamp("random-choice", INFO) <= 95.0
 	with pytest.raises(ValueError):
 		resolve_timestamp("bogus", INFO)
 

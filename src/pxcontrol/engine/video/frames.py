@@ -15,13 +15,18 @@ logger = logging.getLogger(__name__)
 MIDDLE_FROM = 0.25
 MIDDLE_TO = 0.75
 
+# Диапазон случайных кадров-кандидатов (режим random-choice): шире середины,
+# чтобы пользователю было из чего выбирать.
+CHOICE_FROM = 0.05
+CHOICE_TO = 0.95
+
 
 def resolve_timestamp(source: str, info: VideoInfo) -> float:
 	"""Вычисляет момент времени (сек), из которого брать кадр заставки.
 
 	Args:
-		source: режим источника — 'random-middle', 'first', 'time:СЕК'
-			или 'frame:N'.
+		source: режим источника — 'random-middle', 'random-choice',
+			'first', 'time:СЕК' или 'frame:N'.
 		info: метаданные видео.
 
 	Raises:
@@ -31,6 +36,9 @@ def resolve_timestamp(source: str, info: VideoInfo) -> float:
 		return 0.0
 	if source == "random-middle":
 		return random.uniform(info.duration * MIDDLE_FROM, info.duration * MIDDLE_TO)
+	if source == "random-choice":
+		# запасное поведение без человека (автоматика): случайный из 5–95 %
+		return random.uniform(info.duration * CHOICE_FROM, info.duration * CHOICE_TO)
 	if source.startswith("time:"):
 		return float(source.split(":", 1)[1])
 	if source.startswith("frame:"):

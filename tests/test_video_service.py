@@ -112,6 +112,67 @@ async def test_prepare_reports_progress(
 	assert received == [0.5, 1.0]
 
 
+async def test_prepare_intro_source_override(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Подмена источника кадра действует на один запуск, пресет не меняется."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	source = tmp_path / "src.mp4"
+	source.write_bytes(b"src")
+	processor = _FakeProcessor()
+	service = VideoService(db, "ffmpeg", processor=processor)
+	preset = await service.save_preset(PresetFields(
+		name="Выбор", intro=True, intro_source="random-choice",
+	))
+	await service.prepare(str(source), preset.id, intro_source="image:/x/кадр.png")
+	assert processor.calls[0].intro_source == "image:/x/кадр.png"
+	fields = await service.get_preset_fields(preset.id)
+	assert fields.intro_source == "random-choice"  # пресет не тронут
+
+
+async def test_extract_random_frames(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Кандидаты: количество, диапазон 5–95 %, размер кадра, смена партии."""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.probe_video",
+		lambda _p, _b: VideoInfo(1280, 720, 100.0, 25.0, True),
+	)
+
+	def _fake_extract(
+		_src: str, timestamp: float, out: str, width: int, height: int,
+		_bin: str = "ffmpeg",
+	) -> None:
+		assert (width, height) == (1920, 1080)  # финальный размер кадра
+		assert 5.0 <= timestamp <= 95.0
+		Path(out).write_bytes(b"png")
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.extract_still", _fake_extract
+	)
+	source = tmp_path / "v.mp4"
+	source.write_bytes(b"v")
+	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
+	frames = await service.extract_random_frames(str(source), 4)
+	assert len(frames) == 4
+	assert [f.timestamp for f in frames] == sorted(f.timestamp for f in frames)
+	assert all(Path(f.path).is_file() for f in frames)
+	first_dir = Path(frames[0].path).parent
+	second = await service.extract_random_frames(str(source), 2)
+	assert len(second) == 2
+	assert not first_dir.exists()  # старая партия удалена
+
+
 async def test_prepare_validations(db: Database, tmp_path: Path) -> None:
 	"""Понятные ошибки: нет файла, нет ffmpeg, нет пресета."""
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
