@@ -11,7 +11,7 @@ from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
 	QButtonGroup,
 	QFileDialog,
@@ -274,6 +274,16 @@ class _PresetDialog(MessageBoxBase):
 		return int(round(mbps * 1000)) if mbps > 0 else None
 
 
+class _FrameTileButton(TogglePushButton):
+	"""Кнопка-плитка кадра: двойной клик подтверждает выбор."""
+
+	doubleClicked = Signal()
+
+	def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
+		super().mouseDoubleClickEvent(event)
+		self.doubleClicked.emit()
+
+
 class _FramePickerDialog(MessageBoxBase):
 	"""Выбор кадра заставки из случайных кандидатов (плиткой).
 
@@ -361,7 +371,7 @@ class _FramePickerDialog(MessageBoxBase):
 		column = QVBoxLayout(tile)
 		column.setContentsMargins(0, 0, 0, 0)
 		column.setSpacing(2)
-		button = TogglePushButton(tile)
+		button = _FrameTileButton(tile)
 		button.setFixedSize(QSize(232, 133))
 		# картинка — QLabel внутри кнопки: родная отрисовка иконки
 		# смещала её от центра и обрезала; подпись прозрачна для мыши
@@ -376,6 +386,7 @@ class _FramePickerDialog(MessageBoxBase):
 		image.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 		inner.addWidget(image)
 		button.toggled.connect(partial(self._on_toggled, frame.path))
+		button.doubleClicked.connect(partial(self._on_double_clicked, frame.path))
 		self._group.addButton(button)
 		column.addWidget(button)
 		minutes, seconds = divmod(int(frame.timestamp), 60)
@@ -388,6 +399,12 @@ class _FramePickerDialog(MessageBoxBase):
 		if checked:
 			self._chosen = path
 			self.yesButton.setEnabled(True)
+
+	def _on_double_clicked(self, path: str) -> None:
+		"""Двойной клик по плитке = выбрать кадр и «Использовать кадр»."""
+		self._chosen = path
+		self.yesButton.setEnabled(True)
+		self.yesButton.click()
 
 	def _show_error(self, message: str) -> None:
 		"""Показывает ошибку и останавливает колёсико."""
