@@ -41,7 +41,6 @@ class PresetDto:
 
 	id: int
 	name: str
-	summary: str
 
 
 @dataclass(frozen=True)
@@ -78,22 +77,6 @@ class PresetFields:
 	video_bitrate_kbps: int | None = None
 
 
-def _summary(preset: VideoPreset) -> str:
-	"""Короткое описание пресета для карточки."""
-	parts = ["FullHD"]
-	if preset.watermark_path:
-		parts.append(f"вотермарк ({preset.wm_corner})")
-	if preset.intro:
-		parts.append("заставка")
-	if preset.cover:
-		parts.append("обложка")
-	if preset.no_audio:
-		parts.append("без звука")
-	if preset.video_bitrate_kbps:
-		parts.append(f"{preset.video_bitrate_kbps / 1000:g} Мбит/с")
-	return " · ".join(parts)
-
-
 class VideoService:
 	"""Пресеты обработки и запуск подготовки видео."""
 
@@ -116,7 +99,7 @@ class VideoService:
 			rows = (
 				await session.execute(select(VideoPreset).order_by(VideoPreset.id))
 			).scalars()
-			return [PresetDto(p.id, p.name, _summary(p)) for p in rows]
+			return [PresetDto(p.id, p.name) for p in rows]
 
 	async def save_preset(
 		self, fields: PresetFields, preset_id: int | None = None
@@ -140,7 +123,7 @@ class VideoService:
 			await session.commit()
 			await session.refresh(preset)
 		logger.info("Пресет «%s» сохранён (id=%s).", preset.name, preset.id)
-		return PresetDto(preset.id, preset.name, _summary(preset))
+		return PresetDto(preset.id, preset.name)
 
 	async def get_preset_fields(self, preset_id: int) -> PresetFields:
 		"""Возвращает поля пресета для диалога правки.
@@ -177,25 +160,27 @@ class VideoService:
 	async def prepare(
 		self,
 		source_path: str,
-		preset_id: int,
+		fields: PresetFields,
 		intro_source: str | None = None,
 		on_progress: ProgressCallback | None = None,
 	) -> str:
-		"""Готовит видео по пресету; возвращает путь к результату.
+		"""Готовит видео по переданным параметрам; возвращает путь к результату.
 
-		Обработка блокирующая (ffmpeg) и выполняется в отдельном потоке,
+		Параметры приходят готовыми (состояние панели на странице «Видео»):
+		обработка применяет ровно то, что на экране, не заглядывая в пресеты
+		БД. Обработка блокирующая (ffmpeg) и выполняется в отдельном потоке,
 		чтобы не останавливать цикл событий движка. ``on_progress``
 		вызывается из этого потока с долей готовности 0.0..1.0.
 		``intro_source`` подменяет источник кадра заставки только для
-		этого запуска (выбор кадра из кандидатов), пресет не меняется.
+		этого запуска (выбор кадра из кандидатов).
 
 		Raises:
-			VideoError: Файл/пресет/ffmpeg не найдены или обработка упала.
+			VideoError: Файл/ffmpeg не найдены или обработка упала.
 		"""
 		self._require_ready(source_path)
 		source = Path(source_path)
-		options = await self._build_options(source, preset_id, intro_source)
-		logger.info("Обработка видео: %s (пресет id=%s)…", source.name, preset_id)
+		options = self._build_options(source, fields, intro_source)
+		logger.info("Обработка видео: %s (параметры «%s»)…", source.name, fields.name)
 		try:
 			await asyncio.to_thread(self._processor, options, on_progress)
 		except (RuntimeError, ValueError) as exc:
@@ -258,29 +243,25 @@ class VideoService:
 				"или укажите путь в FFMPEG_PATH."
 			)
 
-	async def _build_options(
-		self, source: Path, preset_id: int, intro_source: str | None = None
+	def _build_options(
+		self, source: Path, fields: PresetFields, intro_source: str | None = None
 	) -> ProcessingOptions:
-		"""Собирает параметры обработки из пресета БД."""
-		async with self._db.session_factory() as session:
-			preset = await session.get(VideoPreset, preset_id)
-		if preset is None:
-			raise VideoError("Пресет не найден — обновите список.")
+		"""Собирает параметры обработки из переданных полей."""
 		out_dir = media_dir() / "processed"
 		out_dir.mkdir(parents=True, exist_ok=True)
 		stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-		output = out_dir / f"{source.stem}_{preset.name}_{stamp}.mp4"
+		output = out_dir / f"{source.stem}_{fields.name}_{stamp}.mp4"
 		ffprobe = ffprobe_bin_for(self._ffmpeg)
 		return ProcessingOptions(
 			input=str(source), output=str(output),
-			watermark=preset.watermark_path, wm_corner=preset.wm_corner,
-			wm_margin=preset.wm_margin, wm_opacity=preset.wm_opacity,
-			wm_scale=preset.wm_scale, wm_start_offset=preset.wm_start_offset,
-			wm_end_offset=preset.wm_end_offset, wm_fade=preset.wm_fade,
-			intro=preset.intro,
-			intro_source=intro_source or preset.intro_source,
-			intro_hold=preset.intro_hold,
-			xfade=preset.xfade, cover=preset.cover, no_audio=preset.no_audio,
-			video_bitrate_kbps=preset.video_bitrate_kbps,
+			watermark=fields.watermark_path, wm_corner=fields.wm_corner,
+			wm_margin=fields.wm_margin, wm_opacity=fields.wm_opacity,
+			wm_scale=fields.wm_scale, wm_start_offset=fields.wm_start_offset,
+			wm_end_offset=fields.wm_end_offset, wm_fade=fields.wm_fade,
+			intro=fields.intro,
+			intro_source=intro_source or fields.intro_source,
+			intro_hold=fields.intro_hold,
+			xfade=fields.xfade, cover=fields.cover, no_audio=fields.no_audio,
+			video_bitrate_kbps=fields.video_bitrate_kbps,
 			ffmpeg_bin=self._ffmpeg, ffprobe_bin=ffprobe,
 		)

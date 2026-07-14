@@ -52,23 +52,21 @@ async def test_preset_crud(db: Database) -> None:
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
 	preset = await service.save_preset(FIELDS)
 	assert preset.name == "Бренд"
-	assert "вотермарк (br)" in preset.summary and "заставка" in preset.summary
-	assert "2.5 Мбит/с" in preset.summary
 	fields = await service.get_preset_fields(preset.id)
 	assert fields.intro_source == "time:5.0" and fields.wm_opacity == 0.8
 	assert fields.video_bitrate_kbps == 2500
 	updated = await service.save_preset(
 		PresetFields(name="Бренд-2", no_audio=True), preset.id
 	)
-	assert updated.name == "Бренд-2" and "без звука" in updated.summary
+	assert updated.name == "Бренд-2"
 	await service.delete_preset(preset.id)
 	assert await service.list_presets() == []
 
 
-async def test_prepare_maps_preset_to_options(
+async def test_prepare_maps_fields_to_options(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	"""Подготовка: пресет из БД корректно превращается в ProcessingOptions."""
+	"""Подготовка применяет переданные поля (пресет в БД не нужен)."""
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
 	)
@@ -79,9 +77,8 @@ async def test_prepare_maps_preset_to_options(
 	source.write_bytes(b"src")
 	processor = _FakeProcessor()
 	service = VideoService(db, "ffmpeg", processor=processor)
-	preset = await service.save_preset(FIELDS)
 
-	output = await service.prepare(str(source), preset.id)
+	output = await service.prepare(str(source), FIELDS)
 
 	assert Path(output).is_file()
 	options = processor.calls[0]
@@ -93,7 +90,7 @@ async def test_prepare_maps_preset_to_options(
 	assert options.intro and options.intro_source == "time:5.0"
 	assert options.cover is True
 	assert options.video_bitrate_kbps == 2500
-	assert "processed" in options.output and "исходник" in options.output
+	assert "processed" in options.output and "исходник_Бренд_" in options.output
 
 
 async def test_prepare_reports_progress(
@@ -109,16 +106,17 @@ async def test_prepare_reports_progress(
 	source = tmp_path / "src.mp4"
 	source.write_bytes(b"src")
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
-	preset = await service.save_preset(PresetFields(name="Простой"))
 	received: list[float] = []
-	await service.prepare(str(source), preset.id, on_progress=received.append)
+	await service.prepare(
+		str(source), PresetFields(name="Простой"), on_progress=received.append
+	)
 	assert received == [0.5, 1.0]
 
 
 async def test_prepare_intro_source_override(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	"""Подмена источника кадра действует на один запуск, пресет не меняется."""
+	"""Подмена источника кадра действует на один запуск."""
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
 	)
@@ -129,13 +127,9 @@ async def test_prepare_intro_source_override(
 	source.write_bytes(b"src")
 	processor = _FakeProcessor()
 	service = VideoService(db, "ffmpeg", processor=processor)
-	preset = await service.save_preset(PresetFields(
-		name="Выбор", intro=True, intro_source="random-choice",
-	))
-	await service.prepare(str(source), preset.id, intro_source="image:/x/кадр.png")
+	fields = PresetFields(name="Выбор", intro=True, intro_source="random-choice")
+	await service.prepare(str(source), fields, intro_source="image:/x/кадр.png")
 	assert processor.calls[0].intro_source == "image:/x/кадр.png"
-	fields = await service.get_preset_fields(preset.id)
-	assert fields.intro_source == "random-choice"  # пресет не тронут
 
 
 async def test_extract_random_frames(
@@ -177,16 +171,17 @@ async def test_extract_random_frames(
 
 
 async def test_prepare_validations(db: Database, tmp_path: Path) -> None:
-	"""Понятные ошибки: нет файла, нет ffmpeg, нет пресета."""
+	"""Понятные ошибки: нет файла, нет ffmpeg."""
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
+	fields = PresetFields(name="x")
 	with pytest.raises(VideoError, match="Файл не найден"):
-		await service.prepare(str(tmp_path / "нет.mp4"), 1)
+		await service.prepare(str(tmp_path / "нет.mp4"), fields)
 
 	source = tmp_path / "есть.mp4"
 	source.write_bytes(b"src")
 	no_ffmpeg = VideoService(db, "/нет/такого/ffmpeg", processor=_FakeProcessor())
 	with pytest.raises(VideoError, match="ffmpeg"):
-		await no_ffmpeg.prepare(str(source), 1)
+		await no_ffmpeg.prepare(str(source), fields)
 
 
 async def test_prepare_wraps_processor_errors(
@@ -206,6 +201,5 @@ async def test_prepare_wraps_processor_errors(
 		raise RuntimeError("ffmpeg (обработка видео) завершился с ошибкой: тест")
 
 	service = VideoService(db, "ffmpeg", processor=_boom)
-	preset = await service.save_preset(PresetFields(name="Пустой"))
 	with pytest.raises(VideoError, match="Обработка не удалась"):
-		await service.prepare(str(source), preset.id)
+		await service.prepare(str(source), PresetFields(name="Пустой"))

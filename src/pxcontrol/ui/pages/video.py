@@ -1,8 +1,10 @@
-"""Страница «Видео»: пресеты обработки и подготовка файла.
+"""Страница «Видео»: панель параметров обработки и подготовка файла.
 
-Подготовка отделена от публикации: результат — файл в ``media/processed``;
-кнопка «Опубликовать…» передаёт его странице «Публикация». Контракт
-между подготовкой и публикацией — путь к файлу.
+Параметры живут прямо на странице: «Обработать» применяет то, что на
+экране, ничего не сохраняя. Пресет — «загрузчик»: выбор в списке
+заполняет панель, сохранение — только по явным кнопкам. Результат —
+файл в ``media/processed``; кнопка «Опубликовать…» передаёт его
+странице «Публикация» (контракт — путь к файлу).
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.video import FrameCandidate, PresetDto, PresetFields
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	FormDialog,
 	ProgressPanel,
 	bind,
 	clear_layout,
@@ -68,37 +71,31 @@ _INTRO_SOURCES = [
 #: Режимы источника кадра без значения (поле «секунды/путь» не нужно).
 _SOURCES_WITHOUT_VALUE = {"random-middle", "random-choice"}
 
+#: Имя «пресета» в имени файла результата, когда пресет не выбран.
+_MANUAL_NAME = "ручные"
 
-class _PresetDialog(MessageBoxBase):
-	"""Диалог создания/правки пресета обработки."""
 
-	def __init__(self, parent: QWidget, fields: PresetFields | None = None) -> None:
+class _PresetForm(QWidget):
+	"""Панель параметров обработки (бывший диалог пресета, без имени).
+
+	Живёт прямо на странице: заполняется пресетом (:meth:`fill`),
+	правится свободно, текущее состояние отдаёт :meth:`fields`.
+	"""
+
+	def __init__(self, parent: QWidget) -> None:
 		super().__init__(parent)
-		self.viewLayout.addWidget(SubtitleLabel(
-			"Пресет обработки" if fields is None else "Правка пресета", self,
-		))
-		self._build_controls()
-		if fields is not None:
-			self._fill(fields)
-		self.yesButton.setText("Сохранить")
-		self.cancelButton.setText("Отмена")
-		self.widget.setMinimumWidth(520)
-
-	# --- сборка ----------------------------------------------------------------
-
-	def _build_controls(self) -> None:
-		"""Собирает все поля диалога."""
-		self._name = LineEdit(self)
-		self._name.setPlaceholderText("Название пресета")
-		self.viewLayout.addWidget(self._name)
+		self._layout = QVBoxLayout(self)
+		self._layout.setContentsMargins(0, 0, 0, 0)
+		self._layout.setSpacing(10)
 		self._build_watermark_block()
 		self._build_intro_block()
 		self._build_flags_row()
-		self._build_quality_row()
+
+	# --- сборка ----------------------------------------------------------------
 
 	def _build_watermark_block(self) -> None:
-		"""Вотермарк: файл, угол, отступ, прозрачность, масштаб."""
-		self.viewLayout.addWidget(BodyLabel("Вотермарк (PNG, пусто — без него):", self))
+		"""Вотермарк: файл, угол, отступ, прозрачность, масштаб, окно, плавность."""
+		self._layout.addWidget(BodyLabel("Вотермарк (PNG, пусто — без него):", self))
 		file_row = QHBoxLayout()
 		self._wm_path = LineEdit(self)
 		self._wm_path.setPlaceholderText("Файл вотермарка…")
@@ -106,20 +103,21 @@ class _PresetDialog(MessageBoxBase):
 		browse.clicked.connect(self._pick_watermark)
 		file_row.addWidget(self._wm_path)
 		file_row.addWidget(browse)
-		self.viewLayout.addLayout(file_row)
+		self._layout.addLayout(file_row)
 		row = QHBoxLayout()
 		self._corner = ComboBox(self)
 		for label, _code in _CORNERS:
 			self._corner.addItem(label)
-		self._margin = self._spin(row, "отступ", 0, 200, 24)
+		self._margin = self._spin(row, "отступ от края, пикселей", 0, 200, 24)
 		self._opacity = self._dspin(row, "прозрачность", 0.05, 1.0, 1.0, 0.05)
-		self._scale = self._dspin(row, "масштаб", 0.05, 0.5, 0.15, 0.01)
+		self._scale = self._dspin(row, "масштаб (доля ширины кадра)", 0.05, 0.5, 0.15, 0.01)
 		row.insertWidget(0, self._corner)
-		self.viewLayout.addLayout(row)
+		row.addStretch()
+		self._layout.addLayout(row)
 		self._build_watermark_window_row()
 
 	def _build_watermark_window_row(self) -> None:
-		"""Окно показа вотермарка: отступы от начала и до конца ролика."""
+		"""Окно показа вотермарка: отступы от краёв и плавность переходов."""
 		row = QHBoxLayout()
 		row.addWidget(BodyLabel("Показ вотермарка:", self))
 		self._wm_start = self._dspin(
@@ -135,7 +133,7 @@ class _PresetDialog(MessageBoxBase):
 		)
 		row.addWidget(CaptionLabel("с плавность", self))
 		row.addStretch()
-		self.viewLayout.addLayout(row)
+		self._layout.addLayout(row)
 
 	def _build_intro_block(self) -> None:
 		"""Заставка: включение, источник кадра, тайминги."""
@@ -146,7 +144,7 @@ class _PresetDialog(MessageBoxBase):
 		row.addStretch()
 		self._hold = self._dspin(row, "держать, с", 0.2, 5.0, 1.0, 0.1)
 		self._xfade = self._dspin(row, "растворение, с", 0.1, 3.0, 0.5, 0.1)
-		self.viewLayout.addLayout(row)
+		self._layout.addLayout(row)
 		src_row = QHBoxLayout()
 		self._intro_kind = ComboBox(self)
 		for label, _code in _INTRO_SOURCES:
@@ -155,7 +153,7 @@ class _PresetDialog(MessageBoxBase):
 		self._intro_value.setPlaceholderText("секунды или путь к картинке")
 		src_row.addWidget(self._intro_kind)
 		src_row.addWidget(self._intro_value)
-		self.viewLayout.addLayout(src_row)
+		self._layout.addLayout(src_row)
 		self._intro.checkedChanged.connect(self._toggle_intro_controls)
 		self._toggle_intro_controls(False)
 
@@ -165,7 +163,7 @@ class _PresetDialog(MessageBoxBase):
 			widget.setEnabled(enabled)
 
 	def _build_flags_row(self) -> None:
-		"""Обложка и звук."""
+		"""Обложка, звук и качество."""
 		row = QHBoxLayout()
 		row.addWidget(BodyLabel("Вшить обложку:", self))
 		self._cover = SwitchButton(self)
@@ -174,17 +172,12 @@ class _PresetDialog(MessageBoxBase):
 		row.addWidget(BodyLabel("Убрать звук:", self))
 		self._no_audio = SwitchButton(self)
 		row.addWidget(self._no_audio)
-		row.addStretch()
-		self.viewLayout.addLayout(row)
-
-	def _build_quality_row(self) -> None:
-		"""Качество видео: целевой битрейт (0 — как в оригинале)."""
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Качество видео, Мбит/с:", self))
+		row.addSpacing(24)
+		row.addWidget(BodyLabel("Качество, Мбит/с:", self))
 		self._bitrate = self._dspin(row, "битрейт видео", 0.0, 50.0, 0.0, 0.5)
 		row.addWidget(CaptionLabel("0 — как в оригинале", self))
 		row.addStretch()
-		self.viewLayout.addLayout(row)
+		self._layout.addLayout(row)
 
 	def _spin(self, row: QHBoxLayout, tip: str, lo: int, hi: int, val: int) -> SpinBox:
 		box = SpinBox(self)
@@ -214,9 +207,8 @@ class _PresetDialog(MessageBoxBase):
 
 	# --- значения ---------------------------------------------------------------
 
-	def _fill(self, fields: PresetFields) -> None:
-		"""Заполняет диалог полями существующего пресета."""
-		self._name.setText(fields.name)
+	def fill(self, fields: PresetFields) -> None:
+		"""Заполняет панель полями пресета."""
 		self._wm_path.setText(fields.watermark_path or "")
 		codes = [code for _label, code in _CORNERS]
 		self._corner.setCurrentIndex(codes.index(fields.wm_corner))
@@ -231,9 +223,7 @@ class _PresetDialog(MessageBoxBase):
 		self._xfade.setValue(fields.xfade)
 		kind, _sep, value = fields.intro_source.partition(":")
 		kinds = [code for _label, code in _INTRO_SOURCES]
-		self._intro_kind.setCurrentIndex(
-			kinds.index(kind) if kind in kinds else 0
-		)
+		self._intro_kind.setCurrentIndex(kinds.index(kind) if kind in kinds else 0)
 		self._intro_value.setText(value)
 		self._cover.setChecked(fields.cover)
 		self._no_audio.setChecked(fields.no_audio)
@@ -247,10 +237,10 @@ class _PresetDialog(MessageBoxBase):
 			return kind
 		return f"{kind}:{str(self._intro_value.text()).strip()}"
 
-	def fields(self) -> PresetFields:
-		"""Возвращает заполненные поля пресета."""
+	def fields(self, name: str) -> PresetFields:
+		"""Текущее состояние панели как поля пресета (имя — от вызывающего)."""
 		return PresetFields(
-			name=str(self._name.text()).strip(),
+			name=name,
 			watermark_path=str(self._wm_path.text()).strip() or None,
 			wm_corner=_CORNERS[int(self._corner.currentIndex())][1],
 			wm_margin=int(self._margin.value()),
@@ -414,7 +404,7 @@ class _FramePickerDialog(MessageBoxBase):
 
 
 class VideoPage(ScrollArea):
-	"""Пресеты обработки и подготовка видеофайла."""
+	"""Панель параметров обработки и подготовка видеофайла."""
 
 	#: Просьба опубликовать готовый файл (ловит главное окно → «Публикация»).
 	publish_requested = Signal(str)
@@ -434,28 +424,26 @@ class VideoPage(ScrollArea):
 		layout = QVBoxLayout(container)
 		layout.setContentsMargins(28, 24, 28, 24)
 		layout.setSpacing(16)
-		self._build_presets_header(layout)
-		self._presets_list = QVBoxLayout()
-		self._presets_list.setSpacing(8)
-		layout.addLayout(self._presets_list)
-		layout.addSpacing(16)
-		self._build_process_block(layout)
+		layout.addWidget(SubtitleLabel("Подготовка видео", self))
+		self._build_source_row(layout)
+		self._build_preset_row(layout)
+		layout.addWidget(CaptionLabel(
+			"Параметры: к видео применяется то, что на экране; "
+			"пресет — только загрузка и сохранение набора.", self,
+		))
+		self._form = _PresetForm(self)
+		layout.addWidget(self._form)
+		self._build_process_row(layout)
+		self._progress = ProgressPanel(self)
+		layout.addWidget(self._progress)
+		self._result_box = QVBoxLayout()
+		layout.addLayout(self._result_box)
 		layout.addStretch()
 		self.setWidget(container)
 		self.setWidgetResizable(True)
 		self.enableTransparentBackground()
 
-	def _build_presets_header(self, layout: QVBoxLayout) -> None:
-		header = QHBoxLayout()
-		header.addWidget(SubtitleLabel("Пресеты обработки", self))
-		header.addStretch()
-		add = PushButton(FluentIcon.ADD, "Новый пресет", self)
-		add.clicked.connect(self._on_add_preset)
-		header.addWidget(add)
-		layout.addLayout(header)
-
-	def _build_process_block(self, layout: QVBoxLayout) -> None:
-		layout.addWidget(SubtitleLabel("Подготовка видео", self))
+	def _build_source_row(self, layout: QVBoxLayout) -> None:
 		src_row = QHBoxLayout()
 		self._source = LineEdit(self)
 		self._source.setPlaceholderText("Исходный видеофайл…")
@@ -464,18 +452,32 @@ class VideoPage(ScrollArea):
 		src_row.addWidget(self._source)
 		src_row.addWidget(browse)
 		layout.addLayout(src_row)
-		run_row = QHBoxLayout()
+
+	def _build_preset_row(self, layout: QVBoxLayout) -> None:
+		"""Пресет: выбор-загрузка и кнопки сохранения/удаления."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Пресет:", self))
 		self._preset_combo = ComboBox(self)
+		self._preset_combo.currentIndexChanged.connect(self._on_preset_selected)
+		row.addWidget(self._preset_combo, stretch=1)
+		self._save_button = PushButton(FluentIcon.SAVE, "Сохранить", self)
+		self._save_button.clicked.connect(self._on_save_preset)
+		row.addWidget(self._save_button)
+		save_as = PushButton("Сохранить как…", self)
+		save_as.clicked.connect(self._on_save_preset_as)
+		row.addWidget(save_as)
+		self._delete_button = PushButton(FluentIcon.DELETE, "Удалить", self)
+		self._delete_button.clicked.connect(self._on_delete_preset)
+		row.addWidget(self._delete_button)
+		layout.addLayout(row)
+
+	def _build_process_row(self, layout: QVBoxLayout) -> None:
+		run_row = QHBoxLayout()
 		self._process_button = PrimaryPushButton(FluentIcon.PLAY, "Обработать", self)
 		self._process_button.clicked.connect(self._on_process)
-		run_row.addWidget(self._preset_combo)
 		run_row.addWidget(self._process_button)
 		run_row.addStretch()
 		layout.addLayout(run_row)
-		self._progress = ProgressPanel(self)
-		layout.addWidget(self._progress)
-		self._result_box = QVBoxLayout()
-		layout.addLayout(self._result_box)
 
 	def _show_error(self, message: str) -> None:
 		"""Показывает ошибку и гасит индикатор прогресса."""
@@ -489,68 +491,98 @@ class VideoPage(ScrollArea):
 
 	# --- пресеты -------------------------------------------------------------------
 
-	def _reload_presets(self) -> None:
+	def _reload_presets(self, select_name: str | None = None) -> None:
 		run_in_engine(
 			self._worker, self._worker.engine.video.list_presets(),
-			self, self._show_presets, self._show_error,
+			self, partial(self._show_presets, select_name), self._show_error,
 		)
 
-	def _show_presets(self, presets: list[PresetDto]) -> None:
+	def _show_presets(
+		self, select_name: str | None, presets: list[PresetDto]
+	) -> None:
+		"""Наполняет список пресетов; первый пункт — «свои настройки»."""
 		self._presets = presets
-		clear_layout(self._presets_list)
+		self._preset_combo.blockSignals(True)
 		self._preset_combo.clear()
-		if not presets:
-			self._presets_list.addWidget(CaptionLabel(
-				"Пока нет пресетов — создайте первый: вотермарк, заставка, обложка.",
-				self,
-			))
-			return
+		self._preset_combo.addItem("(свои настройки)")
 		for preset in presets:
-			edit = PushButton("Изменить", self)
-			edit.clicked.connect(bind(self._on_edit_preset, preset))
-			self._presets_list.addWidget(row_card(
-				self, preset.name, preset.summary,
-				trailing=edit, on_delete=bind(self._delete_preset, preset),
-			))
 			self._preset_combo.addItem(preset.name)
+		index = 0
+		if select_name is not None:
+			names = [p.name for p in presets]
+			index = names.index(select_name) + 1 if select_name in names else 0
+		self._preset_combo.setCurrentIndex(index)
+		self._preset_combo.blockSignals(False)
+		self._update_preset_buttons()
 
-	def _on_add_preset(self) -> None:
-		dialog = _PresetDialog(self.window())
-		if dialog.exec():
-			self._save_preset(dialog.fields(), None)
+	def _selected_preset(self) -> PresetDto | None:
+		"""Выбранный пресет (None — «свои настройки»)."""
+		index = int(self._preset_combo.currentIndex()) - 1
+		if 0 <= index < len(self._presets):
+			return self._presets[index]
+		return None
 
-	def _on_edit_preset(self, preset: PresetDto) -> None:
+	def _update_preset_buttons(self) -> None:
+		"""«Сохранить»/«Удалить» доступны только при выбранном пресете."""
+		has_preset = self._selected_preset() is not None
+		self._save_button.setEnabled(has_preset)
+		self._delete_button.setEnabled(has_preset)
+
+	def _on_preset_selected(self, _index: int) -> None:
+		"""Выбор пресета — загрузка его значений в панель."""
+		self._update_preset_buttons()
+		preset = self._selected_preset()
+		if preset is None:
+			return
 		run_in_engine(
 			self._worker, self._worker.engine.video.get_preset_fields(preset.id),
-			self, partial(self._edit_with_fields, preset.id), self._show_error,
+			self, self._form.fill, self._show_error,
 		)
 
-	def _edit_with_fields(self, preset_id: int, fields: PresetFields) -> None:
-		"""Открывает диалог правки с предзаполненными полями."""
-		dialog = _PresetDialog(self.window(), fields)
-		if dialog.exec():
-			self._save_preset(dialog.fields(), preset_id)
-
-	def _save_preset(self, fields: PresetFields, preset_id: int | None) -> None:
-		if not fields.name:
-			self._show_error("У пресета должно быть название.")
+	def _on_save_preset(self) -> None:
+		"""Перезаписывает выбранный пресет текущим состоянием панели."""
+		preset = self._selected_preset()
+		if preset is None:
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.video.save_preset(fields, preset_id),
+			self._worker.engine.video.save_preset(
+				self._form.fields(preset.name), preset.id
+			),
+			self, self._on_preset_saved, self._show_error,
+		)
+
+	def _on_save_preset_as(self) -> None:
+		"""Сохраняет состояние панели новым пресетом (спрашивает имя)."""
+		dialog = FormDialog(
+			"Сохранить пресет", [("name", "Имя пресета…")], self.window(),
+			accept_text="Сохранить",
+		)
+		if not dialog.exec():
+			return
+		name = dialog.value("name")
+		if not name:
+			self._show_error("У пресета должно быть имя.")
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.save_preset(self._form.fields(name)),
 			self, self._on_preset_saved, self._show_error,
 		)
 
 	def _on_preset_saved(self, preset: PresetDto) -> None:
 		InfoBar.success("Пресет сохранён", preset.name, parent=self)
-		self._reload_presets()
+		self._reload_presets(select_name=preset.name)
 
-	def _delete_preset(self, preset: PresetDto) -> None:
+	def _on_delete_preset(self) -> None:
+		preset = self._selected_preset()
+		if preset is None:
+			return
 		if not confirm_delete(self, f"Удалить пресет «{preset.name}»?"):
 			return
 		run_in_engine(
 			self._worker, self._worker.engine.video.delete_preset(preset.id),
-			self, self._reload_presets, self._show_error,
+			self, lambda *_a: self._reload_presets(), self._show_error,
 		)
 
 	# --- подготовка -----------------------------------------------------------------
@@ -564,39 +596,26 @@ class VideoPage(ScrollArea):
 			self._source.setText(path)
 
 	def _on_process(self) -> None:
-		"""Проверяет форму и читает пресет: вдруг нужен выбор кадра."""
+		"""Собирает параметры с экрана и запускает обработку."""
 		source = str(self._source.text()).strip()
 		if not source:
 			self._show_error("Выберите исходный видеофайл.")
 			return
-		index = int(self._preset_combo.currentIndex())
-		if index < 0 or index >= len(self._presets):
-			self._show_error("Создайте и выберите пресет обработки.")
-			return
-		preset_id = self._presets[index].id
-		run_in_engine(
-			self._worker, self._worker.engine.video.get_preset_fields(preset_id),
-			self, partial(self._maybe_pick_frame, source, preset_id),
-			self._show_error,
-		)
-
-	def _maybe_pick_frame(
-		self, source: str, preset_id: int, fields: PresetFields
-	) -> None:
-		"""Открывает выбор кадра, если пресет в режиме «кадры на выбор»."""
+		preset = self._selected_preset()
+		fields = self._form.fields(preset.name if preset else _MANUAL_NAME)
 		needs_choice = fields.intro_source == "random-choice" and (
 			fields.intro or fields.cover
 		)
 		if not needs_choice:
-			self._start_prepare(source, preset_id, None)
+			self._start_prepare(source, fields, None)
 			return
 		dialog = _FramePickerDialog(self._worker, source, self.window())
 		if not dialog.exec() or dialog.chosen_path() is None:
 			return
-		self._start_prepare(source, preset_id, f"image:{dialog.chosen_path()}")
+		self._start_prepare(source, fields, f"image:{dialog.chosen_path()}")
 
 	def _start_prepare(
-		self, source: str, preset_id: int, intro_source: str | None
+		self, source: str, fields: PresetFields, intro_source: str | None
 	) -> None:
 		"""Запускает обработку (с подменой источника кадра или без)."""
 		self._process_button.setEnabled(False)
@@ -604,7 +623,7 @@ class VideoPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.prepare(
-				source, preset_id, intro_source=intro_source,
+				source, fields, intro_source=intro_source,
 				on_progress=self._progress.emit_progress,
 			),
 			self, self._on_processed, self._show_error,
