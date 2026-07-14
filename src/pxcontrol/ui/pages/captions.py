@@ -255,7 +255,7 @@ class FieldsDialog(MessageBoxBase):
 		"""Подсказка плейсхолдеров имени файла — с актуальными полями канала."""
 		tokens = ", ".join("{" + f.name + "}" for f in fields) or "добавьте поля выше"
 		self._pattern_hint.setText(
-			"Плейсхолдеры имени файла: {title} — название, "
+			"Плейсхолдеры имени файла: {video} — название видео, "
 			"{quality} — качество видео, {channel} — @имя канала; "
 			"поля со значениями через запятую: " + tokens
 		)
@@ -297,11 +297,15 @@ class FieldsDialog(MessageBoxBase):
 		self._template_pattern = LineEdit(self)
 		self._template_pattern.setPlaceholderText(
 			"Шаблон имени файла (необязательно): "
-			"{Author}, {title} ({Genre}) {quality} (@{channel})"
+			"{Author}, {video} ({Genre}) {quality} (@{channel})"
 		)
 		self.viewLayout.addWidget(self._template_pattern)
 		self._pattern_hint = CaptionLabel("", self)
 		self._pattern_hint.setWordWrap(True)
+		# подсказку можно выделять и копировать (плейсхолдеры — в шаблон)
+		self._pattern_hint.setTextInteractionFlags(
+			Qt.TextInteractionFlag.TextSelectableByMouse
+		)
 		self.viewLayout.addWidget(self._pattern_hint)
 		row = QHBoxLayout()
 		self._template_name = LineEdit(self)

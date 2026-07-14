@@ -271,10 +271,12 @@ class CaptionsService:
 	) -> str:
 		"""Собирает имя файла по шаблону имени выбранного шаблона подписи.
 
-		Плейсхолдеры: ``{title}`` — название, ``{ИмяПоля}`` — значения поля
-		через запятую (без решёток), ``{quality}`` — меньшая сторона кадра
-		видео (ffprobe), ``{channel}`` — @имя канала без ``@``. Неизвестные
-		плейсхолдеры остаются как есть — видно и правится руками.
+		Плейсхолдеры: ``{video}`` — название видео/поста, ``{ИмяПоля}`` —
+		значения поля через запятую (без решёток), ``{quality}`` — меньшая
+		сторона кадра видео (ffprobe), ``{channel}`` — @имя канала без
+		``@``. Неизвестные плейсхолдеры остаются как есть — видно
+		и правится руками. Название нарочно не ``{title}``: у каналов
+		бывает поле «Title», и различие только регистром путало.
 
 		Raises:
 			CaptionsError: Шаблон не найден, шаблон имени не задан
@@ -287,7 +289,7 @@ class CaptionsService:
 			pattern = template.filename_pattern
 			channel = await session.get(Channel, channel_id)
 		mapping = {
-			"title": title.strip(),
+			"video": title.strip(),
 			"quality": self._probe_quality(media_path),
 			"channel": (channel.username or "") if channel else "",
 		}

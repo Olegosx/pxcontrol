@@ -125,7 +125,7 @@ async def test_render_filename(
 	genre = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
 	template = await service.save_template(
 		channel_id, "Фильм", [author.id, genre.id],
-		"{Author}, {title} ({Genre}) {quality} (@{channel})",
+		"{Author}, {video} ({Genre}) {quality} (@{channel})",
 	)
 	assert template.filename_pattern is not None
 	name = await service.render_filename(
@@ -149,7 +149,7 @@ async def test_render_filename_edge_cases(
 	channel_id = await _add_channel(db)  # канал без username
 	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
 	template = await service.save_template(
-		channel_id, "Т", [field.id], "{title} {quality} {Нет} ({Год})"
+		channel_id, "Т", [field.id], "{video} {quality} {Нет} ({Год})"
 	)
 	name = await service.render_filename(
 		template.id, channel_id, "Имя", {field.id: ["2026"]}, "/x/файл.zip"
