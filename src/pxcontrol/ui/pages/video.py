@@ -10,13 +10,14 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
 	QButtonGroup,
 	QFileDialog,
 	QGridLayout,
 	QHBoxLayout,
+	QLabel,
 	QVBoxLayout,
 	QWidget,
 )
@@ -26,6 +27,7 @@ from qfluentwidgets import (
 	ComboBox,
 	DoubleSpinBox,
 	FluentIcon,
+	IndeterminateProgressRing,
 	InfoBar,
 	LineEdit,
 	MessageBoxBase,
@@ -294,6 +296,9 @@ class _FramePickerDialog(MessageBoxBase):
 		self._grid_box = QWidget(self)
 		self._grid = QGridLayout(self._grid_box)
 		self.viewLayout.addWidget(self._grid_box)
+		self._ring = IndeterminateProgressRing(self)
+		self._ring.setFixedSize(48, 48)
+		self.viewLayout.addWidget(self._ring, 0, Qt.AlignmentFlag.AlignHCenter)
 		self.yesButton.setText("Использовать кадр")
 		self.yesButton.setEnabled(False)
 		self.cancelButton.setText("Отмена")
@@ -307,9 +312,9 @@ class _FramePickerDialog(MessageBoxBase):
 		self._count.setRange(2, 12)
 		self._count.setValue(6)
 		row.addWidget(self._count)
-		refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
-		refresh.clicked.connect(self._reload)
-		row.addWidget(refresh)
+		self._refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
+		self._refresh.clicked.connect(self._reload)
+		row.addWidget(self._refresh)
 		row.addStretch()
 		self.viewLayout.addLayout(row)
 
@@ -318,9 +323,12 @@ class _FramePickerDialog(MessageBoxBase):
 		return self._chosen
 
 	def _reload(self) -> None:
-		"""Запрашивает новую партию случайных кадров."""
+		"""Запрашивает новую партию: чистит плитку и крутит колёсико."""
 		self.yesButton.setEnabled(False)
+		self._refresh.setEnabled(False)
 		self._chosen = None
+		self._clear_grid()
+		self._ring.show()
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.extract_random_frames(
@@ -329,8 +337,8 @@ class _FramePickerDialog(MessageBoxBase):
 			self, self._show_frames, self._show_error,
 		)
 
-	def _show_frames(self, frames: list[FrameCandidate]) -> None:
-		"""Перерисовывает плитку кандидатов."""
+	def _clear_grid(self) -> None:
+		"""Убирает плитку кандидатов."""
 		while self._grid.count():
 			item = self._grid.takeAt(0)
 			widget = item.widget() if item else None
@@ -338,21 +346,43 @@ class _FramePickerDialog(MessageBoxBase):
 				widget.deleteLater()
 		for button in self._group.buttons():
 			self._group.removeButton(button)
+
+	def _show_frames(self, frames: list[FrameCandidate]) -> None:
+		"""Перерисовывает плитку кандидатов."""
+		self._ring.hide()
+		self._refresh.setEnabled(True)
 		for index, frame in enumerate(frames):
-			self._grid.addWidget(self._frame_button(frame), index // 3, index % 3)
+			self._grid.addWidget(self._frame_tile(frame), index // 3, index % 3)
 		self.widget.adjustSize()
 
-	def _frame_button(self, frame: FrameCandidate) -> TogglePushButton:
-		"""Кликабельная миниатюра кадра (выбранная заливается акцентом)."""
-		button = TogglePushButton(self._grid_box)
-		button.setIcon(QIcon(QPixmap(frame.path)))
-		button.setIconSize(QSize(208, 117))
-		button.setMinimumSize(QSize(232, 136))  # кнопке — высота под миниатюру
-		minutes, seconds = divmod(int(frame.timestamp), 60)
-		button.setText(f"{minutes}:{seconds:02d}")
+	def _frame_tile(self, frame: FrameCandidate) -> QWidget:
+		"""Плитка кандидата: миниатюра по центру, время подписью снизу."""
+		tile = QWidget(self._grid_box)
+		column = QVBoxLayout(tile)
+		column.setContentsMargins(0, 0, 0, 0)
+		column.setSpacing(2)
+		button = TogglePushButton(tile)
+		button.setFixedSize(QSize(232, 133))
+		# картинка — QLabel внутри кнопки: родная отрисовка иконки
+		# смещала её от центра и обрезала; подпись прозрачна для мыши
+		inner = QVBoxLayout(button)
+		inner.setContentsMargins(8, 8, 8, 8)
+		image = QLabel(button)
+		image.setPixmap(QPixmap(frame.path).scaled(
+			216, 117, Qt.AspectRatioMode.KeepAspectRatio,
+			Qt.TransformationMode.SmoothTransformation,
+		))
+		image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+		image.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+		inner.addWidget(image)
 		button.toggled.connect(partial(self._on_toggled, frame.path))
 		self._group.addButton(button)
-		return button
+		column.addWidget(button)
+		minutes, seconds = divmod(int(frame.timestamp), 60)
+		caption = CaptionLabel(f"{minutes}:{seconds:02d}", tile)
+		caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+		column.addWidget(caption)
+		return tile
 
 	def _on_toggled(self, path: str, checked: bool) -> None:
 		if checked:
@@ -360,7 +390,9 @@ class _FramePickerDialog(MessageBoxBase):
 			self.yesButton.setEnabled(True)
 
 	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку всплывающей плашкой."""
+		"""Показывает ошибку и останавливает колёсико."""
+		self._ring.hide()
+		self._refresh.setEnabled(True)
 		show_error(self, message)
 
 
