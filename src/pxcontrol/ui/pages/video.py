@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
+	CardWidget,
 	ComboBox,
 	DoubleSpinBox,
 	FluentIcon,
@@ -37,6 +38,7 @@ from qfluentwidgets import (
 	PushButton,
 	ScrollArea,
 	SpinBox,
+	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
 	TogglePushButton,
@@ -86,116 +88,130 @@ class _PresetForm(QWidget):
 		super().__init__(parent)
 		self._layout = QVBoxLayout(self)
 		self._layout.setContentsMargins(0, 0, 0, 0)
-		self._layout.setSpacing(10)
-		self._build_watermark_block()
-		self._build_intro_block()
-		self._build_flags_row()
+		self._layout.setSpacing(12)
+		self._layout.addWidget(self._watermark_card())
+		self._layout.addWidget(self._intro_card())
+		self._layout.addWidget(self._output_card())
 
 	# --- сборка ----------------------------------------------------------------
 
-	def _build_watermark_block(self) -> None:
-		"""Вотермарк: файл, угол, отступ, прозрачность, масштаб, окно, плавность."""
-		self._layout.addWidget(BodyLabel("Вотермарк (PNG, пусто — без него):", self))
+	def _card(self, title: str) -> tuple[CardWidget, QVBoxLayout]:
+		"""Карточка-раздел с подзаголовком."""
+		card = CardWidget(self)
+		box = QVBoxLayout(card)
+		box.setContentsMargins(16, 12, 16, 12)
+		box.setSpacing(10)
+		box.addWidget(StrongBodyLabel(title, card))
+		return card, box
+
+	@staticmethod
+	def _labeled(row: QHBoxLayout, text: str, widget: QWidget) -> None:
+		"""Пара «подпись: контрол» в строке (с отступом после)."""
+		row.addWidget(BodyLabel(text, widget.parentWidget()))
+		row.addWidget(widget)
+		row.addSpacing(16)
+
+	def _watermark_card(self) -> CardWidget:
+		"""Раздел «Вотермарк»: файл, вид, окно показа, плавность."""
+		card, box = self._card("Вотермарк")
 		file_row = QHBoxLayout()
-		self._wm_path = LineEdit(self)
-		self._wm_path.setPlaceholderText("Файл вотермарка…")
-		browse = PushButton("Обзор…", self)
+		file_row.addWidget(BodyLabel("Файл PNG:", card))
+		self._wm_path = LineEdit(card)
+		self._wm_path.setPlaceholderText("пусто — без вотермарка…")
+		browse = PushButton("Обзор…", card)
 		browse.clicked.connect(self._pick_watermark)
-		file_row.addWidget(self._wm_path)
+		file_row.addWidget(self._wm_path, stretch=1)
 		file_row.addWidget(browse)
-		self._layout.addLayout(file_row)
-		row = QHBoxLayout()
-		self._corner = ComboBox(self)
+		box.addLayout(file_row)
+		look = QHBoxLayout()
+		self._corner = ComboBox(card)
 		for label, _code in _CORNERS:
 			self._corner.addItem(label)
-		self._margin = self._spin(row, "отступ от края, пикселей", 0, 200, 24)
-		self._opacity = self._dspin(row, "прозрачность", 0.05, 1.0, 1.0, 0.05)
-		self._scale = self._dspin(row, "масштаб (доля ширины кадра)", 0.05, 0.5, 0.15, 0.01)
-		row.insertWidget(0, self._corner)
-		row.addStretch()
-		self._layout.addLayout(row)
-		self._build_watermark_window_row()
+		self._labeled(look, "Угол:", self._corner)
+		self._margin = self._spin(card, "отступ вотермарка от края кадра", 0, 200, 24)
+		self._labeled(look, "Отступ, пикс:", self._margin)
+		self._opacity = self._dspin(card, "1 — непрозрачен", 0.05, 1.0, 1.0, 0.05)
+		self._labeled(look, "Прозрачность:", self._opacity)
+		self._scale = self._dspin(card, "доля ширины кадра", 0.05, 0.5, 0.15, 0.01)
+		self._labeled(look, "Масштаб:", self._scale)
+		look.addStretch()
+		box.addLayout(look)
+		box.addLayout(self._watermark_window_row(card))
+		return card
 
-	def _build_watermark_window_row(self) -> None:
-		"""Окно показа вотермарка: отступы от краёв и плавность переходов."""
+	def _watermark_window_row(self, card: CardWidget) -> QHBoxLayout:
+		"""Строка окна показа: отступы от краёв ролика и плавность."""
 		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Показ вотермарка:", self))
-		self._wm_start = self._dspin(
-			row, "появление через N секунд (0 — с начала)", 0.0, 3600.0, 0.0, 1.0
-		)
-		row.addWidget(CaptionLabel("с после начала", self))
-		self._wm_end = self._dspin(
-			row, "скрыть за N секунд до конца (0 — до конца)", 0.0, 3600.0, 0.0, 1.0
-		)
-		row.addWidget(CaptionLabel("с до конца", self))
-		self._wm_fade = self._dspin(
-			row, "плавность появления/исчезания, с (0 — резко)", 0.0, 30.0, 0.0, 0.5
-		)
-		row.addWidget(CaptionLabel("с плавность", self))
+		self._wm_start = self._dspin(card, "0 — виден с самого начала", 0.0, 3600.0, 0.0, 1.0)
+		self._labeled(row, "Появление через, с:", self._wm_start)
+		self._wm_end = self._dspin(card, "0 — виден до самого конца", 0.0, 3600.0, 0.0, 1.0)
+		self._labeled(row, "Скрыть за, с до конца:", self._wm_end)
+		self._wm_fade = self._dspin(card, "0 — появляется/исчезает резко", 0.0, 30.0, 0.0, 0.5)
+		self._labeled(row, "Плавность, с:", self._wm_fade)
 		row.addStretch()
-		self._layout.addLayout(row)
+		return row
 
-	def _build_intro_block(self) -> None:
-		"""Заставка: включение, источник кадра, тайминги."""
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Заставка для превью:", self))
-		self._intro = SwitchButton(self)
-		row.addWidget(self._intro)
-		row.addStretch()
-		self._hold = self._dspin(row, "держать, с", 0.2, 5.0, 1.0, 0.1)
-		self._xfade = self._dspin(row, "растворение, с", 0.1, 3.0, 0.5, 0.1)
-		self._layout.addLayout(row)
+	def _intro_card(self) -> CardWidget:
+		"""Раздел «Кадр для превью»: заставка в начале ролика."""
+		card, box = self._card("Кадр для превью (заставка)")
+		top = QHBoxLayout()
+		self._intro = SwitchButton(card)
+		self._labeled(top, "Включена:", self._intro)
+		self._hold = self._dspin(card, "сколько секунд держать кадр", 0.2, 5.0, 1.0, 0.1)
+		self._labeled(top, "Держать, с:", self._hold)
+		self._xfade = self._dspin(card, "длительность растворения в видео", 0.1, 3.0, 0.5, 0.1)
+		self._labeled(top, "Растворение, с:", self._xfade)
+		top.addStretch()
+		box.addLayout(top)
 		src_row = QHBoxLayout()
-		self._intro_kind = ComboBox(self)
+		self._intro_kind = ComboBox(card)
 		for label, _code in _INTRO_SOURCES:
 			self._intro_kind.addItem(label)
-		self._intro_value = LineEdit(self)
+		self._labeled(src_row, "Источник кадра:", self._intro_kind)
+		src_row.addWidget(BodyLabel("Значение:", card))
+		self._intro_value = LineEdit(card)
 		self._intro_value.setPlaceholderText("секунды или путь к картинке")
-		src_row.addWidget(self._intro_kind)
-		src_row.addWidget(self._intro_value)
-		self._layout.addLayout(src_row)
+		src_row.addWidget(self._intro_value, stretch=1)
+		box.addLayout(src_row)
 		self._intro.checkedChanged.connect(self._toggle_intro_controls)
 		self._toggle_intro_controls(False)
+		return card
 
 	def _toggle_intro_controls(self, enabled: bool) -> None:
 		"""Поля заставки активны только при включённом переключателе."""
 		for widget in (self._hold, self._xfade, self._intro_kind, self._intro_value):
 			widget.setEnabled(enabled)
 
-	def _build_flags_row(self) -> None:
-		"""Обложка, звук и качество."""
+	def _output_card(self) -> CardWidget:
+		"""Раздел «Вывод»: обложка, звук, качество."""
+		card, box = self._card("Вывод")
 		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Вшить обложку:", self))
-		self._cover = SwitchButton(self)
-		row.addWidget(self._cover)
-		row.addSpacing(24)
-		row.addWidget(BodyLabel("Убрать звук:", self))
-		self._no_audio = SwitchButton(self)
-		row.addWidget(self._no_audio)
-		row.addSpacing(24)
-		row.addWidget(BodyLabel("Качество, Мбит/с:", self))
-		self._bitrate = self._dspin(row, "битрейт видео", 0.0, 50.0, 0.0, 0.5)
-		row.addWidget(CaptionLabel("0 — как в оригинале", self))
+		self._cover = SwitchButton(card)
+		self._labeled(row, "Вшить обложку:", self._cover)
+		self._no_audio = SwitchButton(card)
+		self._labeled(row, "Убрать звук:", self._no_audio)
+		self._bitrate = self._dspin(card, "битрейт видео", 0.0, 50.0, 0.0, 0.5)
+		self._labeled(row, "Качество, Мбит/с:", self._bitrate)
+		row.addWidget(CaptionLabel("0 — как в оригинале", card))
 		row.addStretch()
-		self._layout.addLayout(row)
+		box.addLayout(row)
+		return card
 
-	def _spin(self, row: QHBoxLayout, tip: str, lo: int, hi: int, val: int) -> SpinBox:
-		box = SpinBox(self)
+	def _spin(self, card: QWidget, tip: str, lo: int, hi: int, val: int) -> SpinBox:
+		box = SpinBox(card)
 		box.setRange(lo, hi)
 		box.setValue(val)
 		box.setToolTip(tip)
-		row.addWidget(box)
 		return box
 
 	def _dspin(
-		self, row: QHBoxLayout, tip: str, lo: float, hi: float, val: float, step: float
+		self, card: QWidget, tip: str, lo: float, hi: float, val: float, step: float
 	) -> DoubleSpinBox:
-		box = DoubleSpinBox(self)
+		box = DoubleSpinBox(card)
 		box.setRange(lo, hi)
 		box.setSingleStep(step)
 		box.setValue(val)
 		box.setToolTip(tip)
-		row.addWidget(box)
 		return box
 
 	def _pick_watermark(self) -> None:
@@ -427,9 +443,11 @@ class VideoPage(ScrollArea):
 		layout.addWidget(SubtitleLabel("Подготовка видео", self))
 		self._build_source_row(layout)
 		self._build_preset_row(layout)
+		layout.addSpacing(8)
+		layout.addWidget(SubtitleLabel("Параметры обработки", self))
 		layout.addWidget(CaptionLabel(
-			"Параметры: к видео применяется то, что на экране; "
-			"пресет — только загрузка и сохранение набора.", self,
+			"К видео применяется то, что на экране; пресет — только "
+			"загрузка и сохранение набора.", self,
 		))
 		self._form = _PresetForm(self)
 		layout.addWidget(self._form)
