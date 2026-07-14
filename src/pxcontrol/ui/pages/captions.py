@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+	QGridLayout,
 	QHBoxLayout,
 	QListWidget,
 	QListWidgetItem,
@@ -26,6 +27,7 @@ from qfluentwidgets import (
 	FlowLayout,
 	LineEdit,
 	MessageBoxBase,
+	PillPushButton,
 	PushButton,
 	SubtitleLabel,
 	SwitchButton,
@@ -44,56 +46,64 @@ from pxcontrol.ui.pages.common import bind, clear_layout, show_error
 
 
 class _FieldRow:
-	"""Строка поля в диалоге сборки: включённость и ввод значений."""
+	"""Строка поля в диалоге сборки: включённость и ввод значений.
+
+	Раскладка — сетка: колонка имён (одинаковой ширины) и колонка
+	значений; значения множественных полей — «пилюли»-теги, визуально
+	отличимые от чекбокса включения поля.
+	"""
 
 	def __init__(
-		self, dialog: QWidget, layout: QVBoxLayout, tf: TemplateFieldDto
+		self, dialog: QWidget, grid: QGridLayout, row: int, tf: TemplateFieldDto
 	) -> None:
 		self.field = tf.field
 		self.check = CheckBox(self.field.name, dialog)
 		self.check.setChecked(tf.enabled)
-		self.check.setMinimumWidth(140)
 		if self.field.multiple:
-			self._build_multi(dialog, layout)
+			grid.addWidget(
+				self.check, row, 0,
+				Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+			)
+			grid.addWidget(self._build_multi(dialog), row, 1)
 		else:
-			self._build_single(dialog, layout)
+			grid.addWidget(self.check, row, 0, Qt.AlignmentFlag.AlignLeft)
+			grid.addWidget(self._build_single(dialog), row, 1)
 
-	def _build_single(self, dialog: QWidget, layout: QVBoxLayout) -> None:
+	def _build_single(self, dialog: QWidget) -> QWidget:
 		"""Одно значение: редактируемый список со словарём."""
-		row = QHBoxLayout()
-		row.addWidget(self.check)
 		self._edit = EditableComboBox(dialog)
 		self._edit.addItems(self.field.values)
 		self._edit.setCurrentIndex(-1)
-		row.addWidget(self._edit, stretch=1)
-		layout.addLayout(row)
+		widget: QWidget = self._edit
+		return widget
 
-	def _build_multi(self, dialog: QWidget, layout: QVBoxLayout) -> None:
-		"""Несколько значений: все значения словаря чекбоксами + строка новых."""
-		row = QHBoxLayout()
-		row.addWidget(self.check, alignment=Qt.AlignmentFlag.AlignTop)
-		column = QVBoxLayout()
-		self._value_checks: list[CheckBox] = []
+	def _build_multi(self, dialog: QWidget) -> QWidget:
+		"""Несколько значений: «пилюли»-теги словаря + строка новых."""
+		box = QWidget(dialog)
+		column = QVBoxLayout(box)
+		column.setContentsMargins(0, 0, 0, 0)
+		column.setSpacing(6)
+		self._pills: list[PillPushButton] = []
 		if self.field.values:
-			values_box = QWidget(dialog)
-			flow = FlowLayout(values_box, needAni=False)
+			pills_box = QWidget(box)
+			flow = FlowLayout(pills_box, needAni=False)
+			flow.setContentsMargins(0, 0, 0, 0)
 			for value in self.field.values:
-				box = CheckBox(value, values_box)
-				flow.addWidget(box)
-				self._value_checks.append(box)
-			column.addWidget(values_box)
-		self._line = LineEdit(dialog)
+				pill = PillPushButton(value, pills_box)
+				flow.addWidget(pill)
+				self._pills.append(pill)
+			column.addWidget(pills_box)
+		self._line = LineEdit(box)
 		self._line.setPlaceholderText("новые значения через запятую…")
 		column.addWidget(self._line)
-		row.addLayout(column, stretch=1)
-		layout.addLayout(row)
+		return box
 
 	def values(self) -> list[str]:
-		"""Введённые значения: отмеченные чекбоксы + строка (без дублей)."""
+		"""Введённые значения: отмеченные пилюли + строка (без дублей)."""
 		if not self.field.multiple:
 			value = str(self._edit.currentText()).strip()
 			return [value] if value else []
-		picked = [str(b.text()) for b in self._value_checks if b.isChecked()]
+		picked = [str(p.text()) for p in self._pills if p.isChecked()]
 		typed = [v.strip() for v in str(self._line.text()).split(",") if v.strip()]
 		return list(dict.fromkeys([*picked, *typed]))
 
@@ -113,8 +123,11 @@ class CaptionDialog(MessageBoxBase):
 		self._title.setPlaceholderText("Название (первой строкой, жирным)…")
 		self._title.setText(suggested_title)
 		self.viewLayout.addWidget(self._title)
-		self._fields_box = QVBoxLayout()
-		self.viewLayout.addLayout(self._fields_box)
+		self._fields_grid = QGridLayout()
+		self._fields_grid.setHorizontalSpacing(16)
+		self._fields_grid.setVerticalSpacing(10)
+		self._fields_grid.setColumnStretch(1, 1)
+		self.viewLayout.addLayout(self._fields_grid)
 		# индекс и перерисовка — после сборки формы, сигнал подключаем последним
 		index = self._last_used_index()
 		self._combo.setCurrentIndex(index)
@@ -143,11 +156,11 @@ class CaptionDialog(MessageBoxBase):
 		return max(stamps)[1] if stamps else 0
 
 	def _show_template(self, index: int) -> None:
-		"""Перестраивает строки полей под выбранный шаблон."""
-		clear_layout(self._fields_box)
+		"""Перестраивает сетку полей под выбранный шаблон."""
+		clear_layout(self._fields_grid)
 		self._rows = [
-			_FieldRow(self, self._fields_box, tf)
-			for tf in self._templates[index].fields
+			_FieldRow(self, self._fields_grid, row, tf)
+			for row, tf in enumerate(self._templates[index].fields)
 		]
 
 	def template_id(self) -> int:
