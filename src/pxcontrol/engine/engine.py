@@ -10,6 +10,7 @@ from pxcontrol.config import Settings
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import TgAccount
 from pxcontrol.engine.services.accounts import AccountsService
+from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.channels import ChannelsService
 from pxcontrol.engine.services.posts import PostsService
 from pxcontrol.engine.services.video import VideoService
@@ -34,6 +35,7 @@ class Engine:
 		self.channels = ChannelsService(self.db, self.gateway)
 		self.posts = PostsService(self.db, self.gateway, settings.ffmpeg_path)
 		self.video = VideoService(self.db, settings.ffmpeg_path)
+		self.captions = CaptionsService(self.db)
 
 	async def start(self) -> None:
 		"""Запускает компоненты в правильном порядке."""

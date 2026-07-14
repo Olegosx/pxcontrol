@@ -131,3 +131,71 @@ class Channel(TimestampMixin, Base):
 
 	bot: Mapped["Bot | None"] = relationship(back_populates="channels")
 	video_preset: Mapped["VideoPreset | None"] = relationship(back_populates="channels")
+
+
+class CaptionField(TimestampMixin, Base):
+	"""Поле подписи канала: пул полей + словарь значений.
+
+	Поле («Genre», «Year»…) и его словарь существуют у канала в одном
+	экземпляре; шаблоны лишь включают поле в свой состав — так значение,
+	добавленное при сборке по одному шаблону, видно и в остальных.
+	"""
+
+	__tablename__ = "caption_fields"
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
+	name: Mapped[str] = mapped_column(String(64))
+	hashtag: Mapped[bool] = mapped_column(Boolean, default=True)
+	multiple: Mapped[bool] = mapped_column(Boolean, default=False)
+
+	values: Mapped[list["CaptionValue"]] = relationship(
+		back_populates="field", cascade="all, delete-orphan",
+		order_by="CaptionValue.value",
+	)
+
+
+class CaptionValue(TimestampMixin, Base):
+	"""Значение словаря поля подписи (например, конкретный жанр)."""
+
+	__tablename__ = "caption_values"
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	field_id: Mapped[int] = mapped_column(ForeignKey("caption_fields.id"))
+	value: Mapped[str] = mapped_column(String(128))
+
+	field: Mapped["CaptionField"] = relationship(back_populates="values")
+
+
+class CaptionTemplate(TimestampMixin, Base):
+	"""Именованный шаблон подписи канала (упорядоченный набор полей)."""
+
+	__tablename__ = "caption_templates"
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
+	name: Mapped[str] = mapped_column(String(64))
+	# для предвыбора «последнего использованного» шаблона в диалоге
+	last_used_at: Mapped[datetime | None] = mapped_column(
+		DateTime(timezone=True), default=None
+	)
+
+	fields: Mapped[list["CaptionTemplateField"]] = relationship(
+		back_populates="template", cascade="all, delete-orphan",
+		order_by="CaptionTemplateField.position",
+	)
+
+
+class CaptionTemplateField(Base):
+	"""Строка состава шаблона: поле, порядок, включено ли по умолчанию."""
+
+	__tablename__ = "caption_template_fields"
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	template_id: Mapped[int] = mapped_column(ForeignKey("caption_templates.id"))
+	field_id: Mapped[int] = mapped_column(ForeignKey("caption_fields.id"))
+	position: Mapped[int] = mapped_column(Integer, default=0)
+	enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+	template: Mapped["CaptionTemplate"] = relationship(back_populates="fields")
+	field: Mapped["CaptionField"] = relationship()

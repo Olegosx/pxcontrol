@@ -28,10 +28,12 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.captions import TemplateDto, title_from_filename
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import MediaKind, PostDraft
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import WhenRow, show_error
+from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
+from pxcontrol.ui.pages.common import WhenRow, noop, show_error
 
 #: Сегменты типов контента: подпись → тип → фильтр диалога выбора файла.
 _KINDS: list[tuple[str, MediaKind, str]] = [
@@ -75,6 +77,7 @@ class PublishPage(ScrollArea):
 		self._text.setPlaceholderText("Текст поста…")
 		self._text.setMinimumHeight(120)
 		layout.addWidget(self._text)
+		self._build_caption_tools(layout)
 		self._build_file_row(layout)
 		self._when_row = WhenRow(self, layout)
 		self._build_send_row(layout)
@@ -92,6 +95,18 @@ class PublishPage(ScrollArea):
 			self._segments.addItem(routeKey=kind.value, text=label)
 		self._segments.currentItemChanged.connect(self._on_kind_changed)
 		layout.addWidget(self._segments)
+
+	def _build_caption_tools(self, layout: QVBoxLayout) -> None:
+		"""Кнопки шаблонизатора подписи."""
+		row = QHBoxLayout()
+		compose = PushButton("Собрать подпись…", self)
+		compose.clicked.connect(self._on_compose_caption)
+		row.addWidget(compose)
+		setup = PushButton("Поля подписи…", self)
+		setup.clicked.connect(self._on_setup_fields)
+		row.addWidget(setup)
+		row.addStretch()
+		layout.addLayout(row)
 
 	def _build_file_row(self, layout: QVBoxLayout) -> None:
 		"""Строка выбора файла вложения (скрыта для типа «Текст»)."""
@@ -173,6 +188,55 @@ class PublishPage(ScrollArea):
 		percent = int(fraction * 100)
 		self._progress.setValue(percent)
 		self._progress_label.setText(f"Загрузка в Telegram: {percent}%")
+
+	# --- подпись по шаблону -----------------------------------------------------
+
+	def _current_channel(self) -> ChannelDto | None:
+		"""Выбранный канал или None (с показом подсказки)."""
+		index = int(self._channel_combo.currentIndex())
+		if index < 0 or index >= len(self._channels):
+			show_error(self, "Сначала подключите и выберите канал.")
+			return None
+		return self._channels[index]
+
+	def _on_setup_fields(self) -> None:
+		"""Открывает настройку полей и шаблонов подписи канала."""
+		channel = self._current_channel()
+		if channel is not None:
+			FieldsDialog(self._worker, channel.id, channel.title, self.window()).exec()
+
+	def _on_compose_caption(self) -> None:
+		"""Загружает шаблоны канала и открывает диалог сборки."""
+		channel = self._current_channel()
+		if channel is None:
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.captions.list_templates(channel.id),
+			self, self._open_caption_dialog, partial(show_error, self),
+		)
+
+	def _open_caption_dialog(self, templates: list[TemplateDto]) -> None:
+		"""Собирает подпись по шаблону и вставляет её в поле текста."""
+		if not all(t.fields for t in templates) or not templates:
+			show_error(
+				self, "Сначала настройте поля и шаблон — кнопка «Поля подписи…».",
+			)
+			return
+		title = ""
+		if self._kind is not MediaKind.NONE and str(self._file_edit.text()).strip():
+			title = title_from_filename(str(self._file_edit.text()).strip())
+		dialog = CaptionDialog(templates, title, self.window())
+		if not dialog.exec():
+			return
+		self._text.setPlainText(dialog.caption())
+		run_in_engine(
+			self._worker,
+			self._worker.engine.captions.record_usage(
+				dialog.template_id(), dialog.used_values()
+			),
+			self, noop, partial(show_error, self),
+		)
 
 	# --- отправка -------------------------------------------------------------------
 

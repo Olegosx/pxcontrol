@@ -33,6 +33,8 @@
 | [channels.md](03-modules/channels.md) | Управление каналами | 🟡 |
 | [telegram-gateway.md](03-modules/telegram-gateway.md) | Шлюз к Telegram Bot API | 🟡 |
 | [scheduler.md](03-modules/scheduler.md) | Планировщик и отложенный постинг | 🟡 |
+| [video-processing.md](03-modules/video-processing.md) | Подготовка видео | 🟢 |
+| [captions.md](03-modules/captions.md) | Подписи к постам (шаблоны) | 🟢 |
 | [content-sources.md](03-modules/content-sources.md) | Источники и парсинг | 🟡 |
 | [ai-generation.md](03-modules/ai-generation.md) | Генерация контента ИИ | 🟡 |
 | [moderation-queue.md](03-modules/moderation-queue.md) | Очередь модерации | 🟡 |
