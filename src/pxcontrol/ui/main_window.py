@@ -21,7 +21,9 @@ class MainWindow(FluentWindow):
 		super().__init__()
 		self._worker = worker
 		self.setWindowTitle("pXcontrol")
-		self.resize(1000, 640)
+		# ширина — под форму параметров видео (самая широкая страница)
+		self.resize(1160, 800)
+		self.setMinimumSize(1000, 640)
 		self._build_navigation()
 
 	def _build_navigation(self) -> None:
