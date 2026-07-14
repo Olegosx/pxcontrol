@@ -85,10 +85,15 @@ def row_card(
 	layout.setContentsMargins(16, 10, 10, 10)
 	column = QVBoxLayout()
 	column.setSpacing(2)
-	column.addWidget(StrongBodyLabel(title, card))
-	column.addWidget(CaptionLabel(subtitle, card))
-	layout.addLayout(column)
-	layout.addStretch()
+	# перенос строк: длинный текст (имя файла и т.п.) не должен
+	# распирать карточку и уводить элементы за пределы окна
+	title_label = StrongBodyLabel(title, card)
+	title_label.setWordWrap(True)
+	subtitle_label = CaptionLabel(subtitle, card)
+	subtitle_label.setWordWrap(True)
+	column.addWidget(title_label)
+	column.addWidget(subtitle_label)
+	layout.addLayout(column, stretch=1)
 	if trailing is not None:
 		layout.addWidget(trailing)
 	if on_delete is not None:

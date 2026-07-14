@@ -613,7 +613,9 @@ class VideoPage(ScrollArea):
 	def _on_processed(self, output_path: object) -> None:
 		self._hide_progress()
 		path = Path(str(output_path))
-		InfoBar.success("Готово", path.name, parent=self)
+		# всплывашка не переносит строки — длинное имя укорачиваем
+		short = path.name if len(path.name) <= 60 else f"{path.name[:57]}…"
+		InfoBar.success("Готово", short, parent=self)
 		clear_layout(self._result_box)
 		open_btn = PushButton(FluentIcon.PLAY, "Открыть", self)
 		open_btn.clicked.connect(bind(self._open_path, str(path)))
