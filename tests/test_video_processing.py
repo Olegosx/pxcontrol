@@ -139,6 +139,42 @@ def test_resolve_timestamp_modes() -> None:
 		resolve_timestamp("bogus", INFO)
 
 
+# --- окно показа вотермарка -------------------------------------------------------
+
+
+def test_watermark_window_offsets_to_absolute() -> None:
+	"""Отступы от краёв превращаются в абсолютное окно показа."""
+	from pxcontrol.engine.video.pipeline import ProcessingOptions, _watermark_options
+
+	opts = ProcessingOptions(
+		input="a", output="b", watermark="/x/wm.png",
+		wm_start_offset=3.0, wm_end_offset=10.0,
+	)
+	wm = _watermark_options(opts, INFO)  # длительность 100 с
+	assert wm.start == 3.0 and wm.end == 90.0
+	plain = _watermark_options(
+		ProcessingOptions(input="a", output="b", watermark="/x/wm.png"), INFO
+	)
+	assert plain.start is None and plain.end is None
+
+
+def test_watermark_window_degenerate_raises() -> None:
+	"""Отступы больше длительности ролика — понятная ошибка до кодирования."""
+	from pxcontrol.engine.video.pipeline import ProcessingOptions, _watermark_options
+
+	opts = ProcessingOptions(
+		input="a", output="b", watermark="/x/wm.png",
+		wm_start_offset=60.0, wm_end_offset=50.0,  # 60 ≥ 100−50
+	)
+	with pytest.raises(ValueError, match="не помещаются"):
+		_watermark_options(opts, INFO)
+	# без вотермарка те же отступы безвредны (валидировать нечего)
+	no_wm = ProcessingOptions(
+		input="a", output="b", wm_start_offset=60.0, wm_end_offset=50.0
+	)
+	assert _watermark_options(no_wm, INFO).start == 60.0
+
+
 # --- разбор прогресса ffmpeg -----------------------------------------------------
 
 

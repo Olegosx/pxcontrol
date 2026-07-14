@@ -114,6 +114,22 @@ class _PresetDialog(MessageBoxBase):
 		self._scale = self._dspin(row, "масштаб", 0.05, 0.5, 0.15, 0.01)
 		row.insertWidget(0, self._corner)
 		self.viewLayout.addLayout(row)
+		self._build_watermark_window_row()
+
+	def _build_watermark_window_row(self) -> None:
+		"""Окно показа вотермарка: отступы от начала и до конца ролика."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Показ вотермарка:", self))
+		self._wm_start = self._dspin(
+			row, "появление через N секунд (0 — с начала)", 0.0, 3600.0, 0.0, 1.0
+		)
+		row.addWidget(CaptionLabel("с после начала", self))
+		self._wm_end = self._dspin(
+			row, "скрыть за N секунд до конца (0 — до конца)", 0.0, 3600.0, 0.0, 1.0
+		)
+		row.addWidget(CaptionLabel("с до конца", self))
+		row.addStretch()
+		self.viewLayout.addLayout(row)
 
 	def _build_intro_block(self) -> None:
 		"""Заставка: включение, источник кадра, тайминги."""
@@ -201,6 +217,8 @@ class _PresetDialog(MessageBoxBase):
 		self._margin.setValue(fields.wm_margin)
 		self._opacity.setValue(fields.wm_opacity)
 		self._scale.setValue(fields.wm_scale)
+		self._wm_start.setValue(fields.wm_start_offset or 0.0)
+		self._wm_end.setValue(fields.wm_end_offset or 0.0)
 		self._intro.setChecked(fields.intro)
 		self._hold.setValue(fields.intro_hold)
 		self._xfade.setValue(fields.xfade)
@@ -231,6 +249,8 @@ class _PresetDialog(MessageBoxBase):
 			wm_margin=int(self._margin.value()),
 			wm_opacity=round(float(self._opacity.value()), 3),
 			wm_scale=round(float(self._scale.value()), 3),
+			wm_start_offset=float(self._wm_start.value()) or None,
+			wm_end_offset=float(self._wm_end.value()) or None,
 			intro=self._intro.isChecked(),
 			intro_source=self._intro_source(),
 			intro_hold=round(float(self._hold.value()), 2),

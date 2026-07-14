@@ -43,8 +43,9 @@ class ProcessingOptions:
 	wm_margin: int = 24
 	wm_opacity: float = 1.0
 	wm_scale: float = 0.15
-	wm_start: float | None = None
-	wm_end: float | None = None
+	# окно показа вотермарка: отступ от начала и отступ ДО КОНЦА ролика (сек)
+	wm_start_offset: float | None = None
+	wm_end_offset: float | None = None
 	intro: bool = False
 	intro_source: str = "random-middle"
 	intro_hold: float = 1.0
@@ -60,15 +61,33 @@ def _fps_arg(fps: float) -> str:
 	return f"{fps:.5f}"
 
 
-def _watermark_options(opts: ProcessingOptions) -> WatermarkOptions:
-	"""Собирает параметры вотермарка из общих опций обработки."""
+def _watermark_options(opts: ProcessingOptions, info: VideoInfo) -> WatermarkOptions:
+	"""Собирает параметры вотермарка; отступы от краёв → абсолютное окно.
+
+	Начало окна = отступ от начала; конец = длительность − отступ до конца.
+	Граф фильтров работает с абсолютными моментами, как и раньше.
+
+	Raises:
+		ValueError: Окно показа пустое (отступы не помещаются в ролик).
+	"""
+	start = opts.wm_start_offset or None
+	end: float | None = None
+	if opts.wm_end_offset:
+		end = info.duration - opts.wm_end_offset
+	if opts.watermark and (start is not None or end is not None):
+		effective_end = end if end is not None else info.duration
+		if effective_end <= (start or 0.0):
+			raise ValueError(
+				"Окно показа вотермарка пустое: отступы "
+				"не помещаются в длительность ролика."
+			)
 	return WatermarkOptions(
 		corner=opts.wm_corner,
 		margin=opts.wm_margin,
 		opacity=opts.wm_opacity,
 		scale=opts.wm_scale,
-		start=opts.wm_start,
-		end=opts.wm_end,
+		start=start,
+		end=end,
 	)
 
 
@@ -194,7 +213,7 @@ def _run_main(
 	graph = build_filter_complex(
 		fps=_fps_arg(info.fps), width=width, height=height, has_intro=opts.intro,
 		hold=opts.intro_hold, xfade=opts.xfade, still_index=still_index,
-		has_watermark=bool(opts.watermark), wm=_watermark_options(opts),
+		has_watermark=bool(opts.watermark), wm=_watermark_options(opts, info),
 		wm_index=wm_index, has_audio=has_audio,
 	)
 	cmd = _assemble_command(
