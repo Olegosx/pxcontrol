@@ -54,6 +54,8 @@ class ProcessingOptions:
 	xfade: float = 0.5
 	cover: bool = False
 	no_audio: bool = False
+	# комментарий в метаданные контейнера (тег comment); None — не писать
+	meta_comment: str | None = None
 	ffmpeg_bin: str = "ffmpeg"
 	ffprobe_bin: str = "ffprobe"
 
@@ -141,7 +143,8 @@ def _video_quality_args(opts: ProcessingOptions, info: VideoInfo) -> list[str]:
 
 def _assemble_command(
 	ffmpeg_bin: str, inputs: list[str], filter_complex: str, video_label: str,
-	audio_label: str | None, quality: list[str], output: str,
+	audio_label: str | None, quality: list[str], meta_comment: str | None,
+	output: str,
 ) -> list[str]:
 	"""Собирает полную команду ffmpeg для основной обработки."""
 	cmd = [ffmpeg_bin, "-y", *inputs, "-filter_complex", filter_complex, "-map", video_label]
@@ -150,6 +153,8 @@ def _assemble_command(
 	cmd += ["-c:v", "libx264", "-preset", "medium", *quality, "-pix_fmt", "yuv420p"]
 	if audio_label:
 		cmd += ["-c:a", "aac", "-b:a", "192k"]
+	if meta_comment:
+		cmd += ["-metadata", f"comment={meta_comment}"]
 	# -progress pipe:1 — ffmpeg пишет ход кодирования в stdout (для прогресс-бара)
 	cmd += ["-progress", "pipe:1", "-nostats", "-movflags", "+faststart", output]
 	return cmd
@@ -231,7 +236,8 @@ def _run_main(
 	)
 	cmd = _assemble_command(
 		opts.ffmpeg_bin, inputs, graph.filter_complex, graph.video_label,
-		graph.audio_label, _video_quality_args(opts, info), output,
+		graph.audio_label, _video_quality_args(opts, info),
+		opts.meta_comment, output,
 	)
 	_run_ffmpeg_streaming(cmd, "обработка видео", total, on_progress)
 

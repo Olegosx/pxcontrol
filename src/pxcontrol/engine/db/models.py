@@ -109,6 +109,8 @@ class VideoPreset(TimestampMixin, Base):
 	no_audio: Mapped[bool] = mapped_column(Boolean, default=False)
 	# NULL — «как в оригинале»: целевой битрейт берётся из исходника
 	video_bitrate_kbps: Mapped[int | None] = mapped_column(Integer, default=None)
+	# комментарий в метаданные файла (тег comment): «ссылка — описание»
+	meta_comment: Mapped[str | None] = mapped_column(String(512), default=None)
 
 	channels: Mapped[list["Channel"]] = relationship(back_populates="video_preset")
 

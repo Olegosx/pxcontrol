@@ -223,6 +223,26 @@ def test_watermark_window_degenerate_raises() -> None:
 	assert _watermark_options(no_wm, INFO).start == 60.0
 
 
+# --- метаданные -------------------------------------------------------------------
+
+
+def test_assemble_command_meta_comment() -> None:
+	"""Комментарий попадает в команду тегом comment; пустой — не пишется."""
+	from pxcontrol.engine.video.pipeline import _assemble_command
+
+	with_meta = _assemble_command(
+		"ffmpeg", ["-i", "a.mp4"], "graph", "[v]", None, ["-crf", "20"],
+		"https://t.me/mych — канал", "out.mp4",
+	)
+	assert "-metadata" in with_meta
+	assert "comment=https://t.me/mych — канал" in with_meta
+	without = _assemble_command(
+		"ffmpeg", ["-i", "a.mp4"], "graph", "[v]", None, ["-crf", "20"],
+		None, "out.mp4",
+	)
+	assert "-metadata" not in without
+
+
 # --- разбор прогресса ffmpeg -----------------------------------------------------
 
 

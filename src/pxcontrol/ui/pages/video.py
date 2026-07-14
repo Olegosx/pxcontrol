@@ -195,6 +195,14 @@ class _PresetForm(QWidget):
 		row.addWidget(CaptionLabel("0 — как в оригинале", card))
 		row.addStretch()
 		box.addLayout(row)
+		comment_row = QHBoxLayout()
+		comment_row.addWidget(BodyLabel("Комментарий (метаданные):", card))
+		self._meta_comment = LineEdit(card)
+		self._meta_comment.setPlaceholderText(
+			"https://t.me/канал — описание (видно в свойствах файла; пусто — не писать)…"
+		)
+		comment_row.addWidget(self._meta_comment, stretch=1)
+		box.addLayout(comment_row)
 		return card
 
 	def _spin(self, card: QWidget, tip: str, lo: int, hi: int, val: int) -> SpinBox:
@@ -245,6 +253,7 @@ class _PresetForm(QWidget):
 		self._no_audio.setChecked(fields.no_audio)
 		kbps = fields.video_bitrate_kbps
 		self._bitrate.setValue(kbps / 1000 if kbps else 0.0)
+		self._meta_comment.setText(fields.meta_comment or "")
 
 	def _intro_source(self) -> str:
 		"""Собирает строку источника кадра ('random-middle'/'time:…'/'image:…')."""
@@ -272,6 +281,7 @@ class _PresetForm(QWidget):
 			cover=self._cover.isChecked(),
 			no_audio=self._no_audio.isChecked(),
 			video_bitrate_kbps=self._bitrate_kbps(),
+			meta_comment=str(self._meta_comment.text()).strip() or None,
 		)
 
 	def _bitrate_kbps(self) -> int | None:

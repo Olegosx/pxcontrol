@@ -75,6 +75,7 @@ class PresetFields:
 	cover: bool = False
 	no_audio: bool = False
 	video_bitrate_kbps: int | None = None
+	meta_comment: str | None = None  # тег comment: «ссылка на канал — описание»
 
 
 class VideoService:
@@ -145,6 +146,7 @@ class VideoService:
 			intro_hold=preset.intro_hold, xfade=preset.xfade,
 			cover=preset.cover, no_audio=preset.no_audio,
 			video_bitrate_kbps=preset.video_bitrate_kbps,
+			meta_comment=preset.meta_comment,
 		)
 
 	async def delete_preset(self, preset_id: int) -> None:
@@ -263,5 +265,6 @@ class VideoService:
 			intro_hold=fields.intro_hold,
 			xfade=fields.xfade, cover=fields.cover, no_audio=fields.no_audio,
 			video_bitrate_kbps=fields.video_bitrate_kbps,
+			meta_comment=fields.meta_comment,
 			ffmpeg_bin=self._ffmpeg, ffprobe_bin=ffprobe,
 		)

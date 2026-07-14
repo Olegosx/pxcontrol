@@ -15,7 +15,7 @@ FIELDS = PresetFields(
 	name="Бренд", watermark_path="/tmp/logo.png", wm_corner="br",
 	wm_opacity=0.8, wm_start_offset=2.0, wm_end_offset=15.0, wm_fade=1.5,
 	intro=True, intro_source="time:5.0", cover=True,
-	video_bitrate_kbps=2500,
+	video_bitrate_kbps=2500, meta_comment="https://t.me/mych — мой канал",
 )
 
 
@@ -90,6 +90,7 @@ async def test_prepare_maps_fields_to_options(
 	assert options.intro and options.intro_source == "time:5.0"
 	assert options.cover is True
 	assert options.video_bitrate_kbps == 2500
+	assert options.meta_comment == "https://t.me/mych — мой канал"
 	assert "processed" in options.output and "исходник_Бренд_" in options.output
 
 
