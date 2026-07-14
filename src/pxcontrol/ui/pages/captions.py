@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import partial
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -24,6 +23,7 @@ from qfluentwidgets import (
 	CheckBox,
 	ComboBox,
 	EditableComboBox,
+	FlowLayout,
 	LineEdit,
 	MessageBoxBase,
 	PushButton,
@@ -50,51 +50,52 @@ class _FieldRow:
 		self, dialog: QWidget, layout: QVBoxLayout, tf: TemplateFieldDto
 	) -> None:
 		self.field = tf.field
-		row = QHBoxLayout()
 		self.check = CheckBox(self.field.name, dialog)
 		self.check.setChecked(tf.enabled)
 		self.check.setMinimumWidth(140)
-		row.addWidget(self.check)
 		if self.field.multiple:
-			self._build_multi(dialog, row)
+			self._build_multi(dialog, layout)
 		else:
-			self._build_single(dialog, row)
-		layout.addLayout(row)
+			self._build_single(dialog, layout)
 
-	def _build_single(self, dialog: QWidget, row: QHBoxLayout) -> None:
+	def _build_single(self, dialog: QWidget, layout: QVBoxLayout) -> None:
 		"""Одно значение: редактируемый список со словарём."""
+		row = QHBoxLayout()
+		row.addWidget(self.check)
 		self._edit = EditableComboBox(dialog)
 		self._edit.addItems(self.field.values)
 		self._edit.setCurrentIndex(-1)
 		row.addWidget(self._edit, stretch=1)
+		layout.addLayout(row)
 
-	def _build_multi(self, dialog: QWidget, row: QHBoxLayout) -> None:
-		"""Несколько значений: строка через запятую + добавление из словаря."""
+	def _build_multi(self, dialog: QWidget, layout: QVBoxLayout) -> None:
+		"""Несколько значений: все значения словаря чекбоксами + строка новых."""
+		row = QHBoxLayout()
+		row.addWidget(self.check, alignment=Qt.AlignmentFlag.AlignTop)
+		column = QVBoxLayout()
+		self._value_checks: list[CheckBox] = []
+		if self.field.values:
+			values_box = QWidget(dialog)
+			flow = FlowLayout(values_box, needAni=False)
+			for value in self.field.values:
+				box = CheckBox(value, values_box)
+				flow.addWidget(box)
+				self._value_checks.append(box)
+			column.addWidget(values_box)
 		self._line = LineEdit(dialog)
-		self._line.setPlaceholderText("значения через запятую…")
-		row.addWidget(self._line, stretch=1)
-		picker = ComboBox(dialog)
-		picker.addItems(["— из словаря —", *self.field.values])
-		picker.activated.connect(partial(self._pick, picker))
-		row.addWidget(picker)
-
-	def _pick(self, picker: ComboBox, index: int) -> None:
-		"""Дополняет строку выбранным из словаря значением (без дублей)."""
-		if index <= 0:
-			return
-		value = str(picker.itemText(index))
-		current = self.values()
-		if value not in current:
-			self._line.setText(", ".join([*current, value]))
-		picker.setCurrentIndex(0)
+		self._line.setPlaceholderText("новые значения через запятую…")
+		column.addWidget(self._line)
+		row.addLayout(column, stretch=1)
+		layout.addLayout(row)
 
 	def values(self) -> list[str]:
-		"""Введённые значения (пустые отбрасываются)."""
-		if self.field.multiple:
-			raw = str(self._line.text()).split(",")
-		else:
-			raw = [str(self._edit.currentText())]
-		return [v.strip() for v in raw if v.strip()]
+		"""Введённые значения: отмеченные чекбоксы + строка (без дублей)."""
+		if not self.field.multiple:
+			value = str(self._edit.currentText()).strip()
+			return [value] if value else []
+		picked = [str(b.text()) for b in self._value_checks if b.isChecked()]
+		typed = [v.strip() for v in str(self._line.text()).split(",") if v.strip()]
+		return list(dict.fromkeys([*picked, *typed]))
 
 
 class CaptionDialog(MessageBoxBase):
@@ -124,13 +125,14 @@ class CaptionDialog(MessageBoxBase):
 		self.widget.setMinimumWidth(560)
 
 	def _build_template_combo(self) -> None:
-		"""Выбор шаблона (скрыт, если шаблон один)."""
+		"""Выбор шаблона подписи (виден всегда, даже если шаблон один)."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Шаблон подписи:", self))
 		self._combo = ComboBox(self)
 		for template in self._templates:
 			self._combo.addItem(template.name)
-		if len(self._templates) < 2:
-			self._combo.hide()
-		self.viewLayout.addWidget(self._combo)
+		row.addWidget(self._combo, stretch=1)
+		self.viewLayout.addLayout(row)
 
 	def _last_used_index(self) -> int:
 		"""Индекс последнего использованного шаблона (или первого)."""
@@ -246,7 +248,17 @@ class FieldsDialog(MessageBoxBase):
 				bind(self._on_delete_field, field),
 			))
 		self._fill_template_list()
+		self._update_pattern_hint(fields)
 		self.widget.adjustSize()  # данные пришли после показа окна
+
+	def _update_pattern_hint(self, fields: list[FieldDto]) -> None:
+		"""Подсказка плейсхолдеров имени файла — с актуальными полями канала."""
+		tokens = ", ".join("{" + f.name + "}" for f in fields) or "добавьте поля выше"
+		self._pattern_hint.setText(
+			"Плейсхолдеры имени файла: {title} — название, "
+			"{quality} — качество видео, {channel} — @имя канала; "
+			"поля со значениями через запятую: " + tokens
+		)
 
 	def _on_add_field(self) -> None:
 		run_in_engine(
@@ -288,6 +300,9 @@ class FieldsDialog(MessageBoxBase):
 			"{Author}, {title} ({Genre}) {quality} (@{channel})"
 		)
 		self.viewLayout.addWidget(self._template_pattern)
+		self._pattern_hint = CaptionLabel("", self)
+		self._pattern_hint.setWordWrap(True)
+		self.viewLayout.addWidget(self._pattern_hint)
 		row = QHBoxLayout()
 		self._template_name = LineEdit(self)
 		self._template_name.setPlaceholderText("Имя шаблона (например, Фильм)…")
@@ -314,9 +329,11 @@ class FieldsDialog(MessageBoxBase):
 	def _show_templates(self, templates: list[TemplateDto]) -> None:
 		clear_layout(self._templates_box)
 		for template in templates:
-			names = ", ".join(tf.field.name for tf in template.fields)
+			hint = ", ".join(tf.field.name for tf in template.fields)
+			if template.filename_pattern:
+				hint += " · шаблон имени файла задан"
 			self._templates_box.addWidget(self._row_widget(
-				template.name, names, bind(self._on_delete_template, template),
+				template.name, hint, bind(self._on_delete_template, template),
 			))
 		self.widget.adjustSize()  # данные пришли после показа окна
 
