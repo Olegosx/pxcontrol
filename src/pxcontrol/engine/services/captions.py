@@ -24,12 +24,20 @@ from pxcontrol.engine.db.models import (
 	CaptionTemplate,
 	CaptionTemplateField,
 	CaptionValue,
+	Channel,
 )
+from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
 
 logger = logging.getLogger(__name__)
 
 #: Суффикс имён файлов нашего конвейера: _<пресет>_<ГГГГММДД-ЧЧММСС>.
 _PIPELINE_SUFFIX = re.compile(r"_[^_]+_\d{8}-\d{6}$")
+
+#: Плейсхолдер шаблона имени файла: {title}, {ИмяПоля}, {quality}, {channel}.
+_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+
+#: Символы, недопустимые в именах файлов (плюс управляющие).
+_FORBIDDEN_IN_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 class CaptionsError(Exception):
@@ -57,12 +65,13 @@ class TemplateFieldDto:
 
 @dataclass(frozen=True)
 class TemplateDto:
-	"""Шаблон подписи: имя и упорядоченный состав полей."""
+	"""Шаблон подписи: имя, состав полей и шаблон имени файла."""
 
 	id: int
 	name: str
 	last_used_at: datetime | None
 	fields: list[TemplateFieldDto]
+	filename_pattern: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,14 +120,22 @@ def title_from_filename(path: str) -> str:
 	return _PIPELINE_SUFFIX.sub("", stem).strip()
 
 
+def sanitize_filename(name: str) -> str:
+	"""Чистит имя файла: недопустимые символы → пробел, длина ≤ 150."""
+	cleaned = _FORBIDDEN_IN_FILENAME.sub(" ", name)
+	cleaned = re.sub(r"\s+", " ", cleaned).strip()
+	return cleaned[:150].strip()
+
+
 # --- сервис -------------------------------------------------------------------
 
 
 class CaptionsService:
 	"""Поля, словари и шаблоны подписей каналов."""
 
-	def __init__(self, db: Database) -> None:
+	def __init__(self, db: Database, ffmpeg_path: str = "ffmpeg") -> None:
 		self._db = db
+		self._ffmpeg = ffmpeg_path  # для {quality} в шаблоне имени файла
 
 	# --- поля и словари ---------------------------------------------------
 
@@ -197,9 +214,12 @@ class CaptionsService:
 
 	async def save_template(
 		self, channel_id: int, name: str, field_ids: list[int],
-		template_id: int | None = None,
+		filename_pattern: str | None = None, template_id: int | None = None,
 	) -> TemplateDto:
 		"""Создаёт или перезаписывает шаблон (состав — в порядке списка).
+
+		``filename_pattern`` — необязательный шаблон имени файла при
+		отправке ({title}, {ИмяПоля}, {quality}, {channel}).
 
 		Raises:
 			CaptionsError: Пустое имя, пустой состав или шаблон не найден.
@@ -213,6 +233,7 @@ class CaptionsService:
 			template = await self._get_or_create_template(
 				session, channel_id, name, template_id
 			)
+			template.filename_pattern = (filename_pattern or "").strip() or None
 			saved_id = template.id
 			await session.execute(
 				delete(CaptionTemplateField)
@@ -239,6 +260,54 @@ class CaptionsService:
 				delete(CaptionTemplate).where(CaptionTemplate.id == template_id)
 			)
 			await session.commit()
+
+	async def render_filename(
+		self,
+		template_id: int,
+		channel_id: int,
+		title: str,
+		used_values: dict[int, list[str]],
+		media_path: str,
+	) -> str:
+		"""Собирает имя файла по шаблону имени выбранного шаблона подписи.
+
+		Плейсхолдеры: ``{title}`` — название, ``{ИмяПоля}`` — значения поля
+		через запятую (без решёток), ``{quality}`` — меньшая сторона кадра
+		видео (ffprobe), ``{channel}`` — @имя канала без ``@``. Неизвестные
+		плейсхолдеры остаются как есть — видно и правится руками.
+
+		Raises:
+			CaptionsError: Шаблон не найден, шаблон имени не задан
+				или имя получилось пустым.
+		"""
+		async with self._db.session_factory() as session:
+			template = await session.get(CaptionTemplate, template_id)
+			if template is None or not template.filename_pattern:
+				raise CaptionsError("У шаблона не задан шаблон имени файла.")
+			pattern = template.filename_pattern
+			channel = await session.get(Channel, channel_id)
+		mapping = {
+			"title": title.strip(),
+			"quality": self._probe_quality(media_path),
+			"channel": (channel.username or "") if channel else "",
+		}
+		for field in await self.list_fields(channel_id):
+			mapping[field.name] = ", ".join(used_values.get(field.id, []))
+		rendered = _PLACEHOLDER.sub(
+			lambda m: mapping.get(m.group(1), m.group(0)), pattern
+		)
+		stem = sanitize_filename(rendered)
+		if not stem:
+			raise CaptionsError("Имя файла по шаблону получилось пустым.")
+		return stem + Path(media_path).suffix
+
+	def _probe_quality(self, media_path: str) -> str:
+		"""Качество видео (меньшая сторона кадра) или пустая строка."""
+		try:
+			info = probe_video(media_path, ffprobe_bin_for(self._ffmpeg))
+		except (OSError, RuntimeError, ValueError):
+			return ""
+		return str(min(info.width, info.height))
 
 	async def record_usage(
 		self, template_id: int, used_values: dict[int, list[str]]
@@ -303,4 +372,5 @@ class CaptionsService:
 				TemplateFieldDto(cls._field_dto(row.field), row.enabled)
 				for row in template.fields
 			],
+			template.filename_pattern,
 		)

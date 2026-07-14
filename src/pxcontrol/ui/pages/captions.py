@@ -152,6 +152,10 @@ class CaptionDialog(MessageBoxBase):
 		"""Идентификатор выбранного шаблона."""
 		return self._templates[int(self._combo.currentIndex())].id
 
+	def title(self) -> str:
+		"""Название поста (первая строка подписи)."""
+		return str(self._title.text()).strip()
+
 	def caption(self) -> str:
 		"""Собранный текст подписи (только включённые поля)."""
 		lines = [
@@ -278,6 +282,12 @@ class FieldsDialog(MessageBoxBase):
 		)
 		self._template_list.setMaximumHeight(140)
 		self.viewLayout.addWidget(self._template_list)
+		self._template_pattern = LineEdit(self)
+		self._template_pattern.setPlaceholderText(
+			"Шаблон имени файла (необязательно): "
+			"{Author}, {title} ({Genre}) {quality} (@{channel})"
+		)
+		self.viewLayout.addWidget(self._template_pattern)
 		row = QHBoxLayout()
 		self._template_name = LineEdit(self)
 		self._template_name.setPlaceholderText("Имя шаблона (например, Фильм)…")
@@ -325,12 +335,14 @@ class FieldsDialog(MessageBoxBase):
 			self._worker.engine.captions.save_template(
 				self._channel_id, str(self._template_name.text()),
 				self._checked_field_ids(),
+				str(self._template_pattern.text()).strip() or None,
 			),
 			self, self._on_template_saved, self._show_error,
 		)
 
 	def _on_template_saved(self, _template: TemplateDto) -> None:
 		self._template_name.clear()
+		self._template_pattern.clear()
 		self._reload()
 
 	def _on_delete_template(self, template: TemplateDto) -> None:

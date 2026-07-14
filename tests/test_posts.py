@@ -233,6 +233,57 @@ async def test_video_thumbnail_failure_does_not_block_publish(
 	assert len(gateway.published) == 1 and gateway.thumbs() == [None]
 
 
+async def test_publish_renames_file_and_preview(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""rename_to переименовывает файл и кадр-превью, уходит новый путь."""
+	def _fake_thumb(
+		source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0
+	) -> None:
+		assert source.endswith("Новое имя.png")  # превью ищется по новому имени
+		Path(out).write_bytes(b"jpg")
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.posts.make_thumbnail", _fake_thumb
+	)
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	video = tmp_path / "старое_test_20260714-000000.mp4"
+	video.write_bytes(b"video")
+	(tmp_path / "старое_test_20260714-000000.png").write_bytes(b"png")
+	await service.publish(PostDraft(
+		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+		rename_to="Новое имя.mp4",
+	))
+	_chat, post = gateway.published[0]
+	assert post.media_path == str(tmp_path / "Новое имя.mp4")
+	assert (tmp_path / "Новое имя.mp4").is_file()
+	assert (tmp_path / "Новое имя.png").is_file()
+	assert not video.exists()
+
+
+async def test_publish_rename_validations(db: Database, tmp_path: Path) -> None:
+	"""Имя с путём или занятое имя — ошибка до отправки."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	video = tmp_path / "в.mp4"
+	video.write_bytes(b"video")
+	with pytest.raises(PostError, match="не должно содержать путь"):
+		await service.publish(PostDraft(
+			channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+			rename_to="a/b.mp4",
+		))
+	(tmp_path / "занято.mp4").write_bytes(b"x")
+	with pytest.raises(PostError, match="уже существует"):
+		await service.publish(PostDraft(
+			channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+			rename_to="занято.mp4",
+		))
+	assert gateway.published == []
+
+
 async def test_publish_userbot_unavailable(db: Database) -> None:
 	"""Неподключённый userbot — ошибка с инструкцией, что делать."""
 	gateway = _FakeGateway()

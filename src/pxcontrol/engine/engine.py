@@ -35,7 +35,7 @@ class Engine:
 		self.channels = ChannelsService(self.db, self.gateway)
 		self.posts = PostsService(self.db, self.gateway, settings.ffmpeg_path)
 		self.video = VideoService(self.db, settings.ffmpeg_path)
-		self.captions = CaptionsService(self.db)
+		self.captions = CaptionsService(self.db, settings.ffmpeg_path)
 
 	async def start(self) -> None:
 		"""Запускает компоненты в правильном порядке."""

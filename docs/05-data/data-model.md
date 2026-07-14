@@ -73,7 +73,8 @@
 - **`caption_values`** — словарь значений поля: `field_id` FK, `value`.
   Общий для всех шаблонов канала.
 - **`caption_templates`** — именованные шаблоны: `channel_id` FK, `name`,
-  `last_used_at?` (для предвыбора в диалоге).
+  `last_used_at?` (для предвыбора в диалоге), `filename_pattern?` —
+  шаблон имени файла при отправке (миграция `e7a1c94f5d28`).
 - **`caption_template_fields`** — состав шаблона: `template_id` FK,
   `field_id` FK, `position`, `enabled`. Без полей времени.
 

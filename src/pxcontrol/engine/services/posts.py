@@ -61,6 +61,8 @@ class PostDraft:
 		media_path: путь к файлу вложения (None — чистый текст).
 		media_kind: тип вложения.
 		when: момент публикации (None — «сейчас»).
+		rename_to: новое имя файла (без пути) перед отправкой; вместе
+			с файлом переименовывается его кадр-превью (сосед ``.png``).
 	"""
 
 	channel_id: int
@@ -68,6 +70,7 @@ class PostDraft:
 	media_path: str | None = None
 	media_kind: MediaKind = MediaKind.NONE
 	when: datetime | None = None
+	rename_to: str | None = None
 
 
 class _PostPort(Protocol):
@@ -139,14 +142,17 @@ class PostsService:
 		"""
 		self._validate(draft)
 		channel = await self._get_channel(draft.channel_id)
+		media_path = draft.media_path
+		if media_path is not None and draft.rename_to:
+			media_path = self._apply_rename(media_path, draft.rename_to)
 		with tempfile.TemporaryDirectory() as tmp:
 			thumb: str | None = None
-			if draft.media_kind is MediaKind.VIDEO and draft.media_path:
+			if draft.media_kind is MediaKind.VIDEO and media_path:
 				thumb = await asyncio.to_thread(
-					self._video_thumbnail, draft.media_path, tmp
+					self._video_thumbnail, media_path, tmp
 				)
 			post = OutgoingPost(
-				text=draft.text, media_path=draft.media_path,
+				text=draft.text, media_path=media_path,
 				media_kind=draft.media_kind, when=draft.when, thumb_path=thumb,
 			)
 			await self._gateway.publish(channel.tg_chat_id, post, on_progress)
@@ -155,6 +161,31 @@ class PostsService:
 			draft.media_kind if draft.media_path else "текст", channel.title,
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
+
+	@staticmethod
+	def _apply_rename(media_path: str, rename_to: str) -> str:
+		"""Переименовывает файл (и его кадр-превью) перед отправкой.
+
+		Returns:
+			Путь к файлу под новым именем (папка не меняется).
+
+		Raises:
+			PostError: Имя содержит путь или целевое имя уже занято.
+		"""
+		if "/" in rename_to or "\\" in rename_to:
+			raise PostError("Новое имя файла не должно содержать путь.")
+		source = Path(media_path)
+		target = source.with_name(rename_to)
+		if target == source:
+			return str(source)
+		if target.exists():
+			raise PostError(f"Файл «{rename_to}» уже существует — смените имя.")
+		source.rename(target)
+		preview = source.with_suffix(".png")
+		if preview.is_file():
+			preview.rename(target.with_suffix(".png"))
+		logger.info("Файл переименован: %s → %s", source.name, target.name)
+		return str(target)
 
 	def _video_thumbnail(self, video_path: str, tmp_dir: str) -> str | None:
 		"""Готовит JPEG-миниатюру видео для Telegram (вписана в 320×320).

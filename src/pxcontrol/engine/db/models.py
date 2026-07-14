@@ -179,6 +179,8 @@ class CaptionTemplate(TimestampMixin, Base):
 	last_used_at: Mapped[datetime | None] = mapped_column(
 		DateTime(timezone=True), default=None
 	)
+	# шаблон имени файла при отправке: {title}, {ИмяПоля}, {quality}, {channel}
+	filename_pattern: Mapped[str | None] = mapped_column(String(255), default=None)
 
 	fields: Mapped[list["CaptionTemplateField"]] = relationship(
 		back_populates="template", cascade="all, delete-orphan",

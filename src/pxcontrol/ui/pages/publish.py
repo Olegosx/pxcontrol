@@ -12,6 +12,7 @@ from functools import partial
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
+	CheckBox,
 	ComboBox,
 	FluentIcon,
 	InfoBar,
@@ -106,12 +107,32 @@ class PublishPage(ScrollArea):
 		row.setContentsMargins(0, 0, 0, 0)
 		self._file_edit = LineEdit(self._file_box)
 		self._file_edit.setPlaceholderText("Файл вложения…")
+		self._file_edit.textChanged.connect(self._clear_rename)
 		browse = PushButton("Обзор…", self._file_box)
 		browse.clicked.connect(self._pick_file)
 		row.addWidget(self._file_edit)
 		row.addWidget(browse)
 		self._file_box.hide()
 		layout.addWidget(self._file_box)
+		self._build_rename_row(layout)
+
+	def _build_rename_row(self, layout: QVBoxLayout) -> None:
+		"""Строка переименования файла при отправке (появляется из подписи)."""
+		self._rename_box = QWidget(self)
+		row = QHBoxLayout(self._rename_box)
+		row.setContentsMargins(0, 0, 0, 0)
+		self._rename_check = CheckBox("Переименовать при отправке:", self._rename_box)
+		self._rename_check.setChecked(True)
+		row.addWidget(self._rename_check)
+		self._rename_edit = LineEdit(self._rename_box)
+		row.addWidget(self._rename_edit, stretch=1)
+		self._rename_box.hide()
+		layout.addWidget(self._rename_box)
+
+	def _clear_rename(self, _text: str = "") -> None:
+		"""Сбрасывает переименование (файл сменился — имя устарело)."""
+		self._rename_edit.clear()
+		self._rename_box.hide()
 
 	def _build_send_row(self, layout: QVBoxLayout) -> None:
 		"""Кнопка отправки и индикатор прогресса загрузки."""
@@ -202,9 +223,10 @@ class PublishPage(ScrollArea):
 				"Сначала настройте поля и шаблон — кнопка «Поля подписи…»."
 			)
 			return
+		media = str(self._file_edit.text()).strip()
 		title = ""
-		if self._kind is not MediaKind.NONE and str(self._file_edit.text()).strip():
-			title = title_from_filename(str(self._file_edit.text()).strip())
+		if self._kind is not MediaKind.NONE and media:
+			title = title_from_filename(media)
 		dialog = CaptionDialog(templates, title, self.window())
 		if not dialog.exec():
 			return
@@ -216,6 +238,32 @@ class PublishPage(ScrollArea):
 			),
 			self, noop, self._show_error,
 		)
+		self._suggest_rename(templates, dialog, media)
+
+	def _suggest_rename(
+		self, templates: list[TemplateDto], dialog: CaptionDialog, media: str
+	) -> None:
+		"""Предлагает имя файла по шаблону имени (если он задан)."""
+		template = next(t for t in templates if t.id == dialog.template_id())
+		channel = self._current_channel()
+		if not (template.filename_pattern and media and channel):
+			return
+		if self._kind is MediaKind.NONE:
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.captions.render_filename(
+				template.id, channel.id, dialog.title(),
+				dialog.used_values(), media,
+			),
+			self, self._show_rename_suggestion, self._show_error,
+		)
+
+	def _show_rename_suggestion(self, filename: str) -> None:
+		"""Показывает строку переименования с вычисленным именем."""
+		self._rename_edit.setText(filename)
+		self._rename_check.setChecked(True)
+		self._rename_box.show()
 
 	# --- отправка -------------------------------------------------------------------
 
@@ -246,7 +294,14 @@ class PublishPage(ScrollArea):
 			media_path=None if is_text else media,
 			media_kind=MediaKind.NONE if is_text or media is None else self._kind,
 			when=self._when_row.when(),
+			rename_to=self._rename_to(),
 		)
+
+	def _rename_to(self) -> str | None:
+		"""Новое имя файла, если переименование включено и имя задано."""
+		if not self._rename_box.isVisibleTo(self) or not self._rename_check.isChecked():
+			return None
+		return str(self._rename_edit.text()).strip() or None
 
 	def _on_sent(self, when: datetime | None, _result: object = None) -> None:
 		"""Показывает итог, чистит форму и гасит прогресс."""

@@ -69,9 +69,9 @@ async def db(tmp_path: Path) -> AsyncIterator[Database]:
 	await database.close()
 
 
-async def _add_channel(db: Database) -> int:
+async def _add_channel(db: Database, username: str | None = None) -> int:
 	async with db.session_factory() as session:
-		channel = Channel(title="Канал", tg_chat_id="-1001")
+		channel = Channel(title="Канал", tg_chat_id="-1001", username=username)
 		session.add(channel)
 		await session.commit()
 		await session.refresh(channel)
@@ -107,6 +107,59 @@ async def test_template_roundtrip_and_shared_dictionary(db: Database) -> None:
 	assert next(tf for tf in clip.fields).field.values == ["action", "drama"]
 	film = next(t for t in templates if t.name == "Фильм")
 	assert film.last_used_at is not None
+
+
+async def test_render_filename(
+	db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Имя файла: плейсхолдеры, качество, канал, очистка символов."""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.captions.probe_video",
+		lambda _p, _b: VideoInfo(1920, 1080, 60.0, 25.0, True),
+	)
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db, username="mych")
+	author = await service.add_field(channel_id, "Author", hashtag=True, multiple=False)
+	genre = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
+	template = await service.save_template(
+		channel_id, "Фильм", [author.id, genre.id],
+		"{Author}, {title} ({Genre}) {quality} (@{channel})",
+	)
+	assert template.filename_pattern is not None
+	name = await service.render_filename(
+		template.id, channel_id, "Lara: Croft",
+		{author.id: ["Best"], genre.id: ["action", "drama"]},
+		"/x/видео.mp4",
+	)
+	# двоеточие из названия вычищено, качество и канал подставлены
+	assert name == "Best, Lara Croft (action, drama) 1080 (@mych).mp4"
+
+
+async def test_render_filename_edge_cases(
+	db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Не-видео — без качества; неизвестный плейсхолдер остаётся как есть."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.captions.probe_video",
+		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
+	)
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)  # канал без username
+	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
+	template = await service.save_template(
+		channel_id, "Т", [field.id], "{title} {quality} {Нет} ({Год})"
+	)
+	name = await service.render_filename(
+		template.id, channel_id, "Имя", {field.id: ["2026"]}, "/x/файл.zip"
+	)
+	assert name == "Имя {Нет} (2026).zip"
+	no_pattern = await service.save_template(channel_id, "Без", [field.id])
+	with pytest.raises(CaptionsError, match="не задан шаблон имени"):
+		await service.render_filename(
+			no_pattern.id, channel_id, "х", {}, "/x/ф.mp4"
+		)
 
 
 async def test_template_validation_and_delete(db: Database) -> None:
