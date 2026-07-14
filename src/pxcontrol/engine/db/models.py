@@ -99,6 +99,8 @@ class VideoPreset(TimestampMixin, Base):
 	# окно показа вотермарка: отступ от начала и отступ ДО КОНЦА (сек)
 	wm_start_offset: Mapped[float | None] = mapped_column(Float, default=None)
 	wm_end_offset: Mapped[float | None] = mapped_column(Float, default=None)
+	# плавность появления/исчезания на краях окна (сек; 0 — резко)
+	wm_fade: Mapped[float] = mapped_column(Float, default=0.0)
 	intro: Mapped[bool] = mapped_column(Boolean, default=False)
 	intro_source: Mapped[str] = mapped_column(String(255), default="random-middle")
 	intro_hold: Mapped[float] = mapped_column(Float, default=1.0)

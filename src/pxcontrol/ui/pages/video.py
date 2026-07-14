@@ -128,6 +128,10 @@ class _PresetDialog(MessageBoxBase):
 			row, "скрыть за N секунд до конца (0 — до конца)", 0.0, 3600.0, 0.0, 1.0
 		)
 		row.addWidget(CaptionLabel("с до конца", self))
+		self._wm_fade = self._dspin(
+			row, "плавность появления/исчезания, с (0 — резко)", 0.0, 30.0, 0.0, 0.5
+		)
+		row.addWidget(CaptionLabel("с плавность", self))
 		row.addStretch()
 		self.viewLayout.addLayout(row)
 
@@ -219,6 +223,7 @@ class _PresetDialog(MessageBoxBase):
 		self._scale.setValue(fields.wm_scale)
 		self._wm_start.setValue(fields.wm_start_offset or 0.0)
 		self._wm_end.setValue(fields.wm_end_offset or 0.0)
+		self._wm_fade.setValue(fields.wm_fade)
 		self._intro.setChecked(fields.intro)
 		self._hold.setValue(fields.intro_hold)
 		self._xfade.setValue(fields.xfade)
@@ -251,6 +256,7 @@ class _PresetDialog(MessageBoxBase):
 			wm_scale=round(float(self._scale.value()), 3),
 			wm_start_offset=float(self._wm_start.value()) or None,
 			wm_end_offset=float(self._wm_end.value()) or None,
+			wm_fade=round(float(self._wm_fade.value()), 2),
 			intro=self._intro.isChecked(),
 			intro_source=self._intro_source(),
 			intro_hold=round(float(self._hold.value()), 2),

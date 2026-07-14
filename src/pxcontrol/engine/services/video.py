@@ -68,6 +68,7 @@ class PresetFields:
 	wm_scale: float = 0.15
 	wm_start_offset: float | None = None  # показать через N сек от начала
 	wm_end_offset: float | None = None  # скрыть за N сек до конца
+	wm_fade: float = 0.0  # плавность появления/исчезания (сек; 0 — резко)
 	intro: bool = False
 	intro_source: str = "random-middle"
 	intro_hold: float = 1.0
@@ -156,7 +157,7 @@ class VideoService:
 			wm_corner=preset.wm_corner, wm_margin=preset.wm_margin,
 			wm_opacity=preset.wm_opacity, wm_scale=preset.wm_scale,
 			wm_start_offset=preset.wm_start_offset,
-			wm_end_offset=preset.wm_end_offset,
+			wm_end_offset=preset.wm_end_offset, wm_fade=preset.wm_fade,
 			intro=preset.intro, intro_source=preset.intro_source,
 			intro_hold=preset.intro_hold, xfade=preset.xfade,
 			cover=preset.cover, no_audio=preset.no_audio,
@@ -275,7 +276,8 @@ class VideoService:
 			watermark=preset.watermark_path, wm_corner=preset.wm_corner,
 			wm_margin=preset.wm_margin, wm_opacity=preset.wm_opacity,
 			wm_scale=preset.wm_scale, wm_start_offset=preset.wm_start_offset,
-			wm_end_offset=preset.wm_end_offset, intro=preset.intro,
+			wm_end_offset=preset.wm_end_offset, wm_fade=preset.wm_fade,
+			intro=preset.intro,
 			intro_source=intro_source or preset.intro_source,
 			intro_hold=preset.intro_hold,
 			xfade=preset.xfade, cover=preset.cover, no_audio=preset.no_audio,

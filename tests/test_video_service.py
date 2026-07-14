@@ -13,7 +13,7 @@ from pxcontrol.engine.video import ProcessingOptions
 
 FIELDS = PresetFields(
 	name="Бренд", watermark_path="/tmp/logo.png", wm_corner="br",
-	wm_opacity=0.8, wm_start_offset=2.0, wm_end_offset=15.0,
+	wm_opacity=0.8, wm_start_offset=2.0, wm_end_offset=15.0, wm_fade=1.5,
 	intro=True, intro_source="time:5.0", cover=True,
 	video_bitrate_kbps=2500,
 )
@@ -89,6 +89,7 @@ async def test_prepare_maps_preset_to_options(
 	assert options.watermark == "/tmp/logo.png"
 	assert options.wm_corner == "br" and options.wm_opacity == 0.8
 	assert options.wm_start_offset == 2.0 and options.wm_end_offset == 15.0
+	assert options.wm_fade == 1.5
 	assert options.intro and options.intro_source == "time:5.0"
 	assert options.cover is True
 	assert options.video_bitrate_kbps == 2500

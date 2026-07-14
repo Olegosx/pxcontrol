@@ -53,7 +53,8 @@
 ### `video_presets` — шаблоны обработки видео (референс makeVideo)
 `name`, `watermark_path?`, `wm_corner/margin/opacity/scale`,
 `wm_start_offset?/wm_end_offset?` (окно показа вотермарка отступами
-от начала/до конца, сек; миграция `f2b8d61c3a97`), `intro`,
+от начала/до конца, сек; миграция `f2b8d61c3a97`), `wm_fade`
+(плавность переходов, сек; миграция `a3c5e97d21b4`), `intro`,
 `intro_source`, `intro_hold`, `xfade`, `cover`, `no_audio`,
 `video_bitrate_kbps?` (NULL — «как в оригинале»; миграция
 `c7d2f4a91b33`). Переиспользуются между каналами.

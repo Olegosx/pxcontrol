@@ -46,6 +46,8 @@ class ProcessingOptions:
 	# окно показа вотермарка: отступ от начала и отступ ДО КОНЦА ролика (сек)
 	wm_start_offset: float | None = None
 	wm_end_offset: float | None = None
+	# плавность появления/исчезания на краях окна (сек; 0 — резко)
+	wm_fade: float = 0.0
 	intro: bool = False
 	intro_source: str = "random-middle"
 	intro_hold: float = 1.0
@@ -75,11 +77,18 @@ def _watermark_options(opts: ProcessingOptions, info: VideoInfo) -> WatermarkOpt
 	if opts.wm_end_offset:
 		end = info.duration - opts.wm_end_offset
 	if opts.watermark and (start is not None or end is not None):
-		effective_end = end if end is not None else info.duration
-		if effective_end <= (start or 0.0):
+		window = (end if end is not None else info.duration) - (start or 0.0)
+		if window <= 0:
 			raise ValueError(
 				"Окно показа вотермарка пустое: отступы "
 				"не помещаются в длительность ролика."
+			)
+		fade_span = opts.wm_fade * (
+			(start is not None) + (end is not None)
+		)
+		if fade_span > window:
+			raise ValueError(
+				"Плавность переходов не помещается в окно показа вотермарка."
 			)
 	return WatermarkOptions(
 		corner=opts.wm_corner,
@@ -88,6 +97,7 @@ def _watermark_options(opts: ProcessingOptions, info: VideoInfo) -> WatermarkOpt
 		scale=opts.wm_scale,
 		start=start,
 		end=end,
+		fade=opts.wm_fade,
 	)
 
 
@@ -210,8 +220,11 @@ def _run_main(
 	inputs, wm_index, still_index = _build_inputs(opts, info, still_path)
 	has_audio = info.has_audio and not opts.no_audio
 	width, height = fitted_size(info.width, info.height)
+	# длительность итога = исходник + удержание кадра заставки (см. SPEC)
+	total = info.duration + (opts.intro_hold if opts.intro else 0.0)
 	graph = build_filter_complex(
-		fps=_fps_arg(info.fps), width=width, height=height, has_intro=opts.intro,
+		fps=_fps_arg(info.fps), width=width, height=height, duration=total,
+		has_intro=opts.intro,
 		hold=opts.intro_hold, xfade=opts.xfade, still_index=still_index,
 		has_watermark=bool(opts.watermark), wm=_watermark_options(opts, info),
 		wm_index=wm_index, has_audio=has_audio,
@@ -220,8 +233,6 @@ def _run_main(
 		opts.ffmpeg_bin, inputs, graph.filter_complex, graph.video_label,
 		graph.audio_label, _video_quality_args(opts, info), output,
 	)
-	# длительность итога = исходник + удержание кадра заставки (см. SPEC)
-	total = info.duration + (opts.intro_hold if opts.intro else 0.0)
 	_run_ffmpeg_streaming(cmd, "обработка видео", total, on_progress)
 
 

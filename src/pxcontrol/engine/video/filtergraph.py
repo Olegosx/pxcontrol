@@ -40,6 +40,7 @@ class WatermarkOptions:
 		scale: ширина вотермарка как доля ширины кадра (например 0.15).
 		start: момент появления в секундах по исходному видео (None — с начала).
 		end: момент скрытия в секундах по исходному видео (None — до конца).
+		fade: плавность появления/исчезания на краях окна (сек; 0 — резко).
 	"""
 
 	corner: str
@@ -48,6 +49,7 @@ class WatermarkOptions:
 	scale: float
 	start: float | None
 	end: float | None
+	fade: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -119,8 +121,26 @@ def _enable_expr(wm: WatermarkOptions, offset: float) -> str:
 	return f":enable='between(t,{start:.3f},{end:.3f})'"
 
 
+def _watermark_fades(wm: WatermarkOptions, offset: float) -> str:
+	"""Фрагменты fade по альфе на краях окна показа (или пустая строка).
+
+	Переход есть только на краю с заданным отступом; времена сдвигаются
+	на длительность заставки, как и окно показа.
+	"""
+	if wm.fade <= 0:
+		return ""
+	parts = ""
+	if wm.start is not None:
+		parts += f",fade=t=in:st={wm.start + offset:.3f}:d={wm.fade:.3f}:alpha=1"
+	if wm.end is not None:
+		start_out = wm.end + offset - wm.fade
+		parts += f",fade=t=out:st={start_out:.3f}:d={wm.fade:.3f}:alpha=1"
+	return parts
+
+
 def _watermark_chains(
-	wm: WatermarkOptions, wm_index: int, base: str, offset: float
+	wm: WatermarkOptions, wm_index: int, base: str, offset: float, fps: str,
+	duration: float,
 ) -> tuple[list[str], str]:
 	"""Цепочки вотермарка: масштабирование под кадр, прозрачность, наложение.
 
@@ -129,6 +149,12 @@ def _watermark_chains(
 	идёт под наложение. scale2ref не используется: он устарел и в ffmpeg 8
 	искажает размер и пропорции. colorchannelmixer задаёт прозрачность.
 
+	Плавность (fade по альфе) требует кадров во времени — у статичной
+	картинки кадр один, поэтому при переходах она зацикливается фильтром
+	loop в поток. Поток обязательно ограничивается trim по длительности
+	итога: бесконечный вторичный вход overlay не даёт ffmpeg завершиться
+	(кодирование продолжается вечно — проверено).
+
 	Цвета: RGB→YUV — явно матрицей bt709 (по умолчанию ffmpeg берёт bt601,
 	и плеер сдвигал оттенки), смешивание — в yuv444 (по умолчанию yuv420:
 	цветность в четверть разрешения, и тонкие штрихи вотермарка перенимали
@@ -136,10 +162,20 @@ def _watermark_chains(
 	"""
 	position = _overlay_position(wm.corner, wm.margin)
 	enable = _enable_expr(wm, offset)
-	chains = [
-		f"{base}split[bg][wm_ref]",
-		f"[{wm_index}:v][wm_ref]scale=w=rw*{wm.scale}:h=-2[wm_s]",
-		f"[wm_s]format=rgba,colorchannelmixer=aa={wm.opacity},"
+	fades = _watermark_fades(wm, offset)
+	wm_in = f"[{wm_index}:v]"
+	chains = [f"{base}split[bg][wm_ref]"]
+	if fades:
+		# trim ровно по длительности: длиннее — наложение продлит ролик
+		# повтором последнего кадра фона, короче — прикроет repeatlast
+		chains.append(
+			f"{wm_in}loop=loop=-1:size=1,fps={fps},"
+			f"setpts=N/FRAME_RATE/TB,trim=duration={duration:.3f}[wm_v]"
+		)
+		wm_in = "[wm_v]"
+	chains += [
+		f"{wm_in}[wm_ref]scale=w=rw*{wm.scale}:h=-2[wm_s]",
+		f"[wm_s]format=rgba,colorchannelmixer=aa={wm.opacity}{fades},"
 		f"scale=out_color_matrix={TARGET_COLOR_MATRIX}:out_range=tv,"
 		f"format=yuva444p[wm_a]",
 		f"[bg][wm_a]overlay={position}:format=yuv444{enable}[vout]",
@@ -160,6 +196,7 @@ def build_filter_complex(
 	fps: str,
 	width: int,
 	height: int,
+	duration: float,
 	has_intro: bool,
 	hold: float,
 	xfade: float,
@@ -175,6 +212,8 @@ def build_filter_complex(
 		fps: кадровая частота строкой (например '29.97003').
 		width: ширина итогового кадра (fitted_size).
 		height: высота итогового кадра (fitted_size).
+		duration: длительность итогового видео (сек) — ограничивает
+			зацикленный поток вотермарка при плавности.
 		has_intro: включена ли заставка.
 		hold: сколько секунд держать кадр заставки сплошняком.
 		xfade: длительность растворения заставки в видео.
@@ -197,7 +236,9 @@ def build_filter_complex(
 	if has_watermark:
 		if wm is None or wm_index is None:
 			raise ValueError("Вотермарк включён, но его параметры не заданы")
-		wm_chains, video_label = _watermark_chains(wm, wm_index, base, offset)
+		wm_chains, video_label = _watermark_chains(
+			wm, wm_index, base, offset, fps, duration
+		)
 		chains += wm_chains
 	else:
 		video_label = base

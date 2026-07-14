@@ -24,9 +24,9 @@ INFO = VideoInfo(width=1920, height=1080, duration=100.0, fps=25.0, has_audio=Tr
 def _build(**kwargs: object) -> object:
 	"""Хелпер: вызывает build_filter_complex со значениями по умолчанию."""
 	defaults: dict[str, object] = dict(
-		fps="25.00000", width=1920, height=1080, has_intro=False, hold=1.0,
-		xfade=0.5, still_index=None, has_watermark=False, wm=None,
-		wm_index=None, has_audio=False,
+		fps="25.00000", width=1920, height=1080, duration=100.0,
+		has_intro=False, hold=1.0, xfade=0.5, still_index=None,
+		has_watermark=False, wm=None, wm_index=None, has_audio=False,
 	)
 	defaults.update(kwargs)
 	return build_filter_complex(**defaults)  # type: ignore[arg-type]
@@ -156,6 +156,54 @@ def test_watermark_window_offsets_to_absolute() -> None:
 		ProcessingOptions(input="a", output="b", watermark="/x/wm.png"), INFO
 	)
 	assert plain.start is None and plain.end is None
+
+
+def test_watermark_fade_adds_loop_and_fades() -> None:
+	"""Плавность: картинка зацикливается, fade по альфе на краях окна."""
+	wm = WatermarkOptions(
+		corner="tr", margin=24, opacity=0.8, scale=0.15,
+		start=2.0, end=5.0, fade=1.0,
+	)
+	graph = _build(has_watermark=True, wm=wm, wm_index=1)
+	assert "loop=loop=-1:size=1,fps=25.00000" in graph.filter_complex
+	# поток обязательно конечен: бесконечный не даёт ffmpeg завершиться
+	assert "trim=duration=100.000" in graph.filter_complex
+	assert "fade=t=in:st=2.000:d=1.000:alpha=1" in graph.filter_complex
+	assert "fade=t=out:st=4.000:d=1.000:alpha=1" in graph.filter_complex
+	# со заставкой времена переходов сдвигаются на удержание кадра
+	shifted = _build(
+		has_watermark=True, wm=wm, wm_index=1,
+		has_intro=True, still_index=2, hold=1.0,
+	)
+	assert "fade=t=in:st=3.000" in shifted.filter_complex
+	assert "fade=t=out:st=5.000" in shifted.filter_complex
+
+
+def test_watermark_without_fade_keeps_single_frame() -> None:
+	"""Нулевая плавность — прежний дешёвый путь без loop и fade."""
+	graph = _build(has_watermark=True, wm=WM, wm_index=1)
+	assert "loop=" not in graph.filter_complex
+	assert "fade=" not in graph.filter_complex
+
+
+def test_watermark_fade_must_fit_window() -> None:
+	"""Переходы, не помещающиеся в окно показа, — ошибка до кодирования."""
+	from pxcontrol.engine.video.pipeline import ProcessingOptions, _watermark_options
+
+	opts = ProcessingOptions(
+		input="a", output="b", watermark="/x/wm.png",
+		wm_start_offset=45.0, wm_end_offset=45.0, wm_fade=6.0,  # окно 10 с < 12 с
+	)
+	with pytest.raises(ValueError, match="Плавность"):
+		_watermark_options(opts, INFO)
+	ok = _watermark_options(
+		ProcessingOptions(
+			input="a", output="b", watermark="/x/wm.png",
+			wm_start_offset=45.0, wm_end_offset=45.0, wm_fade=5.0,
+		),
+		INFO,
+	)
+	assert ok.fade == 5.0
 
 
 def test_watermark_window_degenerate_raises() -> None:
