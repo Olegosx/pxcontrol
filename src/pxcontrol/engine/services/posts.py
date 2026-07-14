@@ -24,8 +24,9 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.telegram.types import OutgoingPost
 from pxcontrol.engine.video.frames import make_thumbnail, resolve_timestamp
-from pxcontrol.engine.video.probe import probe_video
+from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,8 @@ class _PostPort(Protocol):
 	async def send_text(self, token: str, chat_id: str, text: str) -> int: ...
 
 	async def publish(
-		self, chat_id: str, text: str, media_path: str | None,
-		media_kind: str, when: datetime | None,
+		self, chat_id: str, post: OutgoingPost,
 		on_progress: ProgressCallback | None,
-		thumb_path: str | None,
 	) -> None: ...
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]: ...
@@ -146,10 +145,11 @@ class PostsService:
 				thumb = await asyncio.to_thread(
 					self._video_thumbnail, draft.media_path, tmp
 				)
-			await self._gateway.publish(
-				channel.tg_chat_id, draft.text, draft.media_path,
-				draft.media_kind, draft.when, on_progress, thumb,
+			post = OutgoingPost(
+				text=draft.text, media_path=draft.media_path,
+				media_kind=draft.media_kind, when=draft.when, thumb_path=thumb,
 			)
+			await self._gateway.publish(channel.tg_chat_id, post, on_progress)
 		logger.info(
 			"Пост (%s) → «%s» (%s).",
 			draft.media_kind if draft.media_path else "текст", channel.title,
@@ -169,7 +169,7 @@ class PostsService:
 			if preview.is_file():
 				make_thumbnail(str(preview), thumb, self._ffmpeg)
 			else:
-				info = probe_video(video_path, self._ffprobe_bin())
+				info = probe_video(video_path, ffprobe_bin_for(self._ffmpeg))
 				timestamp = resolve_timestamp("random-middle", info)
 				make_thumbnail(video_path, thumb, self._ffmpeg, timestamp)
 		except (OSError, RuntimeError, ValueError):
@@ -180,13 +180,6 @@ class PostsService:
 			return None
 		return thumb
 
-	def _ffprobe_bin(self) -> str:
-		"""ffprobe ищем рядом с заданным ffmpeg (или в PATH)."""
-		ffmpeg = Path(self._ffmpeg)
-		if ffmpeg.is_absolute():
-			return str(ffmpeg.with_name("ffprobe"))
-		return "ffprobe"
-
 	@staticmethod
 	def _validate(draft: PostDraft) -> None:
 		"""Отклоняет пустой черновик, битый путь и время «почти сейчас».
@@ -196,16 +189,13 @@ class PostsService:
 		"""
 		if not draft.text and draft.media_path is None:
 			raise PostError("Пост пуст — добавьте текст или файл.")
-		if draft.media_path is not None:
-			if draft.media_kind is MediaKind.NONE:
-				raise PostError("У вложения не указан тип контента.")
-			if not Path(draft.media_path).is_file():
-				raise PostError(f"Файл не найден: {draft.media_path}")
-		if draft.when is not None:
-			if draft.when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
-				raise PostError(
-					"Время публикации должно быть хотя бы на минуту в будущем."
-				)
+		if draft.media_path is not None and draft.media_kind is MediaKind.NONE:
+			raise PostError("У вложения не указан тип контента.")
+		if draft.media_path is not None and not Path(draft.media_path).is_file():
+			raise PostError(f"Файл не найден: {draft.media_path}")
+		when = draft.when
+		if when is not None and when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
+			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
 
 	async def list_scheduled(self) -> list[ScheduledPostDto]:
 		"""Собирает отложенные записи всех активных каналов из Telegram."""

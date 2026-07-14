@@ -20,7 +20,7 @@
 | Документ | Назначение | Статус |
 |---|---|---|
 | [overview.md](02-architecture/overview.md) | Общая картина системы | 🟡 |
-| [components.md](02-architecture/components.md) | Состав компонентов | 🟡 |
+| [components.md](02-architecture/components.md) | Состав компонентов | 🟢 |
 | [data-flow.md](02-architecture/data-flow.md) | Поток данных (контент → публикация) | 🟡 |
 | [runtime.md](02-architecture/runtime.md) | Порядок запуска и остановки | 🟢 |
 | [tech-stack.md](02-architecture/tech-stack.md) | Технологии и обоснование | 🟢 |
@@ -31,8 +31,8 @@
 |---|---|---|
 | [README.md](03-modules/README.md) | Карта модулей | 🟡 |
 | [channels.md](03-modules/channels.md) | Управление каналами | 🟡 |
-| [telegram-gateway.md](03-modules/telegram-gateway.md) | Шлюз к Telegram Bot API | 🟡 |
-| [scheduler.md](03-modules/scheduler.md) | Планировщик и отложенный постинг | 🟡 |
+| [telegram-gateway.md](03-modules/telegram-gateway.md) | Шлюз Telegram (Bot API + MTProto) | 🟢 |
+| [scheduler.md](03-modules/scheduler.md) | Расписание: отложенные записи из Telegram | 🟢 |
 | [video-processing.md](03-modules/video-processing.md) | Подготовка видео | 🟢 |
 | [captions.md](03-modules/captions.md) | Подписи к постам (шаблоны) | 🟢 |
 | [content-sources.md](03-modules/content-sources.md) | Источники и парсинг | 🟡 |

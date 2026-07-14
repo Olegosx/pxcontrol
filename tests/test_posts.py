@@ -19,6 +19,7 @@ from pxcontrol.engine.services.posts import (
 	ScheduledPostDto,
 )
 from pxcontrol.engine.telegram.mtproto import UserbotUnavailable
+from pxcontrol.engine.telegram.types import OutgoingPost
 
 
 class _FakeGateway:
@@ -26,8 +27,7 @@ class _FakeGateway:
 
 	def __init__(self) -> None:
 		self.sent: list[tuple[str, str, str]] = []
-		self.published: list[tuple[str, str, str | None, str, datetime | None]] = []
-		self.thumbs: list[str | None] = []
+		self.published: list[tuple[str, OutgoingPost]] = []
 		self.userbot_ok = True
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
@@ -35,17 +35,18 @@ class _FakeGateway:
 		return 42
 
 	async def publish(
-		self, chat_id: str, text: str, media_path: str | None,
-		media_kind: str, when: datetime | None, on_progress: object,
-		thumb_path: str | None,
+		self, chat_id: str, post: OutgoingPost, on_progress: object
 	) -> None:
 		if not self.userbot_ok:
 			raise UserbotUnavailable("Userbot не подключён — войдите в аккаунт.")
-		if media_path is not None and callable(on_progress):
+		if post.media_path is not None and callable(on_progress):
 			on_progress(0.5)
 			on_progress(1.0)
-		self.published.append((chat_id, text, media_path, media_kind, when))
-		self.thumbs.append(thumb_path)
+		self.published.append((chat_id, post))
+
+	def thumbs(self) -> list[str | None]:
+		"""Миниатюры отправленных постов (в порядке отправки)."""
+		return [post.thumb_path for _chat, post in self.published]
 
 	async def get_scheduled(self, chat_id: str) -> list[object]:
 		return [SimpleNamespace(
@@ -108,8 +109,8 @@ async def test_publish_text_now_and_scheduled(db: Database) -> None:
 	when = datetime.now(UTC) + timedelta(hours=1)
 	await service.publish(PostDraft(channel_id, text="позже", when=when))
 	assert gateway.published == [
-		("-1001", "сразу", None, "none", None),
-		("-1001", "позже", None, "none", when),
+		("-1001", OutgoingPost(text="сразу")),
+		("-1001", OutgoingPost(text="позже", when=when)),
 	]
 
 
@@ -126,7 +127,9 @@ async def test_publish_media_with_progress(db: Database, tmp_path: Path) -> None
 		media_kind=MediaKind.VIDEO,
 	)
 	await service.publish(draft, on_progress=received.append)
-	assert gateway.published == [("-1001", "подпись", str(video), "video", None)]
+	chat_id, post = gateway.published[0]
+	assert (chat_id, post.text, post.media_path) == ("-1001", "подпись", str(video))
+	assert post.media_kind == "video" and post.when is None
 	assert received == [0.5, 1.0]
 
 
@@ -176,7 +179,8 @@ async def test_video_thumbnail_from_neighbor_preview(
 		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
 	))
 	assert sources == [(str(tmp_path / "ролик.png"), 0.0)]
-	assert gateway.thumbs[0] is not None and gateway.thumbs[0].endswith(".jpg")
+	thumb = gateway.thumbs()[0]
+	assert thumb is not None and thumb.endswith(".jpg")
 
 
 async def test_video_thumbnail_random_middle_without_preview(
@@ -206,7 +210,7 @@ async def test_video_thumbnail_random_middle_without_preview(
 	await service.publish(PostDraft(
 		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
 	))
-	assert gateway.thumbs == [gateway.thumbs[0]] and gateway.thumbs[0] is not None
+	assert gateway.thumbs()[0] is not None
 
 
 async def test_video_thumbnail_failure_does_not_block_publish(
@@ -226,7 +230,7 @@ async def test_video_thumbnail_failure_does_not_block_publish(
 	await service.publish(PostDraft(
 		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
 	))
-	assert len(gateway.published) == 1 and gateway.thumbs == [None]
+	assert len(gateway.published) == 1 and gateway.thumbs() == [None]
 
 
 async def test_publish_userbot_unavailable(db: Database) -> None:

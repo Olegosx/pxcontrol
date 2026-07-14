@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
 from typing import Any
 
 from pxcontrol.engine.telegram.bot_api import (
@@ -21,6 +20,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	send_text,
 )
 from pxcontrol.engine.telegram.mtproto import MtprotoLoginManager, MtprotoTransport
+from pxcontrol.engine.telegram.types import OutgoingPost
 
 logger = logging.getLogger(__name__)
 
@@ -70,22 +70,15 @@ class TelegramGateway:
 	async def publish(
 		self,
 		chat_id: str,
-		text: str,
-		media_path: str | None,
-		media_kind: str,
-		when: datetime | None,
+		post: OutgoingPost,
 		on_progress: Callable[[float], None] | None = None,
-		thumb_path: str | None = None,
 	) -> None:
 		"""Публикует пост любого типа через userbot (ADR-0011).
 
 		Текст или медиа с подписью; сразу (when=None) или отложенно —
 		отложенные хранит и публикует сервер Telegram (ADR-0010).
-		``thumb_path`` — JPEG-миниатюра для видео.
 		"""
-		await self.mtproto.publish(
-			chat_id, text, media_path, media_kind, when, on_progress, thumb_path
-		)
+		await self.mtproto.publish(chat_id, post, on_progress)
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]:
 		"""Читает отложенные записи канала из Telegram."""

@@ -114,7 +114,11 @@ class CaptionDialog(MessageBoxBase):
 		self.viewLayout.addWidget(self._title)
 		self._fields_box = QVBoxLayout()
 		self.viewLayout.addLayout(self._fields_box)
-		self._show_template(self._default_index())
+		# индекс и перерисовка — после сборки формы, сигнал подключаем последним
+		index = self._last_used_index()
+		self._combo.setCurrentIndex(index)
+		self._show_template(index)
+		self._combo.currentIndexChanged.connect(self._show_template)
 		self.yesButton.setText("Вставить в подпись")
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(560)
@@ -124,20 +128,17 @@ class CaptionDialog(MessageBoxBase):
 		self._combo = ComboBox(self)
 		for template in self._templates:
 			self._combo.addItem(template.name)
-		self._combo.currentIndexChanged.connect(self._show_template)
 		if len(self._templates) < 2:
 			self._combo.hide()
 		self.viewLayout.addWidget(self._combo)
 
-	def _default_index(self) -> int:
-		"""Последний использованный шаблон (или первый)."""
+	def _last_used_index(self) -> int:
+		"""Индекс последнего использованного шаблона (или первого)."""
 		stamps = [
 			(t.last_used_at, i) for i, t in enumerate(self._templates)
 			if t.last_used_at is not None
 		]
-		index = max(stamps)[1] if stamps else 0
-		self._combo.setCurrentIndex(index)
-		return index
+		return max(stamps)[1] if stamps else 0
 
 	def _show_template(self, index: int) -> None:
 		"""Перестраивает строки полей под выбранный шаблон."""
@@ -188,6 +189,10 @@ class FieldsDialog(MessageBoxBase):
 		self.cancelButton.hide()
 		self.widget.setMinimumWidth(560)
 		self._reload()
+
+	def _show_error(self, message: str) -> None:
+		"""Показывает ошибку всплывающей плашкой."""
+		show_error(self, message)
 
 	# --- поля -----------------------------------------------------------------
 
@@ -246,7 +251,7 @@ class FieldsDialog(MessageBoxBase):
 				self._channel_id, str(self._field_name.text()),
 				self._field_hashtag.isChecked(), self._field_multiple.isChecked(),
 			),
-			self, self._on_field_added, partial(show_error, self),
+			self, self._on_field_added, self._show_error,
 		)
 
 	def _on_field_added(self, _field: FieldDto) -> None:
@@ -256,7 +261,7 @@ class FieldsDialog(MessageBoxBase):
 	def _on_delete_field(self, field: FieldDto) -> None:
 		run_in_engine(
 			self._worker, self._worker.engine.captions.delete_field(field.id),
-			self, lambda *_a: self._reload(), partial(show_error, self),
+			self, lambda *_a: self._reload(), self._show_error,
 		)
 
 	# --- шаблоны ----------------------------------------------------------------
@@ -321,7 +326,7 @@ class FieldsDialog(MessageBoxBase):
 				self._channel_id, str(self._template_name.text()),
 				self._checked_field_ids(),
 			),
-			self, self._on_template_saved, partial(show_error, self),
+			self, self._on_template_saved, self._show_error,
 		)
 
 	def _on_template_saved(self, _template: TemplateDto) -> None:
@@ -332,7 +337,7 @@ class FieldsDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.delete_template(template.id),
-			self, lambda *_a: self._reload(), partial(show_error, self),
+			self, lambda *_a: self._reload(), self._show_error,
 		)
 
 	# --- загрузка -----------------------------------------------------------------
@@ -341,10 +346,10 @@ class FieldsDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.list_fields(self._channel_id),
-			self, self._show_fields, partial(show_error, self),
+			self, self._show_fields, self._show_error,
 		)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.list_templates(self._channel_id),
-			self, self._show_templates, partial(show_error, self),
+			self, self._show_templates, self._show_error,
 		)

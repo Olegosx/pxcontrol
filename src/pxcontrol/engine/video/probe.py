@@ -6,9 +6,18 @@ import json
 import logging
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def ffprobe_bin_for(ffmpeg_bin: str) -> str:
+	"""Путь к ffprobe: рядом с заданным ffmpeg или по имени в PATH."""
+	ffmpeg = Path(ffmpeg_bin)
+	if ffmpeg.is_absolute():
+		return str(ffmpeg.with_name("ffprobe"))
+	return "ffprobe"
 
 
 @dataclass(frozen=True)

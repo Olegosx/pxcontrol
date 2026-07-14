@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from pxcontrol.engine.telegram.mtproto import MtprotoTransport, UserbotUnavailable
+from pxcontrol.engine.telegram.types import OutgoingPost
 
 
 class _FakeClient:
@@ -56,7 +57,7 @@ async def test_requires_connected_userbot() -> None:
 	"""Без подключения — понятная ошибка с инструкцией."""
 	transport = MtprotoTransport()
 	with pytest.raises(UserbotUnavailable, match="войдите"):
-		await transport.publish("-1001", "x", None, "none", datetime.now(UTC))
+		await transport.publish("-1001", OutgoingPost(text="x"))
 
 
 async def test_start_connects_once() -> None:
@@ -76,7 +77,7 @@ async def test_publish_text_passes_schedule() -> None:
 	transport = _transport(fake)
 	await transport.start()
 	when = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
-	await transport.publish("-1001234", "текст", None, "none", when)
+	await transport.publish("-1001234", OutgoingPost(text="текст", when=when))
 	assert fake.sent == [(-1001234, "текст", when)]
 	assert fake.files == []
 
@@ -88,10 +89,13 @@ async def test_publish_media_maps_kind_to_hints() -> None:
 	await transport.start()
 	received: list[float] = []
 	await transport.publish(
-		"-1001234", "подпись", "/tmp/v.mp4", "video", None,
+		"-1001234",
+		OutgoingPost(text="подпись", media_path="/tmp/v.mp4", media_kind="video"),
 		on_progress=received.append,
 	)
-	await transport.publish("-1001234", "", "/tmp/d.zip", "document", None)
+	await transport.publish(
+		"-1001234", OutgoingPost(media_path="/tmp/d.zip", media_kind="document")
+	)
 	video, doc = fake.files
 	assert video["file"] == "/tmp/v.mp4" and video["caption"] == "подпись"
 	assert video["supports_streaming"] and not video["force_document"]

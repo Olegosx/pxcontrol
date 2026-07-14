@@ -21,6 +21,7 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import VideoPreset
 from pxcontrol.engine.video import ProcessingOptions, process
 from pxcontrol.engine.video.pipeline import ProgressCallback
+from pxcontrol.engine.video.probe import ffprobe_bin_for
 from pxcontrol.paths import media_dir
 
 logger = logging.getLogger(__name__)
@@ -199,7 +200,7 @@ class VideoService:
 		out_dir.mkdir(parents=True, exist_ok=True)
 		stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 		output = out_dir / f"{source.stem}_{preset.name}_{stamp}.mp4"
-		ffprobe = self._ffprobe_bin()
+		ffprobe = ffprobe_bin_for(self._ffmpeg)
 		return ProcessingOptions(
 			input=str(source), output=str(output),
 			watermark=preset.watermark_path, wm_corner=preset.wm_corner,
@@ -211,10 +212,3 @@ class VideoService:
 			video_bitrate_kbps=preset.video_bitrate_kbps,
 			ffmpeg_bin=self._ffmpeg, ffprobe_bin=ffprobe,
 		)
-
-	def _ffprobe_bin(self) -> str:
-		"""ffprobe ищем рядом с заданным ffmpeg (или в PATH)."""
-		ffmpeg = Path(self._ffmpeg)
-		if ffmpeg.is_absolute():
-			return str(ffmpeg.with_name("ffprobe"))
-		return "ffprobe"

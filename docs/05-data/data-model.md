@@ -1,11 +1,11 @@
 # Модель данных
 
-> Статус: 🟢 первая версия реализована · Обновлено: 2026-07-03 · Владелец: olegosx
+> Статус: 🟢 актуально · Обновлено: 2026-07-14 · Владелец: olegosx
 
 ## Назначение документа
 
 Описать сущности приложения, их поля и связи. Соответствует коду
-`src/pxcontrol/engine/db/models.py` и миграции `e5cc5457ed7a`.
+`src/pxcontrol/engine/db/models.py` (миграции `e5cc5457ed7a` … `d9f3a6e42b71`).
 
 ## Принципы
 
@@ -14,7 +14,8 @@
 - Поля, помеченные 🔐, шифруются прозрачно (тип `EncryptedStr`, ключ —
   в системном хранилище ОС; [ADR-0009](../02-architecture/decisions/0009-config-secrets-in-db.md)).
 - Медиа-файлы в БД не хранятся — только пути; сами файлы на диске.
-- У всех таблиц, кроме `settings`, есть `created_at`/`updated_at`.
+- У всех таблиц, кроме `settings` и `caption_template_fields`,
+  есть `created_at`/`updated_at`.
 
 ## Сущности (текущая схема)
 
@@ -23,6 +24,9 @@
 |---|---|---|
 | `key` | str, PK | имя настройки |
 | `value` | JSON | значение любого типа |
+
+Зарезервирована: кодом пока не используется (конфиг живёт в `.env`);
+судьба таблицы решается отдельной задачей.
 
 ### `bots` — Telegram-боты (несколько; канал ссылается на своего)
 | Поле | Тип | Назначение |
@@ -49,7 +53,8 @@
 ### `video_presets` — шаблоны обработки видео (референс makeVideo)
 `name`, `watermark_path?`, `wm_corner/margin/opacity/scale`,
 `wm_start?/wm_end?`, `intro`, `intro_source`, `intro_hold`, `xfade`,
-`cover`, `no_audio`. Переиспользуются между каналами.
+`cover`, `no_audio`, `video_bitrate_kbps?` (NULL — «как в оригинале»;
+миграция `c7d2f4a91b33`). Переиспользуются между каналами.
 
 ### `channels` — подключённые каналы
 | Поле | Тип | Назначение |
@@ -59,7 +64,18 @@
 | `username` | str? | @имя, если есть |
 | `enabled` | bool | канал активен |
 | `bot_id` | FK→bots? | бот-публикатор (NULL — ещё не назначен) |
-| `video_preset_id` | FK→video_presets? | шаблон видео |
+| `video_preset_id` | FK→video_presets? | пресет видео по умолчанию — задел под связку «подготовить и опубликовать для канала»; потребителя в коде пока нет |
+
+### Подписи к постам (миграция `d9f3a6e42b71`, [captions.md](../03-modules/captions.md))
+
+- **`caption_fields`** — пул полей канала: `channel_id` FK, `name`,
+  `hashtag` (оформлять значения решётками), `multiple` (несколько значений).
+- **`caption_values`** — словарь значений поля: `field_id` FK, `value`.
+  Общий для всех шаблонов канала.
+- **`caption_templates`** — именованные шаблоны: `channel_id` FK, `name`,
+  `last_used_at?` (для предвыбора в диалоге).
+- **`caption_template_fields`** — состав шаблона: `template_id` FK,
+  `field_id` FK, `position`, `enabled`. Без полей времени.
 
 ## Отложено сознательно (YAGNI)
 

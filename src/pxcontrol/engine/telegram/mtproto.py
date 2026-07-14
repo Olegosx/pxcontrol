@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
 from typing import Any
+
+from pxcontrol.engine.telegram.types import OutgoingPost
 
 logger = logging.getLogger(__name__)
 
@@ -119,12 +120,8 @@ class MtprotoTransport:
 	async def publish(
 		self,
 		chat_id: str,
-		text: str,
-		media_path: str | None,
-		media_kind: str,
-		when: datetime | None,
+		post: OutgoingPost,
 		on_progress: Callable[[float], None] | None = None,
-		thumb_path: str | None = None,
 	) -> None:
 		"""Публикует пост: текст или медиа с подписью, сразу или отложенно.
 
@@ -132,9 +129,8 @@ class MtprotoTransport:
 		на файлы (50 МБ) мал для видео, отложенные (schedule_date) хранит
 		и публикует сервер Telegram (ADR-0010). ``on_progress`` получает
 		долю загрузки файла 0.0..1.0 (большие файлы — это минуты).
-
-		``thumb_path`` — JPEG-миниатюра видео (Telegram принимает её,
-		только когда известны размеры видео — их извлекает hachoir).
+		Миниатюру Telegram принимает, только когда известны размеры
+		видео — их извлекает hachoir.
 		"""
 		client = self._require_client()
 
@@ -143,23 +139,23 @@ class MtprotoTransport:
 				on_progress(sent / total)
 
 		try:
-			if media_path is None:
-				await client.send_message(int(chat_id), text, schedule=when)
+			if post.media_path is None:
+				await client.send_message(int(chat_id), post.text, schedule=post.when)
 			else:
 				await client.send_file(
-					int(chat_id), media_path, caption=text or None,
-					schedule=when,
-					supports_streaming=media_kind == "video",
-					force_document=media_kind == "document",
+					int(chat_id), post.media_path, caption=post.text or None,
+					schedule=post.when,
+					supports_streaming=post.media_kind == "video",
+					force_document=post.media_kind == "document",
 					progress_callback=_progress,
-					thumb=thumb_path,
+					thumb=post.thumb_path,
 				)
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 			raise UserbotUnavailable(_map_post_error(exc)) from exc
 		logger.info(
 			"Пост отправлен в чат %s (%s, %s).", chat_id,
-			media_kind if media_path else "текст",
-			f"отложено на {when}" if when else "сразу",
+			post.media_kind if post.media_path else "текст",
+			f"отложено на {post.when}" if post.when else "сразу",
 		)
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]:

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TypeVar
 
-from PySide6.QtCore import QDate, QTime
+from PySide6.QtCore import QDate, QTime, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
@@ -18,6 +18,7 @@ from qfluentwidgets import (
 	LineEdit,
 	MessageBox,
 	MessageBoxBase,
+	ProgressBar,
 	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
@@ -95,6 +96,51 @@ def row_card(
 		delete_button.clicked.connect(on_delete)
 		layout.addWidget(delete_button)
 	return card
+
+
+class ProgressPanel(QWidget):
+	"""Полоса прогресса с подписью и мостом из потока движка.
+
+	``emit_progress`` передаётся колбэком в движок: сигнал Qt доставляет
+	долю готовности (0.0..1.0) в поток интерфейса. Используется страницами
+	«Видео» (кодирование) и «Публикация» (загрузка файла).
+	"""
+
+	_progressed = Signal(float)
+
+	def __init__(self, parent: QWidget) -> None:
+		super().__init__(parent)
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		self._bar = ProgressBar(self)
+		self._bar.setRange(0, 100)
+		self._label = CaptionLabel("", self)
+		layout.addWidget(self._bar)
+		layout.addWidget(self._label)
+		self._prefix = ""
+		self._progressed.connect(self._on_progress)
+		self.hide()
+
+	@property
+	def emit_progress(self) -> Callable[[float], None]:
+		"""Колбэк для движка (безопасен к вызову из другого потока)."""
+		return self._progressed.emit
+
+	def begin(self, prefix: str, note: str = "") -> None:
+		"""Показывает панель: префикс для процентов и стартовая подпись."""
+		self._prefix = prefix
+		self._bar.setValue(0)
+		self._label.setText(note or f"{prefix}…")
+		self.show()
+
+	def finish(self) -> None:
+		"""Прячет панель."""
+		self.hide()
+
+	def _on_progress(self, fraction: float) -> None:
+		percent = int(fraction * 100)
+		self._bar.setValue(percent)
+		self._label.setText(f"{self._prefix}: {percent}%")
 
 
 class WhenRow:

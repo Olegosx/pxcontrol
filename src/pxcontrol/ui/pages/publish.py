@@ -9,17 +9,14 @@ from __future__ import annotations
 from datetime import datetime
 from functools import partial
 
-from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-	CaptionLabel,
 	ComboBox,
 	FluentIcon,
 	InfoBar,
 	LineEdit,
 	PrimaryPushButton,
-	ProgressBar,
 	PushButton,
 	ScrollArea,
 	SegmentedWidget,
@@ -33,7 +30,7 @@ from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import MediaKind, PostDraft
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
-from pxcontrol.ui.pages.common import WhenRow, noop, show_error
+from pxcontrol.ui.pages.common import ProgressPanel, WhenRow, noop, show_error
 
 #: Сегменты типов контента: подпись → тип → фильтр диалога выбора файла.
 _KINDS: list[tuple[str, MediaKind, str]] = [
@@ -43,12 +40,6 @@ _KINDS: list[tuple[str, MediaKind, str]] = [
 	("Аудио", MediaKind.AUDIO, "Аудио (*.mp3 *.m4a *.flac *.ogg *.wav)"),
 	("Файл", MediaKind.DOCUMENT, "Все файлы (*)"),
 ]
-
-
-class _ProgressRelay(QObject):
-	"""Мост прогресса: колбэк из потока движка → сигнал в поток интерфейса."""
-
-	progressed = Signal(float)
 
 
 class PublishPage(ScrollArea):
@@ -130,15 +121,8 @@ class PublishPage(ScrollArea):
 		row.addWidget(self._send_button)
 		row.addStretch()
 		layout.addLayout(row)
-		self._progress = ProgressBar(self)
-		self._progress.setRange(0, 100)
-		self._progress.hide()
+		self._progress = ProgressPanel(self)
 		layout.addWidget(self._progress)
-		self._progress_label = CaptionLabel("", self)
-		self._progress_label.hide()
-		layout.addWidget(self._progress_label)
-		self._relay = _ProgressRelay(self)
-		self._relay.progressed.connect(self._on_progress)
 
 	# --- поведение -----------------------------------------------------------------
 
@@ -156,7 +140,7 @@ class PublishPage(ScrollArea):
 	def _reload_channels(self) -> None:
 		run_in_engine(
 			self._worker, self._worker.engine.channels.list_channels(),
-			self, self._show_channels, partial(show_error, self),
+			self, self._show_channels, self._show_error,
 		)
 
 	def _show_channels(self, channels: list[ChannelDto]) -> None:
@@ -184,18 +168,13 @@ class PublishPage(ScrollArea):
 		if path:
 			self._file_edit.setText(path)
 
-	def _on_progress(self, fraction: float) -> None:
-		percent = int(fraction * 100)
-		self._progress.setValue(percent)
-		self._progress_label.setText(f"Загрузка в Telegram: {percent}%")
-
 	# --- подпись по шаблону -----------------------------------------------------
 
 	def _current_channel(self) -> ChannelDto | None:
 		"""Выбранный канал или None (с показом подсказки)."""
 		index = int(self._channel_combo.currentIndex())
 		if index < 0 or index >= len(self._channels):
-			show_error(self, "Сначала подключите и выберите канал.")
+			self._show_error("Сначала подключите и выберите канал.")
 			return None
 		return self._channels[index]
 
@@ -213,14 +192,14 @@ class PublishPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.list_templates(channel.id),
-			self, self._open_caption_dialog, partial(show_error, self),
+			self, self._open_caption_dialog, self._show_error,
 		)
 
 	def _open_caption_dialog(self, templates: list[TemplateDto]) -> None:
 		"""Собирает подпись по шаблону и вставляет её в поле текста."""
-		if not all(t.fields for t in templates) or not templates:
-			show_error(
-				self, "Сначала настройте поля и шаблон — кнопка «Поля подписи…».",
+		if not templates or not all(t.fields for t in templates):
+			self._show_error(
+				"Сначала настройте поля и шаблон — кнопка «Поля подписи…»."
 			)
 			return
 		title = ""
@@ -235,28 +214,24 @@ class PublishPage(ScrollArea):
 			self._worker.engine.captions.record_usage(
 				dialog.template_id(), dialog.used_values()
 			),
-			self, noop, partial(show_error, self),
+			self, noop, self._show_error,
 		)
 
 	# --- отправка -------------------------------------------------------------------
 
 	def _on_send(self) -> None:
 		"""Собирает черновик и отправляет через движок."""
-		index = int(self._channel_combo.currentIndex())
-		if index < 0 or index >= len(self._channels):
-			show_error(self, "Сначала подключите канал на странице «Каналы».")
+		channel = self._current_channel()
+		if channel is None:
 			return
-		draft = self._draft(self._channels[index].id)
+		draft = self._draft(channel.id)
 		self._send_button.setEnabled(False)
 		if draft.media_path is not None:
-			self._progress.setValue(0)
-			self._progress.show()
-			self._progress_label.setText("Отправка…")
-			self._progress_label.show()
+			self._progress.begin("Загрузка в Telegram", "Отправка…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.posts.publish(
-				draft, on_progress=self._relay.progressed.emit
+				draft, on_progress=self._progress.emit_progress
 			),
 			self, partial(self._on_sent, draft.when), self._show_error,
 		)
@@ -287,10 +262,11 @@ class PublishPage(ScrollArea):
 			)
 
 	def _show_error(self, message: str) -> None:
+		"""Показывает ошибку и гасит индикатор прогресса."""
 		self._hide_progress()
 		show_error(self, message)
 
 	def _hide_progress(self) -> None:
-		self._progress.hide()
-		self._progress_label.hide()
+		"""Прячет полосу прогресса и возвращает кнопку."""
+		self._progress.finish()
 		self._send_button.setEnabled(True)
