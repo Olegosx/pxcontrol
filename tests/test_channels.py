@@ -26,6 +26,7 @@ class _FakeGateway:
 
 	login = None  # вход userbot в этих тестах не используется
 	userbot_is_admin = True  # ответ попутной/основной userbot-проверки
+	bot_is_admin = True  # ответ проверки прав бота
 
 	async def check_bot_token(self, token: str) -> str:
 		return "test_bot"
@@ -33,7 +34,7 @@ class _FakeGateway:
 	async def check_channel(self, token: str, chat_ref: str) -> ChannelInfo:
 		if chat_ref == "@notfound":
 			raise ChannelCheckError("Канал не найден — проверьте @имя или ID.")
-		if chat_ref == "@noperm":
+		if chat_ref == "@noperm" or not self.bot_is_admin:
 			raise ChannelCheckError(
 				"У бота нет права публиковать сообщения в канале."
 			)
@@ -128,6 +129,46 @@ async def test_connect_via_userbot(db: Database) -> None:
 	with pytest.raises(UserbotUnavailable, match="не администратор"):
 		await service.add_channel_via_userbot("@testchan")
 	assert await service.list_channels() == []
+
+
+async def test_recheck_updates_flags_both_ways(db: Database) -> None:
+	"""Перепроверка актуализирует userbot-флаг и сообщает о правах бота."""
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()
+	gateway.userbot_is_admin = False
+	service = ChannelsService(db, gateway)
+	dto = await service.add_channel(bot_id, "@testchan")
+	assert dto.userbot_admin is False
+	# userbot стал админом (например, добавили после подключения)
+	gateway.userbot_is_admin = True
+	access = await service.recheck_channel(dto.id)
+	assert access.userbot_ok and access.channel.userbot_admin is True
+	assert access.bot_ok is True
+	# бота выгнали из канала: флаг userbot остаётся, бот — предупреждение
+	gateway.bot_is_admin = False
+	access = await service.recheck_channel(dto.id)
+	assert access.bot_ok is False
+	assert access.channel.bot_id is not None  # бот не отвязан молча
+
+
+async def test_assign_and_unassign_bot(db: Database) -> None:
+	"""Каналу без бота назначается бот (с проверкой прав) и отвязывается."""
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()
+	service = ChannelsService(db, gateway)
+	dto = await service.add_channel_via_userbot("@testchan")
+	assert dto.bot_id is None
+	# без прав — не назначается
+	gateway.bot_is_admin = False
+	with pytest.raises(ChannelCheckError, match="нет права"):
+		await service.assign_bot(dto.id, bot_id)
+	# с правами — назначается
+	gateway.bot_is_admin = True
+	updated = await service.assign_bot(dto.id, bot_id)
+	assert updated.bot_id == bot_id and updated.bot_label == "Публикатор"
+	# отвязка: бот исчезает, userbot-флаг не трогается
+	updated = await service.unassign_bot(dto.id)
+	assert updated.bot_id is None and updated.userbot_admin is True
 
 
 async def test_unknown_bot_rejected(db: Database) -> None:

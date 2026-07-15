@@ -13,13 +13,16 @@ from qfluentwidgets import (
 	LineEdit,
 	MessageBoxBase,
 	PrimaryPushButton,
+	PushButton,
 	ScrollArea,
 	SubtitleLabel,
 )
 
+from functools import partial
+
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto
-from pxcontrol.engine.services.channels import ChannelDto
+from pxcontrol.engine.services.channels import ChannelAccess, ChannelDto
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	bind,
@@ -89,6 +92,30 @@ class _ConnectDialog(MessageBoxBase):
 	def chat_ref(self) -> str:
 		"""Введённая ссылка на канал."""
 		return str(self._ref.text()).strip()
+
+
+class _AssignBotDialog(MessageBoxBase):
+	"""Выбор бота для назначения каналу."""
+
+	def __init__(self, bots: list[BotDto], parent: QWidget) -> None:
+		super().__init__(parent)
+		self._bots = bots
+		self.viewLayout.addWidget(SubtitleLabel("Назначить бота", self))
+		self.viewLayout.addWidget(BodyLabel(
+			"Бот должен быть администратором канала\n"
+			"с правом публиковать сообщения.", self,
+		))
+		self._combo = ComboBox(self)
+		for bot in bots:
+			self._combo.addItem(f"{bot.label} (@{bot.username or '—'})")
+		self.viewLayout.addWidget(self._combo)
+		self.yesButton.setText("Назначить")
+		self.cancelButton.setText("Отмена")
+		self.widget.setMinimumWidth(420)
+
+	def bot_id(self) -> int:
+		"""Идентификатор выбранного бота."""
+		return self._bots[int(self._combo.currentIndex())].id
 
 
 class ChannelsPage(ScrollArea):
@@ -162,7 +189,7 @@ class ChannelsPage(ScrollArea):
 		return box
 
 	def _channel_row(self, channel: ChannelDto) -> CardWidget:
-		"""Карточка канала: название, @имя, способы администрирования."""
+		"""Карточка канала: название, способы администрирования, действия."""
 		ways = []
 		if channel.bot_label:
 			ways.append(f"бот {channel.bot_label}")
@@ -171,10 +198,83 @@ class ChannelsPage(ScrollArea):
 		subtitle = (
 			f"@{channel.username or '—'} · админ: {' + '.join(ways) or '—'}"
 		)
+		buttons = QWidget(self)
+		row = QHBoxLayout(buttons)
+		row.setContentsMargins(0, 0, 0, 0)
+		recheck = PushButton("Проверить доступы", buttons)
+		recheck.clicked.connect(bind(self._recheck_channel, channel))
+		row.addWidget(recheck)
+		if channel.bot_id is None:
+			bot_action = PushButton("Назначить бота…", buttons)
+			bot_action.clicked.connect(bind(self._on_assign_bot, channel))
+		else:
+			bot_action = PushButton("Отвязать бота", buttons)
+			bot_action.clicked.connect(bind(self._on_unassign_bot, channel))
+		row.addWidget(bot_action)
 		return row_card(
-			self, channel.title, subtitle,
+			self, channel.title, subtitle, trailing=buttons,
 			on_delete=bind(self._delete_channel, channel),
 		)
+
+	# --- доступы и бот -----------------------------------------------------------
+
+	def _recheck_channel(self, channel: ChannelDto) -> None:
+		"""Перепроверяет оба способа администрирования канала."""
+		InfoBar.info("Проверка", f"Проверяю доступы «{channel.title}»…", parent=self)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.channels.recheck_channel(channel.id),
+			self, self._on_rechecked, self._show_error,
+		)
+
+	def _on_rechecked(self, access: ChannelAccess) -> None:
+		"""Показывает итог перепроверки и обновляет список."""
+		parts = [f"userbot: {'админ' if access.userbot_ok else 'не админ'}"]
+		if access.bot_ok is not None:
+			parts.append(f"бот: {'права на месте' if access.bot_ok else 'права потеряны'}")
+		summary = " · ".join(parts)
+		if access.userbot_ok and access.bot_ok is not False:
+			InfoBar.success(access.channel.title, summary, parent=self)
+		else:
+			InfoBar.warning(access.channel.title, summary, parent=self, duration=6000)
+		self._reload()
+
+	def _on_assign_bot(self, channel: ChannelDto) -> None:
+		"""Открывает выбор бота для назначения каналу."""
+		run_in_engine(
+			self._worker, self._worker.engine.accounts.list_bots(),
+			self, partial(self._open_assign_dialog, channel), self._show_error,
+		)
+
+	def _open_assign_dialog(self, channel: ChannelDto, bots: list[BotDto]) -> None:
+		if not bots:
+			self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
+			return
+		dialog = _AssignBotDialog(bots, self.window())
+		if not dialog.exec():
+			return
+		InfoBar.info("Проверка", "Проверяю права бота в канале…", parent=self)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.channels.assign_bot(channel.id, dialog.bot_id()),
+			self, self._on_bot_changed, self._show_error,
+		)
+
+	def _on_unassign_bot(self, channel: ChannelDto) -> None:
+		if not confirm_delete(
+			self, f"Отвязать бота от канала «{channel.title}»?",
+			accept_text="Отвязать",
+		):
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.channels.unassign_bot(channel.id),
+			self, self._on_bot_changed, self._show_error,
+		)
+
+	def _on_bot_changed(self, channel: ChannelDto) -> None:
+		InfoBar.success("Готово", channel.title, parent=self)
+		self._reload()
 
 	# --- подключение -----------------------------------------------------------
 

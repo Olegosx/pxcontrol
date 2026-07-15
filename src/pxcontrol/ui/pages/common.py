@@ -56,10 +56,10 @@ def clear_layout(layout: QLayout) -> None:
 			widget.deleteLater()
 
 
-def confirm_delete(parent: QWidget, text: str) -> bool:
-	"""Спрашивает подтверждение удаления."""
+def confirm_delete(parent: QWidget, text: str, accept_text: str = "Удалить") -> bool:
+	"""Спрашивает подтверждение необратимого действия."""
 	box = MessageBox("Подтверждение", text, parent.window())
-	box.yesButton.setText("Удалить")
+	box.yesButton.setText(accept_text)
 	box.cancelButton.setText("Отмена")
 	return bool(box.exec())
 

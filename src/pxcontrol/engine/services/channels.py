@@ -43,6 +43,21 @@ class ChannelDto:
 	userbot_admin: bool = False
 
 
+@dataclass(frozen=True)
+class ChannelAccess:
+	"""Итог перепроверки доступов канала.
+
+	Attributes:
+		channel: канал с обновлённым флагом userbot.
+		userbot_ok: userbot — админ с правом публиковать.
+		bot_ok: права бота на месте (None — бот не назначен).
+	"""
+
+	channel: ChannelDto
+	userbot_ok: bool
+	bot_ok: bool | None
+
+
 class ChannelsService:
 	"""Подключение каналов, проверка прав бота и хранение настроек."""
 
@@ -141,6 +156,91 @@ class ChannelsService:
 			await session.commit()
 			await session.refresh(channel)
 		return channel
+
+	async def recheck_channel(self, channel_id: int) -> ChannelAccess:
+		"""Перепроверяет оба способа администрирования канала.
+
+		Флаг userbot обновляется в обе стороны (права могли отозвать).
+		Потеря прав бота его не отвязывает — только сообщается: бота
+		могут вернуть в канал.
+
+		Raises:
+			ChannelError: Канал не найден.
+		"""
+		async with self._db.session_factory() as session:
+			channel = (
+				await session.execute(
+					select(Channel).options(selectinload(Channel.bot))
+					.where(Channel.id == channel_id)
+				)
+			).scalar_one_or_none()
+			if channel is None:
+				raise ChannelError("Канал не найден — обновите список.")
+			bot_label = channel.bot.label if channel.bot is not None else None
+			bot_token = channel.bot.token if channel.bot is not None else None
+			userbot_ok = await self._probe_userbot(channel.tg_chat_id)
+			bot_ok: bool | None = None
+			if bot_token is not None:
+				bot_ok = await self._probe_bot(bot_token, channel.tg_chat_id)
+			channel.userbot_admin = userbot_ok
+			await session.commit()
+			await session.refresh(channel)
+			dto = self._dto(channel, bot_label=bot_label)
+		logger.info(
+			"Доступы канала «%s»: userbot=%s, бот=%s.",
+			dto.title, userbot_ok, bot_ok,
+		)
+		return ChannelAccess(dto, userbot_ok, bot_ok)
+
+	async def assign_bot(self, channel_id: int, bot_id: int) -> ChannelDto:
+		"""Назначает каналу бота (с проверкой его прав в канале).
+
+		Raises:
+			ChannelError: Канал или бот не найдены.
+			ChannelCheckError: Бот не админ канала / без права публиковать.
+		"""
+		bot = await self._get_bot(bot_id)
+		async with self._db.session_factory() as session:
+			channel = await session.get(Channel, channel_id)
+			if channel is None:
+				raise ChannelError("Канал не найден — обновите список.")
+			chat_id = channel.tg_chat_id
+		await self._gateway.check_channel(bot.token, chat_id)
+		async with self._db.session_factory() as session:
+			channel = await session.get(Channel, channel_id)
+			if channel is None:
+				raise ChannelError("Канал не найден — обновите список.")
+			channel.bot_id = bot.id
+			await session.commit()
+			await session.refresh(channel)
+			dto = self._dto(channel, bot_label=bot.label)
+		logger.info("Каналу «%s» назначен бот «%s».", dto.title, bot.label)
+		return dto
+
+	async def unassign_bot(self, channel_id: int) -> ChannelDto:
+		"""Отвязывает бота от канала (сам бот остаётся в приложении).
+
+		Raises:
+			ChannelError: Канал не найден.
+		"""
+		async with self._db.session_factory() as session:
+			channel = await session.get(Channel, channel_id)
+			if channel is None:
+				raise ChannelError("Канал не найден — обновите список.")
+			channel.bot_id = None
+			await session.commit()
+			await session.refresh(channel)
+			dto = self._dto(channel)
+		logger.info("От канала «%s» отвязан бот.", dto.title)
+		return dto
+
+	async def _probe_bot(self, token: str, chat_id: str) -> bool:
+		"""Проверяет права бота, не роняя перепроверку."""
+		try:
+			await self._gateway.check_channel(token, chat_id)
+		except Exception:  # noqa: BLE001 — итог отражается в ответе
+			return False
+		return True
 
 	async def delete_channel(self, channel_id: int) -> None:
 		"""Удаляет канал по идентификатору (из приложения, не из Telegram)."""
