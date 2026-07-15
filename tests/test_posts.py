@@ -27,12 +27,19 @@ class _FakeGateway:
 
 	def __init__(self) -> None:
 		self.sent: list[tuple[str, str, str]] = []
+		self.media: list[tuple[str, str, str, str, str]] = []
 		self.published: list[tuple[str, OutgoingPost]] = []
 		self.userbot_ok = True
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
 		self.sent.append((token, chat_id, text))
 		return 42
+
+	async def send_media(
+		self, token: str, chat_id: str, kind: str, path: str, caption: str
+	) -> int:
+		self.media.append((token, chat_id, kind, path, caption))
+		return 43
 
 	async def publish(
 		self, chat_id: str, post: OutgoingPost, on_progress: object
@@ -64,7 +71,9 @@ async def db(tmp_path: Path) -> AsyncIterator[Database]:
 	await database.close()
 
 
-async def _add_channel(db: Database, with_bot: bool = True) -> int:
+async def _add_channel(
+	db: Database, with_bot: bool = True, userbot_admin: bool = True
+) -> int:
 	"""Создаёт канал (и бота при необходимости), возвращает id канала."""
 	async with db.session_factory() as session:
 		bot_id = None
@@ -73,7 +82,10 @@ async def _add_channel(db: Database, with_bot: bool = True) -> int:
 			session.add(bot)
 			await session.flush()
 			bot_id = bot.id
-		channel = Channel(title="Канал", tg_chat_id="-1001", bot_id=bot_id)
+		channel = Channel(
+			title="Канал", tg_chat_id="-1001", bot_id=bot_id,
+			userbot_admin=userbot_admin,
+		)
 		session.add(channel)
 		await session.commit()
 		await session.refresh(channel)
@@ -282,6 +294,65 @@ async def test_publish_rename_validations(db: Database, tmp_path: Path) -> None:
 			rename_to="занято.mp4",
 		))
 	assert gateway.published == []
+
+
+def test_publish_capabilities() -> None:
+	"""Возможности из способов администрирования; userbot — приоритет."""
+	from pxcontrol.engine.services.posts import publish_capabilities
+
+	both = publish_capabilities(bot_assigned=True, userbot_admin=True)
+	assert both.userbot and both.bot
+	bot_only = publish_capabilities(bot_assigned=True, userbot_admin=False)
+	assert not bot_only.userbot and bot_only.bot
+	none = publish_capabilities(bot_assigned=False, userbot_admin=False)
+	assert not none.userbot and not none.bot
+
+
+async def test_publish_bot_fallback_text_and_media(
+	db: Database, tmp_path: Path
+) -> None:
+	"""Канал «только бот»: текст и медиа ≤50 МБ уходят через Bot API."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db, userbot_admin=False)
+	await service.publish(PostDraft(channel_id, text="через бота"))
+	assert gateway.sent == [("123:AAA", "-1001", "через бота")]
+	photo = tmp_path / "фото.jpg"
+	photo.write_bytes(b"jpg")
+	await service.publish(PostDraft(
+		channel_id, text="подпись", media_path=str(photo),
+		media_kind=MediaKind.PHOTO,
+	))
+	assert gateway.media == [
+		("123:AAA", "-1001", "photo", str(photo), "подпись")
+	]
+	assert gateway.published == []  # userbot-путь не задействован
+
+
+async def test_publish_bot_limits(db: Database, tmp_path: Path) -> None:
+	"""Канал «только бот»: отложка и файлы >50 МБ — ошибки до отправки."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db, userbot_admin=False)
+	when = datetime.now(UTC) + timedelta(hours=1)
+	with pytest.raises(PostError, match="userbot-админа"):
+		await service.publish(PostDraft(channel_id, text="x", when=when))
+	big = tmp_path / "большой.mp4"
+	with big.open("wb") as handle:
+		handle.truncate(51 * 1024 * 1024)  # разрежённый файл, диск не страдает
+	with pytest.raises(PostError, match="50 МБ"):
+		await service.publish(PostDraft(
+			channel_id, media_path=str(big), media_kind=MediaKind.VIDEO,
+		))
+	assert gateway.sent == [] and gateway.media == []
+
+
+async def test_publish_without_any_way(db: Database) -> None:
+	"""Канал без способов публикации — понятная ошибка."""
+	service = PostsService(db, _FakeGateway())
+	channel_id = await _add_channel(db, with_bot=False, userbot_admin=False)
+	with pytest.raises(PostError, match="нет способа публикации"):
+		await service.publish(PostDraft(channel_id, text="x"))
 
 
 async def test_publish_userbot_unavailable(db: Database) -> None:

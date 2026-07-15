@@ -177,6 +177,13 @@ class WhenRow:
 		self._date.setVisible(not now)
 		self._time.setVisible(not now)
 
+	def set_schedule_allowed(self, allowed: bool, hint: str = "") -> None:
+		"""Разрешает/запрещает отложенную публикацию (иначе — только «сейчас»)."""
+		if not allowed:
+			self._now_switch.setChecked(True)
+		self._now_switch.setEnabled(allowed)
+		self._now_switch.setToolTip("" if allowed else hint)
+
 	def when(self) -> datetime | None:
 		"""None — «сейчас», иначе выбранный момент (в UTC)."""
 		if self._now_switch.isChecked():

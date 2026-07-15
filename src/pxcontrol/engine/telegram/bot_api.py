@@ -80,6 +80,60 @@ def ensure_bot_can_post(member: Any) -> None:
 		raise ChannelCheckError("У бота нет права публиковать сообщения в канале.")
 
 
+async def send_media(
+	token: str, chat_id: str, kind: str, path: str, caption: str
+) -> int:
+	"""Отправляет медиа в канал через Bot API (лимит — 50 МБ на файл).
+
+	``kind``: photo/video/audio/document (как в MediaKind).
+
+	Returns:
+		ID сообщения в Telegram.
+
+	Raises:
+		ChannelCheckError: Telegram отклонил отправку (нет прав, размер и т.п.).
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	from aiogram import Bot
+	from aiogram.exceptions import (
+		TelegramBadRequest,
+		TelegramForbiddenError,
+		TelegramNetworkError,
+		TelegramUnauthorizedError,
+	)
+	from aiogram.types import FSInputFile
+
+	bot = Bot(token)
+	file = FSInputFile(path)
+	text = caption or None
+	try:
+		if kind == "photo":
+			message = await bot.send_photo(int(chat_id), file, caption=text)
+		elif kind == "video":
+			message = await bot.send_video(
+				int(chat_id), file, caption=text, supports_streaming=True
+			)
+		elif kind == "audio":
+			message = await bot.send_audio(int(chat_id), file, caption=text)
+		else:
+			message = await bot.send_document(int(chat_id), file, caption=text)
+		return int(message.message_id)
+	except TelegramUnauthorizedError as exc:
+		raise ChannelCheckError("Telegram отклонил токен бота.") from exc
+	except TelegramForbiddenError as exc:
+		raise ChannelCheckError(
+			f"Бот не может писать в канал. (Telegram: {exc.message})"
+		) from exc
+	except TelegramBadRequest as exc:
+		raise ChannelCheckError(
+			f"Telegram отклонил отправку. (Telegram: {exc.message})"
+		) from exc
+	except TelegramNetworkError as exc:
+		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
+	finally:
+		await bot.session.close()
+
+
 async def send_text(token: str, chat_id: str, text: str) -> int:
 	"""Публикует текстовый пост в канал через Bot API («сейчас»).
 

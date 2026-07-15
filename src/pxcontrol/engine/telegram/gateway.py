@@ -17,6 +17,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	check_channel,
 	check_token,
 	get_bot_events,
+	send_media,
 	send_text,
 )
 from pxcontrol.engine.telegram.mtproto import MtprotoLoginManager, MtprotoTransport
@@ -64,6 +65,12 @@ class TelegramGateway:
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
 		"""Публикует текстовый пост «сейчас» через бота."""
 		return await send_text(token, chat_id, text)
+
+	async def send_media(
+		self, token: str, chat_id: str, kind: str, path: str, caption: str
+	) -> int:
+		"""Отправляет медиа ботом (запасной транспорт, лимит 50 МБ)."""
+		return await send_media(token, chat_id, kind, path, caption)
 
 	# --- MTProto (userbot) -------------------------------------------------------
 

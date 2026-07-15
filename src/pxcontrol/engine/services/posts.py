@@ -33,8 +33,35 @@ logger = logging.getLogger(__name__)
 #: Минимальный запас до времени публикации (Telegram не берёт «почти сейчас»).
 MIN_SCHEDULE_AHEAD = timedelta(seconds=60)
 
+#: Лимит Bot API на отправку файла ботом.
+BOT_MAX_FILE_BYTES = 50 * 1024 * 1024
+
 #: Колбэк прогресса загрузки: доля 0.0..1.0.
 ProgressCallback = Callable[[float], None]
+
+
+@dataclass(frozen=True)
+class PublishCapabilities:
+	"""Возможности публикации канала (из способов администрирования).
+
+	Attributes:
+		userbot: полный набор — любые типы, до 2 ГБ, «сейчас» и отложенные.
+		bot: запасной путь — текст и медиа до 50 МБ, только «сейчас».
+	"""
+
+	userbot: bool
+	bot: bool
+
+
+def publish_capabilities(
+	bot_assigned: bool, userbot_admin: bool
+) -> PublishCapabilities:
+	"""Возможности публикации по способам администрирования канала.
+
+	Единственный источник правды для движка и интерфейса; приоритет
+	транспорта — MTProto (ADR-0011).
+	"""
+	return PublishCapabilities(userbot=userbot_admin, bot=bot_assigned)
 
 
 class PostError(Exception):
@@ -82,6 +109,10 @@ class _PostPort(Protocol):
 		self, chat_id: str, post: OutgoingPost,
 		on_progress: ProgressCallback | None,
 	) -> None: ...
+
+	async def send_media(
+		self, token: str, chat_id: str, kind: str, path: str, caption: str
+	) -> int: ...
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]: ...
 
@@ -131,20 +162,49 @@ class PostsService:
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
 	) -> None:
-		"""Публикует черновик через userbot: сразу или отложенно (ADR-0011).
+		"""Публикует черновик: userbot в приоритете, бот — запасной путь.
 
-		Единый вход для всех типов контента: текст, фото, видео, аудио,
-		документ. ``on_progress`` получает долю загрузки файла 0.0..1.0.
+		Единый вход для всех типов контента. Транспорт выбирается по
+		возможностям канала (:func:`publish_capabilities`): userbot —
+		полный набор; только бот — текст и медиа до 50 МБ, «сейчас».
+		``on_progress`` получает долю загрузки файла 0.0..1.0
+		(бот-путь прогресс не отдаёт).
 
 		Raises:
-			PostError: Черновик пуст, файл/канал не найдены, время не в будущем.
-			UserbotUnavailable: Userbot не подключён / не админ канала.
+			PostError: Черновик/канал/файл не годятся или у канала
+				нет способа публикации.
+			UserbotUnavailable: Userbot отвалился по дороге.
 		"""
 		self._validate(draft)
 		channel = await self._get_channel(draft.channel_id)
+		caps = publish_capabilities(channel.bot is not None, channel.userbot_admin)
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
 			media_path = self._apply_rename(media_path, draft.rename_to)
+		if caps.userbot:
+			await self._publish_userbot(channel, draft, media_path, on_progress)
+		elif caps.bot:
+			await self._publish_bot(channel, draft, media_path)
+		else:
+			raise PostError(
+				"У канала нет способа публикации — проверьте доступы "
+				"на странице «Каналы»."
+			)
+		logger.info(
+			"Пост (%s) → «%s» (%s, %s).",
+			draft.media_kind if draft.media_path else "текст", channel.title,
+			"userbot" if caps.userbot else "бот",
+			f"отложено на {draft.when}" if draft.when else "опубликовано",
+		)
+
+	async def _publish_userbot(
+		self,
+		channel: Channel,
+		draft: PostDraft,
+		media_path: str | None,
+		on_progress: ProgressCallback | None,
+	) -> None:
+		"""Полный путь через userbot (MTProto): всё, включая отложенные."""
 		with tempfile.TemporaryDirectory() as tmp:
 			thumb: str | None = None
 			if draft.media_kind is MediaKind.VIDEO and media_path:
@@ -156,10 +216,34 @@ class PostsService:
 				media_kind=draft.media_kind, when=draft.when, thumb_path=thumb,
 			)
 			await self._gateway.publish(channel.tg_chat_id, post, on_progress)
-		logger.info(
-			"Пост (%s) → «%s» (%s).",
-			draft.media_kind if draft.media_path else "текст", channel.title,
-			f"отложено на {draft.when}" if draft.when else "опубликовано",
+
+	async def _publish_bot(
+		self, channel: Channel, draft: PostDraft, media_path: str | None
+	) -> None:
+		"""Запасной путь через бота: текст и медиа до 50 МБ, только «сейчас».
+
+		Raises:
+			PostError: Отложенный пост или файл больше лимита Bot API.
+		"""
+		if draft.when is not None:
+			raise PostError(
+				"Отложенные посты требуют userbot-админа в канале — "
+				"через бота доступно только «сейчас»."
+			)
+		assert channel.bot is not None  # гарантировано publish_capabilities
+		if media_path is None:
+			await self._gateway.send_text(
+				channel.bot.token, channel.tg_chat_id, draft.text
+			)
+			return
+		if Path(media_path).stat().st_size > BOT_MAX_FILE_BYTES:
+			raise PostError(
+				"Файл больше 50 МБ — лимит отправки ботом. Добавьте "
+				"userbot администратором канала или уменьшите файл."
+			)
+		await self._gateway.send_media(
+			channel.bot.token, channel.tg_chat_id,
+			draft.media_kind, media_path, draft.text,
 		)
 
 	@staticmethod

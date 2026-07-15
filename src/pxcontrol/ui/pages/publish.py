@@ -12,6 +12,7 @@ from functools import partial
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
+	CaptionLabel,
 	CheckBox,
 	ComboBox,
 	FluentIcon,
@@ -28,7 +29,11 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import TemplateDto, title_from_filename
 from pxcontrol.engine.services.channels import ChannelDto
-from pxcontrol.engine.services.posts import MediaKind, PostDraft
+from pxcontrol.engine.services.posts import (
+	MediaKind,
+	PostDraft,
+	publish_capabilities,
+)
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import ProgressPanel, WhenRow, noop, show_error
@@ -64,7 +69,10 @@ class PublishPage(ScrollArea):
 		layout.addWidget(SubtitleLabel("Публикация", self))
 		self._build_kind_segments(layout)
 		self._channel_combo = ComboBox(self)
+		self._channel_combo.currentIndexChanged.connect(self._on_channel_changed)
 		layout.addWidget(self._channel_combo)
+		self._caps_hint = CaptionLabel("", self)
+		layout.addWidget(self._caps_hint)
 		self._text = TextEdit(self)
 		self._text.setPlaceholderText("Текст поста…")
 		self._text.setMinimumHeight(120)
@@ -173,6 +181,45 @@ class PublishPage(ScrollArea):
 			self._channel_combo.addItem(channel.title)
 		if 0 <= selected < len(channels):
 			self._channel_combo.setCurrentIndex(selected)
+		self._on_channel_changed()
+
+	def _channel_or_none(self) -> ChannelDto | None:
+		"""Выбранный канал без показа ошибок (для адаптации формы)."""
+		index = int(self._channel_combo.currentIndex())
+		if 0 <= index < len(self._channels):
+			return self._channels[index]
+		return None
+
+	def _on_channel_changed(self, _index: int = 0) -> None:
+		"""Адаптирует форму под возможности выбранного канала."""
+		channel = self._channel_or_none()
+		if channel is None:
+			self._caps_hint.setText("")
+			self._when_row.set_schedule_allowed(True)
+			return
+		caps = publish_capabilities(
+			channel.bot_id is not None, channel.userbot_admin
+		)
+		if caps.userbot:
+			self._caps_hint.setText(
+				"Публикация через userbot: все типы контента, файлы "
+				"до 2 ГБ, «сейчас» и отложенные."
+			)
+			self._when_row.set_schedule_allowed(True)
+		elif caps.bot:
+			self._caps_hint.setText(
+				"Публикация через бота: файлы до 50 МБ, только «сейчас» "
+				"(для отложенных нужен userbot-админ)."
+			)
+			self._when_row.set_schedule_allowed(
+				False, "Отложенные требуют userbot-админа в канале"
+			)
+		else:
+			self._caps_hint.setText(
+				"⚠ Нет способа публикации — проверьте доступы "
+				"на странице «Каналы»."
+			)
+			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
 
 	def _on_kind_changed(self, kind_key: str) -> None:
 		"""Меняет состав формы под выбранный тип контента."""
@@ -193,11 +240,10 @@ class PublishPage(ScrollArea):
 
 	def _current_channel(self) -> ChannelDto | None:
 		"""Выбранный канал или None (с показом подсказки)."""
-		index = int(self._channel_combo.currentIndex())
-		if index < 0 or index >= len(self._channels):
+		channel = self._channel_or_none()
+		if channel is None:
 			self._show_error("Сначала подключите и выберите канал.")
-			return None
-		return self._channels[index]
+		return channel
 
 	def _on_setup_fields(self) -> None:
 		"""Открывает настройку полей и шаблонов подписи канала."""
