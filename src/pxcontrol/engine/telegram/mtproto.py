@@ -11,7 +11,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from pxcontrol.engine.telegram.types import OutgoingPost
+from pxcontrol.engine.telegram.types import OutgoingPost, UserbotChannelInfo
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,58 @@ class MtprotoTransport:
 			post.media_kind if post.media_path else "текст",
 			f"отложено на {post.when}" if post.when else "сразу",
 		)
+
+	async def check_channel(self, chat_ref: str) -> UserbotChannelInfo:
+		"""Проверяет канал и права userbot: админ с правом публиковать.
+
+		Принимает @имя, ссылку t.me/… или ID -100… (разбор общий
+		с бот-путём — ``normalize_chat_ref``).
+
+		Raises:
+			UserbotUnavailable: Userbot не подключён, канал не найден,
+				userbot не админ или без права публиковать.
+		"""
+		from telethon import utils
+
+		from pxcontrol.engine.telegram.bot_api import (
+			ChannelCheckError,
+			normalize_chat_ref,
+		)
+
+		client = self._require_client()
+		try:
+			ref = normalize_chat_ref(chat_ref)
+		except ChannelCheckError as exc:
+			raise UserbotUnavailable(str(exc)) from exc
+		try:
+			entity = await client.get_entity(ref)
+			perms = await client.get_permissions(entity, "me")
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+			raise UserbotUnavailable(_map_post_error(exc)) from exc
+		self._ensure_userbot_can_post(perms)
+		return UserbotChannelInfo(
+			chat_id=str(utils.get_peer_id(entity)),
+			title=str(getattr(entity, "title", "") or chat_ref),
+			username=getattr(entity, "username", None),
+		)
+
+	@staticmethod
+	def _ensure_userbot_can_post(perms: Any) -> None:
+		"""Требует права админа с публикацией (владельцу можно всё).
+
+		Raises:
+			UserbotUnavailable: Прав не хватает.
+		"""
+		if not perms.is_admin:
+			raise UserbotUnavailable(
+				"Userbot не администратор канала — добавьте аккаунт "
+				"администратором с правом публиковать."
+			)
+		rights = getattr(perms.participant, "admin_rights", None)
+		if not perms.is_creator and not getattr(rights, "post_messages", False):
+			raise UserbotUnavailable(
+				"У userbot нет права публиковать сообщения в канале."
+			)
 
 	async def get_scheduled(self, chat_id: str) -> list[Any]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""

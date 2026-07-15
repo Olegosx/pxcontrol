@@ -20,7 +20,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	send_text,
 )
 from pxcontrol.engine.telegram.mtproto import MtprotoLoginManager, MtprotoTransport
-from pxcontrol.engine.telegram.types import OutgoingPost
+from pxcontrol.engine.telegram.types import OutgoingPost, UserbotChannelInfo
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,10 @@ class TelegramGateway:
 		return await send_text(token, chat_id, text)
 
 	# --- MTProto (userbot) -------------------------------------------------------
+
+	async def check_channel_userbot(self, chat_ref: str) -> UserbotChannelInfo:
+		"""Проверяет канал и права userbot (админ + право публиковать)."""
+		return await self.mtproto.check_channel(chat_ref)
 
 	async def publish(
 		self,

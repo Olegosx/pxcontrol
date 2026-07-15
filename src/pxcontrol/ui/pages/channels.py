@@ -31,34 +31,60 @@ from pxcontrol.ui.pages.common import (
 
 
 class _ConnectDialog(MessageBoxBase):
-	"""Диалог подключения: выбор бота и ссылка на канал."""
+	"""Диалог подключения: способ (userbot/бот), бот для бот-способа, ссылка."""
+
+	_HINTS = {
+		"userbot": (
+			"Аккаунт userbot должен быть администратором канала\n"
+			"с правом публиковать сообщения (бот не нужен)."
+		),
+		"bot": (
+			"Перед подключением добавьте бота администратором канала\n"
+			"с правом публиковать сообщения."
+		),
+	}
 
 	def __init__(self, bots: list[BotDto], parent: QWidget) -> None:
 		super().__init__(parent)
 		self._bots = bots
 		self.viewLayout.addWidget(SubtitleLabel("Подключить канал", self))
-		hint = BodyLabel(
-			"Перед подключением добавьте бота администратором канала\n"
-			"с правом публиковать сообщения.\n"
-			"Приватный канал: укажите ID вида -100… (его покажет бот\n"
-			"@getidsbot, если переслать ему любой пост канала).", self,
-		)
-		self.viewLayout.addWidget(hint)
+		self._way = ComboBox(self)
+		self._way.addItem("Через userbot (аккаунт — админ канала)")
+		self._way.addItem("Через бота")
+		self._way.currentIndexChanged.connect(self._on_way_changed)
+		self.viewLayout.addWidget(self._way)
+		self._hint = BodyLabel("", self)
+		self.viewLayout.addWidget(self._hint)
 		self._combo = ComboBox(self)
 		for bot in bots:
 			self._combo.addItem(f"{bot.label} (@{bot.username or '—'})")
 		self.viewLayout.addWidget(self._combo)
 		self._ref = LineEdit(self)
-		self._ref.setPlaceholderText("@имя, ссылка t.me/… или ID канала")
+		self._ref.setPlaceholderText(
+			"@имя, ссылка t.me/… или ID -100… (приватный канал)"
+		)
 		self._ref.setClearButtonEnabled(True)
 		self.viewLayout.addWidget(self._ref)
 		self.yesButton.setText("Подключить")
 		self.cancelButton.setText("Отмена")
-		self.widget.setMinimumWidth(440)
+		self.widget.setMinimumWidth(460)
+		self._on_way_changed(0)
 
-	def bot_id(self) -> int:
-		"""Идентификатор выбранного бота."""
-		return self._bots[int(self._combo.currentIndex())].id
+	def _on_way_changed(self, index: int) -> None:
+		"""Показывает выбор бота только для бот-способа."""
+		self._combo.setVisible(index == 1)
+		self._hint.setText(self._HINTS["bot" if index == 1 else "userbot"])
+
+	def way(self) -> str:
+		"""Способ подключения: 'userbot' или 'bot'."""
+		return "bot" if int(self._way.currentIndex()) == 1 else "userbot"
+
+	def bot_id(self) -> int | None:
+		"""Идентификатор выбранного бота (None — ботов нет)."""
+		index = int(self._combo.currentIndex())
+		if 0 <= index < len(self._bots):
+			return self._bots[index].id
+		return None
 
 	def chat_ref(self) -> str:
 		"""Введённая ссылка на канал."""
@@ -126,7 +152,8 @@ class ChannelsPage(ScrollArea):
 		title = SubtitleLabel("Пока нет подключённых каналов", box)
 		title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 		hint = BodyLabel(
-			"Добавьте бота администратором канала и нажмите «Подключить канал».",
+			"Нажмите «Подключить канал»: через userbot (аккаунт — админ) "
+			"или через бота.",
 			box,
 		)
 		hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -135,8 +162,15 @@ class ChannelsPage(ScrollArea):
 		return box
 
 	def _channel_row(self, channel: ChannelDto) -> CardWidget:
-		"""Карточка канала: название, @имя, бот, удаление."""
-		subtitle = f"@{channel.username or '—'} · бот: {channel.bot_label or '—'}"
+		"""Карточка канала: название, @имя, способы администрирования."""
+		ways = []
+		if channel.bot_label:
+			ways.append(f"бот {channel.bot_label}")
+		if channel.userbot_admin:
+			ways.append("userbot")
+		subtitle = (
+			f"@{channel.username or '—'} · админ: {' + '.join(ways) or '—'}"
+		)
 		return row_card(
 			self, channel.title, subtitle,
 			on_delete=bind(self._delete_channel, channel),
@@ -152,23 +186,26 @@ class ChannelsPage(ScrollArea):
 		)
 
 	def _open_connect_dialog(self, bots: list[BotDto]) -> None:
-		if not bots:
-			self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
-			return
 		dialog = _ConnectDialog(bots, self.window())
 		if not dialog.exec():
 			return
 		if not dialog.chat_ref():
 			self._show_error("Укажите @имя, ссылку или ID канала.")
 			return
-		InfoBar.info("Проверка", "Проверяю канал и права бота…", parent=self)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.channels.add_channel(
-				dialog.bot_id(), dialog.chat_ref()
-			),
-			self, self._on_connected, self._show_error,
-		)
+		if dialog.way() == "bot":
+			bot_id = dialog.bot_id()
+			if bot_id is None:
+				self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
+				return
+			coro = self._worker.engine.channels.add_channel(
+				bot_id, dialog.chat_ref()
+			)
+		else:
+			coro = self._worker.engine.channels.add_channel_via_userbot(
+				dialog.chat_ref()
+			)
+		InfoBar.info("Проверка", "Проверяю канал и права…", parent=self)
+		run_in_engine(self._worker, coro, self, self._on_connected, self._show_error)
 
 	def _on_connected(self, channel: ChannelDto) -> None:
 		InfoBar.success("Канал подключён", channel.title, parent=self)

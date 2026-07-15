@@ -17,12 +17,15 @@ from pxcontrol.engine.telegram.bot_api import (
 	ensure_bot_can_post,
 	normalize_chat_ref,
 )
+from pxcontrol.engine.telegram.mtproto import UserbotUnavailable
+from pxcontrol.engine.telegram.types import UserbotChannelInfo
 
 
 class _FakeGateway:
 	"""Подмена шлюза: токены и каналы проверяются без сети."""
 
 	login = None  # вход userbot в этих тестах не используется
+	userbot_is_admin = True  # ответ попутной/основной userbot-проверки
 
 	async def check_bot_token(self, token: str) -> str:
 		return "test_bot"
@@ -35,6 +38,14 @@ class _FakeGateway:
 				"У бота нет права публиковать сообщения в канале."
 			)
 		return ChannelInfo("-1001234", "Тестовый канал", "testchan")
+
+	async def check_channel_userbot(self, chat_ref: str) -> UserbotChannelInfo:
+		if not self.userbot_is_admin:
+			raise UserbotUnavailable(
+				"Userbot не администратор канала — добавьте аккаунт "
+				"администратором с правом публиковать."
+			)
+		return UserbotChannelInfo("-1001234", "Тестовый канал", "testchan")
 
 
 @pytest.fixture
@@ -86,6 +97,37 @@ async def test_duplicate_channel_rejected(db: Database) -> None:
 	await service.add_channel(bot_id, "@testchan")
 	with pytest.raises(ChannelError, match="уже подключён"):
 		await service.add_channel(bot_id, "@testchan")
+
+
+async def test_bot_connect_probes_userbot(db: Database) -> None:
+	"""Бот-путь попутно отмечает userbot-админа; сбой пробы не мешает."""
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()
+	service = ChannelsService(db, gateway)
+	dto = await service.add_channel(bot_id, "@testchan")
+	assert dto.userbot_admin is True
+	await service.delete_channel(dto.id)
+	gateway.userbot_is_admin = False
+	dto = await service.add_channel(bot_id, "@testchan")
+	assert dto.userbot_admin is False  # подключение состоялось без userbot
+
+
+async def test_connect_via_userbot(db: Database) -> None:
+	"""Через userbot канал подключается без бота; не админ — ошибка."""
+	gateway = _FakeGateway()
+	service = ChannelsService(db, gateway)
+	dto = await service.add_channel_via_userbot("@testchan")
+	assert dto.bot_id is None and dto.bot_label is None
+	assert dto.userbot_admin is True
+	listed = await service.list_channels()
+	assert listed[0].userbot_admin is True
+	with pytest.raises(ChannelError, match="уже подключён"):
+		await service.add_channel_via_userbot("@testchan")
+	await service.delete_channel(dto.id)
+	gateway.userbot_is_admin = False
+	with pytest.raises(UserbotUnavailable, match="не администратор"):
+		await service.add_channel_via_userbot("@testchan")
+	assert await service.list_channels() == []
 
 
 async def test_unknown_bot_rejected(db: Database) -> None:

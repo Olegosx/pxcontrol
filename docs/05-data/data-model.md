@@ -68,7 +68,8 @@
 | `tg_chat_id` | str, unique | идентификатор канала в Telegram |
 | `username` | str? | @имя, если есть |
 | `enabled` | bool | канал активен |
-| `bot_id` | FK→bots? | бот-публикатор (NULL — ещё не назначен) |
+| `userbot_admin` | bool | userbot — админ канала (проверено при подключении; миграция `f4e8b3c92a17`) |
+| `bot_id` | FK→bots? | бот-админ (NULL — канал подключён через userbot) |
 | `video_preset_id` | FK→video_presets? | пресет видео по умолчанию — задел под связку «подготовить и опубликовать для канала»; потребителя в коде пока нет |
 
 ### Подписи к постам (миграция `d9f3a6e42b71`, [captions.md](../03-modules/captions.md))

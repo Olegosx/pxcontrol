@@ -103,6 +103,31 @@ async def test_publish_media_maps_kind_to_hints() -> None:
 	assert received == [0.5, 1.0]
 
 
+def test_ensure_userbot_can_post() -> None:
+	"""Права userbot: админ с публикацией или владелец; иначе — ошибка."""
+	ok = SimpleNamespace(
+		is_admin=True, is_creator=False,
+		participant=SimpleNamespace(admin_rights=SimpleNamespace(post_messages=True)),
+	)
+	MtprotoTransport._ensure_userbot_can_post(ok)
+	creator = SimpleNamespace(
+		is_admin=True, is_creator=True,
+		participant=SimpleNamespace(admin_rights=None),
+	)
+	MtprotoTransport._ensure_userbot_can_post(creator)
+	with pytest.raises(UserbotUnavailable, match="не администратор"):
+		MtprotoTransport._ensure_userbot_can_post(SimpleNamespace(
+			is_admin=False, is_creator=False, participant=SimpleNamespace(),
+		))
+	with pytest.raises(UserbotUnavailable, match="нет права публиковать"):
+		MtprotoTransport._ensure_userbot_can_post(SimpleNamespace(
+			is_admin=True, is_creator=False,
+			participant=SimpleNamespace(
+				admin_rights=SimpleNamespace(post_messages=False)
+			),
+		))
+
+
 async def test_get_scheduled_returns_messages() -> None:
 	"""Чтение отложенных возвращает сообщения Telegram."""
 	transport = _transport(_FakeClient())

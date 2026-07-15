@@ -7,6 +7,21 @@ from datetime import datetime
 
 
 @dataclass(frozen=True)
+class UserbotChannelInfo:
+	"""Канал, проверенный через userbot (MTProto).
+
+	Attributes:
+		chat_id: идентификатор канала в формате Bot API (-100…).
+		title: название канала.
+		username: @имя без собаки (None — приватный).
+	"""
+
+	chat_id: str
+	title: str
+	username: str | None
+
+
+@dataclass(frozen=True)
 class OutgoingPost:
 	"""Исходящий пост для транспорта: текст или медиа с подписью.
 
