@@ -20,6 +20,7 @@ from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import VideoPreset
+from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET, SettingsService
 from pxcontrol.engine.video import ProcessingOptions, process
 from pxcontrol.engine.video.constants import fitted_size
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
@@ -89,10 +90,15 @@ class VideoService:
 		self,
 		db: Database,
 		ffmpeg_path: FfmpegSource,
+		settings: SettingsService | None = None,
 		processor: Callable[[ProcessingOptions, ProgressCallback | None], None] = process,
 	) -> None:
+		"""``settings`` — общий сервис настроек движка; None — свой
+		экземпляр поверх той же БД (для тестов это эквивалентно:
+		настройки каналов не кэшируются)."""
 		self._db = db
 		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер: путь из настроек
+		self._settings = settings if settings is not None else SettingsService(db)
 		self._processor = processor  # подменяется в тестах
 		self._candidates_dir: str | None = None  # партия кадров-кандидатов
 
@@ -157,12 +163,17 @@ class VideoService:
 		)
 
 	async def delete_preset(self, preset_id: int) -> None:
-		"""Удаляет пресет по идентификатору."""
+		"""Удаляет пресет и снимает его у каналов, где он был по умолчанию.
+
+		Целостность настройки-ссылки держит сервис (ADR-0013, вариант «а»):
+		внешнего ключа у строки настройки нет, поэтому ссылки чистятся здесь.
+		"""
 		async with self._db.session_factory() as session:
 			await session.execute(
 				delete(VideoPreset).where(VideoPreset.id == preset_id)
 			)
 			await session.commit()
+		await self._settings.drop_channel_value(CHANNEL_DEFAULT_PRESET, preset_id)
 
 	# --- подготовка ----------------------------------------------------------
 

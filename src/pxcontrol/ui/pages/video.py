@@ -13,7 +13,7 @@ from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap
+from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
 	QButtonGroup,
 	QGridLayout,
@@ -46,6 +46,8 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.channels import ChannelDto
+from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET
 from pxcontrol.engine.services.video import FrameCandidate, PresetDto, PresetFields
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -527,8 +529,14 @@ class VideoPage(ScrollArea):
 		self.setObjectName("video")
 		self._worker = worker
 		self._presets: list[PresetDto] = []
+		self._channels: list[ChannelDto] = []
 		self._build()
 		self._reload_presets()
+
+	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
+		"""Обновляет список каналов при каждом открытии страницы."""
+		super().showEvent(event)
+		self._reload_channels()
 
 	# --- сборка страницы ---------------------------------------------------------
 
@@ -536,6 +544,7 @@ class VideoPage(ScrollArea):
 		layout = page_layout(self)
 		layout.addWidget(SubtitleLabel("Подготовка видео", self))
 		self._build_source_row(layout)
+		self._build_channel_row(layout)
 		self._build_preset_row(layout)
 		layout.addSpacing(8)
 		layout.addWidget(SubtitleLabel("Параметры обработки", self))
@@ -576,6 +585,20 @@ class VideoPage(ScrollArea):
 	def _play_source(self) -> None:
 		"""Открывает исходник системным плеером (встроенного пока нет)."""
 		self._open_path(str(self._source.text()).strip())
+
+	def _build_channel_row(self, layout: QVBoxLayout) -> None:
+		"""Канал: выбор подставляет его пресет по умолчанию (настройка канала)."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Канал:", self))
+		self._channel_combo = ComboBox(self)
+		self._channel_combo.addItem("(не выбран)")
+		self._channel_combo.setToolTip(
+			"Выбор канала загружает его пресет по умолчанию "
+			"(задаётся на странице «Каналы» → «Пресет…»)"
+		)
+		self._channel_combo.currentIndexChanged.connect(self._on_channel_selected)
+		row.addWidget(self._channel_combo, stretch=1)
+		layout.addLayout(row)
 
 	def _build_preset_row(self, layout: QVBoxLayout) -> None:
 		"""Пресет: выбор-загрузка и кнопки сохранения/удаления."""
@@ -645,6 +668,64 @@ class VideoPage(ScrollArea):
 		if 0 <= index < len(self._presets):
 			return self._presets[index]
 		return None
+
+	# --- канал и его пресет по умолчанию -------------------------------------------
+
+	def _reload_channels(self) -> None:
+		run_in_engine(
+			self._worker, self._worker.engine.channels.list_channels(),
+			self, self._show_channels, self._show_error,
+		)
+
+	def _show_channels(self, channels: list[ChannelDto]) -> None:
+		"""Наполняет список каналов, сохраняя текущий выбор (по id)."""
+		selected = self._selected_channel()
+		self._channels = channels
+		self._channel_combo.blockSignals(True)
+		self._channel_combo.clear()
+		self._channel_combo.addItem("(не выбран)")
+		for channel in channels:
+			self._channel_combo.addItem(channel.title)
+		if selected is not None:
+			ids = [channel.id for channel in channels]
+			if selected.id in ids:
+				self._channel_combo.setCurrentIndex(ids.index(selected.id) + 1)
+		self._channel_combo.blockSignals(False)
+
+	def _selected_channel(self) -> ChannelDto | None:
+		"""Выбранный канал (None — «не выбран»)."""
+		index = int(self._channel_combo.currentIndex()) - 1
+		if 0 <= index < len(self._channels):
+			return self._channels[index]
+		return None
+
+	def _on_channel_selected(self, _index: int) -> None:
+		"""Выбор канала — загрузка его пресета по умолчанию в панель."""
+		channel = self._selected_channel()
+		if channel is None:
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id),
+			self, partial(self._apply_channel_preset, channel), self._show_error,
+		)
+
+	def _apply_channel_preset(
+		self, channel: ChannelDto, preset_id: object
+	) -> None:
+		"""Подставляет пресет канала; нет пресета — форма не трогается."""
+		ids = [preset.id for preset in self._presets]
+		if not isinstance(preset_id, int) or preset_id not in ids:
+			# не задан (или ссылка на удалённый пресет — то же самое)
+			InfoBar.info(
+				"Пресет не задан",
+				f"У канала «{channel.title}» нет пресета по умолчанию — "
+				"задайте его на странице «Каналы» → «Пресет…».",
+				parent=self,
+			)
+			return
+		# setCurrentIndex вызывает _on_preset_selected — панель заполнится
+		self._preset_combo.setCurrentIndex(ids.index(preset_id) + 1)
 
 	def _update_preset_buttons(self) -> None:
 		"""«Сохранить»/«Удалить» доступны только при выбранном пресете."""

@@ -203,8 +203,13 @@ class PublishPage(ScrollArea):
 		)
 
 	def _show_channels(self, channels: list[ChannelDto]) -> None:
-		"""Обновляет список каналов, сохраняя текущий выбор."""
+		"""Обновляет список каналов, сохраняя текущий выбор.
+
+		Выключенные каналы (настройка ``enabled``) в списке не показываются —
+		публиковать в них нельзя, пока их не включат на странице «Каналы».
+		"""
 		selected = int(self._channel_combo.currentIndex())
+		channels = [channel for channel in channels if channel.enabled]
 		self._channels = channels
 		self._channel_combo.clear()
 		for channel in channels:

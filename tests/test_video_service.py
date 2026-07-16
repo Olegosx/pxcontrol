@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
+from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET, SettingsService
 from pxcontrol.engine.services.video import PresetFields, VideoError, VideoService
 from pxcontrol.engine.video import ProcessingOptions
 
@@ -64,6 +66,24 @@ async def test_preset_crud(db: Database) -> None:
 	assert updated.name == "Бренд-2"
 	await service.delete_preset(preset.id)
 	assert await service.list_presets() == []
+
+
+async def test_delete_preset_clears_channel_defaults(db: Database) -> None:
+	"""Удаление пресета снимает его у каналов (ADR-0013, вариант «а»)."""
+	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
+	preset = await service.save_preset(FIELDS)
+	keep = await service.save_preset(PresetFields(name="Другой"))
+	async with db.session_factory() as session:
+		channel = Channel(title="Канал", tg_chat_id="-1001")
+		session.add(channel)
+		await session.commit()
+		await session.refresh(channel)
+	settings = SettingsService(db)
+	await settings.set_for(CHANNEL_DEFAULT_PRESET, channel.id, preset.id)
+	await service.delete_preset(preset.id)
+	assert await settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id) is None
+	# другой пресет не задет
+	assert [p.id for p in await service.list_presets()] == [keep.id]
 
 
 async def test_prepare_maps_fields_to_options(

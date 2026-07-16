@@ -16,6 +16,7 @@ from pxcontrol.engine.services.posts import (
 	PostsService,
 	ScheduledPostDto,
 )
+from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
 from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
 
@@ -351,3 +352,12 @@ async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
 	assert items == [ScheduledPostDto(
 		"Канал", "Отложенный текст", datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
 	)]
+
+
+async def test_list_scheduled_skips_disabled_channel(db: Database) -> None:
+	"""Выключенный канал (настройка enabled = False) не опрашивается."""
+	service = PostsService(db, _FakeGateway())
+	channel_id = await _add_channel(db)
+	assert len(await service.list_scheduled()) == 1
+	await SettingsService(db).set_for(CHANNEL_ENABLED, channel_id, False)
+	assert await service.list_scheduled() == []

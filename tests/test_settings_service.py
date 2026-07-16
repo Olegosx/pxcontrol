@@ -12,6 +12,7 @@ from pxcontrol.engine.db.models import AppSetting, Channel
 from pxcontrol.engine.services.channels import ChannelsService
 from pxcontrol.engine.services.settings import (
 	CHANNEL_DEFAULT_PRESET,
+	CHANNEL_ENABLED,
 	FFMPEG_PATH,
 	PUBLISH_LAST_CHANNEL_ID,
 	THEME_DARK,
@@ -29,10 +30,10 @@ async def db(tmp_path: Path) -> AsyncIterator[Database]:
 	await database.close()
 
 
-async def _add_channel(db: Database) -> int:
+async def _add_channel(db: Database, tg_chat_id: str = "-1001") -> int:
 	"""Создаёт канал, возвращает id."""
 	async with db.session_factory() as session:
-		channel = Channel(title="Канал", tg_chat_id="-1001")
+		channel = Channel(title="Канал", tg_chat_id=tg_chat_id)
 		session.add(channel)
 		await session.commit()
 		await session.refresh(channel)
@@ -125,3 +126,35 @@ async def test_bool_does_not_pass_as_int(db: Database) -> None:
 		await session.commit()
 	service = SettingsService(db)
 	assert await service.get(PUBLISH_LAST_CHANNEL_ID) is None
+
+
+async def test_set_rejects_wrong_type(db: Database) -> None:
+	"""Запись значения не того типа отклоняется в обеих областях."""
+	service = SettingsService(db)
+	with pytest.raises(SettingsError, match="не подходит по типу"):
+		await service.set(THEME_DARK, "тьма")  # type: ignore[arg-type]
+	channel_id = await _add_channel(db)
+	with pytest.raises(SettingsError, match="не подходит по типу"):
+		# 1 — не bool: подкласс-ловушку проверяем в обе стороны
+		await service.set_for(CHANNEL_ENABLED, channel_id, 1)  # type: ignore[arg-type]
+
+
+async def test_get_for_all_returns_only_stored(db: Database) -> None:
+	"""Пакетное чтение отдаёт строки только заданных каналов."""
+	service = SettingsService(db)
+	first = await _add_channel(db, "-1001")
+	await _add_channel(db, "-1002")  # без настройки — читается умолчанием
+	await service.set_for(CHANNEL_ENABLED, first, False)
+	assert await service.get_for_all(CHANNEL_ENABLED) == {first: False}
+
+
+async def test_drop_channel_value_removes_matching_refs(db: Database) -> None:
+	"""Снятие настройки-ссылки задевает только каналы с этим значением."""
+	service = SettingsService(db)
+	first = await _add_channel(db, "-1001")
+	second = await _add_channel(db, "-1002")
+	await service.set_for(CHANNEL_DEFAULT_PRESET, first, 5)
+	await service.set_for(CHANNEL_DEFAULT_PRESET, second, 7)
+	await service.drop_channel_value(CHANNEL_DEFAULT_PRESET, 5)
+	assert await service.get_for(CHANNEL_DEFAULT_PRESET, first) is None
+	assert await service.get_for(CHANNEL_DEFAULT_PRESET, second) == 7

@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Channel, ChannelSetting
+from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
 from pxcontrol.engine.telegram.types import ChannelInfo
 
 logger = logging.getLogger(__name__)
@@ -60,12 +61,22 @@ class ChannelAccess:
 class ChannelsService:
 	"""Подключение каналов, проверка прав бота и хранение настроек."""
 
-	def __init__(self, db: Database, gateway: _ChannelChecker) -> None:
+	def __init__(
+		self,
+		db: Database,
+		gateway: _ChannelChecker,
+		settings: SettingsService | None = None,
+	) -> None:
+		"""``settings`` — общий сервис настроек движка; None — свой
+		экземпляр поверх той же БД (для тестов это эквивалентно:
+		настройки каналов не кэшируются)."""
 		self._db = db
 		self._gateway = gateway
+		self._settings = settings if settings is not None else SettingsService(db)
 
 	async def list_channels(self) -> list[ChannelDto]:
 		"""Возвращает все подключённые каналы (с именем бота)."""
+		enabled = await self._settings.get_for_all(CHANNEL_ENABLED)
 		async with self._db.session_factory() as session:
 			rows = (
 				await session.execute(
@@ -74,7 +85,10 @@ class ChannelsService:
 					.order_by(Channel.id)
 				)
 			).scalars()
-			return [self._dto(ch) for ch in rows]
+			return [
+				self._dto(ch, enabled=enabled.get(ch.id, CHANNEL_ENABLED.default))
+				for ch in rows
+			]
 
 	async def add_channel(self, bot_id: int, chat_ref: str) -> ChannelDto:
 		"""Подключает канал через бота (с попутной проверкой userbot).
@@ -184,7 +198,8 @@ class ChannelsService:
 			channel.userbot_admin = userbot_ok
 			await session.commit()
 			await session.refresh(channel)
-			dto = self._dto(channel, bot_label=bot_label)
+			enabled = await self._settings.get_for(CHANNEL_ENABLED, channel_id)
+			dto = self._dto(channel, bot_label=bot_label, enabled=enabled)
 		logger.info(
 			"Доступы канала «%s»: userbot=%s, бот=%s.",
 			dto.title, userbot_ok, bot_ok,
@@ -212,7 +227,8 @@ class ChannelsService:
 			channel.bot_id = bot.id
 			await session.commit()
 			await session.refresh(channel)
-			dto = self._dto(channel, bot_label=bot.label)
+			enabled = await self._settings.get_for(CHANNEL_ENABLED, channel_id)
+			dto = self._dto(channel, bot_label=bot.label, enabled=enabled)
 		logger.info("Каналу «%s» назначен бот «%s».", dto.title, bot.label)
 		return dto
 
@@ -229,7 +245,8 @@ class ChannelsService:
 			channel.bot_id = None
 			await session.commit()
 			await session.refresh(channel)
-			dto = self._dto(channel)
+			enabled = await self._settings.get_for(CHANNEL_ENABLED, channel_id)
+			dto = self._dto(channel, enabled=enabled)
 		logger.info("От канала «%s» отвязан бот.", dto.title)
 		return dto
 
@@ -263,7 +280,10 @@ class ChannelsService:
 		return bot
 
 	@staticmethod
-	def _dto(channel: Channel, bot_label: str | None = None) -> ChannelDto:
+	def _dto(
+		channel: Channel, bot_label: str | None = None, enabled: bool = True
+	) -> ChannelDto:
+		"""Снимок канала; ``enabled`` — из настроек (у нового канала — True)."""
 		if bot_label is None and channel.bot_id is not None and channel.bot is not None:
 			bot_label = channel.bot.label
 		return ChannelDto(
@@ -273,6 +293,6 @@ class ChannelsService:
 			channel.tg_chat_id,
 			channel.bot_id,
 			bot_label,
-			channel.enabled,
+			enabled,
 			channel.userbot_admin,
 		)

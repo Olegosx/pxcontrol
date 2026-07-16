@@ -160,7 +160,6 @@ class Channel(TimestampMixin, Base):
 	title: Mapped[str] = mapped_column(String(255))
 	tg_chat_id: Mapped[str] = mapped_column(String(64), unique=True)
 	username: Mapped[str | None] = mapped_column(String(255), default=None)
-	enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 	# userbot — админ канала (проверено при подключении); бот — через bot_id
 	userbot_admin: Mapped[bool] = mapped_column(Boolean, default=False)
 	bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), default=None)

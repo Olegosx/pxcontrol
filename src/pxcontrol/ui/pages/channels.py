@@ -18,11 +18,14 @@ from qfluentwidgets import (
 	PushButton,
 	ScrollArea,
 	SubtitleLabel,
+	SwitchButton,
 )
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto
 from pxcontrol.engine.services.channels import ChannelAccess, ChannelDto
+from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET, CHANNEL_ENABLED
+from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	TOAST_DURATION_MS,
@@ -30,6 +33,7 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	confirm_delete,
 	error_reporter,
+	noop,
 	page_layout,
 	row_card,
 )
@@ -120,6 +124,43 @@ class _AssignBotDialog(MessageBoxBase):
 		return self._bots[int(self._combo.currentIndex())].id
 
 
+class _ChannelPresetDialog(MessageBoxBase):
+	"""Выбор пресета обработки видео по умолчанию для канала."""
+
+	def __init__(
+		self,
+		channel_title: str,
+		presets: list[PresetDto],
+		current_id: int | None,
+		parent: QWidget,
+	) -> None:
+		super().__init__(parent)
+		self._presets = presets
+		self.viewLayout.addWidget(SubtitleLabel("Пресет по умолчанию", self))
+		self.viewLayout.addWidget(BodyLabel(
+			f"Канал «{channel_title}»: пресет подставляется\n"
+			"на странице «Видео» при выборе канала.", self,
+		))
+		self._combo = ComboBox(self)
+		self._combo.addItem("(не задан)")
+		for preset in presets:
+			self._combo.addItem(preset.name)
+		ids = [preset.id for preset in presets]
+		if current_id in ids:
+			self._combo.setCurrentIndex(ids.index(current_id) + 1)
+		self.viewLayout.addWidget(self._combo)
+		self.yesButton.setText("Сохранить")
+		self.cancelButton.setText("Отмена")
+		self.widget.setMinimumWidth(420)
+
+	def preset_id(self) -> int | None:
+		"""Идентификатор выбранного пресета (None — «не задан»)."""
+		index = int(self._combo.currentIndex())
+		if index <= 0:
+			return None
+		return self._presets[index - 1].id
+
+
 class ChannelsPage(ScrollArea):
 	"""Список подключённых каналов; подключение через проверку прав бота."""
 
@@ -192,9 +233,22 @@ class ChannelsPage(ScrollArea):
 		buttons = QWidget(self)
 		row = QHBoxLayout(buttons)
 		row.setContentsMargins(0, 0, 0, 0)
+		enabled_switch = SwitchButton(buttons)
+		enabled_switch.setChecked(channel.enabled)
+		enabled_switch.setToolTip(
+			"Канал активен: участвует в публикации и опросе расписания"
+		)
+		enabled_switch.checkedChanged.connect(
+			partial(self._on_toggle_enabled, channel)
+		)
+		row.addWidget(enabled_switch)
 		recheck = PushButton("Проверить доступы", buttons)
 		recheck.clicked.connect(bind(self._recheck_channel, channel))
 		row.addWidget(recheck)
+		preset_action = PushButton("Пресет…", buttons)
+		preset_action.setToolTip("Пресет обработки видео по умолчанию")
+		preset_action.clicked.connect(bind(self._on_choose_preset, channel))
+		row.addWidget(preset_action)
 		if channel.bot_id is None:
 			bot_action = PushButton("Назначить бота…", buttons)
 			bot_action.clicked.connect(bind(self._on_assign_bot, channel))
@@ -205,6 +259,66 @@ class ChannelsPage(ScrollArea):
 		return row_card(
 			self, channel.title, subtitle, trailing=buttons,
 			on_delete=bind(self._delete_channel, channel),
+		)
+
+	# --- настройки канала (активность, пресет) -----------------------------------
+
+	def _on_toggle_enabled(self, channel: ChannelDto, checked: bool) -> None:
+		"""Включает/выключает канал (публикация и расписание)."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set_for(
+				CHANNEL_ENABLED, channel.id, checked
+			),
+			self, noop, self._on_toggle_failed,
+		)
+
+	def _on_toggle_failed(self, message: str) -> None:
+		"""Ошибка записи флага: показать и вернуть карточкам правду из БД."""
+		self._show_error(message)
+		self._reload()
+
+	def _on_choose_preset(self, channel: ChannelDto) -> None:
+		"""Открывает выбор пресета по умолчанию (сначала — список пресетов)."""
+		run_in_engine(
+			self._worker, self._worker.engine.video.list_presets(),
+			self, partial(self._on_presets_loaded, channel), self._show_error,
+		)
+
+	def _on_presets_loaded(
+		self, channel: ChannelDto, presets: list[PresetDto]
+	) -> None:
+		"""Пресеты получены — узнаём текущий выбор канала."""
+		if not presets:
+			self._show_error(
+				"Пресетов пока нет — сохраните хотя бы один на странице «Видео»."
+			)
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id),
+			self, partial(self._open_preset_dialog, channel, presets),
+			self._show_error,
+		)
+
+	def _open_preset_dialog(
+		self, channel: ChannelDto, presets: list[PresetDto], current_id: int | None
+	) -> None:
+		"""Диалог выбора; сохранение — настройкой канала."""
+		dialog = _ChannelPresetDialog(channel.title, presets, current_id, self.window())
+		if not dialog.exec():
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set_for(
+				CHANNEL_DEFAULT_PRESET, channel.id, dialog.preset_id()
+			),
+			self, partial(self._on_preset_saved, channel), self._show_error,
+		)
+
+	def _on_preset_saved(self, channel: ChannelDto, _result: object = None) -> None:
+		InfoBar.success(
+			"Готово", f"Пресет по умолчанию «{channel.title}» сохранён.", parent=self
 		)
 
 	# --- доступы и бот -----------------------------------------------------------

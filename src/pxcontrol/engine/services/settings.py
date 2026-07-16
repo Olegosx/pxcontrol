@@ -84,6 +84,11 @@ CHANNEL_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
 	"default_video_preset", SettingScope.CHANNEL, None, int
 )
 
+#: Канал активен: участвует в публикации и опросе расписания.
+CHANNEL_ENABLED: SettingKey[bool] = SettingKey(
+	"enabled", SettingScope.CHANNEL, True, bool
+)
+
 
 class SettingsService:
 	"""Чтение и запись настроек приложения и каналов.
@@ -116,8 +121,13 @@ class SettingsService:
 		return self._validated(key, row.value if row is not None else None)
 
 	async def set(self, key: SettingKey[_T], value: _T) -> None:
-		"""Сохраняет настройку приложения (None — сброс к умолчанию)."""
+		"""Сохраняет настройку приложения (None — сброс к умолчанию).
+
+		Raises:
+			SettingsError: Значение не подходит ключу по типу.
+		"""
 		self._require_scope(key, SettingScope.APP)
+		self._require_valid(key, value)
 		async with self._db.session_factory() as session:
 			row = await session.get(AppSetting, key.name)
 			if value is None:
@@ -152,15 +162,55 @@ class SettingsService:
 			row = await session.get(ChannelSetting, (channel_id, key.name))
 		return self._validated(key, row.value if row is not None else None)
 
+	async def get_for_all(self, key: SettingKey[_T]) -> dict[int, _T]:
+		"""Значения настройки по всем каналам одним запросом (для списков).
+
+		Returns:
+			Отображение «id канала → значение» только для каналов,
+			у которых настройка задана; остальные — умолчание ключа.
+		"""
+		self._require_scope(key, SettingScope.CHANNEL)
+		async with self._db.session_factory() as session:
+			rows = (await session.execute(
+				select(ChannelSetting).where(ChannelSetting.name == key.name)
+			)).scalars()
+			return {row.channel_id: self._validated(key, row.value) for row in rows}
+
+	async def drop_channel_value(self, key: SettingKey[_T], value: _T) -> None:
+		"""Снимает настройку со значением ``value`` у всех каналов.
+
+		Целостность настроек-ссылок держит сервис (ADR-0013, вариант «а»):
+		при удалении сущности, на которую ссылается настройка (например,
+		пресета видео), ссылки чистятся этим методом. Сравнение — в коде:
+		JSON-значения в SQL сравниваются ненадёжно, а строк немного.
+		"""
+		self._require_scope(key, SettingScope.CHANNEL)
+		async with self._db.session_factory() as session:
+			rows = (await session.execute(
+				select(ChannelSetting).where(ChannelSetting.name == key.name)
+			)).scalars().all()
+			removed = 0
+			for row in rows:
+				if row.value == value:
+					await session.delete(row)
+					removed += 1
+			await session.commit()
+		if removed:
+			logger.info(
+				"Настройка %s со значением %r снята у %d канал(ов).",
+				key.name, value, removed,
+			)
+
 	async def set_for(
 		self, key: SettingKey[_T], channel_id: int, value: _T
 	) -> None:
 		"""Сохраняет настройку канала (None — сброс к умолчанию).
 
 		Raises:
-			SettingsError: Канал не найден.
+			SettingsError: Канал не найден или значение не подходит по типу.
 		"""
 		self._require_scope(key, SettingScope.CHANNEL)
+		self._require_valid(key, value)
 		async with self._db.session_factory() as session:
 			if await session.get(Channel, channel_id) is None:
 				raise SettingsError("Канал не найден — обновите список.")
@@ -188,15 +238,36 @@ class SettingsService:
 			)
 
 	@staticmethod
-	def _validated(key: SettingKey[_T], raw: Any) -> _T:
+	def _matches(key: SettingKey[Any], value: Any) -> bool:
+		"""Подходит ли значение ключу по типу.
+
+		bool — подкласс int, поэтому проверяется отдельно: True не должен
+		сходить за целое у int-ключа (и наоборот).
+		"""
+		if isinstance(value, bool):
+			return key.value_type is bool
+		return isinstance(value, key.value_type)
+
+	@classmethod
+	def _require_valid(cls, key: SettingKey[Any], value: Any) -> None:
+		"""Отклоняет запись значения не того типа (None — сброс, допустим).
+
+		Raises:
+			SettingsError: Значение не подходит ключу по типу.
+		"""
+		if value is None or cls._matches(key, value):
+			return
+		raise SettingsError(
+			f"Настройка «{key.name}»: значение {value!r} не подходит по типу."
+		)
+
+	@classmethod
+	def _validated(cls, key: SettingKey[_T], raw: Any) -> _T:
 		"""Проверяет тип значения из БД; битое — умолчание с предупреждением."""
 		if raw is None:
 			return key.default
-		# bool — подкласс int: не даём True сойти за целое и наоборот
-		if isinstance(raw, bool) and key.value_type is not bool:
-			pass
-		elif isinstance(raw, key.value_type):
-			return raw  # type: ignore[return-value]  # тип проверен по ключу
+		if cls._matches(key, raw):
+			return raw  # type: ignore[no-any-return]  # тип проверен по ключу
 		logger.warning(
 			"Настройка %s: значение %r не подходит по типу — умолчание.",
 			key.name, raw,

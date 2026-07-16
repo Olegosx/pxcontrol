@@ -23,6 +23,7 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
 from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source, run_tool
 from pxcontrol.engine.video.frames import resolve_timestamp
@@ -141,11 +142,19 @@ class PostsService:
 	"""Публикация постов: userbot в приоритете, бот — запасной путь."""
 
 	def __init__(
-		self, db: Database, gateway: _PostPort, ffmpeg_path: FfmpegSource = "ffmpeg"
+		self,
+		db: Database,
+		gateway: _PostPort,
+		ffmpeg_path: FfmpegSource = "ffmpeg",
+		settings: SettingsService | None = None,
 	) -> None:
+		"""``settings`` — общий сервис настроек движка; None — свой
+		экземпляр поверх той же БД (для тестов это эквивалентно:
+		настройки каналов не кэшируются)."""
 		self._db = db
 		self._gateway = gateway
 		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер пути (настройки)
+		self._settings = settings if settings is not None else SettingsService(db)
 
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
@@ -314,15 +323,21 @@ class PostsService:
 			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
 
 	async def list_scheduled(self) -> list[ScheduledPostDto]:
-		"""Собирает отложенные записи всех активных каналов из Telegram."""
+		"""Собирает отложенные записи активных каналов из Telegram.
+
+		Выключенные каналы (настройка ``enabled`` = False) не опрашиваются.
+		"""
+		enabled = await self._settings.get_for_all(CHANNEL_ENABLED)
 		async with self._db.session_factory() as session:
 			channels = (
 				(await session.execute(
-					select(Channel).where(Channel.enabled).order_by(Channel.id)
+					select(Channel).order_by(Channel.id)
 				)).scalars().all()
 			)
 		items: list[ScheduledPostDto] = []
 		for channel in channels:
+			if not enabled.get(channel.id, CHANNEL_ENABLED.default):
+				continue
 			for message in await self._gateway.get_scheduled(channel.tg_chat_id):
 				items.append(self._dto(channel.title, message))
 		items.sort(key=lambda item: item.scheduled_at)

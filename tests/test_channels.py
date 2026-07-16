@@ -11,6 +11,7 @@ import pytest
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.channels import ChannelError, ChannelsService
+from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import (
 	ChannelCheckError,
 	ensure_bot_can_post,
@@ -225,6 +226,16 @@ def test_describe_update() -> None:
 	assert line is not None and "пост в канале" in line
 
 	assert describe_update(SimpleNamespace(my_chat_member=None, channel_post=None)) is None
+
+
+async def test_channel_enabled_comes_from_settings(db: Database) -> None:
+	"""Флаг активности канала в DTO читается из настроек (умолчание — True)."""
+	service = ChannelsService(db, _FakeGateway())
+	channel = await service.add_channel_via_userbot("@chan")
+	assert channel.enabled is True
+	await SettingsService(db).set_for(CHANNEL_ENABLED, channel.id, False)
+	listed = await service.list_channels()
+	assert [ch.enabled for ch in listed] == [False]
 
 
 def test_ensure_bot_can_post() -> None:
