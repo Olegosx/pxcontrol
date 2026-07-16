@@ -1,24 +1,26 @@
 """Страница «Публикация»: единая точка создания постов всех типов.
 
-Тип контента выбирается сегментами (текст/фото/видео/аудио/файл),
-отправка — всегда через userbot (ADR-0011), сразу или отложенно.
+Тип контента выбирается сегментами (текст/фото/видео/аудио/файл).
+Отправка идёт через очередь движка (ADR-0012): «Отправить» ставит пост
+в хвост и сразу освобождает форму под следующий; очередь видна на
+странице, каждый элемент можно отменить.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-from functools import partial
-
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QShowEvent
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	CaptionLabel,
+	CardWidget,
 	CheckBox,
 	ComboBox,
 	FluentIcon,
 	InfoBar,
 	LineEdit,
 	PrimaryPushButton,
+	ProgressBar,
 	PushButton,
 	ScrollArea,
 	SegmentedWidget,
@@ -30,13 +32,27 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import TemplateDto, title_from_filename
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import (
-	MediaKind,
+	BOT_MAX_FILE_BYTES,
+	USERBOT_MAX_FILE_BYTES,
 	PostDraft,
 	publish_capabilities,
 )
+from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
+from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
-from pxcontrol.ui.pages.common import ProgressPanel, WhenRow, noop, show_error
+from pxcontrol.ui.pages.common import (
+	WhenRow,
+	bind,
+	clear_layout,
+	error_reporter,
+	noop,
+	pick_file,
+	row_card,
+)
+
+#: Период опроса состояния очереди отправки (мс).
+_QUEUE_POLL_MS = 500
 
 #: Сегменты типов контента: подпись → тип → фильтр диалога выбора файла.
 _KINDS: list[tuple[str, MediaKind, str]] = [
@@ -55,9 +71,20 @@ class PublishPage(ScrollArea):
 		super().__init__(parent)
 		self.setObjectName("publish")
 		self._worker = worker
+		self._show_error = error_reporter(self)
 		self._channels: list[ChannelDto] = []
 		self._kind = MediaKind.NONE
+		self._queue_signature: tuple[tuple[int, QueueItemStatus, str | None], ...] = ()
+		self._queue_bars: dict[int, ProgressBar] = {}
+		self._handled_ids: set[int] = set()  # завершённые, уже показанные плашкой
+		self._queue_busy = False
 		self._build()
+		# опрос очереди живёт всегда (не только при видимой странице):
+		# завершения снимаются с показа, а кэш занятости нужен при выходе
+		self._queue_timer = QTimer(self)
+		self._queue_timer.setInterval(_QUEUE_POLL_MS)
+		self._queue_timer.timeout.connect(self._poll_queue)
+		self._queue_timer.start()
 
 	# --- сборка страницы ---------------------------------------------------------
 
@@ -143,15 +170,16 @@ class PublishPage(ScrollArea):
 		self._rename_box.hide()
 
 	def _build_send_row(self, layout: QVBoxLayout) -> None:
-		"""Кнопка отправки и индикатор прогресса загрузки."""
+		"""Кнопка отправки и панель очереди отправки под ней."""
 		row = QHBoxLayout()
 		self._send_button = PrimaryPushButton(FluentIcon.SEND, "Отправить", self)
 		self._send_button.clicked.connect(self._on_send)
 		row.addWidget(self._send_button)
 		row.addStretch()
 		layout.addLayout(row)
-		self._progress = ProgressPanel(self)
-		layout.addWidget(self._progress)
+		self._queue_box = QVBoxLayout()
+		self._queue_box.setSpacing(8)
+		layout.addLayout(self._queue_box)
 
 	# --- поведение -----------------------------------------------------------------
 
@@ -203,13 +231,14 @@ class PublishPage(ScrollArea):
 		if caps.userbot:
 			self._caps_hint.setText(
 				"Публикация через userbot: все типы контента, файлы "
-				"до 2 ГБ, «сейчас» и отложенные."
+				f"до {USERBOT_MAX_FILE_BYTES // 2**30} ГБ, "
+				"«сейчас» и отложенные."
 			)
 			self._when_row.set_schedule_allowed(True)
 		elif caps.bot:
 			self._caps_hint.setText(
-				"Публикация через бота: файлы до 50 МБ, только «сейчас» "
-				"(для отложенных нужен userbot-админ)."
+				f"Публикация через бота: файлы до {BOT_MAX_FILE_BYTES // 2**20} "
+				"МБ, только «сейчас» (для отложенных нужен userbot-админ)."
 			)
 			self._when_row.set_schedule_allowed(
 				False, "Отложенные требуют userbot-админа в канале"
@@ -231,8 +260,9 @@ class PublishPage(ScrollArea):
 		)
 
 	def _pick_file(self) -> None:
+		"""Диалог выбора вложения с фильтром по текущему типу контента."""
 		file_filter = next(f for _l, k, f in _KINDS if k is self._kind)
-		path, _ = QFileDialog.getOpenFileName(self, "Файл вложения", "", file_filter)
+		path = pick_file(self, "Файл вложения", file_filter)
 		if path:
 			self._file_edit.setText(path)
 
@@ -311,23 +341,17 @@ class PublishPage(ScrollArea):
 		self._rename_check.setChecked(True)
 		self._rename_box.show()
 
-	# --- отправка -------------------------------------------------------------------
+	# --- отправка через очередь ---------------------------------------------------
 
 	def _on_send(self) -> None:
-		"""Собирает черновик и отправляет через движок."""
+		"""Ставит черновик в очередь отправки; форма сразу свободна."""
 		channel = self._current_channel()
 		if channel is None:
 			return
-		draft = self._draft(channel.id)
-		self._send_button.setEnabled(False)
-		if draft.media_path is not None:
-			self._progress.begin("Загрузка в Telegram", "Отправка…")
 		run_in_engine(
 			self._worker,
-			self._worker.engine.posts.publish(
-				draft, on_progress=self._progress.emit_progress
-			),
-			self, partial(self._on_sent, draft.when), self._show_error,
+			self._worker.engine.publish_queue.enqueue(self._draft(channel.id)),
+			self, self._on_enqueued, self._show_error,
 		)
 
 	def _draft(self, channel_id: int) -> PostDraft:
@@ -349,25 +373,117 @@ class PublishPage(ScrollArea):
 			return None
 		return str(self._rename_edit.text()).strip() or None
 
-	def _on_sent(self, when: datetime | None, _result: object = None) -> None:
-		"""Показывает итог, чистит форму и гасит прогресс."""
-		self._hide_progress()
+	def _on_enqueued(self, _item_id: object = None) -> None:
+		"""Черновик принят в очередь — чистим форму под следующий пост."""
 		self._text.clear()
 		self._file_edit.clear()
-		if when is None:
-			InfoBar.success("Опубликовано", "Пост отправлен в канал.", parent=self)
-		else:
+		self._poll_queue()  # панель очереди обновляется сразу, не по таймеру
+
+	# --- панель очереди -------------------------------------------------------------
+
+	def queue_busy(self) -> bool:
+		"""Есть ли неотправленное в очереди (для подтверждения выхода)."""
+		return self._queue_busy
+
+	def _poll_queue(self) -> None:
+		"""Запрашивает состояние очереди (по таймеру и после постановки)."""
+		# ошибки опроса не показываем плашками: мост пишет их в лог,
+		# а раз в полсекунды спамить пользователя нечем и незачем
+		run_in_engine(
+			self._worker, self._worker.engine.publish_queue.state(),
+			self, self._show_queue, noop,
+		)
+
+	def _show_queue(self, items: list[QueueItemDto]) -> None:
+		"""Обновляет панель очереди; завершённые — плашка и снятие с показа."""
+		visible: list[QueueItemDto] = []
+		for item in items:
+			if item.status is QueueItemStatus.DONE:
+				self._finish_item(item, notify=True)
+			elif item.status is QueueItemStatus.CANCELLED:
+				self._finish_item(item, notify=False)
+			else:
+				visible.append(item)
+		self._queue_busy = any(
+			item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
+			for item in visible
+		)
+		signature = tuple((i.id, i.status, i.error) for i in visible)
+		if signature != self._queue_signature:
+			self._queue_signature = signature
+			self._rebuild_queue(visible)
+		for item in visible:  # прогресс — без пересборки карточек
+			bar = self._queue_bars.get(item.id)
+			if bar is not None:
+				bar.setValue(int(item.progress * 100))
+
+	def _finish_item(self, item: QueueItemDto, notify: bool) -> None:
+		"""Показывает итог завершённого элемента и снимает его с показа."""
+		if item.id in self._handled_ids:
+			return  # уже показали; ждём, пока движок уберёт из состояния
+		self._handled_ids.add(item.id)
+		if notify:
 			InfoBar.success(
-				"Отложенная запись создана",
-				"Публикацию выполнит сервер Telegram.", parent=self,
+				"Отложенная запись создана" if item.scheduled else "Опубликовано",
+				item.title, parent=self.window(),
 			)
+		else:
+			InfoBar.info("Отправка отменена", item.title, parent=self.window())
+		self._dismiss(item.id)
 
-	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку и гасит индикатор прогресса."""
-		self._hide_progress()
-		show_error(self, message)
+	def _rebuild_queue(self, items: list[QueueItemDto]) -> None:
+		"""Перестраивает карточки очереди (только при смене состава/статусов)."""
+		clear_layout(self._queue_box)
+		self._queue_bars = {}
+		for item in items:
+			self._queue_box.addWidget(self._queue_row(item))
 
-	def _hide_progress(self) -> None:
-		"""Прячет полосу прогресса и возвращает кнопку."""
-		self._progress.finish()
-		self._send_button.setEnabled(True)
+	def _queue_row(self, item: QueueItemDto) -> CardWidget:
+		"""Карточка элемента очереди: статус, прогресс, отмена/убрать."""
+		trailing = QWidget(self)
+		row = QHBoxLayout(trailing)
+		row.setContentsMargins(0, 0, 0, 0)
+		if item.status is QueueItemStatus.SENDING:
+			bar = ProgressBar(trailing)
+			bar.setRange(0, 100)
+			bar.setValue(int(item.progress * 100))
+			bar.setFixedWidth(160)
+			row.addWidget(bar)
+			self._queue_bars[item.id] = bar
+		if item.status is QueueItemStatus.ERROR:
+			action = PushButton("Убрать", trailing)
+			action.clicked.connect(bind(self._dismiss, item.id))
+		else:
+			action = PushButton("Отмена", trailing)
+			action.clicked.connect(bind(self._cancel_item, item.id))
+		row.addWidget(action)
+		return row_card(
+			self, item.title, self._queue_subtitle(item), trailing=trailing
+		)
+
+	@staticmethod
+	def _queue_subtitle(item: QueueItemDto) -> str:
+		"""Подпись карточки: канал и человекочитаемый статус."""
+		if item.status is QueueItemStatus.SENDING:
+			status = "отправляется"
+		elif item.status is QueueItemStatus.ERROR:
+			status = f"ошибка: {item.error}"
+		else:
+			status = "в очереди"
+			if item.scheduled:
+				status += " · отложенный"
+		return f"{item.channel_title} · {status}"
+
+	def _cancel_item(self, item_id: int) -> None:
+		"""Просит движок отменить элемент очереди."""
+		run_in_engine(
+			self._worker, self._worker.engine.publish_queue.cancel(item_id),
+			self, noop, self._show_error,
+		)
+
+	def _dismiss(self, item_id: int) -> None:
+		"""Убирает завершённый элемент из состояния очереди."""
+		run_in_engine(
+			self._worker, self._worker.engine.publish_queue.dismiss(item_id),
+			self, noop, noop,
+		)

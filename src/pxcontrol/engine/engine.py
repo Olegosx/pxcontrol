@@ -13,6 +13,7 @@ from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.channels import ChannelsService
 from pxcontrol.engine.services.posts import PostsService
+from pxcontrol.engine.services.publish_queue import PublishQueue
 from pxcontrol.engine.services.video import VideoService
 from pxcontrol.engine.telegram.gateway import TelegramGateway
 
@@ -34,6 +35,7 @@ class Engine:
 		self.accounts = AccountsService(self.db, self.gateway)
 		self.channels = ChannelsService(self.db, self.gateway)
 		self.posts = PostsService(self.db, self.gateway, settings.ffmpeg_path)
+		self.publish_queue = PublishQueue(self.posts)
 		self.video = VideoService(self.db, settings.ffmpeg_path)
 		self.captions = CaptionsService(self.db, settings.ffmpeg_path)
 
@@ -48,6 +50,7 @@ class Engine:
 	async def stop(self) -> None:
 		"""Останавливает компоненты в обратном порядке."""
 		logger.info("Остановка движка…")
+		await self.publish_queue.shutdown()
 		await self.gateway.stop()
 		await self.db.close()
 		logger.info("Движок остановлен.")
@@ -68,7 +71,7 @@ class Engine:
 			)
 		if account is None or account.session is None:
 			return
-		self.gateway.mtproto.configure(
+		await self.gateway.activate_userbot(
 			account.api_id, account.api_hash, account.session
 		)
-		logger.info("Userbot «%s» будет подключён при старте шлюза.", account.label)
+		logger.info("Userbot «%s» подключён.", account.label)

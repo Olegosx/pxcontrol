@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from qfluentwidgets import FluentIcon, FluentWindow, NavigationItemPosition
+from PySide6.QtGui import QCloseEvent
+from qfluentwidgets import FluentIcon, FluentWindow, MessageBox, NavigationItemPosition
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.posts import MediaKind
+from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.pages.accounts import AccountsPage
 from pxcontrol.ui.pages.channels import ChannelsPage
 from pxcontrol.ui.pages.publish import PublishPage
@@ -52,3 +53,23 @@ class MainWindow(FluentWindow):
 		"""Переходит на «Публикацию» с предзаполненным видеофайлом."""
 		self._publish_page.prefill_media(MediaKind.VIDEO, path)
 		self.switchTo(self._publish_page)
+
+	def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — API Qt
+		"""Подтверждает выход, если очередь отправки не пуста.
+
+		Очередь живёт в памяти (ADR-0012): при выходе неотправленные
+		посты пропадут — без вопроса терять их нельзя.
+		"""
+		if self._publish_page.queue_busy():
+			box = MessageBox(
+				"Отправка не завершена",
+				"В очереди публикации остались неотправленные посты — "
+				"при выходе они пропадут. Выйти?",
+				self,
+			)
+			box.yesButton.setText("Выйти")
+			box.cancelButton.setText("Остаться")
+			if not box.exec():
+				event.ignore()
+				return
+		super().closeEvent(event)
