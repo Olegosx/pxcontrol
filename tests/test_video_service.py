@@ -12,7 +12,8 @@ from pxcontrol.engine.services.video import PresetFields, VideoError, VideoServi
 from pxcontrol.engine.video import ProcessingOptions
 
 FIELDS = PresetFields(
-	name="Бренд", watermark_path="/tmp/logo.png", wm_corner="br",
+	name="Бренд", trim_start=3.5, trim_end=1.5, fade_in=0.5, fade_out=1.0,
+	watermark_path="/tmp/logo.png", wm_corner="br",
 	wm_opacity=0.8, wm_start_offset=2.0, wm_end_offset=15.0, wm_fade=1.5,
 	intro=True, intro_source="time:5.0", cover=True,
 	video_bitrate_kbps=2500, meta_comment="https://t.me/mych — мой канал",
@@ -55,6 +56,8 @@ async def test_preset_crud(db: Database) -> None:
 	fields = await service.get_preset_fields(preset.id)
 	assert fields.intro_source == "time:5.0" and fields.wm_opacity == 0.8
 	assert fields.video_bitrate_kbps == 2500
+	assert fields.trim_start == 3.5 and fields.trim_end == 1.5
+	assert fields.fade_in == 0.5 and fields.fade_out == 1.0
 	updated = await service.save_preset(
 		PresetFields(name="Бренд-2", no_audio=True), preset.id
 	)
@@ -83,6 +86,8 @@ async def test_prepare_maps_fields_to_options(
 	assert Path(output).is_file()
 	options = processor.calls[0]
 	assert options.input == str(source)
+	assert options.trim_start == 3.5 and options.trim_end == 1.5
+	assert options.fade_in == 0.5 and options.fade_out == 1.0
 	assert options.watermark == "/tmp/logo.png"
 	assert options.wm_corner == "br" and options.wm_opacity == 0.8
 	assert options.wm_start_offset == 2.0 and options.wm_end_offset == 15.0
@@ -169,6 +174,47 @@ async def test_extract_random_frames(
 	second = await service.extract_random_frames(str(source), 2)
 	assert len(second) == 2
 	assert not first_dir.exists()  # старая партия удалена
+
+
+async def test_extract_random_frames_respects_trim(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Кандидаты — из обрезанного диапазона; время — от обрезанной версии."""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.probe_video",
+		lambda _p, _b: VideoInfo(1280, 720, 100.0, 25.0, True),
+	)
+	extracted: list[float] = []
+
+	def _fake_extract(
+		_src: str, timestamp: float, out: str, _w: int, _h: int,
+		_bin: str = "ffmpeg",
+	) -> None:
+		extracted.append(timestamp)
+		Path(out).write_bytes(b"png")
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.extract_still", _fake_extract
+	)
+	source = tmp_path / "v.mp4"
+	source.write_bytes(b"v")
+	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
+	frames = await service.extract_random_frames(
+		str(source), 6, trim_start=20.0, trim_end=30.0
+	)
+	# рабочая версия — 50 с: подписи в её времени, извлечение — со сдвигом
+	for frame, raw in zip(frames, extracted, strict=True):
+		assert 2.5 <= frame.timestamp <= 47.5  # 5–95 % от 50 с
+		assert raw == pytest.approx(20.0 + frame.timestamp)
+	with pytest.raises(VideoError, match="не оставляет"):
+		await service.extract_random_frames(
+			str(source), 2, trim_start=70.0, trim_end=40.0
+		)
 
 
 async def test_prepare_validations(db: Database, tmp_path: Path) -> None:

@@ -16,7 +16,6 @@ from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
 	QButtonGroup,
-	QFileDialog,
 	QGridLayout,
 	QHBoxLayout,
 	QLabel,
@@ -42,6 +41,7 @@ from qfluentwidgets import (
 	SubtitleLabel,
 	SwitchButton,
 	TogglePushButton,
+	ToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -53,6 +53,7 @@ from pxcontrol.ui.pages.common import (
 	bind,
 	clear_layout,
 	confirm_delete,
+	pick_file,
 	row_card,
 	show_error,
 )
@@ -76,6 +77,9 @@ _SOURCES_WITHOUT_VALUE = {"random-middle", "random-choice"}
 #: Имя «пресета» в имени файла результата, когда пресет не выбран.
 _MANUAL_NAME = "ручные"
 
+#: Колонок в плитке выбора кадра заставки.
+_FRAME_GRID_COLUMNS = 3
+
 
 class _PresetForm(QWidget):
 	"""Панель параметров обработки (бывший диалог пресета, без имени).
@@ -89,6 +93,7 @@ class _PresetForm(QWidget):
 		self._layout = QVBoxLayout(self)
 		self._layout.setContentsMargins(0, 0, 0, 0)
 		self._layout.setSpacing(12)
+		self._layout.addWidget(self._trim_card())
 		self._layout.addWidget(self._watermark_card())
 		self._layout.addWidget(self._intro_card())
 		self._layout.addWidget(self._output_card())
@@ -110,6 +115,25 @@ class _PresetForm(QWidget):
 		row.addWidget(BodyLabel(text, widget.parentWidget()))
 		row.addWidget(widget)
 		row.addSpacing(16)
+
+	def _trim_card(self) -> CardWidget:
+		"""Раздел «Обрезка»: отрезаемые края; остальное считается от результата."""
+		card, box = self._card("Обрезка")
+		row = QHBoxLayout()
+		self._trim_start = self._dspin(
+			card, "0 — не резать", 0.0, 36000.0, 0.0, 0.1
+		)
+		self._labeled(row, "Отрезать в начале, с:", self._trim_start)
+		self._trim_end = self._dspin(
+			card, "0 — не резать", 0.0, 36000.0, 0.0, 0.1
+		)
+		self._labeled(row, "Отрезать в конце, с:", self._trim_end)
+		row.addWidget(CaptionLabel(
+			"остальные параметры — от обрезанной версии", card
+		))
+		row.addStretch()
+		box.addLayout(row)
+		return card
 
 	def _watermark_card(self) -> CardWidget:
 		"""Раздел «Вотермарк»: файл, вид, окно показа, плавность."""
@@ -183,7 +207,7 @@ class _PresetForm(QWidget):
 			widget.setEnabled(enabled)
 
 	def _output_card(self) -> CardWidget:
-		"""Раздел «Вывод»: обложка, звук, качество."""
+		"""Раздел «Вывод»: обложка, звук, качество, затухание на краях."""
 		card, box = self._card("Вывод")
 		row = QHBoxLayout()
 		self._cover = SwitchButton(card)
@@ -195,6 +219,16 @@ class _PresetForm(QWidget):
 		row.addWidget(CaptionLabel("0 — как в оригинале", card))
 		row.addStretch()
 		box.addLayout(row)
+		fade_row = QHBoxLayout()
+		self._fade_in = self._dspin(card, "0 — без эффекта", 0.0, 30.0, 0.0, 0.1)
+		self._labeled(fade_row, "Затухание в начале, с:", self._fade_in)
+		self._fade_out = self._dspin(card, "0 — без эффекта", 0.0, 30.0, 0.0, 0.1)
+		self._labeled(fade_row, "Затухание в конце, с:", self._fade_out)
+		fade_row.addWidget(CaptionLabel(
+			"появление из чёрного / уход в чёрное; видео и звук", card
+		))
+		fade_row.addStretch()
+		box.addLayout(fade_row)
 		comment_row = QHBoxLayout()
 		comment_row.addWidget(BodyLabel("Комментарий (метаданные):", card))
 		self._meta_comment = LineEdit(card)
@@ -206,6 +240,7 @@ class _PresetForm(QWidget):
 		return card
 
 	def _spin(self, card: QWidget, tip: str, lo: int, hi: int, val: int) -> SpinBox:
+		"""Целочисленный регулятор: диапазон lo..hi, старт val, подсказка tip."""
 		box = SpinBox(card)
 		box.setRange(lo, hi)
 		box.setValue(val)
@@ -215,6 +250,7 @@ class _PresetForm(QWidget):
 	def _dspin(
 		self, card: QWidget, tip: str, lo: float, hi: float, val: float, step: float
 	) -> DoubleSpinBox:
+		"""Дробный регулятор: диапазон lo..hi, старт val, шаг step, подсказка tip."""
 		box = DoubleSpinBox(card)
 		box.setRange(lo, hi)
 		box.setSingleStep(step)
@@ -223,9 +259,8 @@ class _PresetForm(QWidget):
 		return box
 
 	def _pick_watermark(self) -> None:
-		path, _ = QFileDialog.getOpenFileName(
-			self, "Файл вотермарка", "", "Изображения (*.png)"
-		)
+		"""Диалог выбора PNG-файла вотермарка."""
+		path = pick_file(self, "Файл вотермарка", "Изображения (*.png)")
 		if path:
 			self._wm_path.setText(path)
 
@@ -233,6 +268,10 @@ class _PresetForm(QWidget):
 
 	def fill(self, fields: PresetFields) -> None:
 		"""Заполняет панель полями пресета."""
+		self._trim_start.setValue(fields.trim_start)
+		self._trim_end.setValue(fields.trim_end)
+		self._fade_in.setValue(fields.fade_in)
+		self._fade_out.setValue(fields.fade_out)
 		self._wm_path.setText(fields.watermark_path or "")
 		codes = [code for _label, code in _CORNERS]
 		self._corner.setCurrentIndex(codes.index(fields.wm_corner))
@@ -266,6 +305,10 @@ class _PresetForm(QWidget):
 		"""Текущее состояние панели как поля пресета (имя — от вызывающего)."""
 		return PresetFields(
 			name=name,
+			trim_start=round(float(self._trim_start.value()), 3),
+			trim_end=round(float(self._trim_end.value()), 3),
+			fade_in=round(float(self._fade_in.value()), 3),
+			fade_out=round(float(self._fade_out.value()), 3),
 			watermark_path=str(self._wm_path.text()).strip() or None,
 			wm_corner=_CORNERS[int(self._corner.currentIndex())][1],
 			wm_margin=int(self._margin.value()),
@@ -293,7 +336,7 @@ class _PresetForm(QWidget):
 class _FrameTileButton(TogglePushButton):
 	"""Кнопка-плитка кадра: двойной клик подтверждает выбор."""
 
-	doubleClicked = Signal()
+	doubleClicked = Signal()  # noqa: N815 — соглашение имён сигналов Qt
 
 	def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
 		super().mouseDoubleClickEvent(event)
@@ -309,11 +352,19 @@ class _FramePickerDialog(MessageBoxBase):
 	"""
 
 	def __init__(
-		self, worker: EngineWorker, source_path: str, parent: QWidget
+		self,
+		worker: EngineWorker,
+		source_path: str,
+		parent: QWidget,
+		trim_start: float = 0.0,
+		trim_end: float = 0.0,
 	) -> None:
 		super().__init__(parent)
 		self._worker = worker
 		self._source = source_path
+		# кандидаты — из обрезанного диапазона, время — от обрезанной версии
+		self._trim_start = trim_start
+		self._trim_end = trim_end
 		self._chosen: str | None = None
 		self._group = QButtonGroup(self)
 		self._group.setExclusive(True)
@@ -332,6 +383,7 @@ class _FramePickerDialog(MessageBoxBase):
 		self._reload()
 
 	def _build_controls_row(self) -> None:
+		"""Строка управления партией: число кадров и кнопка «Обновить»."""
 		row = QHBoxLayout()
 		row.addWidget(BodyLabel("Кадров:", self))
 		self._count = SpinBox(self)
@@ -358,7 +410,8 @@ class _FramePickerDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.extract_random_frames(
-				self._source, int(self._count.value())
+				self._source, int(self._count.value()),
+				trim_start=self._trim_start, trim_end=self._trim_end,
 			),
 			self, self._show_frames, self._show_error,
 		)
@@ -378,7 +431,8 @@ class _FramePickerDialog(MessageBoxBase):
 		self._ring.hide()
 		self._refresh.setEnabled(True)
 		for index, frame in enumerate(frames):
-			self._grid.addWidget(self._frame_tile(frame), index // 3, index % 3)
+			row, column = divmod(index, _FRAME_GRID_COLUMNS)
+			self._grid.addWidget(self._frame_tile(frame), row, column)
 		self.widget.adjustSize()
 
 	def _frame_tile(self, frame: FrameCandidate) -> QWidget:
@@ -472,14 +526,29 @@ class VideoPage(ScrollArea):
 		self.enableTransparentBackground()
 
 	def _build_source_row(self, layout: QVBoxLayout) -> None:
+		"""Строка исходника: путь, «Обзор…» и просмотр системным плеером."""
 		src_row = QHBoxLayout()
 		self._source = LineEdit(self)
 		self._source.setPlaceholderText("Исходный видеофайл…")
+		self._source.textChanged.connect(self._on_source_changed)
 		browse = PushButton("Обзор…", self)
 		browse.clicked.connect(self._pick_source)
+		self._play_button = ToolButton(FluentIcon.PLAY, self)
+		self._play_button.setToolTip("Посмотреть выбранный файл (системный плеер)")
+		self._play_button.setEnabled(False)  # активируется выбором файла
+		self._play_button.clicked.connect(self._play_source)
 		src_row.addWidget(self._source)
 		src_row.addWidget(browse)
+		src_row.addWidget(self._play_button)
 		layout.addLayout(src_row)
+
+	def _on_source_changed(self, text: str) -> None:
+		"""Просмотр доступен, только когда путь указывает на существующий файл."""
+		self._play_button.setEnabled(Path(text.strip()).is_file())
+
+	def _play_source(self) -> None:
+		"""Открывает исходник системным плеером (встроенного пока нет)."""
+		self._open_path(str(self._source.text()).strip())
 
 	def _build_preset_row(self, layout: QVBoxLayout) -> None:
 		"""Пресет: выбор-загрузка и кнопки сохранения/удаления."""
@@ -616,8 +685,9 @@ class VideoPage(ScrollArea):
 	# --- подготовка -----------------------------------------------------------------
 
 	def _pick_source(self) -> None:
-		path, _ = QFileDialog.getOpenFileName(
-			self, "Исходное видео", "",
+		"""Диалог выбора исходного видеофайла."""
+		path = pick_file(
+			self, "Исходное видео",
 			"Видео (*.mp4 *.mov *.mkv *.avi *.webm);;Все файлы (*)",
 		)
 		if path:
@@ -637,7 +707,10 @@ class VideoPage(ScrollArea):
 		if not needs_choice:
 			self._start_prepare(source, fields, None)
 			return
-		dialog = _FramePickerDialog(self._worker, source, self.window())
+		dialog = _FramePickerDialog(
+			self._worker, source, self.window(),
+			trim_start=fields.trim_start, trim_end=fields.trim_end,
+		)
 		if not dialog.exec() or dialog.chosen_path() is None:
 			return
 		self._start_prepare(source, fields, f"image:{dialog.chosen_path()}")
@@ -658,6 +731,7 @@ class VideoPage(ScrollArea):
 		)
 
 	def _on_processed(self, output_path: object) -> None:
+		"""Показывает итог обработки и карточку результата с действиями."""
 		self._hide_progress()
 		path = Path(str(output_path))
 		# всплывашка не переносит строки — длинное имя укорачиваем

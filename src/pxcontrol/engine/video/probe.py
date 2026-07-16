@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-import logging
-import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from pxcontrol.engine.video.ffmpeg import run_tool
 
 
 def ffprobe_bin_for(ffmpeg_bin: str) -> str:
@@ -41,6 +39,26 @@ class VideoInfo:
 	bitrate_kbps: int | None = None
 
 
+def trimmed_info(info: VideoInfo, trim_start: float, trim_end: float) -> VideoInfo:
+	"""Метаданные рабочей (обрезанной) версии: длительность без краёв.
+
+	От этой версии считаются все остальные параметры обработки: окно
+	вотермарка, кадр заставки, длительность итога.
+
+	Raises:
+		ValueError: Обрезка не оставляет от ролика ничего.
+	"""
+	if not trim_start and not trim_end:
+		return info
+	duration = info.duration - trim_start - trim_end
+	if duration <= 0:
+		raise ValueError(
+			"Обрезка не оставляет от ролика ничего: отрезаемые края "
+			"больше его длительности."
+		)
+	return replace(info, duration=duration)
+
+
 def _run_ffprobe(path: str, ffprobe_bin: str) -> dict[str, Any]:
 	"""Запускает ffprobe и возвращает разобранный JSON по файлу.
 
@@ -51,10 +69,7 @@ def _run_ffprobe(path: str, ffprobe_bin: str) -> dict[str, Any]:
 		ffprobe_bin, "-v", "error", "-print_format", "json",
 		"-show_streams", "-show_format", path,
 	]
-	result = subprocess.run(cmd, capture_output=True, text=True)
-	if result.returncode != 0:
-		raise RuntimeError(f"ffprobe не смог прочитать '{path}': {result.stderr.strip()}")
-	return dict(json.loads(result.stdout))
+	return dict(json.loads(run_tool(cmd, f"чтение метаданных '{path}'")))
 
 
 def _parse_fps(rate: str) -> float:

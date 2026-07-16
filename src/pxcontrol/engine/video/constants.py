@@ -20,6 +20,15 @@ TARGET_PIX_FMT = "yuv420p"
 # сдвигал оттенки вотермарка.
 TARGET_COLOR_MATRIX = "bt709"
 
+# Кодирование результата (как в референсе makeVideo): H.264 + AAC.
+VIDEO_CODEC = "libx264"
+ENCODE_PRESET = "medium"
+AUDIO_CODEC = "aac"
+AUDIO_BITRATE = "192k"
+
+# Запасное качество, когда битрейт не задан и ffprobe его не сообщил.
+FALLBACK_CRF = "20"
+
 
 def fitted_size(width: int, height: int) -> tuple[int, int]:
 	"""Размер кадра, вписанного в рамку FullHD с сохранением пропорций.

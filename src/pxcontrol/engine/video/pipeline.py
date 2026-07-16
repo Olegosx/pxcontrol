@@ -2,7 +2,7 @@
 
 Поведение — по SPEC.md референса makeVideo: FullHD-вписывание, вотермарк
 с окном показа (отсчёт от исходного видео), заставка hold+xfade для
-превью Телеграма, опциональная обложка attached_pic.
+статичного превью, опциональная обложка attached_pic.
 """
 
 from __future__ import annotations
@@ -10,52 +10,74 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import subprocess
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pxcontrol.engine.video.constants import fitted_size
+from pxcontrol.engine.video.constants import (
+	AUDIO_BITRATE,
+	AUDIO_CODEC,
+	ENCODE_PRESET,
+	FALLBACK_CRF,
+	TARGET_PIX_FMT,
+	VIDEO_CODEC,
+	fitted_size,
+)
+from pxcontrol.engine.video.ffmpeg import ProgressCallback, run_streaming, run_tool
 from pxcontrol.engine.video.filtergraph import WatermarkOptions, build_filter_complex
 from pxcontrol.engine.video.frames import extract_still, prepare_still
-from pxcontrol.engine.video.probe import VideoInfo, probe_video
+from pxcontrol.engine.video.probe import VideoInfo, probe_video, trimmed_info
 
 logger = logging.getLogger(__name__)
 
-#: Колбэк прогресса: доля готовности 0.0..1.0.
-ProgressCallback = Callable[[float], None]
+# Запас длительности входа-заставки сверх hold+xfade: ffmpeg обрезает
+# зацикленную картинку по -t, и без запаса последний кадр перехода
+# мог не попасть в поток.
+_STILL_INPUT_MARGIN = 0.1
+
+__all__ = ["ProcessingOptions", "ProgressCallback", "process"]
 
 
 @dataclass(frozen=True)
 class ProcessingOptions:
-	"""Параметры обработки одного видео (зеркалят пресет `video_presets`).
+	"""Параметры обработки одного видео.
 
-	``video_bitrate_kbps``: целевой битрейт видео в кбит/с; None — «как
-	в оригинале» (битрейт исходника, а если он неизвестен — CRF 20).
+	Все поля пресета обязательны: их значения по умолчанию живут в одном
+	месте — ``PresetFields`` (сервис видео), а здесь — только контракт
+	исполнения. ``video_bitrate_kbps``: целевой битрейт видео в кбит/с;
+	None — «как в оригинале» (битрейт исходника, а если он неизвестен —
+	CRF 20).
 	"""
 
 	input: str
 	output: str
-	video_bitrate_kbps: int | None = None
-	watermark: str | None = None
-	wm_corner: str = "tr"
-	wm_margin: int = 24
-	wm_opacity: float = 1.0
-	wm_scale: float = 0.15
+	# обрезка с краёв (сек; 0 — не резать): остальные параметры — окно
+	# вотермарка, кадр заставки, длительности — считаются от обрезанной версии
+	trim_start: float
+	trim_end: float
+	# затухание на краях итога (сек; 0 — без эффекта): появление из чёрного /
+	# уход в чёрное, видео и звук вместе; к обрезке не привязано
+	fade_in: float
+	fade_out: float
+	video_bitrate_kbps: int | None
+	watermark: str | None
+	wm_corner: str
+	wm_margin: int
+	wm_opacity: float
+	wm_scale: float
 	# окно показа вотермарка: отступ от начала и отступ ДО КОНЦА ролика (сек)
-	wm_start_offset: float | None = None
-	wm_end_offset: float | None = None
+	wm_start_offset: float | None
+	wm_end_offset: float | None
 	# плавность появления/исчезания на краях окна (сек; 0 — резко)
-	wm_fade: float = 0.0
-	intro: bool = False
-	intro_source: str = "random-middle"
-	intro_hold: float = 1.0
-	xfade: float = 0.5
-	cover: bool = False
-	no_audio: bool = False
+	wm_fade: float
+	intro: bool
+	intro_source: str
+	intro_hold: float
+	xfade: float
+	cover: bool
+	no_audio: bool
 	# комментарий в метаданные контейнера (тег comment); None — не писать
-	meta_comment: str | None = None
+	meta_comment: str | None
 	ffmpeg_bin: str = "ffmpeg"
 	ffprobe_bin: str = "ffprobe"
 
@@ -69,15 +91,14 @@ def _watermark_options(opts: ProcessingOptions, info: VideoInfo) -> WatermarkOpt
 	"""Собирает параметры вотермарка; отступы от краёв → абсолютное окно.
 
 	Начало окна = отступ от начала; конец = длительность − отступ до конца.
-	Граф фильтров работает с абсолютными моментами, как и раньше.
+	Нулевой отступ означает «без ограничения» (как и незаданный). Граф
+	фильтров работает с абсолютными моментами, как и раньше.
 
 	Raises:
 		ValueError: Окно показа пустое (отступы не помещаются в ролик).
 	"""
-	start = opts.wm_start_offset or None
-	end: float | None = None
-	if opts.wm_end_offset:
-		end = info.duration - opts.wm_end_offset
+	start = opts.wm_start_offset if opts.wm_start_offset else None
+	end = info.duration - opts.wm_end_offset if opts.wm_end_offset else None
 	if opts.watermark and (start is not None or end is not None):
 		window = (end if end is not None else info.duration) - (start or 0.0)
 		if window <= 0:
@@ -108,11 +129,21 @@ def _build_inputs(
 ) -> tuple[list[str], int | None, int | None]:
 	"""Готовит список входов ffmpeg и индексы вотермарка и заставки.
 
+	Обрезка — входными аргументами: ``-ss`` пропускает начало, ``-t``
+	ограничивает длительность (``info`` — уже обрезанная версия).
+	Временные метки при этом обнуляются на точке среза, поэтому весь
+	граф фильтров живёт во времени обрезанной версии.
+
 	Returns:
 		Кортеж (аргументы входов, индекс вотермарка, индекс заставки).
 		Индекс равен None, если соответствующий вход не нужен.
 	"""
-	inputs = ["-i", opts.input]
+	inputs: list[str] = []
+	if opts.trim_start:
+		inputs += ["-ss", f"{opts.trim_start:.3f}"]
+	if opts.trim_start or opts.trim_end:
+		inputs += ["-t", f"{info.duration:.3f}"]
+	inputs += ["-i", opts.input]
 	index = 1
 	wm_index: int | None = None
 	still_index: int | None = None
@@ -120,7 +151,7 @@ def _build_inputs(
 		inputs += ["-i", opts.watermark]
 		wm_index, index = index, index + 1
 	if opts.intro:
-		duration = opts.intro_hold + opts.xfade + 0.1
+		duration = opts.intro_hold + opts.xfade + _STILL_INPUT_MARGIN
 		inputs += [
 			"-loop", "1", "-framerate", _fps_arg(info.fps),
 			"-t", f"{duration:.3f}", "-i", str(still_path),
@@ -133,12 +164,12 @@ def _video_quality_args(opts: ProcessingOptions, info: VideoInfo) -> list[str]:
 	"""Аргументы качества видео: заданный битрейт, битрейт исходника или CRF.
 
 	Приоритет: явный битрейт пресета → битрейт исходника («как в оригинале»,
-	режим по умолчанию) → CRF 20, если ffprobe битрейт не сообщил.
+	режим по умолчанию) → CRF, если ffprobe битрейт не сообщил.
 	"""
 	kbps = opts.video_bitrate_kbps or info.bitrate_kbps
 	if kbps:
 		return ["-b:v", f"{kbps}k"]
-	return ["-crf", "20"]
+	return ["-crf", FALLBACK_CRF]
 
 
 def _assemble_command(
@@ -150,68 +181,14 @@ def _assemble_command(
 	cmd = [ffmpeg_bin, "-y", *inputs, "-filter_complex", filter_complex, "-map", video_label]
 	if audio_label:
 		cmd += ["-map", audio_label]
-	cmd += ["-c:v", "libx264", "-preset", "medium", *quality, "-pix_fmt", "yuv420p"]
+	cmd += ["-c:v", VIDEO_CODEC, "-preset", ENCODE_PRESET, *quality, "-pix_fmt", TARGET_PIX_FMT]
 	if audio_label:
-		cmd += ["-c:a", "aac", "-b:a", "192k"]
+		cmd += ["-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE]
 	if meta_comment:
 		cmd += ["-metadata", f"comment={meta_comment}"]
 	# -progress pipe:1 — ffmpeg пишет ход кодирования в stdout (для прогресс-бара)
 	cmd += ["-progress", "pipe:1", "-nostats", "-movflags", "+faststart", output]
 	return cmd
-
-
-def _progress_seconds(line: str) -> float | None:
-	"""Извлекает секунды из строки прогресса ffmpeg.
-
-	Поле ``out_time_ms`` исторически содержит МИКРОсекунды (причуда ffmpeg,
-	проверено на 8.0); ``out_time_us`` — его честный синоним.
-	"""
-	for key in ("out_time_us=", "out_time_ms="):
-		if line.startswith(key):
-			value = line[len(key):].strip()
-			try:
-				return int(value) / 1_000_000
-			except ValueError:
-				return None
-	return None
-
-
-def _run_ffmpeg_streaming(
-	cmd: list[str],
-	what: str,
-	total_seconds: float,
-	on_progress: ProgressCallback | None,
-) -> None:
-	"""Запускает ffmpeg, транслируя ход кодирования в колбэк.
-
-	Raises:
-		RuntimeError: Если ffmpeg завершился с ненулевым кодом.
-	"""
-	logger.debug("ffmpeg (%s): %s", what, " ".join(cmd))
-	proc = subprocess.Popen(
-		cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-	)
-	assert proc.stdout is not None  # stdout=PIPE
-	for line in proc.stdout:
-		seconds = _progress_seconds(line)
-		if seconds is not None and on_progress is not None and total_seconds > 0:
-			on_progress(min(seconds / total_seconds, 1.0))
-	stderr = proc.stderr.read() if proc.stderr is not None else ""
-	proc.wait()
-	if proc.returncode != 0:
-		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {stderr.strip()}")
-
-
-def _run_ffmpeg(cmd: list[str], what: str) -> None:
-	"""Запускает ffmpeg и поднимает исключение при ошибке.
-
-	Raises:
-		RuntimeError: Если ffmpeg завершился с ненулевым кодом.
-	"""
-	logger.debug("ffmpeg (%s): %s", what, " ".join(cmd))
-	result = subprocess.run(cmd, capture_output=True, text=True)
-	if result.returncode != 0:
-		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {result.stderr.strip()}")
 
 
 def _run_main(
@@ -227,19 +204,24 @@ def _run_main(
 	width, height = fitted_size(info.width, info.height)
 	# длительность итога = исходник + удержание кадра заставки (см. SPEC)
 	total = info.duration + (opts.intro_hold if opts.intro else 0.0)
+	if opts.fade_in + opts.fade_out > total:
+		raise ValueError(
+			"Затухания в начале и в конце не помещаются "
+			"в длительность ролика."
+		)
 	graph = build_filter_complex(
 		fps=_fps_arg(info.fps), width=width, height=height, duration=total,
-		has_intro=opts.intro,
 		hold=opts.intro_hold, xfade=opts.xfade, still_index=still_index,
-		has_watermark=bool(opts.watermark), wm=_watermark_options(opts, info),
+		wm=_watermark_options(opts, info) if opts.watermark else None,
 		wm_index=wm_index, has_audio=has_audio,
+		fade_in=opts.fade_in, fade_out=opts.fade_out,
 	)
 	cmd = _assemble_command(
 		opts.ffmpeg_bin, inputs, graph.filter_complex, graph.video_label,
 		graph.audio_label, _video_quality_args(opts, info),
 		opts.meta_comment, output,
 	)
-	_run_ffmpeg_streaming(cmd, "обработка видео", total, on_progress)
+	run_streaming(cmd, "обработка видео", total, on_progress)
 
 
 def _attach_cover(
@@ -249,9 +231,12 @@ def _attach_cover(
 	cmd = [
 		ffmpeg_bin, "-y", "-i", video_path, "-i", cover_path,
 		"-map", "0", "-map", "1", "-c", "copy", "-c:v:1", "png",
-		"-disposition:v:1", "attached_pic", output,
+		"-disposition:v:1", "attached_pic",
+		# +faststart — moov в начало файла (главный проход его уже ставил,
+		# но ремукс с обложкой без флага увёл бы индекс в хвост)
+		"-movflags", "+faststart", output,
 	]
-	_run_ffmpeg(cmd, "вшивание обложки")
+	run_tool(cmd, "вшивание обложки")
 
 
 def _save_preview(
@@ -262,7 +247,7 @@ def _save_preview(
 	Кадр заставки/обложки, если готовился (он и задуман «лицом» ролика),
 	иначе — первый кадр результата. Превью — вспомогательный артефакт:
 	его отказ не роняет успешную обработку, только предупреждение в лог.
-	Публикация берёт из него миниатюру для Telegram.
+	Слой публикации режет из него миниатюру видео.
 	"""
 	preview = str(Path(opts.output).with_suffix(".png"))
 	try:
@@ -292,17 +277,23 @@ def process(
 
 	Raises:
 		RuntimeError: Если ffprobe/ffmpeg завершились с ошибкой.
-		ValueError: Если режим источника кадра не распознан.
+		ValueError: Режим источника кадра не распознан, обрезка съедает
+			всё видео, окно вотермарка или затухания не помещаются.
 	"""
 	info = probe_video(opts.input, opts.ffprobe_bin)
+	# все дальнейшие расчёты — от рабочей (обрезанной) версии
+	work_info = trimmed_info(info, opts.trim_start, opts.trim_end)
 	with tempfile.TemporaryDirectory() as tmp:
 		still_path: str | None = None
 		if opts.intro or opts.cover:
 			still_path = os.path.join(tmp, "still.png")
-			prepare_still(opts.input, opts.intro_source, info, still_path, opts.ffmpeg_bin)
+			prepare_still(
+				opts.input, opts.intro_source, work_info, still_path,
+				opts.ffmpeg_bin, start_offset=opts.trim_start,
+			)
 		main_output = opts.output if not opts.cover else os.path.join(tmp, "main.mp4")
-		_run_main(opts, info, still_path, main_output, on_progress)
+		_run_main(opts, work_info, still_path, main_output, on_progress)
 		if opts.cover:
 			_attach_cover(opts.ffmpeg_bin, main_output, str(still_path), opts.output)
-		_save_preview(opts, info, still_path)
+		_save_preview(opts, work_info, still_path)
 	logger.info("Готово: %s", opts.output)

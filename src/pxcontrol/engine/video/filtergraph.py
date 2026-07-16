@@ -10,12 +10,9 @@
   * задержка звука на длительность заставки, чтобы дорожка совпала с видео.
 """
 
-import logging
 from dataclasses import dataclass
 
 from pxcontrol.engine.video.constants import TARGET_COLOR_MATRIX, TARGET_PIX_FMT
-
-logger = logging.getLogger(__name__)
 
 # Выражения позиции overlay по углу: W/H — размеры фона, w/h — размеры вотермарка.
 CORNER_POSITIONS = {
@@ -183,12 +180,42 @@ def _watermark_chains(
 	return chains, "[vout]"
 
 
-def _audio_chains(has_intro: bool, hold: float) -> tuple[list[str], str]:
-	"""Цепочки звука: задержка на длительность заставки или прямое отображение."""
+def _fade_filters(fade_in: float, fade_out: float, duration: float) -> str:
+	"""Фрагмент fade-фильтров видео для затухания на краях (или пусто).
+
+	Появление — из чёрного с самого начала итога (накрывает и заставку),
+	уход — в чёрное к концу итоговой длительности.
+	"""
+	parts = []
+	if fade_in > 0:
+		parts.append(f"fade=t=in:st=0:d={fade_in:.3f}")
+	if fade_out > 0:
+		parts.append(f"fade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}")
+	return ",".join(parts)
+
+
+def _audio_chains(
+	has_intro: bool, hold: float, fade_in: float, fade_out: float, duration: float
+) -> tuple[list[str], str]:
+	"""Цепочки звука: задержка под заставку и затухание на краях.
+
+	Затухание в начале стартует там, где начинается звук: при заставке
+	дорожка сдвинута на ``hold`` (тишина adelay), и afade с нуля отыграл
+	бы по тишине. Затухание в конце — к концу итоговой длительности.
+	"""
+	filters = []
 	if has_intro:
-		delay_ms = int(round(hold * 1000))
-		return [f"[0:a]adelay={delay_ms}:all=1[aout]"], "[aout]"
-	return [], "0:a"
+		filters.append(f"adelay={int(round(hold * 1000))}:all=1")
+	if fade_in > 0:
+		start = hold if has_intro else 0.0
+		filters.append(f"afade=t=in:st={start:.3f}:d={fade_in:.3f}")
+	if fade_out > 0:
+		filters.append(
+			f"afade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}"
+		)
+	if not filters:
+		return [], "0:a"
+	return [f"[0:a]{','.join(filters)}[aout]"], "[aout]"
 
 
 def build_filter_complex(
@@ -197,53 +224,65 @@ def build_filter_complex(
 	width: int,
 	height: int,
 	duration: float,
-	has_intro: bool,
 	hold: float,
 	xfade: float,
 	still_index: int | None,
-	has_watermark: bool,
 	wm: WatermarkOptions | None,
 	wm_index: int | None,
 	has_audio: bool,
+	fade_in: float,
+	fade_out: float,
 ) -> FilterGraph:
 	"""Собирает граф фильтров из участков и возвращает метки потоков для -map.
+
+	Участки включаются самими данными: заставка — заданным ``still_index``,
+	вотермарк — заданным ``wm`` (отдельных флагов нет — нечему расходиться).
 
 	Args:
 		fps: кадровая частота строкой (например '29.97003').
 		width: ширина итогового кадра (fitted_size).
 		height: высота итогового кадра (fitted_size).
 		duration: длительность итогового видео (сек) — ограничивает
-			зацикленный поток вотермарка при плавности.
-		has_intro: включена ли заставка.
+			зацикленный поток вотермарка при плавности и задаёт конец
+			затухания.
 		hold: сколько секунд держать кадр заставки сплошняком.
 		xfade: длительность растворения заставки в видео.
-		still_index: индекс входа с картинкой-заставкой (если есть заставка).
-		has_watermark: накладывать ли вотермарк.
-		wm: параметры вотермарка (если he накладывается — может быть None).
-		wm_index: индекс входа с картинкой-вотермарком.
+		still_index: индекс входа с картинкой-заставкой (None — без заставки).
+		wm: параметры вотермарка (None — не накладывается).
+		wm_index: индекс входа с картинкой-вотермарком (обязателен при ``wm``).
 		has_audio: переносить ли звук.
+		fade_in: затухание в начале — появление из чёрного (сек; 0 — нет).
+		fade_out: затухание в конце — уход в чёрное (сек; 0 — нет).
 
 	Returns:
 		FilterGraph со строкой -filter_complex и метками видео/звука.
+
+	Raises:
+		ValueError: Задан ``wm`` без ``wm_index``.
 	"""
+	has_intro = still_index is not None
 	chains = [_main_chain(fps, width, height)]
 	base, offset = "[main]", 0.0
-	if has_intro:
-		if still_index is None:
-			raise ValueError("Заставка включена, но вход с кадром не задан")
+	if still_index is not None:
 		chains += _intro_chains(fps, hold, xfade, still_index)
 		base, offset = "[base]", hold
-	if has_watermark:
-		if wm is None or wm_index is None:
-			raise ValueError("Вотермарк включён, но его параметры не заданы")
+	if wm is not None:
+		if wm_index is None:
+			raise ValueError("Вотермарк задан, но вход с его картинкой — нет")
 		wm_chains, video_label = _watermark_chains(
 			wm, wm_index, base, offset, fps, duration
 		)
 		chains += wm_chains
 	else:
 		video_label = base
+	fades = _fade_filters(fade_in, fade_out, duration)
+	if fades:
+		chains.append(f"{video_label}{fades}[vfinal]")
+		video_label = "[vfinal]"
 	audio_label: str | None = None
 	if has_audio:
-		audio_chains, audio_label = _audio_chains(has_intro, hold)
+		audio_chains, audio_label = _audio_chains(
+			has_intro, hold, fade_in, fade_out, duration
+		)
 		chains += audio_chains
 	return FilterGraph(";".join(chains), video_label, audio_label)

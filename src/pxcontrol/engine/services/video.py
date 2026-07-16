@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -23,9 +22,9 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import VideoPreset
 from pxcontrol.engine.video import ProcessingOptions, process
 from pxcontrol.engine.video.constants import fitted_size
-from pxcontrol.engine.video.frames import CHOICE_FROM, CHOICE_TO, extract_still
+from pxcontrol.engine.video.frames import extract_still, resolve_timestamp
 from pxcontrol.engine.video.pipeline import ProgressCallback
-from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
+from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video, trimmed_info
 from pxcontrol.paths import media_dir
 
 logger = logging.getLogger(__name__)
@@ -60,6 +59,10 @@ class PresetFields:
 	"""
 
 	name: str
+	trim_start: float = 0.0  # отрезать N сек в начале (0 — не резать)
+	trim_end: float = 0.0  # отрезать N сек в конце (0 — не резать)
+	fade_in: float = 0.0  # появление из чёрного, сек (0 — без эффекта)
+	fade_out: float = 0.0  # уход в чёрное, сек (0 — без эффекта)
 	watermark_path: str | None = None
 	wm_corner: str = "tr"
 	wm_margin: int = 24
@@ -137,7 +140,10 @@ class VideoService:
 		if preset is None:
 			raise VideoError("Пресет не найден — обновите список.")
 		return PresetFields(
-			name=preset.name, watermark_path=preset.watermark_path,
+			name=preset.name,
+			trim_start=preset.trim_start, trim_end=preset.trim_end,
+			fade_in=preset.fade_in, fade_out=preset.fade_out,
+			watermark_path=preset.watermark_path,
 			wm_corner=preset.wm_corner, wm_margin=preset.wm_margin,
 			wm_opacity=preset.wm_opacity, wm_scale=preset.wm_scale,
 			wm_start_offset=preset.wm_start_offset,
@@ -191,7 +197,11 @@ class VideoService:
 		return options.output
 
 	async def extract_random_frames(
-		self, source_path: str, count: int = 6
+		self,
+		source_path: str,
+		count: int = 6,
+		trim_start: float = 0.0,
+		trim_end: float = 0.0,
 	) -> list[FrameCandidate]:
 		"""Выдёргивает случайные кадры-кандидаты заставки (5–95 % длительности).
 
@@ -199,9 +209,12 @@ class VideoService:
 		уходит в обработку как есть (``image:<путь>``), без повторного
 		извлечения. Партией владеет сервис: предыдущая удаляется при каждом
 		новом запросе, так что за сессию живёт максимум одна папка.
+		При обрезке (``trim_start``/``trim_end``) кандидаты берутся только
+		из обрезанного диапазона, время — от обрезанной версии.
 
 		Raises:
-			VideoError: Файл/ffmpeg не найдены или извлечение упало.
+			VideoError: Файл/ffmpeg не найдены, обрезка съедает всё видео
+				или извлечение упало.
 		"""
 		self._require_ready(source_path)
 		if self._candidates_dir is not None:
@@ -209,25 +222,39 @@ class VideoService:
 		self._candidates_dir = tempfile.mkdtemp(prefix="pxcontrol-frames-")
 		try:
 			return await asyncio.to_thread(
-				self._extract_candidates, source_path, count, self._candidates_dir
+				self._extract_candidates, source_path, count,
+				self._candidates_dir, trim_start, trim_end,
 			)
 		except (RuntimeError, ValueError, OSError) as exc:
 			raise VideoError(f"Не удалось извлечь кадры: {exc}") from exc
 
 	def _extract_candidates(
-		self, source_path: str, count: int, out_dir: str
+		self,
+		source_path: str,
+		count: int,
+		out_dir: str,
+		trim_start: float,
+		trim_end: float,
 	) -> list[FrameCandidate]:
-		"""Блокирующее извлечение кадров (выполняется в отдельном потоке)."""
+		"""Блокирующее извлечение кадров (выполняется в отдельном потоке).
+
+		Raises:
+			ValueError: Обрезка не оставляет от ролика ничего.
+		"""
 		info = probe_video(source_path, ffprobe_bin_for(self._ffmpeg))
+		work_info = trimmed_info(info, trim_start, trim_end)
 		width, height = fitted_size(info.width, info.height)
 		stamps = sorted(
-			random.uniform(info.duration * CHOICE_FROM, info.duration * CHOICE_TO)
-			for _ in range(count)
+			resolve_timestamp("random-choice", work_info) for _ in range(count)
 		)
 		frames: list[FrameCandidate] = []
 		for index, timestamp in enumerate(stamps):
 			path = str(Path(out_dir) / f"frame_{index:02d}.png")
-			extract_still(source_path, timestamp, path, width, height, self._ffmpeg)
+			# извлечение — из исходника, время кандидата — от обрезанной версии
+			extract_still(
+				source_path, trim_start + timestamp, path,
+				width, height, self._ffmpeg,
+			)
 			frames.append(FrameCandidate(timestamp, path))
 		return frames
 
@@ -256,6 +283,8 @@ class VideoService:
 		ffprobe = ffprobe_bin_for(self._ffmpeg)
 		return ProcessingOptions(
 			input=str(source), output=str(output),
+			trim_start=fields.trim_start, trim_end=fields.trim_end,
+			fade_in=fields.fade_in, fade_out=fields.fade_out,
 			watermark=fields.watermark_path, wm_corner=fields.wm_corner,
 			wm_margin=fields.wm_margin, wm_opacity=fields.wm_opacity,
 			wm_scale=fields.wm_scale, wm_start_offset=fields.wm_start_offset,
