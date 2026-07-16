@@ -1,17 +1,22 @@
-"""Страница «Настройки»: тема оформления и путь к ffmpeg.
+"""Страница «Настройки»: категории слева, правка выбранной — справа.
 
-Значения живут в настройках приложения (таблица ``app_settings``,
-ADR-0013) и переживают перезапуск; тема применяется на лету.
+Категории: «Общие» (тема оформления, путь к ffmpeg) и «Аккаунты»
+(боты, userbot, ключи ИИ — встроенная :class:`AccountsPage`).
+Отдельного пункта «Аккаунты» в боковой навигации окна больше нет.
+
+Значения общих настроек живут в ``app_settings`` (ADR-0013)
+и переживают перезапуск; тема применяется на лету.
 """
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
 	InfoBar,
 	LineEdit,
+	ListWidget,
 	PushButton,
 	SubtitleLabel,
 	SwitchButton,
@@ -20,16 +25,45 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.settings import FFMPEG_PATH, THEME_DARK
 from pxcontrol.ui.async_bridge import run_in_engine
+from pxcontrol.ui.pages.accounts import AccountsPage
 from pxcontrol.ui.pages.common import error_reporter, noop
 from pxcontrol.ui.theme import apply_theme
 
+#: Ширина списка категорий слева.
+_CATEGORIES_WIDTH = 200
+
 
 class SettingsPage(QWidget):
-	"""Настройки приложения: оформление и обработка видео."""
+	"""Контейнер настроек: список категорий и стек панелей правки."""
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
 		self.setObjectName("settings")
+		layout = QHBoxLayout(self)
+		layout.setContentsMargins(28, 24, 0, 0)
+		layout.setSpacing(16)
+		self._categories = ListWidget(self)
+		self._categories.setFixedWidth(_CATEGORIES_WIDTH)
+		self._stack = QStackedWidget(self)
+		# категория = пункт списка + панель в стеке (порядок общий)
+		self._add_category("Общие", _GeneralSettings(worker, self))
+		self._add_category("Аккаунты", AccountsPage(worker, self))
+		self._categories.currentRowChanged.connect(self._stack.setCurrentIndex)
+		self._categories.setCurrentRow(0)
+		layout.addWidget(self._categories)
+		layout.addWidget(self._stack, stretch=1)
+
+	def _add_category(self, title: str, panel: QWidget) -> None:
+		"""Добавляет категорию: пункт в список и панель в стек."""
+		self._categories.addItem(title)
+		self._stack.addWidget(panel)
+
+
+class _GeneralSettings(QWidget):
+	"""Категория «Общие»: оформление и обработка видео."""
+
+	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
+		super().__init__(parent)
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		self._build()
@@ -38,7 +72,7 @@ class SettingsPage(QWidget):
 	def _build(self) -> None:
 		"""Собирает блоки «Оформление» и «Обработка видео»."""
 		layout = QVBoxLayout(self)
-		layout.setContentsMargins(28, 24, 28, 24)
+		layout.setContentsMargins(0, 0, 28, 24)
 		layout.setSpacing(12)
 		layout.addWidget(SubtitleLabel("Оформление", self))
 		theme_row = QHBoxLayout()

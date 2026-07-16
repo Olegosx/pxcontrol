@@ -11,7 +11,6 @@ from qfluentwidgets import FluentIcon, FluentWindow, MessageBox, NavigationItemP
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.settings import WINDOW_GEOMETRY
 from pxcontrol.engine.telegram.types import MediaKind
-from pxcontrol.ui.pages.accounts import AccountsPage
 from pxcontrol.ui.pages.channels import ChannelsPage
 from pxcontrol.ui.pages.publish import PublishPage
 from pxcontrol.ui.pages.schedule import SchedulePage
@@ -53,15 +52,10 @@ class MainWindow(FluentWindow):
 		self.addSubInterface(
 			SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание"
 		)
-		settings_page = SettingsPage(self._worker, self)
+		# категории настроек (Общие, Аккаунты) — внутри самой страницы
 		self.addSubInterface(
-			settings_page, FluentIcon.SETTING, "Настройки",
+			SettingsPage(self._worker, self), FluentIcon.SETTING, "Настройки",
 			NavigationItemPosition.BOTTOM,
-		)
-		# «Аккаунты» — дочерний пункт «Настроек» (дерево навигации).
-		self.addSubInterface(
-			AccountsPage(self._worker, self), FluentIcon.PEOPLE, "Аккаунты",
-			NavigationItemPosition.BOTTOM, parent=settings_page,
 		)
 
 	def _open_publish_with_video(self, path: str) -> None:
