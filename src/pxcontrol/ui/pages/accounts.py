@@ -28,6 +28,7 @@ from pxcontrol.ui.pages.common import (
 	confirm_delete,
 	error_reporter,
 	noop,
+	page_layout,
 	row_card,
 )
 
@@ -77,19 +78,13 @@ class AccountsPage(ScrollArea):
 
 	def _build(self) -> None:
 		"""Собирает три группы в прокручиваемом контейнере."""
-		container = QWidget(self)
-		layout = QVBoxLayout(container)
-		layout.setContentsMargins(28, 24, 28, 24)
-		layout.setSpacing(24)
-		self._bots = _Section("Боты", self._on_add_bot, container)
-		self._accounts = _Section("Userbot (MTProto)", self._on_add_account, container)
-		self._keys = _Section("Ключи ИИ", self._on_add_key, container)
+		layout = page_layout(self, spacing=24)
+		self._bots = _Section("Боты", self._on_add_bot, self)
+		self._accounts = _Section("Userbot (MTProto)", self._on_add_account, self)
+		self._keys = _Section("Ключи ИИ", self._on_add_key, self)
 		for section in (self._bots, self._accounts, self._keys):
 			layout.addWidget(section)
 		layout.addStretch()
-		self.setWidget(container)
-		self.setWidgetResizable(True)
-		self.enableTransparentBackground()
 
 	# --- общие помощники ------------------------------------------------------
 

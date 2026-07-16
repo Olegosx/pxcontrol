@@ -24,7 +24,7 @@
 | [data-flow.md](02-architecture/data-flow.md) | Поток данных (контент → публикация) | 🟡 |
 | [runtime.md](02-architecture/runtime.md) | Порядок запуска и остановки | 🟢 |
 | [tech-stack.md](02-architecture/tech-stack.md) | Технологии и обоснование | 🟢 |
-| [decisions/README.md](02-architecture/decisions/README.md) | Журнал решений (ADR) | 🟡 |
+| [decisions/README.md](02-architecture/decisions/README.md) | Журнал решений (ADR) | 🟢 |
 
 ## 03. Модули
 | Документ | Назначение | Статус |
@@ -42,8 +42,8 @@
 ## 04. Интерфейс движка
 | Документ | Назначение | Статус |
 |---|---|---|
-| [engine-api.md](04-api/engine-api.md) | API движка (внутренний, Python) | 🟡 |
-| [data-schemas.md](04-api/data-schemas.md) | Схемы данных (Pydantic) | 🟡 |
+| [engine-api.md](04-api/engine-api.md) | API движка (внутренний, Python) | 🟢 |
+| [data-schemas.md](04-api/data-schemas.md) | Схемы данных (датаклассы границы) | 🟢 |
 
 ## 05. Данные
 | Документ | Назначение | Статус |

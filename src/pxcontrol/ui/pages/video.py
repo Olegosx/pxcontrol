@@ -54,6 +54,7 @@ from pxcontrol.ui.pages.common import (
 	bind,
 	clear_layout,
 	confirm_delete,
+	page_layout,
 	pick_file,
 	row_card,
 	show_error,
@@ -532,10 +533,7 @@ class VideoPage(ScrollArea):
 	# --- сборка страницы ---------------------------------------------------------
 
 	def _build(self) -> None:
-		container = QWidget(self)
-		layout = QVBoxLayout(container)
-		layout.setContentsMargins(28, 24, 28, 24)
-		layout.setSpacing(16)
+		layout = page_layout(self)
 		layout.addWidget(SubtitleLabel("Подготовка видео", self))
 		self._build_source_row(layout)
 		self._build_preset_row(layout)
@@ -553,9 +551,6 @@ class VideoPage(ScrollArea):
 		self._result_box = QVBoxLayout()
 		layout.addLayout(self._result_box)
 		layout.addStretch()
-		self.setWidget(container)
-		self.setWidgetResizable(True)
-		self.enableTransparentBackground()
 
 	def _build_source_row(self, layout: QVBoxLayout) -> None:
 		"""Строка исходника: путь, «Обзор…» и просмотр системным плеером."""

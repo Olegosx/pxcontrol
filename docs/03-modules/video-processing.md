@@ -144,5 +144,6 @@ ffprobe. Отступы, не помещающиеся в ролик, — пон
 
 ## Связанные документы
 
-- [Спецификация поведения — makeVideo SPEC.md](../../../makeVideo/SPEC.md)
+- Спецификация поведения — `SPEC.md` соседнего проекта `makeVideo`
+  (вне этого репозитория: `../makeVideo/SPEC.md` относительно корня pXcontrol)
 - [Модель данных](../05-data/data-model.md) · [ADR-0006](../02-architecture/decisions/0006-desktop-pyside6.md)

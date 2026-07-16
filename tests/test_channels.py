@@ -13,12 +13,11 @@ from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.channels import ChannelError, ChannelsService
 from pxcontrol.engine.telegram.bot_api import (
 	ChannelCheckError,
-	ChannelInfo,
 	ensure_bot_can_post,
 	normalize_chat_ref,
 )
 from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
-from pxcontrol.engine.telegram.types import UserbotChannelInfo
+from pxcontrol.engine.telegram.types import ChannelInfo
 
 
 class _FakeGateway:
@@ -40,13 +39,13 @@ class _FakeGateway:
 			)
 		return ChannelInfo("-1001234", "Тестовый канал", "testchan")
 
-	async def check_channel_userbot(self, chat_ref: str) -> UserbotChannelInfo:
+	async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo:
 		if not self.userbot_is_admin:
 			raise UserbotUnavailableError(
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
-		return UserbotChannelInfo("-1001234", "Тестовый канал", "testchan")
+		return ChannelInfo("-1001234", "Тестовый канал", "testchan")
 
 
 @pytest.fixture

@@ -18,8 +18,8 @@ class MediaKind(StrEnum):
 
 
 @dataclass(frozen=True)
-class UserbotChannelInfo:
-	"""Канал, проверенный через userbot (MTProto).
+class ChannelInfo:
+	"""Канал, проверенный любым транспортом (бот или userbot).
 
 	Attributes:
 		chat_id: идентификатор канала в формате Bot API (-100…).

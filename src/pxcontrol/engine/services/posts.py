@@ -43,6 +43,9 @@ USERBOT_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
 _THUMB_BOX_PX = 320
 _THUMB_JPEG_QUALITY = "4"
 
+#: Длина превью текста отложенной записи на странице «Расписание».
+_SCHEDULED_PREVIEW_CHARS = 80
+
 #: Колбэк прогресса загрузки: доля 0.0..1.0.
 ProgressCallback = Callable[[float], None]
 
@@ -73,6 +76,17 @@ def publish_capabilities(
 
 class PostError(Exception):
 	"""Ошибка создания/отправки поста (с понятным человеку текстом)."""
+
+
+def text_preview(text: str, limit: int) -> str:
+	"""Обрезает текст до ``limit`` символов, длинный — с «…» на конце.
+
+	Общий помощник коротких заголовков/превью (очередь отправки,
+	список отложенных): лимит зависит от места показа.
+	"""
+	if len(text) <= limit:
+		return text
+	return f"{text[:limit - 1]}…"
 
 
 @dataclass(frozen=True)
@@ -332,7 +346,7 @@ class PostsService:
 	def _dto(channel_title: str, message: ScheduledMessage) -> ScheduledPostDto:
 		"""Готовит запись для интерфейса: канал, короткий текст, время."""
 		text = message.text or "(медиа без текста)"
-		preview = text if len(text) <= 80 else f"{text[:77]}…"
+		preview = text_preview(text, _SCHEDULED_PREVIEW_CHARS)
 		return ScheduledPostDto(channel_title, preview, message.scheduled_at)
 
 

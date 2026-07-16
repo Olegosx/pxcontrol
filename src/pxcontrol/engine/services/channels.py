@@ -11,8 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Channel
-from pxcontrol.engine.telegram.bot_api import ChannelInfo
-from pxcontrol.engine.telegram.types import UserbotChannelInfo
+from pxcontrol.engine.telegram.types import ChannelInfo
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ class _ChannelChecker(Protocol):
 
 	async def check_channel(self, token: str, chat_ref: str) -> ChannelInfo: ...
 
-	async def check_channel_userbot(self, chat_ref: str) -> UserbotChannelInfo: ...
+	async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo: ...
 
 
 @dataclass(frozen=True)

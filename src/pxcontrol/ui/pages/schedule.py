@@ -20,7 +20,12 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.posts import ScheduledPostDto
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import clear_layout, error_reporter, row_card
+from pxcontrol.ui.pages.common import (
+	clear_layout,
+	error_reporter,
+	page_layout,
+	row_card,
+)
 
 
 class SchedulePage(ScrollArea):
@@ -36,30 +41,24 @@ class SchedulePage(ScrollArea):
 
 	def _build(self) -> None:
 		"""Шапка с кнопками и область списка."""
-		container = QWidget(self)
-		layout = QVBoxLayout(container)
-		layout.setContentsMargins(28, 24, 28, 24)
-		layout.setSpacing(16)
+		layout = page_layout(self)
 		header = QHBoxLayout()
-		header.addWidget(SubtitleLabel("Отложенные записи", container))
+		header.addWidget(SubtitleLabel("Отложенные записи", self))
 		header.addStretch()
-		refresh = PushButton(FluentIcon.SYNC, "Обновить", container)
+		refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
 		refresh.clicked.connect(self._reload)
 		header.addWidget(refresh)
 		layout.addLayout(header)
 		hint = CaptionLabel(
 			"Список читается из Telegram. Создание постов — на странице "
 			"«Публикация»; править и удалять отложенные можно из любого "
-			"клиента Telegram.", container,
+			"клиента Telegram.", self,
 		)
 		layout.addWidget(hint)
 		self._list = QVBoxLayout()
 		self._list.setSpacing(8)
 		layout.addLayout(self._list)
 		layout.addStretch()
-		self.setWidget(container)
-		self.setWidgetResizable(True)
-		self.enableTransparentBackground()
 
 	# --- список отложенных (из Telegram) ---------------------------------------
 

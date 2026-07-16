@@ -30,6 +30,7 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	confirm_delete,
 	error_reporter,
+	page_layout,
 	row_card,
 )
 
@@ -132,16 +133,11 @@ class ChannelsPage(ScrollArea):
 
 	def _build(self) -> None:
 		"""Собирает шапку с кнопкой и область списка."""
-		container = QWidget(self)
-		layout = QVBoxLayout(container)
-		layout.setContentsMargins(28, 24, 28, 24)
-		layout.setSpacing(16)
+		layout = page_layout(self)
 		header = QHBoxLayout()
-		header.addWidget(SubtitleLabel("Подключённые каналы", container))
+		header.addWidget(SubtitleLabel("Подключённые каналы", self))
 		header.addStretch()
-		connect_button = PrimaryPushButton(
-			FluentIcon.ADD, "Подключить канал", container
-		)
+		connect_button = PrimaryPushButton(FluentIcon.ADD, "Подключить канал", self)
 		connect_button.clicked.connect(self._on_connect)
 		header.addWidget(connect_button)
 		layout.addLayout(header)
@@ -149,9 +145,6 @@ class ChannelsPage(ScrollArea):
 		self._list.setSpacing(8)
 		layout.addLayout(self._list)
 		layout.addStretch()
-		self.setWidget(container)
-		self.setWidgetResizable(True)
-		self.enableTransparentBackground()
 
 	# --- список ---------------------------------------------------------------
 

@@ -99,6 +99,7 @@ class _FieldRow:
 		self._edit = EditableComboBox(dialog)
 		self._edit.addItems(self.field.values)
 		self._edit.setCurrentIndex(-1)
+		# qfluentwidgets не типизирован: без явной аннотации mypy видит Any
 		widget: QWidget = self._edit
 		return widget
 

@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Any
 
-from pxcontrol.engine.telegram.types import MediaKind
+from pxcontrol.engine.telegram.types import ChannelInfo, MediaKind
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +18,6 @@ class InvalidBotTokenError(Exception):
 
 class ChannelCheckError(Exception):
 	"""Канал не прошёл проверку подключения (с понятным текстом)."""
-
-
-@dataclass(frozen=True)
-class ChannelInfo:
-	"""Данные канала, полученные при проверке подключения."""
-
-	chat_id: str
-	title: str
-	username: str | None
 
 
 @asynccontextmanager

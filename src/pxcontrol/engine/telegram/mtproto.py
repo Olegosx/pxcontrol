@@ -12,10 +12,10 @@ from collections.abc import Callable
 from typing import Any
 
 from pxcontrol.engine.telegram.types import (
+	ChannelInfo,
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
-	UserbotChannelInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ class MtprotoTransport:
 			f"отложено на {post.when}" if post.when else "сразу",
 		)
 
-	async def check_channel(self, chat_ref: str) -> UserbotChannelInfo:
+	async def check_channel(self, chat_ref: str) -> ChannelInfo:
 		"""Проверяет канал и права userbot: админ с правом публиковать.
 
 		Принимает @имя, ссылку t.me/… или ID -100… (разбор общий
@@ -191,7 +191,7 @@ class MtprotoTransport:
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 			raise UserbotUnavailableError(_map_post_error(exc)) from exc
 		self._ensure_userbot_can_post(perms)
-		return UserbotChannelInfo(
+		return ChannelInfo(
 			chat_id=str(utils.get_peer_id(entity)),
 			title=str(getattr(entity, "title", "") or chat_ref),
 			username=getattr(entity, "username", None),

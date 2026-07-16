@@ -20,6 +20,7 @@ from qfluentwidgets import (
 	MessageBox,
 	MessageBoxBase,
 	ProgressBar,
+	ScrollArea,
 	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
@@ -31,6 +32,9 @@ _T = TypeVar("_T")
 
 #: Длительность всплывающих плашек с ошибками/предупреждениями (мс).
 TOAST_DURATION_MS = 6000
+
+#: Отступы содержимого страницы от краёв окна (слева, сверху, справа, снизу).
+PAGE_MARGINS = (28, 24, 28, 24)
 
 
 def noop(*_args: object) -> None:
@@ -47,6 +51,27 @@ def bind(action: Callable[[_T], None], item: _T) -> Callable[[], None]:
 		action(item)
 
 	return handler
+
+
+def page_layout(page: ScrollArea, spacing: int = 16) -> QVBoxLayout:
+	"""Каркас прокручиваемой страницы: контейнер с едиными отступами.
+
+	Одна сборка вместо одинаковых семи строк на каждой странице:
+	контейнер, отступы :data:`PAGE_MARGINS`, интервал между блоками,
+	растяжение по ширине и прозрачный фон (после ``setWidget`` —
+	иначе фон контейнера не перекрашивается).
+
+	Returns:
+		Компоновка контейнера — страница добавляет в неё содержимое.
+	"""
+	container = QWidget(page)
+	layout = QVBoxLayout(container)
+	layout.setContentsMargins(*PAGE_MARGINS)
+	layout.setSpacing(spacing)
+	page.setWidget(container)
+	page.setWidgetResizable(True)
+	page.enableTransparentBackground()
+	return layout
 
 
 def clear_layout(layout: QLayout) -> None:

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from pxcontrol.engine.services.posts import PostDraft, PostsService
+from pxcontrol.engine.services.posts import PostDraft, PostsService, text_preview
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +96,7 @@ def _draft_title(draft: PostDraft) -> str:
 	"""Заголовок элемента: имя файла, иначе начало текста."""
 	if draft.media_path is not None:
 		return (draft.rename_to or Path(draft.media_path).name).strip()
-	text = draft.text.strip()
-	if len(text) <= _TITLE_PREVIEW_CHARS:
-		return text
-	return f"{text[:_TITLE_PREVIEW_CHARS - 1]}…"
+	return text_preview(draft.text.strip(), _TITLE_PREVIEW_CHARS)
 
 
 class PublishQueue:

@@ -12,7 +12,6 @@ import logging
 from collections.abc import Callable
 
 from pxcontrol.engine.telegram.bot_api import (
-	ChannelInfo,
 	check_channel,
 	check_token,
 	get_bot_events,
@@ -21,10 +20,10 @@ from pxcontrol.engine.telegram.bot_api import (
 )
 from pxcontrol.engine.telegram.mtproto import MtprotoLoginManager, MtprotoTransport
 from pxcontrol.engine.telegram.types import (
+	ChannelInfo,
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
-	UserbotChannelInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,7 +77,7 @@ class TelegramGateway:
 
 	# --- MTProto (userbot) -------------------------------------------------------
 
-	async def check_channel_userbot(self, chat_ref: str) -> UserbotChannelInfo:
+	async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo:
 		"""Проверяет канал и права userbot (админ + право публиковать)."""
 		return await self.mtproto.check_channel(chat_ref)
 

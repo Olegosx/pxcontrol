@@ -47,6 +47,7 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	error_reporter,
 	noop,
+	page_layout,
 	pick_file,
 	row_card,
 )
@@ -89,10 +90,7 @@ class PublishPage(ScrollArea):
 	# --- сборка страницы ---------------------------------------------------------
 
 	def _build(self) -> None:
-		container = QWidget(self)
-		layout = QVBoxLayout(container)
-		layout.setContentsMargins(28, 24, 28, 24)
-		layout.setSpacing(16)
+		layout = page_layout(self)
 		layout.addWidget(SubtitleLabel("Публикация", self))
 		self._build_kind_segments(layout)
 		self._channel_combo = ComboBox(self)
@@ -109,9 +107,6 @@ class PublishPage(ScrollArea):
 		self._when_row = WhenRow(self, layout)
 		self._build_send_row(layout)
 		layout.addStretch()
-		self.setWidget(container)
-		self.setWidgetResizable(True)
-		self.enableTransparentBackground()
 		# после сборки всех полей — сегмент по умолчанию (сигнал трогает форму)
 		self._segments.setCurrentItem(MediaKind.NONE.value)
 
