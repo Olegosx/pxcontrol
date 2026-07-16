@@ -26,6 +26,7 @@ from pxcontrol.engine.db.models import (
 	CaptionValue,
 	Channel,
 )
+from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
 
 logger = logging.getLogger(__name__)
@@ -145,9 +146,9 @@ def sanitize_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:
 class CaptionsService:
 	"""Поля, словари и шаблоны подписей каналов."""
 
-	def __init__(self, db: Database, ffmpeg_path: str = "ffmpeg") -> None:
+	def __init__(self, db: Database, ffmpeg_path: FfmpegSource = "ffmpeg") -> None:
 		self._db = db
-		self._ffmpeg = ffmpeg_path  # для {quality} в шаблоне имени файла
+		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер пути (настройки)
 
 	# --- поля и словари ---------------------------------------------------
 
@@ -360,7 +361,7 @@ class CaptionsService:
 	def _probe_quality(self, media_path: str) -> str:
 		"""Качество видео (меньшая сторона кадра) или пустая строка."""
 		try:
-			info = probe_video(media_path, ffprobe_bin_for(self._ffmpeg))
+			info = probe_video(media_path, ffprobe_bin_for(self._ffmpeg()))
 		except (OSError, RuntimeError, ValueError):
 			return ""
 		return str(min(info.width, info.height))

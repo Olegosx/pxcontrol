@@ -217,6 +217,32 @@ async def test_extract_random_frames_respects_trim(
 		)
 
 
+async def test_ffmpeg_provider_picks_up_changes(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Путь к ffmpeg спрашивается у провайдера на каждом запуске.
+
+	Так смена пути в настройках приложения подхватывается без
+	перезапуска (ADR-0013).
+	"""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	source = tmp_path / "src.mp4"
+	source.write_bytes(b"src")
+	current = {"path": "/opt/one/ffmpeg"}
+	processor = _FakeProcessor()
+	service = VideoService(db, lambda: current["path"], processor=processor)
+	await service.prepare(str(source), PresetFields(name="а"))
+	assert processor.calls[0].ffmpeg_bin == "/opt/one/ffmpeg"
+	current["path"] = "/opt/two/ffmpeg"  # «сменили в настройках»
+	await service.prepare(str(source), PresetFields(name="б"))
+	assert processor.calls[1].ffmpeg_bin == "/opt/two/ffmpeg"
+
+
 async def test_prepare_validations(db: Database, tmp_path: Path) -> None:
 	"""Понятные ошибки: нет файла, нет ffmpeg."""
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())

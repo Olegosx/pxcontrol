@@ -22,6 +22,7 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import VideoPreset
 from pxcontrol.engine.video import ProcessingOptions, process
 from pxcontrol.engine.video.constants import fitted_size
+from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
 from pxcontrol.engine.video.frames import extract_still, resolve_timestamp
 from pxcontrol.engine.video.pipeline import ProgressCallback
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video, trimmed_info
@@ -87,11 +88,11 @@ class VideoService:
 	def __init__(
 		self,
 		db: Database,
-		ffmpeg_path: str,
+		ffmpeg_path: FfmpegSource,
 		processor: Callable[[ProcessingOptions, ProgressCallback | None], None] = process,
 	) -> None:
 		self._db = db
-		self._ffmpeg = ffmpeg_path
+		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер: путь из настроек
 		self._processor = processor  # подменяется в тестах
 		self._candidates_dir: str | None = None  # партия кадров-кандидатов
 
@@ -241,7 +242,7 @@ class VideoService:
 		Raises:
 			ValueError: Обрезка не оставляет от ролика ничего.
 		"""
-		info = probe_video(source_path, ffprobe_bin_for(self._ffmpeg))
+		info = probe_video(source_path, ffprobe_bin_for(self._ffmpeg()))
 		work_info = trimmed_info(info, trim_start, trim_end)
 		width, height = fitted_size(info.width, info.height)
 		stamps = sorted(
@@ -253,7 +254,7 @@ class VideoService:
 			# извлечение — из исходника, время кандидата — от обрезанной версии
 			extract_still(
 				source_path, trim_start + timestamp, path,
-				width, height, self._ffmpeg,
+				width, height, self._ffmpeg(),
 			)
 			frames.append(FrameCandidate(timestamp, path))
 		return frames
@@ -266,9 +267,9 @@ class VideoService:
 		"""
 		if not Path(source_path).is_file():
 			raise VideoError(f"Файл не найден: {source_path}")
-		if shutil.which(self._ffmpeg) is None:
+		if shutil.which(self._ffmpeg()) is None:
 			raise VideoError(
-				f"Не найден ffmpeg («{self._ffmpeg}») — установите его "
+				f"Не найден ffmpeg («{self._ffmpeg()}») — установите его "
 				"или укажите путь в FFMPEG_PATH."
 			)
 
@@ -280,7 +281,7 @@ class VideoService:
 		out_dir.mkdir(parents=True, exist_ok=True)
 		stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 		output = out_dir / f"{source.stem}_{fields.name}_{stamp}.mp4"
-		ffprobe = ffprobe_bin_for(self._ffmpeg)
+		ffprobe = ffprobe_bin_for(self._ffmpeg())
 		return ProcessingOptions(
 			input=str(source), output=str(output),
 			trim_start=fields.trim_start, trim_end=fields.trim_end,
@@ -295,5 +296,5 @@ class VideoService:
 			xfade=fields.xfade, cover=fields.cover, no_audio=fields.no_audio,
 			video_bitrate_kbps=fields.video_bitrate_kbps,
 			meta_comment=fields.meta_comment,
-			ffmpeg_bin=self._ffmpeg, ffprobe_bin=ffprobe,
+			ffmpeg_bin=self._ffmpeg(), ffprobe_bin=ffprobe,
 		)

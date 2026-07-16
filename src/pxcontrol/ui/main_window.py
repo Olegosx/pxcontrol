@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
+from PySide6.QtCore import QByteArray
 from PySide6.QtGui import QCloseEvent
 from qfluentwidgets import FluentIcon, FluentWindow, MessageBox, NavigationItemPosition
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.settings import WINDOW_GEOMETRY
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.pages.accounts import AccountsPage
 from pxcontrol.ui.pages.channels import ChannelsPage
@@ -13,6 +17,8 @@ from pxcontrol.ui.pages.publish import PublishPage
 from pxcontrol.ui.pages.schedule import SchedulePage
 from pxcontrol.ui.pages.settings import SettingsPage
 from pxcontrol.ui.pages.video import VideoPage
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(FluentWindow):
@@ -25,7 +31,16 @@ class MainWindow(FluentWindow):
 		# ширина — под форму параметров видео (самая широкая страница)
 		self.resize(1160, 800)
 		self.setMinimumSize(1000, 640)
+		self._restore_geometry()
 		self._build_navigation()
+
+	def _restore_geometry(self) -> None:
+		"""Восстанавливает сохранённое состояние окна (движок уже готов)."""
+		saved = self._worker.submit(
+			self._worker.engine.settings.get(WINDOW_GEOMETRY)
+		).result(timeout=5)
+		if saved:
+			self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii")))
 
 	def _build_navigation(self) -> None:
 		"""Наполняет боковую навигацию разделами приложения."""
@@ -38,7 +53,7 @@ class MainWindow(FluentWindow):
 		self.addSubInterface(
 			SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание"
 		)
-		settings_page = SettingsPage(self)
+		settings_page = SettingsPage(self._worker, self)
 		self.addSubInterface(
 			settings_page, FluentIcon.SETTING, "Настройки",
 			NavigationItemPosition.BOTTOM,
@@ -72,4 +87,15 @@ class MainWindow(FluentWindow):
 			if not box.exec():
 				event.ignore()
 				return
+		self._save_geometry()
 		super().closeEvent(event)
+
+	def _save_geometry(self) -> None:
+		"""Сохраняет состояние окна (движок ещё жив: он гасится после Qt)."""
+		data = bytes(self.saveGeometry().toBase64()).decode("ascii")
+		try:
+			self._worker.submit(
+				self._worker.engine.settings.set(WINDOW_GEOMETRY, data)
+			).result(timeout=5)
+		except Exception:  # noqa: BLE001 — потеря геометрии не мешает выходу
+			logger.warning("Не удалось сохранить состояние окна.", exc_info=True)

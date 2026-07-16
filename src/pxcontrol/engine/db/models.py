@@ -31,17 +31,33 @@ class TimestampMixin:
 	)
 
 
-class Setting(Base):
-	"""Настройка приложения: ключ → значение (JSON — любой тип).
+class AppSetting(Base):
+	"""Настройка приложения: строка «имя → значение» (ADR-0013).
 
-	Зарезервирована на будущее: таблица создана начальной миграцией,
-	но код её пока не читает и не пишет (конфиг живёт в
-	:class:`pxcontrol.config.Settings` и секретах ADR-0009).
+	Состав, типы и умолчания задаёт реестр ключей
+	(:mod:`pxcontrol.engine.services.settings`) — сюда попадают только
+	имена из реестра. Секретам здесь не место (ADR-0009).
 	"""
 
-	__tablename__ = "settings"
+	__tablename__ = "app_settings"
 
-	key: Mapped[str] = mapped_column(String(128), primary_key=True)
+	name: Mapped[str] = mapped_column(String(128), primary_key=True)
+	value: Mapped[Any] = mapped_column(JSON)
+
+
+class ChannelSetting(Base):
+	"""Настройка канала: строка «(канал, имя) → значение» (ADR-0013).
+
+	Внешний ключ с каскадом: настройки живут и умирают вместе с каналом
+	(каскад страхует и сервис — ``ChannelsService.delete_channel``).
+	"""
+
+	__tablename__ = "channel_settings"
+
+	channel_id: Mapped[int] = mapped_column(
+		ForeignKey("channels.id", ondelete="CASCADE"), primary_key=True
+	)
+	name: Mapped[str] = mapped_column(String(128), primary_key=True)
 	value: Mapped[Any] = mapped_column(JSON)
 
 
@@ -128,14 +144,14 @@ class VideoPreset(TimestampMixin, Base):
 	# комментарий в метаданные файла (тег comment): «ссылка — описание»
 	meta_comment: Mapped[str | None] = mapped_column(String(512))
 
-	channels: Mapped[list[Channel]] = relationship(back_populates="video_preset")
-
 
 class Channel(TimestampMixin, Base):
 	"""Подключённый Telegram-канал.
 
-	Ссылается на бота-публикатора и пресет видео. Оба поля допускают
-	``NULL``: канал можно завести до настройки бота/пресета.
+	Ссылается на бота-публикатора (``NULL`` — канал подключён через
+	userbot). Параметры-предпочтения канала — строками
+	в ``channel_settings`` (ADR-0013), например пресет обработки
+	по умолчанию.
 	"""
 
 	__tablename__ = "channels"
@@ -148,12 +164,8 @@ class Channel(TimestampMixin, Base):
 	# userbot — админ канала (проверено при подключении); бот — через bot_id
 	userbot_admin: Mapped[bool] = mapped_column(Boolean, default=False)
 	bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), default=None)
-	video_preset_id: Mapped[int | None] = mapped_column(
-		ForeignKey("video_presets.id"), default=None
-	)
 
 	bot: Mapped[Bot | None] = relationship(back_populates="channels")
-	video_preset: Mapped[VideoPreset | None] = relationship(back_populates="channels")
 
 
 class CaptionField(TimestampMixin, Base):

@@ -8,7 +8,8 @@ from pathlib import Path
 from pxcontrol.engine.db.database import Database
 
 EXPECTED_TABLES = {
-	"settings", "bots", "tg_accounts", "ai_credentials", "video_presets", "channels",
+	"app_settings", "channel_settings", "bots", "tg_accounts", "ai_credentials",
+	"video_presets", "channels",
 	"caption_fields", "caption_values", "caption_templates", "caption_template_fields",
 }
 

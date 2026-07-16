@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Bot, Channel
+from pxcontrol.engine.db.models import Bot, Channel, ChannelSetting
 from pxcontrol.engine.telegram.types import ChannelInfo
 
 logger = logging.getLogger(__name__)
@@ -242,8 +242,15 @@ class ChannelsService:
 		return True
 
 	async def delete_channel(self, channel_id: int) -> None:
-		"""Удаляет канал по идентификатору (из приложения, не из Telegram)."""
+		"""Удаляет канал и его настройки (из приложения, не из Telegram).
+
+		Настройки чистятся явно: каскад внешнего ключа объявлен в схеме,
+		но SQLite применяет его только при включённом PRAGMA foreign_keys.
+		"""
 		async with self._db.session_factory() as session:
+			await session.execute(
+				delete(ChannelSetting).where(ChannelSetting.channel_id == channel_id)
+			)
 			await session.execute(delete(Channel).where(Channel.id == channel_id))
 			await session.commit()
 

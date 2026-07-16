@@ -24,7 +24,7 @@ from sqlalchemy.orm import selectinload
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
 from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
-from pxcontrol.engine.video.ffmpeg import run_tool
+from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source, run_tool
 from pxcontrol.engine.video.frames import resolve_timestamp
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
 
@@ -141,11 +141,11 @@ class PostsService:
 	"""Публикация постов: userbot в приоритете, бот — запасной путь."""
 
 	def __init__(
-		self, db: Database, gateway: _PostPort, ffmpeg_path: str = "ffmpeg"
+		self, db: Database, gateway: _PostPort, ffmpeg_path: FfmpegSource = "ffmpeg"
 	) -> None:
 		self._db = db
 		self._gateway = gateway
-		self._ffmpeg = ffmpeg_path  # для миниатюры видео
+		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер пути (настройки)
 
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
@@ -272,11 +272,11 @@ class PostsService:
 		preview = Path(video_path).with_suffix(".png")
 		try:
 			if preview.is_file():
-				_make_thumbnail(str(preview), thumb, self._ffmpeg)
+				_make_thumbnail(str(preview), thumb, self._ffmpeg())
 			else:
-				info = probe_video(video_path, ffprobe_bin_for(self._ffmpeg))
+				info = probe_video(video_path, ffprobe_bin_for(self._ffmpeg()))
 				timestamp = resolve_timestamp("random-middle", info)
-				_make_thumbnail(video_path, thumb, self._ffmpeg, timestamp)
+				_make_thumbnail(video_path, thumb, self._ffmpeg(), timestamp)
 		except (OSError, RuntimeError, ValueError):
 			logger.warning(
 				"Миниатюра для %s не получилась — публикуем без неё.",

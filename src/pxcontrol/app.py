@@ -43,11 +43,14 @@ def _run_qt(worker: EngineWorker) -> int:
 	"""Создаёт Qt-приложение, показывает окно и крутит цикл событий."""
 	from PySide6.QtWidgets import QApplication  # ленивый импорт интерфейса
 
+	from pxcontrol.engine.services.settings import THEME_DARK
 	from pxcontrol.ui.main_window import MainWindow
 	from pxcontrol.ui.theme import apply_theme
 
 	app = QApplication.instance() or QApplication([])
-	apply_theme(dark=True)
+	# сохранённая тема — до создания окна (движок уже готов, ожидание — мс)
+	dark = worker.submit(worker.engine.settings.get(THEME_DARK)).result(timeout=5)
+	apply_theme(dark=dark)
 	window = MainWindow(worker)
 	window.show()
 	logger.info("Интерфейс запущен.")

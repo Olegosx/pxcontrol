@@ -14,6 +14,7 @@ from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.channels import ChannelsService
 from pxcontrol.engine.services.posts import PostsService
 from pxcontrol.engine.services.publish_queue import PublishQueue
+from pxcontrol.engine.services.settings import FFMPEG_PATH, SettingsService
 from pxcontrol.engine.services.video import VideoService
 from pxcontrol.engine.telegram.gateway import TelegramGateway
 
@@ -31,18 +32,26 @@ class Engine:
 	def __init__(self, settings: Settings) -> None:
 		self._settings = settings
 		self.db = Database(settings.database_url)
+		self.settings = SettingsService(self.db)
 		self.gateway = TelegramGateway()
 		self.accounts = AccountsService(self.db, self.gateway)
 		self.channels = ChannelsService(self.db, self.gateway)
-		self.posts = PostsService(self.db, self.gateway, settings.ffmpeg_path)
+		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
+		# пусто — бутстрап из .env; смена подхватывается без перезапуска
+		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path)
 		self.publish_queue = PublishQueue(self.posts)
-		self.video = VideoService(self.db, settings.ffmpeg_path)
-		self.captions = CaptionsService(self.db, settings.ffmpeg_path)
+		self.video = VideoService(self.db, self._ffmpeg_path)
+		self.captions = CaptionsService(self.db, self._ffmpeg_path)
+
+	def _ffmpeg_path(self) -> str:
+		"""Действующий путь к ffmpeg: настройка из БД или бутстрап .env."""
+		return self.settings.cached(FFMPEG_PATH) or self._settings.ffmpeg_path
 
 	async def start(self) -> None:
 		"""Запускает компоненты в правильном порядке."""
 		logger.info("Запуск движка…")
 		await self.db.init()
+		await self.settings.prime()
 		await self._activate_userbot_if_logged_in()
 		await self.gateway.start()
 		logger.info("Движок запущен.")

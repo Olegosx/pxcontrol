@@ -38,6 +38,7 @@ from pxcontrol.engine.services.posts import (
 	publish_capabilities,
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
+from pxcontrol.engine.services.settings import PUBLISH_LAST_CHANNEL_ID
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
@@ -74,12 +75,18 @@ class PublishPage(ScrollArea):
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		self._channels: list[ChannelDto] = []
+		# канал прошлой публикации: предвыбор после загрузки списка
+		self._restore_channel_id: int | None = None
 		self._kind = MediaKind.NONE
 		self._queue_signature: tuple[tuple[int, QueueItemStatus, str | None], ...] = ()
 		self._queue_bars: dict[int, ProgressBar] = {}
 		self._handled_ids: set[int] = set()  # завершённые, уже показанные плашкой
 		self._queue_busy = False
 		self._build()
+		run_in_engine(
+			worker, worker.engine.settings.get(PUBLISH_LAST_CHANNEL_ID),
+			self, self._on_last_channel_loaded, noop,
+		)
 		# опрос очереди живёт всегда (не только при видимой странице):
 		# завершения снимаются с показа, а кэш занятости нужен при выходе
 		self._queue_timer = QTimer(self)
@@ -204,7 +211,23 @@ class PublishPage(ScrollArea):
 			self._channel_combo.addItem(channel.title)
 		if 0 <= selected < len(channels):
 			self._channel_combo.setCurrentIndex(selected)
+		self._apply_channel_restore()
 		self._on_channel_changed()
+
+	def _on_last_channel_loaded(self, channel_id: object) -> None:
+		"""Пришёл канал прошлой публикации — применяем, если список готов."""
+		self._restore_channel_id = channel_id if isinstance(channel_id, int) else None
+		self._apply_channel_restore()
+
+	def _apply_channel_restore(self) -> None:
+		"""Предвыбирает канал прошлой публикации (один раз)."""
+		if self._restore_channel_id is None:
+			return
+		ids = [channel.id for channel in self._channels]
+		if self._restore_channel_id in ids:
+			self._channel_combo.setCurrentIndex(ids.index(self._restore_channel_id))
+			self._restore_channel_id = None
+			self._on_channel_changed()
 
 	def _channel_or_none(self) -> ChannelDto | None:
 		"""Выбранный канал без показа ошибок (для адаптации формы)."""
@@ -347,6 +370,11 @@ class PublishPage(ScrollArea):
 			self._worker,
 			self._worker.engine.publish_queue.enqueue(self._draft(channel.id)),
 			self, self._on_enqueued, self._show_error,
+		)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set(PUBLISH_LAST_CHANNEL_ID, channel.id),
+			self, noop, noop,
 		)
 
 	def _draft(self, channel_id: int) -> PostDraft:

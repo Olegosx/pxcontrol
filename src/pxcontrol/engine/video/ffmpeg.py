@@ -17,6 +17,19 @@ logger = logging.getLogger(__name__)
 #: Колбэк прогресса: доля готовности 0.0..1.0.
 ProgressCallback = Callable[[float], None]
 
+#: Источник пути к ffmpeg: готовая строка или провайдер (путь из настроек).
+FfmpegSource = str | Callable[[], str]
+
+
+def ffmpeg_source(source: FfmpegSource) -> Callable[[], str]:
+	"""Нормализует источник пути к ffmpeg: строка → константный провайдер.
+
+	Сервисы принимают и строку (тесты, простые случаи), и провайдер —
+	путь из настроек приложения, смена которого подхватывается
+	без перезапуска.
+	"""
+	return source if callable(source) else (lambda: source)
+
 
 def run_tool(cmd: list[str], what: str) -> str:
 	"""Запускает ffmpeg/ffprobe и возвращает stdout.
