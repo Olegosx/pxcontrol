@@ -42,7 +42,32 @@ from pxcontrol.engine.services.captions import (
 	build_caption,
 )
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import bind, clear_layout, show_error
+from pxcontrol.ui.pages.common import bind, clear_layout, error_reporter
+
+
+def _row_widget(
+	parent: QWidget,
+	text: str,
+	hint: str,
+	on_delete: Callable[[], None],
+	extra: QWidget | None = None,
+) -> QWidget:
+	"""Строка списка (виджет — чтобы перерисовка её корректно удаляла).
+
+	``extra`` — необязательная кнопка перед «Удалить» (например «Словарь…»).
+	"""
+	box = QWidget(parent)
+	row = QHBoxLayout(box)
+	row.setContentsMargins(0, 2, 0, 2)
+	row.addWidget(BodyLabel(text, box))
+	row.addWidget(CaptionLabel(hint, box))
+	row.addStretch()
+	if extra is not None:
+		row.addWidget(extra)
+	delete = PushButton("Удалить", box)
+	delete.clicked.connect(on_delete)
+	row.addWidget(delete)
+	return box
 
 
 class _FieldRow:
@@ -188,6 +213,79 @@ class CaptionDialog(MessageBoxBase):
 		}
 
 
+class DictionaryDialog(MessageBoxBase):
+	"""Редактор словаря поля: список значений, удаление, добавление.
+
+	Словарь пополняется и сам — из значений, введённых при сборке
+	подписи; здесь он правится руками: опечатки и устаревшие значения
+	удаляются, новые добавляются пачкой через запятую.
+	"""
+
+	def __init__(
+		self, worker: EngineWorker, field: FieldDto, parent: QWidget
+	) -> None:
+		super().__init__(parent)
+		self._worker = worker
+		self._field = field
+		self._show_error = error_reporter(self)
+		self.viewLayout.addWidget(SubtitleLabel(f"Словарь поля «{field.name}»", self))
+		self._values_box = QVBoxLayout()
+		self.viewLayout.addLayout(self._values_box)
+		row = QHBoxLayout()
+		self._new_values = LineEdit(self)
+		self._new_values.setPlaceholderText("новые значения через запятую…")
+		row.addWidget(self._new_values, stretch=1)
+		add = PushButton("Добавить", self)
+		add.clicked.connect(self._on_add)
+		row.addWidget(add)
+		self.viewLayout.addLayout(row)
+		self.yesButton.setText("Готово")
+		self.cancelButton.hide()
+		self.widget.setMinimumWidth(460)
+		self._show_values(field)
+
+	def _show_values(self, field: FieldDto) -> None:
+		"""Перерисовывает список значений словаря."""
+		self._field = field
+		clear_layout(self._values_box)
+		if not field.values:
+			self._values_box.addWidget(CaptionLabel(
+				"Словарь пуст — добавьте значения здесь или при сборке подписи.",
+				self,
+			))
+		for value in field.values:
+			self._values_box.addWidget(_row_widget(
+				self, value, "", bind(self._on_delete_value, value),
+			))
+		self.widget.adjustSize()  # список меняется после показа окна
+
+	def _on_add(self) -> None:
+		"""Добавляет значения из строки ввода (через запятую)."""
+		values = [
+			v.strip() for v in str(self._new_values.text()).split(",") if v.strip()
+		]
+		if not values:
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.captions.add_values(self._field.id, values),
+			self, self._on_changed, self._show_error,
+		)
+
+	def _on_delete_value(self, value: str) -> None:
+		"""Удаляет значение из словаря."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.captions.delete_value(self._field.id, value),
+			self, self._on_changed, self._show_error,
+		)
+
+	def _on_changed(self, field: FieldDto) -> None:
+		"""Движок вернул обновлённое поле — перерисовать, очистить ввод."""
+		self._new_values.clear()
+		self._show_values(field)
+
+
 class FieldsDialog(MessageBoxBase):
 	"""Настройка канала: пул полей со словарями и шаблоны."""
 
@@ -198,6 +296,7 @@ class FieldsDialog(MessageBoxBase):
 		super().__init__(parent)
 		self._worker = worker
 		self._channel_id = channel_id
+		self._show_error = error_reporter(self)
 		self._fields: list[FieldDto] = []
 		self.viewLayout.addWidget(SubtitleLabel(
 			f"Подписи канала «{channel_title}»", self
@@ -209,13 +308,10 @@ class FieldsDialog(MessageBoxBase):
 		self.widget.setMinimumWidth(560)
 		self._reload()
 
-	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку всплывающей плашкой."""
-		show_error(self, message)
-
 	# --- поля -----------------------------------------------------------------
 
 	def _build_fields_block(self) -> None:
+		"""Блок пула полей: список и строка добавления нового поля."""
 		self.viewLayout.addWidget(BodyLabel("Поля (словарь общий для шаблонов):", self))
 		self._fields_box = QVBoxLayout()
 		self.viewLayout.addLayout(self._fields_box)
@@ -235,19 +331,6 @@ class FieldsDialog(MessageBoxBase):
 		row.addWidget(add)
 		self.viewLayout.addLayout(row)
 
-	def _row_widget(self, text: str, hint: str, on_delete: Callable[[], None]) -> QWidget:
-		"""Строка списка (виджет — чтобы перерисовка её корректно удаляла)."""
-		box = QWidget(self)
-		row = QHBoxLayout(box)
-		row.setContentsMargins(0, 2, 0, 2)
-		row.addWidget(BodyLabel(text, box))
-		row.addWidget(CaptionLabel(hint, box))
-		row.addStretch()
-		delete = PushButton("Удалить", box)
-		delete.clicked.connect(on_delete)
-		row.addWidget(delete)
-		return box
-
 	def _show_fields(self, fields: list[FieldDto]) -> None:
 		"""Перерисовывает список полей и набор для сборки шаблона."""
 		self._fields = fields
@@ -256,13 +339,20 @@ class FieldsDialog(MessageBoxBase):
 			flags = ("#" if field.hashtag else "текст") + (
 				", несколько" if field.multiple else ""
 			)
-			self._fields_box.addWidget(self._row_widget(
-				f"{field.name} ({flags})", f"словарь: {len(field.values)}",
-				bind(self._on_delete_field, field),
+			dictionary = PushButton("Словарь…", self)
+			dictionary.clicked.connect(bind(self._open_dictionary, field))
+			self._fields_box.addWidget(_row_widget(
+				self, f"{field.name} ({flags})", f"словарь: {len(field.values)}",
+				bind(self._on_delete_field, field), extra=dictionary,
 			))
 		self._fill_template_list()
 		self._update_pattern_hint(fields)
 		self.widget.adjustSize()  # данные пришли после показа окна
+
+	def _open_dictionary(self, field: FieldDto) -> None:
+		"""Открывает редактор словаря поля; после — обновляет счётчики."""
+		DictionaryDialog(self._worker, field, self.window()).exec()
+		self._reload()
 
 	def _update_pattern_hint(self, fields: list[FieldDto]) -> None:
 		"""Подсказка плейсхолдеров имени файла — с актуальными полями канала."""
@@ -296,6 +386,7 @@ class FieldsDialog(MessageBoxBase):
 	# --- шаблоны ----------------------------------------------------------------
 
 	def _build_templates_block(self) -> None:
+		"""Блок шаблонов: список, набор полей, шаблон имени файла, сохранение."""
 		self.viewLayout.addWidget(BodyLabel(
 			"Шаблоны (отметьте поля, порядок — перетаскиванием):", self
 		))
@@ -344,13 +435,14 @@ class FieldsDialog(MessageBoxBase):
 			self._template_list.addItem(item)
 
 	def _show_templates(self, templates: list[TemplateDto]) -> None:
+		"""Перерисовывает список шаблонов с их составом."""
 		clear_layout(self._templates_box)
 		for template in templates:
 			hint = ", ".join(tf.field.name for tf in template.fields)
 			if template.filename_pattern:
 				hint += " · шаблон имени файла задан"
-			self._templates_box.addWidget(self._row_widget(
-				template.name, hint, bind(self._on_delete_template, template),
+			self._templates_box.addWidget(_row_widget(
+				self, template.name, hint, bind(self._on_delete_template, template),
 			))
 		self.widget.adjustSize()  # данные пришли после показа окна
 

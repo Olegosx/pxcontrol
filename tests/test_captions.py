@@ -57,6 +57,23 @@ def test_title_from_filename_strips_pipeline_suffix() -> None:
 	assert title_from_filename("/x/Просто видео.mp4") == "Просто видео"
 
 
+def test_sanitize_filename_limits_bytes_not_chars() -> None:
+	"""Предел имени — в байтах UTF-8; обрезка не рвёт символ посередине."""
+	from pxcontrol.engine.services.captions import (
+		MAX_FILENAME_BYTES,
+		sanitize_filename,
+	)
+
+	# латиница (1 байт/символ): входит ровно MAX_FILENAME_BYTES символов
+	assert sanitize_filename("a" * 300) == "a" * MAX_FILENAME_BYTES
+	# кириллица (2 байта/буква): режется по байтам, символы целы
+	cut = sanitize_filename("ы" * 300)
+	assert cut == "ы" * (MAX_FILENAME_BYTES // 2)
+	assert len(cut.encode("utf-8")) <= MAX_FILENAME_BYTES
+	# короткие имена не трогаются
+	assert sanitize_filename("Обычное имя") == "Обычное имя"
+
+
 # --- сервис -------------------------------------------------------------------
 
 
@@ -160,6 +177,48 @@ async def test_render_filename_edge_cases(
 		await service.render_filename(
 			no_pattern.id, channel_id, "х", {}, "/x/ф.mp4"
 		)
+
+
+async def test_dictionary_add_and_delete_values(db: Database) -> None:
+	"""Редактор словаря: добавление с дедупликацией, удаление значения."""
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	field = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
+	updated = await service.add_values(
+		field.id, ["action", " Action ", "", "drama"]
+	)
+	assert updated.values == ["action", "drama"]  # дубль и пустое — пропущены
+	updated = await service.delete_value(field.id, "action")
+	assert updated.values == ["drama"]
+	with pytest.raises(CaptionsError, match="не найдено"):
+		await service.add_values(999, ["x"])
+
+
+async def test_render_filename_respects_byte_limit(
+	db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Длинное имя режется по байтам с учётом расширения, а не по 150 символам."""
+	from pxcontrol.engine.services.captions import MAX_FILENAME_BYTES
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.captions.probe_video",
+		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
+	)
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
+	template = await service.save_template(channel_id, "Т", [field.id], "{video}")
+	# латиница длиннее прежнего предела в 150 символов — целиком
+	name = await service.render_filename(
+		template.id, channel_id, "a" * 200, {}, "/x/ф.mp4"
+	)
+	assert name == "a" * 200 + ".mp4"
+	# кириллица сверх байтового предела — режется, расширение цело
+	long_name = await service.render_filename(
+		template.id, channel_id, "к" * 300, {}, "/x/ф.mp4"
+	)
+	assert long_name.endswith(".mp4")
+	assert len(long_name.encode("utf-8")) <= MAX_FILENAME_BYTES
 
 
 async def test_template_validation_and_delete(db: Database) -> None:
