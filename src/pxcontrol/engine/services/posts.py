@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,11 +24,17 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
-from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
+from pxcontrol.engine.services.settings import (
+	CHANNEL_ENABLED,
+	VIDEO_PROCESSED_DIR,
+	VIDEO_PUBLISHED_DIR,
+	SettingsService,
+)
 from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source, run_tool
 from pxcontrol.engine.video.frames import resolve_timestamp
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
+from pxcontrol.paths import media_dir
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +194,8 @@ class PostsService:
 				"У канала нет способа публикации — проверьте доступы "
 				"на странице «Каналы»."
 			)
+		if draft.media_kind is MediaKind.VIDEO and media_path is not None:
+			await self._move_to_published(media_path)
 		logger.info(
 			"Пост (%s) → «%s» (%s, %s).",
 			draft.media_kind if draft.media_path else "текст", channel.title,
@@ -244,6 +253,39 @@ class PostsService:
 			channel.bot.token, channel.tg_chat_id,
 			draft.media_kind, media_path, draft.text,
 		)
+
+	async def _move_to_published(self, media_path: str) -> None:
+		"""Переносит опубликованное видео из результатов в опубликованные.
+
+		Правило — «зеркалим относительный путь»: файл из
+		``<результаты>/<подпапка>/…`` переезжает в
+		``<опубликованные>/<подпапка>/…`` (вместе с соседом-превью ``.png``).
+		Файл вне папки результатов не трогается. Перенос вспомогательный:
+		любой сбой — предупреждение в лог, публикацию не роняет (пост уже
+		ушёл; у отложенных файл уже загружен на сервер Telegram).
+		"""
+		processed = await self._settings.get(VIDEO_PROCESSED_DIR)
+		published = await self._settings.get(VIDEO_PUBLISHED_DIR)
+		processed_root = Path(processed) if processed else media_dir() / "processed"
+		published_root = Path(published) if published else media_dir() / "published"
+		source = Path(media_path)
+		try:
+			rel = source.resolve().relative_to(processed_root.resolve())
+		except ValueError:
+			return  # видео не из папки результатов — оставляем на месте
+		try:
+			target = published_root / rel
+			target.parent.mkdir(parents=True, exist_ok=True)
+			shutil.move(str(source), str(target))
+			preview = source.with_suffix(".png")
+			if preview.is_file():
+				shutil.move(str(preview), str(target.with_suffix(".png")))
+			logger.info("Опубликованное видео перенесено: %s → %s", source, target)
+		except OSError:
+			logger.warning(
+				"Не удалось перенести опубликованное видео %s — файл остался "
+				"в папке результатов.", media_path, exc_info=True,
+			)
 
 	@staticmethod
 	def _apply_rename(media_path: str, rename_to: str) -> str:

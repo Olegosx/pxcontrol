@@ -107,9 +107,20 @@ def error_reporter(parent: QWidget) -> Callable[[str], None]:
 	return partial(show_error, parent)
 
 
-def pick_file(parent: QWidget, caption: str, file_filter: str) -> str | None:
-	"""Открывает диалог выбора файла; None — пользователь отменил."""
-	path, _ = QFileDialog.getOpenFileName(parent, caption, "", file_filter)
+def pick_file(
+	parent: QWidget, caption: str, file_filter: str, start_dir: str = ""
+) -> str | None:
+	"""Открывает диалог выбора файла; None — пользователь отменил.
+
+	``start_dir`` — стартовая папка диалога (пусто — на усмотрение Qt).
+	"""
+	path, _ = QFileDialog.getOpenFileName(parent, caption, start_dir, file_filter)
+	return path or None
+
+
+def pick_dir(parent: QWidget, caption: str, start_dir: str = "") -> str | None:
+	"""Открывает диалог выбора папки; None — пользователь отменил."""
+	path = QFileDialog.getExistingDirectory(parent, caption, start_dir)
 	return path or None
 
 

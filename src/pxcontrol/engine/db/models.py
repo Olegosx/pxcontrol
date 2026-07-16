@@ -143,6 +143,9 @@ class VideoPreset(TimestampMixin, Base):
 	video_bitrate_kbps: Mapped[int | None] = mapped_column(Integer)
 	# комментарий в метаданные файла (тег comment): «ссылка — описание»
 	meta_comment: Mapped[str | None] = mapped_column(String(512))
+	# подпапка внутри базовых папок видео (исходники/результаты/опубликованные);
+	# пустая строка — без подпапки
+	subdir: Mapped[str] = mapped_column(String(128), default="")
 
 
 class Channel(TimestampMixin, Base):

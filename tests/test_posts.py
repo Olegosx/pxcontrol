@@ -361,3 +361,68 @@ async def test_list_scheduled_skips_disabled_channel(db: Database) -> None:
 	assert len(await service.list_scheduled()) == 1
 	await SettingsService(db).set_for(CHANNEL_ENABLED, channel_id, False)
 	assert await service.list_scheduled() == []
+
+
+async def test_published_video_moves_to_published_dir(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Видео из папки результатов переезжает в опубликованные (с превью)."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.posts.media_dir", lambda: tmp_path / "media"
+	)
+	processed = tmp_path / "media" / "processed" / "суб"
+	processed.mkdir(parents=True)
+	video = processed / "ролик.mp4"
+	video.write_bytes(b"video")
+	(processed / "ролик.png").write_bytes(b"png")
+	service = PostsService(db, _FakeGateway())
+	channel_id = await _add_channel(db)
+	await service.publish(PostDraft(
+		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+	))
+	published = tmp_path / "media" / "published" / "суб"
+	assert (published / "ролик.mp4").is_file()
+	assert (published / "ролик.png").is_file()
+	assert not video.exists()
+
+
+async def test_video_outside_processed_dir_stays(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Видео не из папки результатов после публикации остаётся на месте."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.posts.media_dir", lambda: tmp_path / "media"
+	)
+	video = tmp_path / "чужое.mp4"
+	video.write_bytes(b"video")
+	service = PostsService(db, _FakeGateway())
+	channel_id = await _add_channel(db)
+	await service.publish(PostDraft(
+		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+	))
+	assert video.is_file()
+
+
+async def test_move_failure_does_not_break_publish(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Сбой переезда — предупреждение в лог, публикация считается успешной."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.posts.media_dir", lambda: tmp_path / "media"
+	)
+
+	def _boom(*_args: object, **_kwargs: object) -> None:
+		raise OSError("диск переполнен")
+
+	monkeypatch.setattr("pxcontrol.engine.services.posts.shutil.move", _boom)
+	processed = tmp_path / "media" / "processed"
+	processed.mkdir(parents=True)
+	video = processed / "ролик.mp4"
+	video.write_bytes(b"video")
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	await service.publish(PostDraft(
+		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
+	))
+	assert len(gateway.published) == 1  # пост ушёл, несмотря на сбой переезда

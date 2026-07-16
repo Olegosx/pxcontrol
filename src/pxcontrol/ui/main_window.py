@@ -58,9 +58,11 @@ class MainWindow(FluentWindow):
 			NavigationItemPosition.BOTTOM,
 		)
 
-	def _open_publish_with_video(self, path: str) -> None:
-		"""Переходит на «Публикацию» с предзаполненным видеофайлом."""
-		self._publish_page.prefill_media(MediaKind.VIDEO, path)
+	def _open_publish_with_video(self, path: str, channel_id: int) -> None:
+		"""Переходит на «Публикацию» с видеофайлом и каналом со страницы «Видео»."""
+		self._publish_page.prefill_media(
+			MediaKind.VIDEO, path, channel_id=channel_id or None
+		)
 		self.switchTo(self._publish_page)
 
 	def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — API Qt

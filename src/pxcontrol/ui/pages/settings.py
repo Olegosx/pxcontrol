@@ -1,8 +1,9 @@
 """Страница «Настройки»: категории слева, правка выбранной — справа.
 
-Категории: «Общие» (тема оформления, путь к ffmpeg) и «Аккаунты»
-(боты, userbot, ключи ИИ — встроенная :class:`AccountsPage`).
-Отдельного пункта «Аккаунты» в боковой навигации окна больше нет.
+Категории: «Общие» (тема оформления, путь к ffmpeg), «Папки»
+(базовые папки видео: исходники / результаты / опубликованные)
+и «Аккаунты» (боты, userbot, ключи ИИ — встроенная
+:class:`AccountsPage`).
 
 Значения общих настроек живут в ``app_settings`` (ADR-0013)
 и переживают перезапуск; тема применяется на лету.
@@ -23,10 +24,17 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.settings import FFMPEG_PATH, THEME_DARK
+from pxcontrol.engine.services.settings import (
+	FFMPEG_PATH,
+	THEME_DARK,
+	VIDEO_PROCESSED_DIR,
+	VIDEO_PUBLISHED_DIR,
+	VIDEO_SOURCE_DIR,
+	SettingKey,
+)
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.accounts import AccountsPage
-from pxcontrol.ui.pages.common import error_reporter, noop
+from pxcontrol.ui.pages.common import bind, error_reporter, noop, pick_dir
 from pxcontrol.ui.theme import apply_theme
 
 #: Ширина списка категорий слева.
@@ -47,6 +55,7 @@ class SettingsPage(QWidget):
 		self._stack = QStackedWidget(self)
 		# категория = пункт списка + панель в стеке (порядок общий)
 		self._add_category("Общие", _GeneralSettings(worker, self))
+		self._add_category("Папки", _FoldersSettings(worker, self))
 		self._add_category("Аккаунты", AccountsPage(worker, self))
 		self._categories.currentRowChanged.connect(self._stack.setCurrentIndex)
 		self._categories.setCurrentRow(0)
@@ -139,4 +148,89 @@ class _GeneralSettings(QWidget):
 			"Сохранено",
 			"Путь к ffmpeg применён (пусто — из .env или PATH).",
 			parent=self,
+		)
+
+
+#: Папки видео: подпись, ключ настройки, стандартное имя в папке приложения.
+_VIDEO_FOLDERS: list[tuple[str, SettingKey[str], str]] = [
+	("Исходники видео:", VIDEO_SOURCE_DIR, "media/source"),
+	("Результаты обработки:", VIDEO_PROCESSED_DIR, "media/processed"),
+	("Опубликованные:", VIDEO_PUBLISHED_DIR, "media/published"),
+]
+
+
+class _FoldersSettings(QWidget):
+	"""Категория «Папки»: базовые папки видео (ADR-0013, ключи video_*_dir).
+
+	Внутри каждой папки живёт подпапка пресета (поле «Подпапка» на странице
+	«Видео»). После публикации видео переезжает из результатов
+	в опубликованные с сохранением подпапки.
+	"""
+
+	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
+		super().__init__(parent)
+		self._worker = worker
+		self._show_error = error_reporter(self)
+		self._edits: dict[str, LineEdit] = {}
+		self._build()
+		self._load()
+
+	def _build(self) -> None:
+		"""Три строки «подпись + путь + Обзор…» и одна кнопка сохранения."""
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 28, 24)
+		layout.setSpacing(12)
+		layout.addWidget(SubtitleLabel("Папки видео", self))
+		for label, key, default_hint in _VIDEO_FOLDERS:
+			row = QHBoxLayout()
+			row.addWidget(BodyLabel(label, self))
+			edit = LineEdit(self)
+			edit.setPlaceholderText(f"пусто — {default_hint} в папке приложения…")
+			edit.setClearButtonEnabled(True)
+			row.addWidget(edit, stretch=1)
+			browse = PushButton("Обзор…", self)
+			browse.clicked.connect(bind(self._pick_folder, key.name))
+			row.addWidget(browse)
+			layout.addLayout(row)
+			self._edits[key.name] = edit
+		save = PushButton("Сохранить", self)
+		save.clicked.connect(self._on_save)
+		save_row = QHBoxLayout()
+		save_row.addWidget(save)
+		save_row.addStretch()
+		layout.addLayout(save_row)
+		layout.addWidget(CaptionLabel(
+			"Внутри каждой папки — подпапка пресета (поле «Подпапка» "
+			"на «Видео»). После публикации видео переезжает из результатов "
+			"в опубликованные.", self,
+		))
+		layout.addStretch()
+
+	def _load(self) -> None:
+		"""Подтягивает сохранённые пути из движка."""
+		for _label, key, _hint in _VIDEO_FOLDERS:
+			run_in_engine(
+				self._worker, self._worker.engine.settings.get(key),
+				self, self._edits[key.name].setText, noop,
+			)
+
+	def _pick_folder(self, key_name: str) -> None:
+		"""Диалог выбора папки для строки настройки."""
+		edit = self._edits[key_name]
+		path = pick_dir(self, "Выбор папки", str(edit.text()).strip())
+		if path:
+			edit.setText(path)
+
+	def _on_save(self) -> None:
+		"""Сохраняет все три пути (пусто — вернуться к стандартной папке)."""
+		for _label, key, _hint in _VIDEO_FOLDERS:
+			run_in_engine(
+				self._worker,
+				self._worker.engine.settings.set(
+					key, str(self._edits[key.name].text()).strip()
+				),
+				self, noop, self._show_error,
+			)
+		InfoBar.success(
+			"Сохранено", "Папки видео применены.", parent=self,
 		)

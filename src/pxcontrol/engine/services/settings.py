@@ -84,6 +84,21 @@ CHANNEL_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
 	"default_video_preset", SettingScope.CHANNEL, None, int
 )
 
+#: Папка исходных видео для обработки; пусто — media/source в папке приложения.
+VIDEO_SOURCE_DIR: SettingKey[str] = SettingKey(
+	"video_source_dir", SettingScope.APP, "", str
+)
+
+#: Папка результатов обработки; пусто — media/processed в папке приложения.
+VIDEO_PROCESSED_DIR: SettingKey[str] = SettingKey(
+	"video_processed_dir", SettingScope.APP, "", str
+)
+
+#: Папка опубликованных видео; пусто — media/published в папке приложения.
+VIDEO_PUBLISHED_DIR: SettingKey[str] = SettingKey(
+	"video_published_dir", SettingScope.APP, "", str
+)
+
 #: Канал активен: участвует в публикации и опросе расписания.
 CHANNEL_ENABLED: SettingKey[bool] = SettingKey(
 	"enabled", SettingScope.CHANNEL, True, bool

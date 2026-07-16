@@ -20,7 +20,14 @@ from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import VideoPreset
-from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET, SettingsService
+from pxcontrol.engine.services.settings import (
+	CHANNEL_DEFAULT_PRESET,
+	VIDEO_PROCESSED_DIR,
+	VIDEO_PUBLISHED_DIR,
+	VIDEO_SOURCE_DIR,
+	SettingKey,
+	SettingsService,
+)
 from pxcontrol.engine.video import ProcessingOptions, process
 from pxcontrol.engine.video.constants import fitted_size
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
@@ -53,6 +60,36 @@ class FrameCandidate:
 
 
 @dataclass(frozen=True)
+class VideoDirs:
+	"""Действующие папки видео (с учётом подпапки пресета).
+
+	Attributes:
+		source: исходники для обработки.
+		processed: результаты обработки.
+		published: опубликованные (файл переезжает сюда после публикации).
+	"""
+
+	source: str
+	processed: str
+	published: str
+
+
+#: Символы, недопустимые в имени подпапки (разделители путей и спецсимволы ОС).
+_SUBDIR_FORBIDDEN = '/\\:*?"<>|'
+
+
+def sanitize_subdir(name: str) -> str:
+	"""Очищает имя подпапки: без разделителей путей и спецсимволов ОС.
+
+	Крайние точки и пробелы срезаются (Windows их не терпит в именах),
+	результат ограничен 128 символами (длина колонки). Пустой результат —
+	«без подпапки».
+	"""
+	cleaned = "".join(ch for ch in name if ch not in _SUBDIR_FORBIDDEN)
+	return cleaned.strip(" .")[:128]
+
+
+@dataclass(frozen=True)
 class PresetFields:
 	"""Поля пресета для создания/правки (зеркалят таблицу video_presets).
 
@@ -81,6 +118,7 @@ class PresetFields:
 	no_audio: bool = False
 	video_bitrate_kbps: int | None = None
 	meta_comment: str | None = None  # тег comment: «ссылка на канал — описание»
+	subdir: str = ""  # подпапка внутри базовых папок видео (пусто — без неё)
 
 
 class VideoService:
@@ -120,15 +158,21 @@ class VideoService:
 		Raises:
 			VideoError: Пресет для обновления не найден.
 		"""
+		values = dict(vars(fields))
+		if preset_id is None and not values["subdir"]:
+			# авто-умолчание при создании: подпапка из имени пресета
+			values["subdir"] = sanitize_subdir(fields.name)
+		else:
+			values["subdir"] = sanitize_subdir(values["subdir"])
 		async with self._db.session_factory() as session:
 			if preset_id is None:
-				preset = VideoPreset(**vars(fields))
+				preset = VideoPreset(**values)
 				session.add(preset)
 			else:
 				existing = await session.get(VideoPreset, preset_id)
 				if existing is None:
 					raise VideoError("Пресет не найден — обновите список.")
-				for key, value in vars(fields).items():
+				for key, value in values.items():
 					setattr(existing, key, value)
 				preset = existing
 			await session.commit()
@@ -160,7 +204,48 @@ class VideoService:
 			cover=preset.cover, no_audio=preset.no_audio,
 			video_bitrate_kbps=preset.video_bitrate_kbps,
 			meta_comment=preset.meta_comment,
+			subdir=preset.subdir,
 		)
+
+	# --- папки видео -----------------------------------------------------------
+
+	def _base_dir(self, key: SettingKey[str], default_name: str) -> Path:
+		"""Базовая папка из настройки; пусто — стандартная в папке приложения."""
+		custom = self._settings.cached(key)
+		return Path(custom) if custom else media_dir() / default_name
+
+	async def dirs_for(self, subdir: str) -> VideoDirs:
+		"""Действующие папки видео для подпапки пресета (создаются на месте).
+
+		Интерфейс открывает в них файловые диалоги; пустая подпапка —
+		корни базовых папок.
+		"""
+		cleaned = sanitize_subdir(subdir)
+		dirs = []
+		for key, default_name in (
+			(VIDEO_SOURCE_DIR, "source"),
+			(VIDEO_PROCESSED_DIR, "processed"),
+			(VIDEO_PUBLISHED_DIR, "published"),
+		):
+			path = self._base_dir(key, default_name) / cleaned
+			path.mkdir(parents=True, exist_ok=True)
+			dirs.append(str(path))
+		return VideoDirs(*dirs)
+
+	async def processed_dir_for_channel(self, channel_id: int) -> str:
+		"""Папка результатов канала: подпапка его пресета по умолчанию.
+
+		Для диалога выбора видео на «Публикации». Нет пресета (или он
+		удалён) — корень папки результатов.
+		"""
+		subdir = ""
+		preset_id = await self._settings.get_for(CHANNEL_DEFAULT_PRESET, channel_id)
+		if preset_id is not None:
+			async with self._db.session_factory() as session:
+				preset = await session.get(VideoPreset, preset_id)
+			if preset is not None:
+				subdir = preset.subdir
+		return (await self.dirs_for(subdir)).processed
 
 	async def delete_preset(self, preset_id: int) -> None:
 		"""Удаляет пресет и снимает его у каналов, где он был по умолчанию.
@@ -288,7 +373,10 @@ class VideoService:
 		self, source: Path, fields: PresetFields, intro_source: str | None = None
 	) -> ProcessingOptions:
 		"""Собирает параметры обработки из переданных полей."""
-		out_dir = media_dir() / "processed"
+		out_dir = (
+			self._base_dir(VIDEO_PROCESSED_DIR, "processed")
+			/ sanitize_subdir(fields.subdir)
+		)
 		out_dir.mkdir(parents=True, exist_ok=True)
 		stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 		output = out_dir / f"{source.stem}_{fields.name}_{stamp}.mp4"

@@ -9,7 +9,11 @@ import pytest
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
-from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET, SettingsService
+from pxcontrol.engine.services.settings import (
+	CHANNEL_DEFAULT_PRESET,
+	VIDEO_PROCESSED_DIR,
+	SettingsService,
+)
 from pxcontrol.engine.services.video import PresetFields, VideoError, VideoService
 from pxcontrol.engine.video import ProcessingOptions
 
@@ -60,12 +64,80 @@ async def test_preset_crud(db: Database) -> None:
 	assert fields.video_bitrate_kbps == 2500
 	assert fields.trim_start == 3.5 and fields.trim_end == 1.5
 	assert fields.fade_in == 0.5 and fields.fade_out == 1.0
+	assert fields.subdir == "Бренд"  # авто из имени при создании
 	updated = await service.save_preset(
 		PresetFields(name="Бренд-2", no_audio=True), preset.id
 	)
 	assert updated.name == "Бренд-2"
 	await service.delete_preset(preset.id)
 	assert await service.list_presets() == []
+
+
+def test_sanitize_subdir_strips_forbidden() -> None:
+	"""Разделители путей и спецсимволы ОС вычищаются, края обрезаются."""
+	from pxcontrol.engine.services.video import sanitize_subdir
+
+	assert sanitize_subdir("Мой/канал\\..") == "Мойканал"
+	assert sanitize_subdir('a:b*c?d"e<f>g|h') == "abcdefgh"
+	assert sanitize_subdir("  .обычное имя.  ") == "обычное имя"
+	assert sanitize_subdir("") == ""
+
+
+async def test_preset_subdir_auto_on_create_and_editable(db: Database) -> None:
+	"""Создание с пустой подпапкой — авто из имени; правка не перетирается."""
+	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
+	preset = await service.save_preset(PresetFields(name="Канал/Тест"))
+	fields = await service.get_preset_fields(preset.id)
+	assert fields.subdir == "КаналТест"  # авто + очистка
+	# явная правка сохраняется как есть (в т.ч. пустая — «без подпапки»)
+	await service.save_preset(PresetFields(name="Канал/Тест", subdir=""), preset.id)
+	assert (await service.get_preset_fields(preset.id)).subdir == ""
+
+
+async def test_prepare_uses_processed_dir_setting_and_subdir(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Результат кладётся в <настройка video_processed_dir>/<подпапка пресета>."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	settings = SettingsService(db)
+	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "мои-результаты"))
+	service = VideoService(
+		db, "ffmpeg", settings=settings, processor=_FakeProcessor()
+	)
+	source = tmp_path / "src.mp4"
+	source.write_bytes(b"src")
+	output = await service.prepare(
+		str(source), PresetFields(name="Тест", subdir="паб")
+	)
+	assert Path(output).parent == tmp_path / "мои-результаты" / "паб"
+
+
+async def test_dirs_for_and_processed_dir_for_channel(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""dirs_for создаёт папки; папка результатов канала — из его пресета."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
+	)
+	settings = SettingsService(db)
+	service = VideoService(db, "ffmpeg", settings=settings, processor=_FakeProcessor())
+	dirs = await service.dirs_for("суб")
+	assert dirs.source == str(tmp_path / "media" / "source" / "суб")
+	assert Path(dirs.processed).is_dir() and Path(dirs.published).is_dir()
+	# канал без пресета — корень результатов
+	async with db.session_factory() as session:
+		channel = Channel(title="Канал", tg_chat_id="-1001")
+		session.add(channel)
+		await session.commit()
+		await session.refresh(channel)
+	root = await service.processed_dir_for_channel(channel.id)
+	assert root == str(tmp_path / "media" / "processed")
+	# канал с пресетом — подпапка пресета
+	preset = await service.save_preset(PresetFields(name="Суб", subdir="суб"))
+	await settings.set_for(CHANNEL_DEFAULT_PRESET, channel.id, preset.id)
+	assert (await service.processed_dir_for_channel(channel.id)).endswith("/суб")
 
 
 async def test_delete_preset_clears_channel_defaults(db: Database) -> None:

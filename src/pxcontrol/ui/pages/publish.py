@@ -39,6 +39,7 @@ from pxcontrol.engine.services.posts import (
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
 from pxcontrol.engine.services.settings import PUBLISH_LAST_CHANNEL_ID
+from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
@@ -190,11 +191,20 @@ class PublishPage(ScrollArea):
 		super().showEvent(event)
 		self._reload_channels()
 
-	def prefill_media(self, kind: MediaKind, path: str) -> None:
-		"""Подставляет вложение (переход с других страниц, например «Видео»)."""
+	def prefill_media(
+		self, kind: MediaKind, path: str, channel_id: int | None = None
+	) -> None:
+		"""Подставляет вложение (переход с других страниц, например «Видео»).
+
+		``channel_id`` — предвыбор канала (например, выбранного на «Видео»);
+		применяется тем же механизмом, что и канал прошлой публикации.
+		"""
 		self._segments.setCurrentItem(kind.value)
 		self._on_kind_changed(kind.value)
 		self._file_edit.setText(path)
+		if channel_id is not None:
+			self._restore_channel_id = channel_id
+			self._apply_channel_restore()
 
 	def _reload_channels(self) -> None:
 		run_in_engine(
@@ -283,9 +293,30 @@ class PublishPage(ScrollArea):
 		)
 
 	def _pick_file(self) -> None:
-		"""Диалог выбора вложения с фильтром по текущему типу контента."""
+		"""Диалог выбора вложения с фильтром по текущему типу контента.
+
+		Для видео диалог открывается в папке результатов обработки
+		выбранного канала (подпапка его пресета по умолчанию); для
+		остальных типов стартовая папка — на усмотрение Qt (позже).
+		"""
+		if self._kind is MediaKind.VIDEO:
+			channel = self._channel_or_none()
+			coro = (
+				self._worker.engine.video.processed_dir_for_channel(channel.id)
+				if channel is not None
+				else self._worker.engine.video.dirs_for("")
+			)
+			run_in_engine(
+				self._worker, coro, self, self._open_file_dialog, self._show_error,
+			)
+			return
+		self._open_file_dialog("")
+
+	def _open_file_dialog(self, start: object) -> None:
+		"""Открывает диалог вложения; ``start`` — папка или VideoDirs."""
+		start_dir = start.processed if isinstance(start, VideoDirs) else str(start)
 		file_filter = next(f for _l, k, f in _KINDS if k is self._kind)
-		path = pick_file(self, "Файл вложения", file_filter)
+		path = pick_file(self, "Файл вложения", file_filter, start_dir=start_dir)
 		if path:
 			self._file_edit.setText(path)
 

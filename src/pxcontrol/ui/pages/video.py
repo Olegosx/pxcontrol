@@ -48,7 +48,12 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET
-from pxcontrol.engine.services.video import FrameCandidate, PresetDto, PresetFields
+from pxcontrol.engine.services.video import (
+	FrameCandidate,
+	PresetDto,
+	PresetFields,
+	VideoDirs,
+)
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	FormDialog,
@@ -261,6 +266,17 @@ class _PresetForm(QWidget):
 		)
 		comment_row.addWidget(self._meta_comment, stretch=1)
 		box.addLayout(comment_row)
+		subdir_row = QHBoxLayout()
+		subdir_row.addWidget(BodyLabel("Подпапка:", card))
+		self._subdir = LineEdit(card)
+		self._subdir.setPlaceholderText("внутри папок видео; пусто — их корень…")
+		self._subdir.setToolTip(
+			"Подпапка внутри базовых папок (Настройки → Папки): исходники, "
+			"результаты и опубликованные этого пресета. При создании пресета "
+			"заполняется его именем."
+		)
+		subdir_row.addWidget(self._subdir, stretch=1)
+		box.addLayout(subdir_row)
 		return card
 
 	def _spin(self, card: QWidget, tip: str, lo: int, hi: int, val: int) -> SpinBox:
@@ -322,6 +338,7 @@ class _PresetForm(QWidget):
 		kbps = fields.video_bitrate_kbps
 		self._bitrate.setValue(kbps / 1000 if kbps else 0.0)
 		self._meta_comment.setText(fields.meta_comment or "")
+		self._subdir.setText(fields.subdir)
 
 	def _intro_source(self) -> str:
 		"""Собирает строку источника кадра ('random-middle'/'time:…'/'image:…')."""
@@ -360,6 +377,7 @@ class _PresetForm(QWidget):
 			no_audio=self._no_audio.isChecked(),
 			video_bitrate_kbps=self._bitrate_kbps(),
 			meta_comment=str(self._meta_comment.text()).strip() or None,
+			subdir=str(self._subdir.text()).strip(),
 		)
 
 	def _bitrate_kbps(self) -> int | None:
@@ -521,8 +539,9 @@ class _FramePickerDialog(MessageBoxBase):
 class VideoPage(ScrollArea):
 	"""Панель параметров обработки и подготовка видеофайла."""
 
-	#: Просьба опубликовать готовый файл (ловит главное окно → «Публикация»).
-	publish_requested = Signal(str)
+	#: Просьба опубликовать готовый файл: путь и id канала со страницы
+	#: (0 — канал не выбран). Ловит главное окно → «Публикация».
+	publish_requested = Signal(str, int)
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
@@ -793,10 +812,19 @@ class VideoPage(ScrollArea):
 	# --- подготовка -----------------------------------------------------------------
 
 	def _pick_source(self) -> None:
-		"""Диалог выбора исходного видеофайла."""
+		"""Диалог выбора исходника — в папке исходников подпапки пресета."""
+		subdir = str(self._form.fields("").subdir)
+		run_in_engine(
+			self._worker, self._worker.engine.video.dirs_for(subdir),
+			self, self._open_source_dialog, self._show_error,
+		)
+
+	def _open_source_dialog(self, dirs: VideoDirs) -> None:
+		"""Открывает диалог исходника в действующей папке исходников."""
 		path = pick_file(
 			self, "Исходное видео",
 			"Видео (*.mp4 *.mov *.mkv *.avi *.webm);;Все файлы (*)",
+			start_dir=dirs.source,
 		)
 		if path:
 			self._source.setText(path)
@@ -851,7 +879,7 @@ class VideoPage(ScrollArea):
 		folder_btn = PushButton(FluentIcon.FOLDER, "Показать в папке", self)
 		folder_btn.clicked.connect(bind(self._open_path, str(path.parent)))
 		publish_btn = PrimaryPushButton(FluentIcon.SEND, "Опубликовать…", self)
-		publish_btn.clicked.connect(bind(self.publish_requested.emit, str(path)))
+		publish_btn.clicked.connect(bind(self._request_publish, str(path)))
 		buttons = QWidget(self)
 		buttons_layout = QHBoxLayout(buttons)
 		buttons_layout.setContentsMargins(0, 0, 0, 0)
@@ -861,6 +889,11 @@ class VideoPage(ScrollArea):
 		self._result_box.addWidget(row_card(
 			self, path.name, f"Результат: {path.parent}", trailing=buttons,
 		))
+
+	def _request_publish(self, path: str) -> None:
+		"""Передаёт файл на «Публикацию» вместе с выбранным каналом."""
+		channel = self._selected_channel()
+		self.publish_requested.emit(path, channel.id if channel else 0)
 
 	@staticmethod
 	def _open_path(path: str) -> None:

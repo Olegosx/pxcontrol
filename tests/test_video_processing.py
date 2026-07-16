@@ -32,6 +32,7 @@ def _options(**overrides: object) -> ProcessingOptions:
 	"""
 	fields = asdict(PresetFields(name="тест"))
 	fields.pop("name")
+	fields.pop("subdir")  # уровень сервиса: конвейер получает готовый путь вывода
 	fields["watermark"] = fields.pop("watermark_path")
 	merged: dict[str, object] = {"input": "a", "output": "b", **fields, **overrides}
 	return ProcessingOptions(**merged)  # type: ignore[arg-type]
