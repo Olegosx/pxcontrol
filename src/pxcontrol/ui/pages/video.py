@@ -26,6 +26,7 @@ from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
 	CardWidget,
+	CheckBox,
 	ComboBox,
 	DoubleSpinBox,
 	FluentIcon,
@@ -94,6 +95,7 @@ class _PresetForm(QWidget):
 		self._layout.setContentsMargins(0, 0, 0, 0)
 		self._layout.setSpacing(12)
 		self._layout.addWidget(self._trim_card())
+		self._layout.addWidget(self._fade_card())
 		self._layout.addWidget(self._watermark_card())
 		self._layout.addWidget(self._intro_card())
 		self._layout.addWidget(self._output_card())
@@ -130,6 +132,35 @@ class _PresetForm(QWidget):
 		self._labeled(row, "Отрезать в конце, с:", self._trim_end)
 		row.addWidget(CaptionLabel(
 			"остальные параметры — от обрезанной версии", card
+		))
+		row.addStretch()
+		box.addLayout(row)
+		return card
+
+	def _fade_card(self) -> CardWidget:
+		"""Раздел «Затухание»: чекбоксы краёв и длительности эффекта."""
+		card, box = self._card("Затухание")
+		row = QHBoxLayout()
+		self._fade_in_check = CheckBox("В начале, с:", card)
+		row.addWidget(self._fade_in_check)
+		self._fade_in = self._dspin(
+			card, "длительность появления из чёрного", 0.1, 30.0, 2.0, 0.1
+		)
+		self._fade_in.setEnabled(False)
+		self._fade_in_check.toggled.connect(self._fade_in.setEnabled)
+		row.addWidget(self._fade_in)
+		row.addSpacing(16)
+		self._fade_out_check = CheckBox("В конце, с:", card)
+		row.addWidget(self._fade_out_check)
+		self._fade_out = self._dspin(
+			card, "длительность ухода в чёрное", 0.1, 30.0, 2.0, 0.1
+		)
+		self._fade_out.setEnabled(False)
+		self._fade_out_check.toggled.connect(self._fade_out.setEnabled)
+		row.addWidget(self._fade_out)
+		row.addSpacing(16)
+		row.addWidget(CaptionLabel(
+			"появление из чёрного / уход в чёрное; видео и звук", card
 		))
 		row.addStretch()
 		box.addLayout(row)
@@ -207,7 +238,7 @@ class _PresetForm(QWidget):
 			widget.setEnabled(enabled)
 
 	def _output_card(self) -> CardWidget:
-		"""Раздел «Вывод»: обложка, звук, качество, затухание на краях."""
+		"""Раздел «Вывод»: обложка, звук, качество."""
 		card, box = self._card("Вывод")
 		row = QHBoxLayout()
 		self._cover = SwitchButton(card)
@@ -219,16 +250,6 @@ class _PresetForm(QWidget):
 		row.addWidget(CaptionLabel("0 — как в оригинале", card))
 		row.addStretch()
 		box.addLayout(row)
-		fade_row = QHBoxLayout()
-		self._fade_in = self._dspin(card, "0 — без эффекта", 0.0, 30.0, 0.0, 0.1)
-		self._labeled(fade_row, "Затухание в начале, с:", self._fade_in)
-		self._fade_out = self._dspin(card, "0 — без эффекта", 0.0, 30.0, 0.0, 0.1)
-		self._labeled(fade_row, "Затухание в конце, с:", self._fade_out)
-		fade_row.addWidget(CaptionLabel(
-			"появление из чёрного / уход в чёрное; видео и звук", card
-		))
-		fade_row.addStretch()
-		box.addLayout(fade_row)
 		comment_row = QHBoxLayout()
 		comment_row.addWidget(BodyLabel("Комментарий (метаданные):", card))
 		self._meta_comment = LineEdit(card)
@@ -270,8 +291,13 @@ class _PresetForm(QWidget):
 		"""Заполняет панель полями пресета."""
 		self._trim_start.setValue(fields.trim_start)
 		self._trim_end.setValue(fields.trim_end)
-		self._fade_in.setValue(fields.fade_in)
-		self._fade_out.setValue(fields.fade_out)
+		# 0 в пресете — эффект выключен; длительность в поле не сбрасываем
+		self._fade_in_check.setChecked(fields.fade_in > 0)
+		if fields.fade_in > 0:
+			self._fade_in.setValue(fields.fade_in)
+		self._fade_out_check.setChecked(fields.fade_out > 0)
+		if fields.fade_out > 0:
+			self._fade_out.setValue(fields.fade_out)
 		self._wm_path.setText(fields.watermark_path or "")
 		codes = [code for _label, code in _CORNERS]
 		self._corner.setCurrentIndex(codes.index(fields.wm_corner))
@@ -307,8 +333,14 @@ class _PresetForm(QWidget):
 			name=name,
 			trim_start=round(float(self._trim_start.value()), 3),
 			trim_end=round(float(self._trim_end.value()), 3),
-			fade_in=round(float(self._fade_in.value()), 3),
-			fade_out=round(float(self._fade_out.value()), 3),
+			fade_in=(
+				round(float(self._fade_in.value()), 3)
+				if self._fade_in_check.isChecked() else 0.0
+			),
+			fade_out=(
+				round(float(self._fade_out.value()), 3)
+				if self._fade_out_check.isChecked() else 0.0
+			),
 			watermark_path=str(self._wm_path.text()).strip() or None,
 			wm_corner=_CORNERS[int(self._corner.currentIndex())][1],
 			wm_margin=int(self._margin.value()),
