@@ -40,6 +40,16 @@ packages = ["src/pxcontrol"]
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint]
+# E/W — стиль, F — ошибки, I — порядок импортов, N — имена,
+# UP — современный синтаксис, B — типовые ловушки, BLE — широкий except
+# (каждый осознанный except Exception помечается noqa с причиной),
+# SIM — упрощения, C4 — включения/генераторы.
+select = ["E", "W", "F", "I", "N", "UP", "B", "BLE", "SIM", "C4"]
+# Отступы проекта — табы (см. [tool.ruff.format]); W191 запрещает табы
+# и потому несовместим с выбранным стилем.
+ignore = ["W191"]
+
 [tool.ruff.format]
 indent-style = "tab"
 

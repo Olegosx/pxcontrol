@@ -20,7 +20,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.posts import ScheduledPostDto
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import clear_layout, row_card, show_error
+from pxcontrol.ui.pages.common import clear_layout, error_reporter, row_card
 
 
 class SchedulePage(ScrollArea):
@@ -30,6 +30,7 @@ class SchedulePage(ScrollArea):
 		super().__init__(parent)
 		self.setObjectName("schedule")
 		self._worker = worker
+		self._show_error = error_reporter(self)
 		self._build()
 		self._reload()
 
@@ -59,10 +60,6 @@ class SchedulePage(ScrollArea):
 		self.setWidget(container)
 		self.setWidgetResizable(True)
 		self.enableTransparentBackground()
-
-	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку всплывающей плашкой."""
-		show_error(self, message)
 
 	# --- список отложенных (из Telegram) ---------------------------------------
 

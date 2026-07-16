@@ -11,7 +11,12 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from pxcontrol.engine.telegram.types import OutgoingPost, UserbotChannelInfo
+from pxcontrol.engine.telegram.types import (
+	MediaKind,
+	OutgoingPost,
+	ScheduledMessage,
+	UserbotChannelInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +25,7 @@ class LoginError(Exception):
 	"""Ошибка входа userbot с понятным человеку текстом."""
 
 
-class UserbotUnavailable(Exception):
+class UserbotUnavailableError(Exception):
 	"""Userbot не подключён или не может выполнить операцию."""
 
 
@@ -112,7 +117,7 @@ class MtprotoTransport:
 	def _require_client(self) -> Any:
 		"""Возвращает подключённого клиента или объясняет, чего не хватает."""
 		if self._client is None:
-			raise UserbotUnavailable(
+			raise UserbotUnavailableError(
 				"Userbot не подключён — войдите в аккаунт: Настройки → Аккаунты."
 			)
 		return self._client
@@ -145,13 +150,13 @@ class MtprotoTransport:
 				await client.send_file(
 					int(chat_id), post.media_path, caption=post.text or None,
 					schedule=post.when,
-					supports_streaming=post.media_kind == "video",
-					force_document=post.media_kind == "document",
+					supports_streaming=post.media_kind is MediaKind.VIDEO,
+					force_document=post.media_kind is MediaKind.DOCUMENT,
 					progress_callback=_progress,
 					thumb=post.thumb_path,
 				)
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-			raise UserbotUnavailable(_map_post_error(exc)) from exc
+			raise UserbotUnavailableError(_map_post_error(exc)) from exc
 		logger.info(
 			"Пост отправлен в чат %s (%s, %s).", chat_id,
 			post.media_kind if post.media_path else "текст",
@@ -165,7 +170,7 @@ class MtprotoTransport:
 		с бот-путём — ``normalize_chat_ref``).
 
 		Raises:
-			UserbotUnavailable: Userbot не подключён, канал не найден,
+			UserbotUnavailableError: Userbot не подключён, канал не найден,
 				userbot не админ или без права публиковать.
 		"""
 		from telethon import utils
@@ -179,12 +184,12 @@ class MtprotoTransport:
 		try:
 			ref = normalize_chat_ref(chat_ref)
 		except ChannelCheckError as exc:
-			raise UserbotUnavailable(str(exc)) from exc
+			raise UserbotUnavailableError(str(exc)) from exc
 		try:
 			entity = await client.get_entity(ref)
 			perms = await client.get_permissions(entity, "me")
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-			raise UserbotUnavailable(_map_post_error(exc)) from exc
+			raise UserbotUnavailableError(_map_post_error(exc)) from exc
 		self._ensure_userbot_can_post(perms)
 		return UserbotChannelInfo(
 			chat_id=str(utils.get_peer_id(entity)),
@@ -197,20 +202,20 @@ class MtprotoTransport:
 		"""Требует права админа с публикацией (владельцу можно всё).
 
 		Raises:
-			UserbotUnavailable: Прав не хватает.
+			UserbotUnavailableError: Прав не хватает.
 		"""
 		if not perms.is_admin:
-			raise UserbotUnavailable(
+			raise UserbotUnavailableError(
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
 		rights = getattr(perms.participant, "admin_rights", None)
 		if not perms.is_creator and not getattr(rights, "post_messages", False):
-			raise UserbotUnavailable(
+			raise UserbotUnavailableError(
 				"У userbot нет права публиковать сообщения в канале."
 			)
 
-	async def get_scheduled(self, chat_id: str) -> list[Any]:
+	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""
 		from telethon.tl.functions.messages import GetScheduledHistoryRequest
 
@@ -219,8 +224,14 @@ class MtprotoTransport:
 			entity = await client.get_input_entity(int(chat_id))
 			result = await client(GetScheduledHistoryRequest(peer=entity, hash=0))
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-			raise UserbotUnavailable(_map_post_error(exc)) from exc
-		return list(result.messages)
+			raise UserbotUnavailableError(_map_post_error(exc)) from exc
+		return [
+			ScheduledMessage(
+				text=getattr(message, "message", "") or "",
+				scheduled_at=message.date,
+			)
+			for message in result.messages
+		]
 
 
 class MtprotoLoginManager:
@@ -247,7 +258,7 @@ class MtprotoLoginManager:
 		try:
 			await client.connect()
 			sent = await client.send_code_request(phone)
-		except Exception as exc:
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 			await _safe_disconnect(client)
 			raise LoginError(_map_login_error(exc)) from exc
 		self._pending[account_id] = (client, sent.phone_code_hash, phone)
@@ -269,7 +280,7 @@ class MtprotoLoginManager:
 			await client.sign_in(phone, code, phone_code_hash=code_hash)
 		except SessionPasswordNeededError:
 			return None  # клиент остаётся жить до ввода пароля
-		except Exception as exc:
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 			await self.cancel(account_id)
 			raise LoginError(_map_login_error(exc)) from exc
 		return await self._finish(account_id, client)
@@ -283,7 +294,9 @@ class MtprotoLoginManager:
 		client, _hash, _phone = self._require(account_id)
 		try:
 			await client.sign_in(password=password)
-		except Exception as exc:
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+			# как и confirm_code: неудачный шаг закрывает незавершённый вход
+			await self.cancel(account_id)
 			raise LoginError(_map_login_error(exc)) from exc
 		return await self._finish(account_id, client)
 

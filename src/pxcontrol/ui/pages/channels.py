@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -18,18 +20,17 @@ from qfluentwidgets import (
 	SubtitleLabel,
 )
 
-from functools import partial
-
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto
 from pxcontrol.engine.services.channels import ChannelAccess, ChannelDto
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	TOAST_DURATION_MS,
 	bind,
 	clear_layout,
 	confirm_delete,
+	error_reporter,
 	row_card,
-	show_error,
 )
 
 
@@ -125,6 +126,7 @@ class ChannelsPage(ScrollArea):
 		super().__init__(parent)
 		self.setObjectName("channels")
 		self._worker = worker
+		self._show_error = error_reporter(self)
 		self._build()
 		self._reload()
 
@@ -150,10 +152,6 @@ class ChannelsPage(ScrollArea):
 		self.setWidget(container)
 		self.setWidgetResizable(True)
 		self.enableTransparentBackground()
-
-	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку всплывающей плашкой."""
-		show_error(self, message)
 
 	# --- список ---------------------------------------------------------------
 
@@ -236,7 +234,10 @@ class ChannelsPage(ScrollArea):
 		if access.userbot_ok and access.bot_ok is not False:
 			InfoBar.success(access.channel.title, summary, parent=self)
 		else:
-			InfoBar.warning(access.channel.title, summary, parent=self, duration=6000)
+			InfoBar.warning(
+				access.channel.title, summary, parent=self,
+				duration=TOAST_DURATION_MS,
+			)
 		self._reload()
 
 	def _on_assign_bot(self, channel: ChannelDto) -> None:
@@ -247,6 +248,7 @@ class ChannelsPage(ScrollArea):
 		)
 
 	def _open_assign_dialog(self, channel: ChannelDto, bots: list[BotDto]) -> None:
+		"""Диалог выбора бота; после выбора — проверка его прав в канале."""
 		if not bots:
 			self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
 			return

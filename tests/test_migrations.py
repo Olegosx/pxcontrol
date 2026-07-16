@@ -25,5 +25,5 @@ async def test_migrations_create_all_tables(tmp_path: Path) -> None:
 			"SELECT name FROM sqlite_master WHERE type='table'"
 		).fetchall()
 	tables = {name for (name,) in rows}
-	assert EXPECTED_TABLES <= tables
+	assert tables >= EXPECTED_TABLES
 	assert "alembic_version" in tables

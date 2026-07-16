@@ -26,9 +26,9 @@ from pxcontrol.ui.pages.common import (
 	bind,
 	clear_layout,
 	confirm_delete,
+	error_reporter,
 	noop,
 	row_card,
-	show_error,
 )
 
 
@@ -69,6 +69,7 @@ class AccountsPage(ScrollArea):
 		super().__init__(parent)
 		self.setObjectName("accounts")
 		self._worker = worker
+		self._show_error = error_reporter(self)
 		self._build()
 		self._reload_all()
 
@@ -92,10 +93,6 @@ class AccountsPage(ScrollArea):
 
 	# --- общие помощники ------------------------------------------------------
 
-	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку всплывающей плашкой."""
-		show_error(self, message)
-
 	def _reload_all(self) -> None:
 		"""Перезагружает все три списка из движка."""
 		self._reload_bots()
@@ -111,6 +108,7 @@ class AccountsPage(ScrollArea):
 		)
 
 	def _show_bots(self, bots: list[BotDto]) -> None:
+		"""Перерисовывает список ботов карточками с диагностикой."""
 		rows = [
 			row_card(
 				self,
@@ -195,6 +193,7 @@ class AccountsPage(ScrollArea):
 		)
 
 	def _account_row(self, account: TgAccountDto) -> CardWidget:
+		"""Карточка userbot-аккаунта: статус входа и кнопка «Войти»."""
 		status = "вход выполнен ✓" if account.logged_in else "вход не выполнен"
 		trailing: QWidget | None = None
 		if not account.logged_in:
@@ -317,6 +316,7 @@ class AccountsPage(ScrollArea):
 		)
 
 	def _show_keys(self, keys: list[AiKeyDto]) -> None:
+		"""Перерисовывает список ключей ИИ (значения замаскированы)."""
 		rows = [
 			row_card(
 				self,

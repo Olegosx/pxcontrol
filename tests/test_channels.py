@@ -17,7 +17,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	ensure_bot_can_post,
 	normalize_chat_ref,
 )
-from pxcontrol.engine.telegram.mtproto import UserbotUnavailable
+from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
 from pxcontrol.engine.telegram.types import UserbotChannelInfo
 
 
@@ -42,7 +42,7 @@ class _FakeGateway:
 
 	async def check_channel_userbot(self, chat_ref: str) -> UserbotChannelInfo:
 		if not self.userbot_is_admin:
-			raise UserbotUnavailable(
+			raise UserbotUnavailableError(
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
@@ -126,7 +126,7 @@ async def test_connect_via_userbot(db: Database) -> None:
 		await service.add_channel_via_userbot("@testchan")
 	await service.delete_channel(dto.id)
 	gateway.userbot_is_admin = False
-	with pytest.raises(UserbotUnavailable, match="не администратор"):
+	with pytest.raises(UserbotUnavailableError, match="не администратор"):
 		await service.add_channel_via_userbot("@testchan")
 	assert await service.list_channels() == []
 

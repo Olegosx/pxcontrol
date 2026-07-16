@@ -2,15 +2,14 @@
 
 Остальной код не знает, каким транспортом выполнена операция. Ориентир:
 публикация любого контента и чтение — MTProto (постоянно подключённый
-userbot, ADR-0011); Bot API — проверки, диагностика и законсервированная
-отправка текста ботом (пригодится для генерации ИИ).
+userbot, ADR-0011); Bot API — проверки, диагностика и запасная публикация
+для каналов без userbot-админа (текст и медиа до 50 МБ, только «сейчас»).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
 
 from pxcontrol.engine.telegram.bot_api import (
 	ChannelInfo,
@@ -21,7 +20,12 @@ from pxcontrol.engine.telegram.bot_api import (
 	send_text,
 )
 from pxcontrol.engine.telegram.mtproto import MtprotoLoginManager, MtprotoTransport
-from pxcontrol.engine.telegram.types import OutgoingPost, UserbotChannelInfo
+from pxcontrol.engine.telegram.types import (
+	MediaKind,
+	OutgoingPost,
+	ScheduledMessage,
+	UserbotChannelInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +71,7 @@ class TelegramGateway:
 		return await send_text(token, chat_id, text)
 
 	async def send_media(
-		self, token: str, chat_id: str, kind: str, path: str, caption: str
+		self, token: str, chat_id: str, kind: MediaKind, path: str, caption: str
 	) -> int:
 		"""Отправляет медиа ботом (запасной транспорт, лимит 50 МБ)."""
 		return await send_media(token, chat_id, kind, path, caption)
@@ -91,6 +95,6 @@ class TelegramGateway:
 		"""
 		await self.mtproto.publish(chat_id, post, on_progress)
 
-	async def get_scheduled(self, chat_id: str) -> list[Any]:
+	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала из Telegram."""
 		return await self.mtproto.get_scheduled(chat_id)

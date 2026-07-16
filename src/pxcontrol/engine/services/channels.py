@@ -112,7 +112,7 @@ class ChannelsService:
 
 		Raises:
 			ChannelError: Канал уже подключён.
-			UserbotUnavailable: Userbot не подключён, не админ или без
+			UserbotUnavailableError: Userbot не подключён, не админ или без
 				права публиковать.
 		"""
 		logger.info("Подключаю канал через userbot: ввод %r.", chat_ref)

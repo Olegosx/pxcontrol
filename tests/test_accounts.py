@@ -9,7 +9,7 @@ import pytest
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.services.accounts import AccountsService, mask_secret
-from pxcontrol.engine.telegram.bot_api import InvalidBotToken
+from pxcontrol.engine.telegram.bot_api import InvalidBotTokenError
 from pxcontrol.engine.telegram.mtproto import LoginError
 
 
@@ -50,7 +50,7 @@ class _FakeGateway:
 
 	async def check_bot_token(self, token: str) -> str:
 		if token == "bad-token":
-			raise InvalidBotToken("Telegram отклонил токен (Unauthorized).")
+			raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).")
 		return "test_bot"
 
 	async def bot_events(self, token: str) -> list[str]:
@@ -81,7 +81,7 @@ async def test_bot_lifecycle(db: Database) -> None:
 async def test_bad_token_not_saved(db: Database) -> None:
 	"""Отклонённый токен не сохраняется в БД."""
 	service = AccountsService(db, _FakeGateway())
-	with pytest.raises(InvalidBotToken):
+	with pytest.raises(InvalidBotTokenError):
 		await service.add_bot("Плохой", "bad-token")
 	assert await service.list_bots() == []
 

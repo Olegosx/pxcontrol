@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import partial
 from typing import TypeVar
 
 from PySide6.QtCore import QDate, QTime, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CalendarPicker,
@@ -27,6 +28,9 @@ from qfluentwidgets import (
 )
 
 _T = TypeVar("_T")
+
+#: Длительность всплывающих плашек с ошибками/предупреждениями (мс).
+TOAST_DURATION_MS = 6000
 
 
 def noop(*_args: object) -> None:
@@ -66,7 +70,22 @@ def confirm_delete(parent: QWidget, text: str, accept_text: str = "Удалит�
 
 def show_error(parent: QWidget, message: str) -> None:
 	"""Показывает ошибку всплывающей плашкой."""
-	InfoBar.error("Ошибка", message, parent=parent, duration=6000)
+	InfoBar.error("Ошибка", message, parent=parent, duration=TOAST_DURATION_MS)
+
+
+def error_reporter(parent: QWidget) -> Callable[[str], None]:
+	"""Колбэк показа ошибок, привязанный к странице/диалогу.
+
+	Один помощник вместо одинаковых методов ``_show_error`` на каждой
+	странице; результат передаётся в ``run_in_engine`` как ``on_error``.
+	"""
+	return partial(show_error, parent)
+
+
+def pick_file(parent: QWidget, caption: str, file_filter: str) -> str | None:
+	"""Открывает диалог выбора файла; None — пользователь отменил."""
+	path, _ = QFileDialog.getOpenFileName(parent, caption, "", file_filter)
+	return path or None
 
 
 def row_card(

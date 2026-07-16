@@ -106,7 +106,7 @@ class AccountsService:
 		"""Проверяет токен через Telegram (getMe) и сохраняет бота.
 
 		Raises:
-			InvalidBotToken: Токен отклонён — в БД ничего не пишется.
+			InvalidBotTokenError: Токен отклонён — в БД ничего не пишется.
 			ConnectionError: Нет связи с Telegram.
 		"""
 		username = await self._gateway.check_bot_token(token)

@@ -5,21 +5,19 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Channel
 from pxcontrol.engine.services.posts import (
-	MediaKind,
 	PostDraft,
 	PostError,
 	PostsService,
 	ScheduledPostDto,
 )
-from pxcontrol.engine.telegram.mtproto import UserbotUnavailable
-from pxcontrol.engine.telegram.types import OutgoingPost
+from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
+from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
 
 
 class _FakeGateway:
@@ -45,7 +43,7 @@ class _FakeGateway:
 		self, chat_id: str, post: OutgoingPost, on_progress: object
 	) -> None:
 		if not self.userbot_ok:
-			raise UserbotUnavailable("Userbot не подключён — войдите в аккаунт.")
+			raise UserbotUnavailableError("Userbot не подключён — войдите в аккаунт.")
 		if post.media_path is not None and callable(on_progress):
 			on_progress(0.5)
 			on_progress(1.0)
@@ -55,10 +53,10 @@ class _FakeGateway:
 		"""Миниатюры отправленных постов (в порядке отправки)."""
 		return [post.thumb_path for _chat, post in self.published]
 
-	async def get_scheduled(self, chat_id: str) -> list[object]:
-		return [SimpleNamespace(
-			message="Отложенный текст",
-			date=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
+		return [ScheduledMessage(
+			text="Отложенный текст",
+			scheduled_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
 		)]
 
 
@@ -90,26 +88,6 @@ async def _add_channel(
 		await session.commit()
 		await session.refresh(channel)
 		return channel.id
-
-
-async def test_send_now_via_bot(db: Database) -> None:
-	"""«Сейчас» уходит через бота канала с расшифрованным токеном."""
-	gateway = _FakeGateway()
-	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
-	assert await service.send_now(channel_id, "привет") == 42
-	token, chat_id, text = gateway.sent[0]
-	assert (token, chat_id, text) == ("123:AAA", "-1001", "привет")
-
-
-async def test_send_now_requires_bot(db: Database) -> None:
-	"""Канал без бота — понятная ошибка, отправки нет."""
-	gateway = _FakeGateway()
-	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db, with_bot=False)
-	with pytest.raises(PostError, match="не назначен бот"):
-		await service.send_now(channel_id, "x")
-	assert gateway.sent == []
 
 
 async def test_publish_text_now_and_scheduled(db: Database) -> None:
@@ -179,7 +157,7 @@ async def test_video_thumbnail_from_neighbor_preview(
 		Path(out).write_bytes(b"jpg")
 
 	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts.make_thumbnail", _fake_thumb
+		"pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb
 	)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
@@ -208,7 +186,7 @@ async def test_video_thumbnail_random_middle_without_preview(
 		Path(out).write_bytes(b"jpg")
 
 	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts.make_thumbnail", _fake_thumb
+		"pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb
 	)
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.posts.probe_video",
@@ -232,7 +210,7 @@ async def test_video_thumbnail_failure_does_not_block_publish(
 	def _boom(*_args: object, **_kwargs: object) -> None:
 		raise RuntimeError("ffmpeg сломался")
 
-	monkeypatch.setattr("pxcontrol.engine.services.posts.make_thumbnail", _boom)
+	monkeypatch.setattr("pxcontrol.engine.services.posts._make_thumbnail", _boom)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
@@ -256,7 +234,7 @@ async def test_publish_renames_file_and_preview(
 		Path(out).write_bytes(b"jpg")
 
 	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts.make_thumbnail", _fake_thumb
+		"pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb
 	)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
@@ -361,7 +339,7 @@ async def test_publish_userbot_unavailable(db: Database) -> None:
 	gateway.userbot_ok = False
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
-	with pytest.raises(UserbotUnavailable, match="войдите"):
+	with pytest.raises(UserbotUnavailableError, match="войдите"):
 		await service.publish(PostDraft(channel_id, text="x"))
 
 

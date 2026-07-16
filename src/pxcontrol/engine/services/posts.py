@@ -1,10 +1,10 @@
 """Сервис постов: fire-and-forget, источник истины — сам канал (ADR-0010).
 
-Публикация любого контента — единой сущностью ``PostDraft`` через userbot
-(ADR-0011): «сейчас» — обычная отправка, отложенно — запись прямо в канале
-(её хранит и публикует сервер Telegram). Локальной таблицы постов нет;
-страница «Расписание» читает отложенные из Telegram. Путь через бота
-(``send_now``) законсервирован для будущей генерации ИИ.
+Публикация любого контента — единой сущностью ``PostDraft``. Транспорт
+выбирается по возможностям канала: userbot в приоритете (ADR-0011),
+бот — запасной путь. «Сейчас» — обычная отправка, отложенно — запись
+прямо в канале (её хранит и публикует сервер Telegram). Локальной
+таблицы постов нет; страница «Расписание» читает отложенные из Telegram.
 """
 
 from __future__ import annotations
@@ -15,17 +15,17 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
-from pxcontrol.engine.telegram.types import OutgoingPost
-from pxcontrol.engine.video.frames import make_thumbnail, resolve_timestamp
+from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
+from pxcontrol.engine.video.ffmpeg import run_tool
+from pxcontrol.engine.video.frames import resolve_timestamp
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,13 @@ MIN_SCHEDULE_AHEAD = timedelta(seconds=60)
 
 #: Лимит Bot API на отправку файла ботом.
 BOT_MAX_FILE_BYTES = 50 * 1024 * 1024
+
+#: Лимит Telegram на файл через userbot (MTProto).
+USERBOT_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+
+#: Миниатюра видео для Telegram: вписывается в квадрат, JPEG-качество ffmpeg.
+_THUMB_BOX_PX = 320
+_THUMB_JPEG_QUALITY = "4"
 
 #: Колбэк прогресса загрузки: доля 0.0..1.0.
 ProgressCallback = Callable[[float], None]
@@ -66,16 +73,6 @@ def publish_capabilities(
 
 class PostError(Exception):
 	"""Ошибка создания/отправки поста (с понятным человеку текстом)."""
-
-
-class MediaKind(StrEnum):
-	"""Тип вложения поста."""
-
-	NONE = "none"  # чистый текст
-	PHOTO = "photo"
-	VIDEO = "video"
-	AUDIO = "audio"
-	DOCUMENT = "document"  # любой файл «как документ»
 
 
 @dataclass(frozen=True)
@@ -111,10 +108,10 @@ class _PostPort(Protocol):
 	) -> None: ...
 
 	async def send_media(
-		self, token: str, chat_id: str, kind: str, path: str, caption: str
+		self, token: str, chat_id: str, kind: MediaKind, path: str, caption: str
 	) -> int: ...
 
-	async def get_scheduled(self, chat_id: str) -> list[Any]: ...
+	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]: ...
 
 
 @dataclass(frozen=True)
@@ -127,7 +124,7 @@ class ScheduledPostDto:
 
 
 class PostsService:
-	"""Публикация постов через userbot; путь через бота законсервирован."""
+	"""Публикация постов: userbot в приоритете, бот — запасной путь."""
 
 	def __init__(
 		self, db: Database, gateway: _PostPort, ffmpeg_path: str = "ffmpeg"
@@ -135,29 +132,6 @@ class PostsService:
 		self._db = db
 		self._gateway = gateway
 		self._ffmpeg = ffmpeg_path  # для миниатюры видео
-
-	async def send_now(self, channel_id: int, text: str) -> int:
-		"""Публикует текст немедленно через бота канала (законсервировано).
-
-		Интерфейс этот путь не использует (публикация идёт через userbot,
-		ADR-0011); метод сохранён для будущей генерации ИИ ботом.
-
-		Returns:
-			ID сообщения в Telegram.
-
-		Raises:
-			PostError: Канал не найден или у него не назначен бот.
-		"""
-		channel = await self._get_channel(channel_id)
-		if channel.bot is None:
-			raise PostError("У канала не назначен бот — переподключите канал.")
-		message_id = await self._gateway.send_text(
-			channel.bot.token, channel.tg_chat_id, text
-		)
-		logger.info(
-			"Пост опубликован в «%s» (message_id=%s).", channel.title, message_id
-		)
-		return message_id
 
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
@@ -173,9 +147,9 @@ class PostsService:
 		Raises:
 			PostError: Черновик/канал/файл не годятся или у канала
 				нет способа публикации.
-			UserbotUnavailable: Userbot отвалился по дороге.
+			UserbotUnavailableError: Userbot отвалился по дороге.
 		"""
-		self._validate(draft)
+		self.validate_draft(draft)
 		channel = await self._get_channel(draft.channel_id)
 		caps = publish_capabilities(channel.bot is not None, channel.userbot_admin)
 		media_path = draft.media_path
@@ -230,7 +204,8 @@ class PostsService:
 				"Отложенные посты требуют userbot-админа в канале — "
 				"через бота доступно только «сейчас»."
 			)
-		assert channel.bot is not None  # гарантировано publish_capabilities
+		if channel.bot is None:  # publish() сюда без бота не приводит
+			raise PostError("У канала не назначен бот — переподключите канал.")
 		if media_path is None:
 			await self._gateway.send_text(
 				channel.bot.token, channel.tg_chat_id, draft.text
@@ -238,8 +213,9 @@ class PostsService:
 			return
 		if Path(media_path).stat().st_size > BOT_MAX_FILE_BYTES:
 			raise PostError(
-				"Файл больше 50 МБ — лимит отправки ботом. Добавьте "
-				"userbot администратором канала или уменьшите файл."
+				f"Файл больше {BOT_MAX_FILE_BYTES // 2**20} МБ — лимит "
+				"отправки ботом. Добавьте userbot администратором канала "
+				"или уменьшите файл."
 			)
 		await self._gateway.send_media(
 			channel.bot.token, channel.tg_chat_id,
@@ -282,11 +258,11 @@ class PostsService:
 		preview = Path(video_path).with_suffix(".png")
 		try:
 			if preview.is_file():
-				make_thumbnail(str(preview), thumb, self._ffmpeg)
+				_make_thumbnail(str(preview), thumb, self._ffmpeg)
 			else:
 				info = probe_video(video_path, ffprobe_bin_for(self._ffmpeg))
 				timestamp = resolve_timestamp("random-middle", info)
-				make_thumbnail(video_path, thumb, self._ffmpeg, timestamp)
+				_make_thumbnail(video_path, thumb, self._ffmpeg, timestamp)
 		except (OSError, RuntimeError, ValueError):
 			logger.warning(
 				"Миниатюра для %s не получилась — публикуем без неё.",
@@ -295,9 +271,20 @@ class PostsService:
 			return None
 		return thumb
 
+	async def channel_title(self, channel_id: int) -> str:
+		"""Название канала (для заголовков элементов очереди отправки).
+
+		Raises:
+			PostError: Канал не найден.
+		"""
+		return (await self._get_channel(channel_id)).title
+
 	@staticmethod
-	def _validate(draft: PostDraft) -> None:
+	def validate_draft(draft: PostDraft) -> None:
 		"""Отклоняет пустой черновик, битый путь и время «почти сейчас».
+
+		Публичная: очередь отправки проверяет черновик при постановке,
+		чтобы ошибка всплыла сразу, а не при отправке.
 
 		Raises:
 			PostError: Черновик не готов к отправке.
@@ -342,7 +329,35 @@ class PostsService:
 		return channel
 
 	@staticmethod
-	def _dto(channel_title: str, message: Any) -> ScheduledPostDto:
-		text = getattr(message, "message", "") or "(медиа без текста)"
+	def _dto(channel_title: str, message: ScheduledMessage) -> ScheduledPostDto:
+		"""Готовит запись для интерфейса: канал, короткий текст, время."""
+		text = message.text or "(медиа без текста)"
 		preview = text if len(text) <= 80 else f"{text[:77]}…"
-		return ScheduledPostDto(channel_title, preview, message.date)
+		return ScheduledPostDto(channel_title, preview, message.scheduled_at)
+
+
+def _make_thumbnail(
+	source_path: str,
+	output_jpg: str,
+	ffmpeg_bin: str = "ffmpeg",
+	timestamp: float = 0.0,
+) -> None:
+	"""Делает JPEG-миниатюру для Telegram: кадр, вписанный в 320×320.
+
+	Пропорции кадра сохраняются (Telegram растягивает миниатюру до
+	пропорций видео — квадратный кроп исказил бы картинку). Источник —
+	картинка или видео (кадр берётся в момент ``timestamp``). Живёт
+	на слое публикации: чистый модуль ``engine/video`` про Telegram
+	не знает.
+
+	Raises:
+		RuntimeError: Если ffmpeg не смог сделать миниатюру.
+	"""
+	box = _THUMB_BOX_PX
+	cmd = [
+		ffmpeg_bin, "-y", "-ss", f"{timestamp:.3f}", "-i", source_path,
+		"-frames:v", "1",
+		"-vf", f"scale={box}:{box}:force_original_aspect_ratio=decrease",
+		"-q:v", _THUMB_JPEG_QUALITY, output_jpg,
+	]
+	run_tool(cmd, "миниатюра видео")

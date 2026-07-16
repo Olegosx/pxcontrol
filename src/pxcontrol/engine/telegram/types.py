@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
+
+
+class MediaKind(StrEnum):
+	"""Тип вложения поста."""
+
+	NONE = "none"  # чистый текст
+	PHOTO = "photo"
+	VIDEO = "video"
+	AUDIO = "audio"
+	DOCUMENT = "document"  # любой файл «как документ»
 
 
 @dataclass(frozen=True)
@@ -31,13 +42,29 @@ class OutgoingPost:
 	Attributes:
 		text: текст поста или подпись к медиа.
 		media_path: путь к файлу вложения (None — чистый текст).
-		media_kind: тип вложения: photo/video/audio/document/none.
+		media_kind: тип вложения.
 		when: момент публикации (None — «сейчас»).
 		thumb_path: JPEG-миниатюра видео (None — без неё).
 	"""
 
 	text: str = ""
 	media_path: str | None = None
-	media_kind: str = "none"
+	media_kind: MediaKind = MediaKind.NONE
 	when: datetime | None = None
 	thumb_path: str | None = None
+
+
+@dataclass(frozen=True)
+class ScheduledMessage:
+	"""Отложенная запись канала, прочитанная транспортом из Telegram.
+
+	Собственный тип границы слоёв: сырые сообщения Telethon не должны
+	доезжать до сервисов.
+
+	Attributes:
+		text: текст записи (пустая строка — медиа без текста).
+		scheduled_at: момент будущей публикации.
+	"""
+
+	text: str
+	scheduled_at: datetime

@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from pxcontrol.engine.telegram.mtproto import MtprotoTransport, UserbotUnavailable
-from pxcontrol.engine.telegram.types import OutgoingPost
+from pxcontrol.engine.telegram.mtproto import MtprotoTransport, UserbotUnavailableError
+from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost
 
 
 class _FakeClient:
@@ -56,7 +56,7 @@ def _transport(client: _FakeClient) -> MtprotoTransport:
 async def test_requires_connected_userbot() -> None:
 	"""Без подключения — понятная ошибка с инструкцией."""
 	transport = MtprotoTransport()
-	with pytest.raises(UserbotUnavailable, match="войдите"):
+	with pytest.raises(UserbotUnavailableError, match="войдите"):
 		await transport.publish("-1001", OutgoingPost(text="x"))
 
 
@@ -90,11 +90,14 @@ async def test_publish_media_maps_kind_to_hints() -> None:
 	received: list[float] = []
 	await transport.publish(
 		"-1001234",
-		OutgoingPost(text="подпись", media_path="/tmp/v.mp4", media_kind="video"),
+		OutgoingPost(
+			text="подпись", media_path="/tmp/v.mp4", media_kind=MediaKind.VIDEO,
+		),
 		on_progress=received.append,
 	)
 	await transport.publish(
-		"-1001234", OutgoingPost(media_path="/tmp/d.zip", media_kind="document")
+		"-1001234",
+		OutgoingPost(media_path="/tmp/d.zip", media_kind=MediaKind.DOCUMENT),
 	)
 	video, doc = fake.files
 	assert video["file"] == "/tmp/v.mp4" and video["caption"] == "подпись"
@@ -115,11 +118,11 @@ def test_ensure_userbot_can_post() -> None:
 		participant=SimpleNamespace(admin_rights=None),
 	)
 	MtprotoTransport._ensure_userbot_can_post(creator)
-	with pytest.raises(UserbotUnavailable, match="не администратор"):
+	with pytest.raises(UserbotUnavailableError, match="не администратор"):
 		MtprotoTransport._ensure_userbot_can_post(SimpleNamespace(
 			is_admin=False, is_creator=False, participant=SimpleNamespace(),
 		))
-	with pytest.raises(UserbotUnavailable, match="нет права публиковать"):
+	with pytest.raises(UserbotUnavailableError, match="нет права публиковать"):
 		MtprotoTransport._ensure_userbot_can_post(SimpleNamespace(
 			is_admin=True, is_creator=False,
 			participant=SimpleNamespace(
@@ -129,8 +132,10 @@ def test_ensure_userbot_can_post() -> None:
 
 
 async def test_get_scheduled_returns_messages() -> None:
-	"""Чтение отложенных возвращает сообщения Telegram."""
+	"""Чтение отложенных отдаёт собственный тип границы, не Telethon."""
 	transport = _transport(_FakeClient())
 	await transport.start()
 	messages = await transport.get_scheduled("-1001234")
-	assert len(messages) == 1 and messages[0].message == "из телеграма"
+	assert len(messages) == 1
+	assert messages[0].text == "из телеграма"
+	assert messages[0].scheduled_at == datetime(2026, 7, 13, tzinfo=UTC)

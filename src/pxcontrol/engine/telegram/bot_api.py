@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
+
+from pxcontrol.engine.telegram.types import MediaKind
 
 logger = logging.getLogger(__name__)
 
 
-class InvalidBotToken(Exception):
+class InvalidBotTokenError(Exception):
 	"""Telegram отклонил токен бота (или токен неправильного формата)."""
 
 
@@ -24,6 +28,38 @@ class ChannelInfo:
 	chat_id: str
 	title: str
 	username: str | None
+
+
+@asynccontextmanager
+async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
+	"""Переводит исключения aiogram в понятные человеку ошибки.
+
+	Единый маппер для всех операций бота (аналог ``_map_post_error``
+	в mtproto): неверный токен и сеть переводятся одинаково, а тексты
+	для «нет прав» (Forbidden) и «отклонено» (BadRequest) зависят
+	от операции и передаются параметрами.
+
+	Raises:
+		ChannelCheckError: Telegram отклонил операцию (токен, права, запрос).
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	from aiogram.exceptions import (
+		TelegramBadRequest,
+		TelegramForbiddenError,
+		TelegramNetworkError,
+		TelegramUnauthorizedError,
+	)
+
+	try:
+		yield
+	except TelegramUnauthorizedError as exc:
+		raise ChannelCheckError("Telegram отклонил токен бота.") from exc
+	except TelegramForbiddenError as exc:
+		raise ChannelCheckError(f"{forbidden} (Telegram: {exc.message})") from exc
+	except TelegramBadRequest as exc:
+		raise ChannelCheckError(f"{bad_request} (Telegram: {exc.message})") from exc
+	except TelegramNetworkError as exc:
+		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
 
 
 def normalize_chat_ref(chat_ref: str) -> str | int:
@@ -81,11 +117,9 @@ def ensure_bot_can_post(member: Any) -> None:
 
 
 async def send_media(
-	token: str, chat_id: str, kind: str, path: str, caption: str
+	token: str, chat_id: str, kind: MediaKind, path: str, caption: str
 ) -> int:
 	"""Отправляет медиа в канал через Bot API (лимит — 50 МБ на файл).
-
-	``kind``: photo/video/audio/document (как в MediaKind).
 
 	Returns:
 		ID сообщения в Telegram.
@@ -95,41 +129,26 @@ async def send_media(
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram import Bot
-	from aiogram.exceptions import (
-		TelegramBadRequest,
-		TelegramForbiddenError,
-		TelegramNetworkError,
-		TelegramUnauthorizedError,
-	)
 	from aiogram.types import FSInputFile
 
 	bot = Bot(token)
 	file = FSInputFile(path)
 	text = caption or None
 	try:
-		if kind == "photo":
-			message = await bot.send_photo(int(chat_id), file, caption=text)
-		elif kind == "video":
-			message = await bot.send_video(
-				int(chat_id), file, caption=text, supports_streaming=True
-			)
-		elif kind == "audio":
-			message = await bot.send_audio(int(chat_id), file, caption=text)
-		else:
-			message = await bot.send_document(int(chat_id), file, caption=text)
-		return int(message.message_id)
-	except TelegramUnauthorizedError as exc:
-		raise ChannelCheckError("Telegram отклонил токен бота.") from exc
-	except TelegramForbiddenError as exc:
-		raise ChannelCheckError(
-			f"Бот не может писать в канал. (Telegram: {exc.message})"
-		) from exc
-	except TelegramBadRequest as exc:
-		raise ChannelCheckError(
-			f"Telegram отклонил отправку. (Telegram: {exc.message})"
-		) from exc
-	except TelegramNetworkError as exc:
-		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
+		async with _bot_errors(
+			"Бот не может писать в канал.", "Telegram отклонил отправку."
+		):
+			if kind is MediaKind.PHOTO:
+				message = await bot.send_photo(int(chat_id), file, caption=text)
+			elif kind is MediaKind.VIDEO:
+				message = await bot.send_video(
+					int(chat_id), file, caption=text, supports_streaming=True
+				)
+			elif kind is MediaKind.AUDIO:
+				message = await bot.send_audio(int(chat_id), file, caption=text)
+			else:
+				message = await bot.send_document(int(chat_id), file, caption=text)
+			return int(message.message_id)
 	finally:
 		await bot.session.close()
 
@@ -145,29 +164,14 @@ async def send_text(token: str, chat_id: str, text: str) -> int:
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram import Bot
-	from aiogram.exceptions import (
-		TelegramBadRequest,
-		TelegramForbiddenError,
-		TelegramNetworkError,
-		TelegramUnauthorizedError,
-	)
 
 	bot = Bot(token)
 	try:
-		message = await bot.send_message(int(chat_id), text)
-		return int(message.message_id)
-	except TelegramUnauthorizedError as exc:
-		raise ChannelCheckError("Telegram отклонил токен бота.") from exc
-	except TelegramForbiddenError as exc:
-		raise ChannelCheckError(
-			f"Бот не может писать в канал. (Telegram: {exc.message})"
-		) from exc
-	except TelegramBadRequest as exc:
-		raise ChannelCheckError(
-			f"Telegram отклонил отправку. (Telegram: {exc.message})"
-		) from exc
-	except TelegramNetworkError as exc:
-		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
+		async with _bot_errors(
+			"Бот не может писать в канал.", "Telegram отклонил отправку."
+		):
+			message = await bot.send_message(int(chat_id), text)
+			return int(message.message_id)
 	finally:
 		await bot.session.close()
 
@@ -203,7 +207,7 @@ async def get_bot_events(token: str) -> list[str]:
 	бота добавляли и с какими правами — диагностика «бот не тот / не там».
 
 	Raises:
-		InvalidBotToken: Telegram отклонил токен.
+		InvalidBotTokenError: Telegram отклонил токен.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram import Bot
@@ -213,7 +217,7 @@ async def get_bot_events(token: str) -> list[str]:
 	try:
 		updates = await bot.get_updates(timeout=1)
 	except TelegramUnauthorizedError as exc:
-		raise InvalidBotToken("Telegram отклонил токен (Unauthorized).") from exc
+		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
 	finally:
@@ -229,37 +233,21 @@ async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram import Bot
-	from aiogram.exceptions import (
-		TelegramBadRequest,
-		TelegramForbiddenError,
-		TelegramNetworkError,
-		TelegramUnauthorizedError,
-	)
 
 	ref = normalize_chat_ref(chat_ref)
 	logger.info("Проверка канала: ввод %r распознан как %r.", chat_ref, ref)
 	bot = Bot(token)
 	try:
-		chat = await bot.get_chat(ref)
-		me = await bot.get_me()
-		member = await bot.get_chat_member(chat.id, me.id)
-		ensure_bot_can_post(member)
-		return ChannelInfo(str(chat.id), chat.title or str(ref), chat.username)
-	except TelegramUnauthorizedError as exc:
-		raise ChannelCheckError("Telegram отклонил токен бота.") from exc
-	except TelegramForbiddenError as exc:
-		raise ChannelCheckError(
-			"Бот не добавлен в канал — добавьте его администратором. "
-			f"(Telegram: {exc.message})"
-		) from exc
-	except TelegramBadRequest as exc:
-		raise ChannelCheckError(
+		async with _bot_errors(
+			"Бот не добавлен в канал — добавьте его администратором.",
 			"Канал не найден — проверьте @имя или ID; приватный канал "
-			"виден боту только после добавления его администратором. "
-			f"(Telegram: {exc.message})"
-		) from exc
-	except TelegramNetworkError as exc:
-		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
+			"виден боту только после добавления его администратором.",
+		):
+			chat = await bot.get_chat(ref)
+			me = await bot.get_me()
+			member = await bot.get_chat_member(chat.id, me.id)
+			ensure_bot_can_post(member)
+			return ChannelInfo(str(chat.id), chat.title or str(ref), chat.username)
 	finally:
 		await bot.session.close()
 
@@ -268,7 +256,7 @@ async def check_token(token: str) -> str:
 	"""Проверяет токен через метод getMe и возвращает @имя бота.
 
 	Raises:
-		InvalidBotToken: Токен неверного формата или отклонён Telegram.
+		InvalidBotTokenError: Токен неверного формата или отклонён Telegram.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram import Bot
@@ -278,14 +266,13 @@ async def check_token(token: str) -> str:
 	try:
 		bot = Bot(token)
 	except TokenValidationError as exc:
-		raise InvalidBotToken("Строка не похожа на токен бота.") from exc
+		raise InvalidBotTokenError("Строка не похожа на токен бота.") from exc
 	try:
 		me = await bot.get_me()
 		return me.username or me.first_name
 	except TelegramUnauthorizedError as exc:
-		raise InvalidBotToken("Telegram отклонил токен (Unauthorized).") from exc
+		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
 	finally:
 		await bot.session.close()
-
