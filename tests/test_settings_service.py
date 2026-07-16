@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import AppSetting, Channel
+from pxcontrol.engine.db.models import AppSetting, Channel, ChannelSetting
 from pxcontrol.engine.services.channels import ChannelsService
 from pxcontrol.engine.services.settings import (
 	CHANNEL_DEFAULT_PRESET,
 	CHANNEL_ENABLED,
 	FFMPEG_PATH,
 	PUBLISH_LAST_CHANNEL_ID,
+	PUBLISH_TIMES,
 	THEME_DARK,
 	SettingsError,
 	SettingsService,
@@ -146,6 +147,22 @@ async def test_get_for_all_returns_only_stored(db: Database) -> None:
 	await _add_channel(db, "-1002")  # без настройки — читается умолчанием
 	await service.set_for(CHANNEL_ENABLED, first, False)
 	assert await service.get_for_all(CHANNEL_ENABLED) == {first: False}
+
+
+async def test_list_setting_roundtrip_keeps_order(db: Database) -> None:
+	"""Списковый ключ: круговой путь с сохранением порядка, [] по умолчанию."""
+	service = SettingsService(db)
+	channel_id = await _add_channel(db)
+	assert await service.get_for(PUBLISH_TIMES, channel_id) == []
+	await service.set_for(PUBLISH_TIMES, channel_id, ["18:30", "10:00"])
+	assert await service.get_for(PUBLISH_TIMES, channel_id) == ["18:30", "10:00"]
+	# не-список в БД → откат к умолчанию
+	async with db.session_factory() as session:
+		row = await session.get(ChannelSetting, (channel_id, PUBLISH_TIMES.name))
+		assert row is not None
+		row.value = "10:00"
+		await session.commit()
+	assert await service.get_for(PUBLISH_TIMES, channel_id) == []
 
 
 async def test_drop_channel_value_removes_matching_refs(db: Database) -> None:

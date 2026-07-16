@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
+	CaptionLabel,
 	CardWidget,
 	ComboBox,
 	FluentIcon,
@@ -24,7 +25,11 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto
 from pxcontrol.engine.services.channels import ChannelAccess, ChannelDto
-from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET, CHANNEL_ENABLED
+from pxcontrol.engine.services.settings import (
+	CHANNEL_DEFAULT_PRESET,
+	CHANNEL_ENABLED,
+	PUBLISH_TIMES,
+)
 from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -35,6 +40,7 @@ from pxcontrol.ui.pages.common import (
 	error_reporter,
 	noop,
 	page_layout,
+	parse_hhmm,
 	row_card,
 )
 
@@ -124,23 +130,24 @@ class _AssignBotDialog(MessageBoxBase):
 		return self._bots[int(self._combo.currentIndex())].id
 
 
-class _ChannelPresetDialog(MessageBoxBase):
-	"""Выбор пресета обработки видео по умолчанию для канала."""
+class _ChannelPrefsDialog(MessageBoxBase):
+	"""Настройки канала: пресет видео по умолчанию и времена публикации."""
+
+	_TIMES_HINT = "Через запятую, первое — по умолчанию; пусто — без стандартных."
 
 	def __init__(
 		self,
 		channel_title: str,
 		presets: list[PresetDto],
 		current_id: int | None,
+		times: list[str],
 		parent: QWidget,
 	) -> None:
 		super().__init__(parent)
 		self._presets = presets
-		self.viewLayout.addWidget(SubtitleLabel("Пресет по умолчанию", self))
-		self.viewLayout.addWidget(BodyLabel(
-			f"Канал «{channel_title}»: пресет подставляется\n"
-			"на странице «Видео» при выборе канала.", self,
-		))
+		self.viewLayout.addWidget(SubtitleLabel("Настройки канала", self))
+		self.viewLayout.addWidget(BodyLabel(f"«{channel_title}»", self))
+		self.viewLayout.addWidget(BodyLabel("Пресет видео по умолчанию:", self))
 		self._combo = ComboBox(self)
 		self._combo.addItem("(не задан)")
 		for preset in presets:
@@ -149,9 +156,25 @@ class _ChannelPresetDialog(MessageBoxBase):
 		if current_id in ids:
 			self._combo.setCurrentIndex(ids.index(current_id) + 1)
 		self.viewLayout.addWidget(self._combo)
+		self.viewLayout.addWidget(BodyLabel("Времена публикации (ЧЧ:ММ):", self))
+		self._times_edit = LineEdit(self)
+		self._times_edit.setPlaceholderText("10:00, 18:30…")
+		self._times_edit.setText(", ".join(str(t) for t in times))
+		self.viewLayout.addWidget(self._times_edit)
+		self._times_hint = CaptionLabel(self._TIMES_HINT, self)
+		self.viewLayout.addWidget(self._times_hint)
 		self.yesButton.setText("Сохранить")
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(420)
+
+	def validate(self) -> bool:  # noqa: N802 — API MessageBoxBase
+		"""Не даёт сохранить времена в неверном формате (диалог открыт)."""
+		try:
+			self.times()
+		except ValueError as exc:
+			self._times_hint.setText(f"⚠ {exc}")
+			return False
+		return True
 
 	def preset_id(self) -> int | None:
 		"""Идентификатор выбранного пресета (None — «не задан»)."""
@@ -159,6 +182,21 @@ class _ChannelPresetDialog(MessageBoxBase):
 		if index <= 0:
 			return None
 		return self._presets[index - 1].id
+
+	def times(self) -> list[str]:
+		"""Времена публикации из поля — нормализованные «ЧЧ:ММ».
+
+		Raises:
+			ValueError: Какое-то из времён не в формате «ЧЧ:ММ».
+		"""
+		raw = str(self._times_edit.text()).strip()
+		if not raw:
+			return []
+		result = []
+		for token in raw.split(","):
+			hours, minutes = parse_hhmm(token)
+			result.append(f"{hours:02d}:{minutes:02d}")
+		return result
 
 
 class ChannelsPage(ScrollArea):
@@ -245,10 +283,12 @@ class ChannelsPage(ScrollArea):
 		recheck = PushButton("Проверить доступы", buttons)
 		recheck.clicked.connect(bind(self._recheck_channel, channel))
 		row.addWidget(recheck)
-		preset_action = PushButton("Пресет…", buttons)
-		preset_action.setToolTip("Пресет обработки видео по умолчанию")
-		preset_action.clicked.connect(bind(self._on_choose_preset, channel))
-		row.addWidget(preset_action)
+		prefs_action = PushButton("Настройки…", buttons)
+		prefs_action.setToolTip(
+			"Пресет видео по умолчанию и времена публикации"
+		)
+		prefs_action.clicked.connect(bind(self._on_open_prefs, channel))
+		row.addWidget(prefs_action)
 		if channel.bot_id is None:
 			bot_action = PushButton("Назначить бота…", buttons)
 			bot_action.clicked.connect(bind(self._on_assign_bot, channel))
@@ -278,8 +318,8 @@ class ChannelsPage(ScrollArea):
 		self._show_error(message)
 		self._reload()
 
-	def _on_choose_preset(self, channel: ChannelDto) -> None:
-		"""Открывает выбор пресета по умолчанию (сначала — список пресетов)."""
+	def _on_open_prefs(self, channel: ChannelDto) -> None:
+		"""Открывает настройки канала (цепочка: пресеты → пресет → времена)."""
 		run_in_engine(
 			self._worker, self._worker.engine.video.list_presets(),
 			self, partial(self._on_presets_loaded, channel), self._show_error,
@@ -289,23 +329,35 @@ class ChannelsPage(ScrollArea):
 		self, channel: ChannelDto, presets: list[PresetDto]
 	) -> None:
 		"""Пресеты получены — узнаём текущий выбор канала."""
-		if not presets:
-			self._show_error(
-				"Пресетов пока нет — сохраните хотя бы один на странице «Видео»."
-			)
-			return
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id),
-			self, partial(self._open_preset_dialog, channel, presets),
+			self, partial(self._on_current_preset_loaded, channel, presets),
 			self._show_error,
 		)
 
-	def _open_preset_dialog(
+	def _on_current_preset_loaded(
 		self, channel: ChannelDto, presets: list[PresetDto], current_id: int | None
 	) -> None:
-		"""Диалог выбора; сохранение — настройкой канала."""
-		dialog = _ChannelPresetDialog(channel.title, presets, current_id, self.window())
+		"""Текущий пресет получен — узнаём времена публикации."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get_for(PUBLISH_TIMES, channel.id),
+			self, partial(self._open_prefs_dialog, channel, presets, current_id),
+			self._show_error,
+		)
+
+	def _open_prefs_dialog(
+		self,
+		channel: ChannelDto,
+		presets: list[PresetDto],
+		current_id: int | None,
+		times: list[str],
+	) -> None:
+		"""Диалог настроек; сохранение — двумя настройками канала."""
+		dialog = _ChannelPrefsDialog(
+			channel.title, presets, current_id, times, self.window()
+		)
 		if not dialog.exec():
 			return
 		run_in_engine(
@@ -313,12 +365,19 @@ class ChannelsPage(ScrollArea):
 			self._worker.engine.settings.set_for(
 				CHANNEL_DEFAULT_PRESET, channel.id, dialog.preset_id()
 			),
-			self, partial(self._on_preset_saved, channel), self._show_error,
+			self, noop, self._show_error,
+		)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set_for(
+				PUBLISH_TIMES, channel.id, dialog.times()
+			),
+			self, partial(self._on_prefs_saved, channel), self._show_error,
 		)
 
-	def _on_preset_saved(self, channel: ChannelDto, _result: object = None) -> None:
+	def _on_prefs_saved(self, channel: ChannelDto, _result: object = None) -> None:
 		InfoBar.success(
-			"Готово", f"Пресет по умолчанию «{channel.title}» сохранён.", parent=self
+			"Готово", f"Настройки канала «{channel.title}» сохранены.", parent=self
 		)
 
 	# --- доступы и бот -----------------------------------------------------------

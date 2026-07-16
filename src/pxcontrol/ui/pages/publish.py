@@ -38,7 +38,7 @@ from pxcontrol.engine.services.posts import (
 	publish_capabilities,
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
-from pxcontrol.engine.services.settings import PUBLISH_LAST_CHANNEL_ID
+from pxcontrol.engine.services.settings import PUBLISH_LAST_CHANNEL_ID, PUBLISH_TIMES
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -252,12 +252,18 @@ class PublishPage(ScrollArea):
 		return None
 
 	def _on_channel_changed(self, _index: int = 0) -> None:
-		"""Адаптирует форму под возможности выбранного канала."""
+		"""Адаптирует форму под возможности и времена выбранного канала."""
 		channel = self._channel_or_none()
 		if channel is None:
 			self._caps_hint.setText("")
 			self._when_row.set_schedule_allowed(True)
+			self._when_row.set_times([])
 			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get_for(PUBLISH_TIMES, channel.id),
+			self, self._when_row.set_times, noop,
+		)
 		caps = publish_capabilities(
 			channel.bot_id is not None, channel.userbot_admin
 		)
@@ -402,9 +408,14 @@ class PublishPage(ScrollArea):
 		channel = self._current_channel()
 		if channel is None:
 			return
+		try:
+			draft = self._draft(channel.id)
+		except ValueError as exc:  # время публикации не «ЧЧ:ММ»
+			self._show_error(str(exc))
+			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.publish_queue.enqueue(self._draft(channel.id)),
+			self._worker.engine.publish_queue.enqueue(draft),
 			self, self._on_enqueued, self._show_error,
 		)
 		run_in_engine(

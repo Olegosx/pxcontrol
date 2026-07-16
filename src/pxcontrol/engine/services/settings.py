@@ -84,6 +84,12 @@ CHANNEL_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
 	"default_video_preset", SettingScope.CHANNEL, None, int
 )
 
+#: Стандартные времена публикации канала: список «ЧЧ:ММ», первое — по умолчанию.
+#: Элементы валидирует интерфейс при сохранении; битые пропускаются при чтении.
+PUBLISH_TIMES: SettingKey[list[str]] = SettingKey(
+	"publish_times", SettingScope.CHANNEL, [], list
+)
+
 #: Папка исходных видео для обработки; пусто — media/source в папке приложения.
 VIDEO_SOURCE_DIR: SettingKey[str] = SettingKey(
 	"video_source_dir", SettingScope.APP, "", str

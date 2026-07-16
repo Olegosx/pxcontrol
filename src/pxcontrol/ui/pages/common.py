@@ -14,6 +14,7 @@ from qfluentwidgets import (
 	CalendarPicker,
 	CaptionLabel,
 	CardWidget,
+	EditableComboBox,
 	FluentIcon,
 	InfoBar,
 	LineEdit,
@@ -24,7 +25,6 @@ from qfluentwidgets import (
 	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
-	TimePicker,
 	TransparentToolButton,
 )
 
@@ -203,27 +203,47 @@ class ProgressPanel(QWidget):
 		self._label.setText(f"{self._prefix}: {percent}%")
 
 
-class WhenRow:
-	"""Строка «Опубликовать сейчас» + скрываемые дата и время.
+def parse_hhmm(text: str) -> tuple[int, int]:
+	"""Разбирает время «ЧЧ:ММ» (часы 0–23, минуты 0–59).
 
-	Общий блок диалогов публикации (пост, видео): переключатель «сейчас»
-	и выбор момента для отложенной записи.
+	Returns:
+		Пара (часы, минуты).
+
+	Raises:
+		ValueError: Формат не «ЧЧ:ММ» или значения вне диапазона.
+	"""
+	error = ValueError("Время — в формате ЧЧ:ММ, например 18:30.")
+	parts = text.strip().split(":")
+	if len(parts) != 2 or not all(part.isdigit() for part in parts):
+		raise error
+	hours, minutes = int(parts[0]), int(parts[1])
+	if hours > 23 or minutes > 59:
+		raise error
+	return hours, minutes
+
+
+class WhenRow:
+	"""Строка «Опубликовать сейчас» + дата и время отложенной записи.
+
+	По умолчанию «сейчас» выключен: посты обычно отложенные. Время —
+	редактируемый список (`EditableComboBox`): пункты — стандартные
+	времена канала (:func:`set_times`), текст правится вручную («ЧЧ:ММ»).
 	"""
 
 	def __init__(self, dialog: QWidget, layout: QVBoxLayout) -> None:
 		row = QHBoxLayout()
 		row.addWidget(BodyLabel("Опубликовать сейчас", dialog))
 		self._now_switch = SwitchButton(dialog)
-		self._now_switch.setChecked(True)
+		self._now_switch.setChecked(False)
 		self._now_switch.checkedChanged.connect(self._on_now_toggled)
 		row.addWidget(self._now_switch)
 		row.addStretch()
 		self._date = CalendarPicker(dialog)
 		self._date.setDate(QDate.currentDate())
-		self._time = TimePicker(dialog)
-		self._time.setTime(QTime.currentTime().addSecs(3600))
-		self._date.hide()
-		self._time.hide()
+		self._time = EditableComboBox(dialog)
+		self._time.setPlaceholderText("ЧЧ:ММ")
+		self._time.setText(QTime.currentTime().addSecs(3600).toString("HH:mm"))
+		self._time.setMaximumWidth(120)
 		row.addWidget(self._date)
 		row.addWidget(self._time)
 		layout.addLayout(row)
@@ -239,14 +259,55 @@ class WhenRow:
 		self._now_switch.setEnabled(allowed)
 		self._now_switch.setToolTip("" if allowed else hint)
 
+	def set_times(self, times: list[str]) -> None:
+		"""Наполняет список стандартными временами канала (первое — выбрано).
+
+		Битые элементы пропускаются; пустой список — текущее время + 1 ч.
+		Если выбранное время сегодня уже прошло — дата переставляется
+		на завтра (пользователь видит это в календаре).
+		"""
+		valid: list[str] = []
+		for item in times:
+			try:
+				parse_hhmm(str(item))
+			except ValueError:
+				continue
+			valid.append(str(item).strip())
+		self._time.clear()
+		self._time.addItems(valid)
+		if valid:
+			self._time.setCurrentIndex(0)
+			self._time.setText(valid[0])
+		else:
+			self._time.setCurrentIndex(-1)
+			self._time.setText(
+				QTime.currentTime().addSecs(3600).toString("HH:mm")
+			)
+		self._adjust_date()
+
+	def _adjust_date(self) -> None:
+		"""Сегодняшнее прошедшее время переносит дату на завтра."""
+		try:
+			hours, minutes = parse_hhmm(str(self._time.text()))
+		except ValueError:
+			return
+		today = QDate.currentDate()
+		if self._date.getDate() > today:
+			return  # дата уже выбрана вперёд — не трогаем
+		passed = QTime(hours, minutes) <= QTime.currentTime()
+		self._date.setDate(today.addDays(1) if passed else today)
+
 	def when(self) -> datetime | None:
-		"""None — «сейчас», иначе выбранный момент (в UTC)."""
+		"""None — «сейчас», иначе выбранный момент (в UTC).
+
+		Raises:
+			ValueError: Время не в формате «ЧЧ:ММ».
+		"""
 		if self._now_switch.isChecked():
 			return None
-		date, time = self._date.getDate(), self._time.getTime()
-		local = datetime(
-			date.year(), date.month(), date.day(), time.hour(), time.minute()
-		)
+		hours, minutes = parse_hhmm(str(self._time.text()))
+		date = self._date.getDate()
+		local = datetime(date.year(), date.month(), date.day(), hours, minutes)
 		return local.astimezone(UTC)
 
 
