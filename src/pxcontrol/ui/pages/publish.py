@@ -15,7 +15,6 @@ from qfluentwidgets import (
 	CaptionLabel,
 	CardWidget,
 	CheckBox,
-	ComboBox,
 	FluentIcon,
 	InfoBar,
 	LineEdit,
@@ -44,10 +43,12 @@ from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
+	DtoComboBox,
 	WhenRow,
 	bind,
 	clear_layout,
 	error_reporter,
+	exec_dialog,
 	noop,
 	page_layout,
 	pick_file,
@@ -75,7 +76,6 @@ class PublishPage(ScrollArea):
 		self.setObjectName("publish")
 		self._worker = worker
 		self._show_error = error_reporter(self)
-		self._channels: list[ChannelDto] = []
 		# канал прошлой публикации: предвыбор после загрузки списка
 		self._restore_channel_id: int | None = None
 		self._kind = MediaKind.NONE
@@ -101,7 +101,7 @@ class PublishPage(ScrollArea):
 		layout = page_layout(self)
 		layout.addWidget(SubtitleLabel("Публикация", self))
 		self._build_kind_segments(layout)
-		self._channel_combo = ComboBox(self)
+		self._channel_combo: DtoComboBox[ChannelDto] = DtoComboBox(self)
 		self._channel_combo.currentIndexChanged.connect(self._on_channel_changed)
 		layout.addWidget(self._channel_combo)
 		self._caps_hint = CaptionLabel("", self)
@@ -213,43 +213,37 @@ class PublishPage(ScrollArea):
 		)
 
 	def _show_channels(self, channels: list[ChannelDto]) -> None:
-		"""Обновляет список каналов, сохраняя текущий выбор.
+		"""Обновляет список каналов, сохраняя выбор по id канала.
 
 		Выключенные каналы (настройка ``enabled``) в списке не показываются —
-		публиковать в них нельзя, пока их не включат на странице «Каналы».
+		фильтр презентационный, само правило держит движок (PostsService
+		откажет выключенному каналу).
 		"""
-		selected = int(self._channel_combo.currentIndex())
-		channels = [channel for channel in channels if channel.enabled]
-		self._channels = channels
-		self._channel_combo.clear()
-		for channel in channels:
-			self._channel_combo.addItem(channel.title)
-		if 0 <= selected < len(channels):
-			self._channel_combo.setCurrentIndex(selected)
+		self._channel_combo.set_items(
+			[channel for channel in channels if channel.enabled],
+			label=lambda channel: channel.title,
+			key=lambda channel: channel.id,
+		)
 		self._apply_channel_restore()
 		self._on_channel_changed()
 
-	def _on_last_channel_loaded(self, channel_id: object) -> None:
+	def _on_last_channel_loaded(self, channel_id: int | None) -> None:
 		"""Пришёл канал прошлой публикации — применяем, если список готов."""
-		self._restore_channel_id = channel_id if isinstance(channel_id, int) else None
+		self._restore_channel_id = channel_id
 		self._apply_channel_restore()
 
 	def _apply_channel_restore(self) -> None:
 		"""Предвыбирает канал прошлой публикации (один раз)."""
-		if self._restore_channel_id is None:
+		wanted = self._restore_channel_id
+		if wanted is None:
 			return
-		ids = [channel.id for channel in self._channels]
-		if self._restore_channel_id in ids:
-			self._channel_combo.setCurrentIndex(ids.index(self._restore_channel_id))
+		if self._channel_combo.select(lambda channel: channel.id == wanted):
 			self._restore_channel_id = None
 			self._on_channel_changed()
 
 	def _channel_or_none(self) -> ChannelDto | None:
 		"""Выбранный канал без показа ошибок (для адаптации формы)."""
-		index = int(self._channel_combo.currentIndex())
-		if 0 <= index < len(self._channels):
-			return self._channels[index]
-		return None
+		return self._channel_combo.selected()
 
 	def _on_channel_changed(self, _index: int = 0) -> None:
 		"""Адаптирует форму под возможности и времена выбранного канала."""
@@ -307,20 +301,23 @@ class PublishPage(ScrollArea):
 		"""
 		if self._kind is MediaKind.VIDEO:
 			channel = self._channel_or_none()
-			coro = (
-				self._worker.engine.video.processed_dir_for_channel(channel.id)
-				if channel is not None
-				else self._worker.engine.video.dirs_for("")
-			)
-			run_in_engine(
-				self._worker, coro, self, self._open_file_dialog, self._show_error,
-			)
+			if channel is not None:
+				run_in_engine(
+					self._worker,
+					self._worker.engine.video.processed_dir_for_channel(channel.id),
+					self, self._open_file_dialog, self._show_error,
+				)
+			else:
+				run_in_engine(
+					self._worker, self._worker.engine.video.dirs_for(""),
+					self, self._open_file_dialog, self._show_error,
+				)
 			return
 		self._open_file_dialog("")
 
-	def _open_file_dialog(self, start: object) -> None:
+	def _open_file_dialog(self, start: str | VideoDirs) -> None:
 		"""Открывает диалог вложения; ``start`` — папка или VideoDirs."""
-		start_dir = start.processed if isinstance(start, VideoDirs) else str(start)
+		start_dir = start.processed if isinstance(start, VideoDirs) else start
 		file_filter = next(f for _l, k, f in _KINDS if k is self._kind)
 		path = pick_file(self, "Файл вложения", file_filter, start_dir=start_dir)
 		if path:
@@ -339,7 +336,9 @@ class PublishPage(ScrollArea):
 		"""Открывает настройку полей и шаблонов подписи канала."""
 		channel = self._current_channel()
 		if channel is not None:
-			FieldsDialog(self._worker, channel.id, channel.title, self.window()).exec()
+			exec_dialog(
+				FieldsDialog(self._worker, channel.id, channel.title, self.window())
+			)
 
 	def _on_compose_caption(self) -> None:
 		"""Загружает шаблоны канала и открывает диалог сборки."""
@@ -364,7 +363,7 @@ class PublishPage(ScrollArea):
 		if self._kind is not MediaKind.NONE and media:
 			title = title_from_filename(media)
 		dialog = CaptionDialog(templates, title, self.window())
-		if not dialog.exec():
+		if not exec_dialog(dialog):
 			return
 		self._text.setPlainText(dialog.caption())
 		run_in_engine(

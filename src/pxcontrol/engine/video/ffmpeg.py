@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -60,6 +61,10 @@ def run_streaming(
 	"""Запускает ffmpeg, транслируя ход кодирования в колбэк.
 
 	Команда должна писать прогресс в stdout (``-progress pipe:1``).
+	stderr (журнал ffmpeg) читается параллельным потоком: буфер канала ОС
+	конечен (~64 КБ), и болтливый ffmpeg (покадровые предупреждения
+	фильтров), заполнив его, замер бы на записи — а мы вечно ждали бы
+	строк прогресса из stdout (взаимная блокировка).
 
 	Raises:
 		RuntimeError: Если ffmpeg завершился с ненулевым кодом.
@@ -68,14 +73,23 @@ def run_streaming(
 	proc = subprocess.Popen(
 		cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
 	)
-	assert proc.stdout is not None  # stdout=PIPE
+	if proc.stdout is None or proc.stderr is None:  # для mypy: оба — PIPE
+		raise RuntimeError(f"ffmpeg ({what}): каналы процесса не открылись.")
+	stderr_pipe = proc.stderr
+	stderr_chunks: list[str] = []
+	reader = threading.Thread(
+		target=lambda: stderr_chunks.append(stderr_pipe.read()),
+		name="ffmpeg-stderr", daemon=True,
+	)
+	reader.start()
 	for line in proc.stdout:
 		seconds = _progress_seconds(line)
 		if seconds is not None and on_progress is not None and total_seconds > 0:
 			on_progress(min(seconds / total_seconds, 1.0))
-	stderr = proc.stderr.read() if proc.stderr is not None else ""
 	proc.wait()
+	reader.join(timeout=10.0)
 	if proc.returncode != 0:
+		stderr = "".join(stderr_chunks)
 		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {stderr.strip()}")
 
 

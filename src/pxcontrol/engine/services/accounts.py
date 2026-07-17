@@ -15,9 +15,14 @@ from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AiCredential, Bot, TgAccount
-from pxcontrol.engine.telegram.mtproto import LoginError
+from pxcontrol.engine.security.secrets import SecretDecryptionError
+from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
 
 logger = logging.getLogger(__name__)
+
+
+class AccountsError(Exception):
+	"""Ошибка операций с аккаунтами (с понятным человеку текстом)."""
 
 
 class _LoginFlow(Protocol):
@@ -48,10 +53,17 @@ class _TelegramPort(Protocol):
 		self, api_id: int, api_hash: str, session: str
 	) -> None: ...
 
+	async def deactivate_userbot(self) -> None: ...
+
 
 def mask_secret(secret: str) -> str:
-	"""Возвращает замаскированное представление секрета для показа в UI."""
-	if len(secret) <= 8:
+	"""Возвращает замаскированное представление секрета для показа в UI.
+
+	Короткие секреты (до 15 символов) маскируются целиком: показывать
+	8 символов из 9 — почти раскрыть секрет. Реальные токены ботов
+	и ключи ИИ длиннее, для них видны только края.
+	"""
+	if len(secret) < 16:
 		return "•" * len(secret)
 	return f"{secret[:4]}…{secret[-4:]}"
 
@@ -119,7 +131,11 @@ class AccountsService:
 		return self._bot_dto(bot)
 
 	async def delete_bot(self, bot_id: int) -> None:
-		"""Удаляет бота по идентификатору."""
+		"""Удаляет бота; каналы, публиковавшие через него, остаются без бота.
+
+		``channels.bot_id`` обнуляет политика внешнего ключа (SET NULL) —
+		канал не «прилипнет» к чужому боту, если SQLite переиспользует id.
+		"""
 		async with self._db.session_factory() as session:
 			await session.execute(delete(Bot).where(Bot.id == bot_id))
 			await session.commit()
@@ -130,7 +146,7 @@ class AccountsService:
 		Строки пишутся в лог и возвращаются для показа в интерфейсе.
 
 		Raises:
-			ValueError: Бот не найден.
+			AccountsError: Бот не найден.
 		"""
 		bot = await self._require_bot(bot_id)
 		lines = await self._gateway.bot_events(bot.token)
@@ -140,11 +156,15 @@ class AccountsService:
 		return lines
 
 	async def _require_bot(self, bot_id: int) -> Bot:
-		"""Возвращает бота или объясняет, что он не найден."""
+		"""Возвращает бота или объясняет, что он не найден.
+
+		Raises:
+			AccountsError: Бот не найден.
+		"""
 		async with self._db.session_factory() as session:
 			bot = await session.get(Bot, bot_id)
 		if bot is None:
-			raise ValueError("Бот не найден.")
+			raise AccountsError("Бот не найден — обновите список.")
 		return bot
 
 	@staticmethod
@@ -172,10 +192,58 @@ class AccountsService:
 		return self._acc_dto(acc)
 
 	async def delete_tg_account(self, account_id: int) -> None:
-		"""Удаляет userbot-аккаунт по идентификатору."""
+		"""Удаляет userbot-аккаунт и переподключает userbot без него.
+
+		Движок не должен продолжать публиковать от имени удалённого
+		аккаунта: если у аккаунта была сессия, userbot отключается
+		и активируется заново по оставшимся сессиям (или остаётся
+		выключенным, если сессий больше нет).
+		"""
 		async with self._db.session_factory() as session:
-			await session.execute(delete(TgAccount).where(TgAccount.id == account_id))
+			account = await session.get(TgAccount, account_id)
+			if account is None:
+				return
+			had_session = account.session is not None
+			await session.delete(account)
 			await session.commit()
+		if had_session:
+			await self._gateway.deactivate_userbot()
+			await self.activate_stored_userbot()
+
+	async def activate_stored_userbot(self) -> None:
+		"""Подключает userbot по сохранённой сессии, если она есть.
+
+		Правило выбора: первый по id аккаунт с сессией (обычно userbot
+		один). Неудача подключения (нет сети, сессия отозвана) не ошибка:
+		приложение работает дальше, userbot подключится после повторного
+		входа. Вызывается движком при старте и после удаления аккаунта.
+		"""
+		try:
+			async with self._db.session_factory() as session:
+				account = (
+					(await session.execute(
+						select(TgAccount)
+						.where(TgAccount.session.is_not(None))
+						.order_by(TgAccount.id)
+					)).scalars().first()
+				)
+		except SecretDecryptionError as exc:
+			# сменился ключ шифрования — не мешаем запуску приложения:
+			# пользователь увидит ту же ошибку на странице аккаунтов
+			logger.warning("Userbot не активирован: %s", exc)
+			return
+		if account is None or account.session is None:
+			return
+		try:
+			await self._gateway.activate_userbot(
+				account.api_id, account.api_hash, account.session
+			)
+		except UserbotUnavailableError as exc:
+			logger.warning(
+				"Userbot «%s» не подключён: %s", account.label, exc
+			)
+			return
+		logger.info("Userbot «%s» подключён.", account.label)
 
 	@staticmethod
 	def _acc_dto(acc: TgAccount) -> TgAccountDto:

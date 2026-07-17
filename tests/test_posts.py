@@ -363,12 +363,72 @@ async def test_list_scheduled_skips_disabled_channel(db: Database) -> None:
 	assert await service.list_scheduled() == []
 
 
+async def test_list_scheduled_skips_bot_only_channel(db: Database) -> None:
+	"""Бот-канал не опрашивается: Bot API отложенных не умеет.
+
+	Раньше такой канал ронял всю страницу «Расписание» ошибкой userbot.
+	"""
+	service = PostsService(db, _FakeGateway())
+	await _add_channel(db, with_bot=True, userbot_admin=False)
+	assert await service.list_scheduled() == []
+
+
+async def test_list_scheduled_isolates_channel_failure(db: Database) -> None:
+	"""Ошибка одного канала не роняет список: канал пропускается."""
+
+	class _FlakyGateway(_FakeGateway):
+		async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
+			if chat_id == "-1001":
+				raise UserbotUnavailableError("Telegram просит подождать 5 с.")
+			return await super().get_scheduled(chat_id)
+
+	service = PostsService(db, _FlakyGateway())
+	await _add_channel(db)  # tg_chat_id="-1001" — упадёт
+	async with db.session_factory() as session:
+		session.add(Channel(
+			title="Второй", tg_chat_id="-1002", bot_id=None, userbot_admin=True,
+		))
+		await session.commit()
+	items = await service.list_scheduled()
+	assert [item.channel_title for item in items] == ["Второй"]
+
+
+async def test_publish_rejects_disabled_channel(db: Database) -> None:
+	"""Выключенный канал не публикует — правило движка, не интерфейса."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	await SettingsService(db).set_for(CHANNEL_ENABLED, channel_id, False)
+	with pytest.raises(PostError, match="выключен"):
+		await service.publish(PostDraft(channel_id, text="x"))
+	assert gateway.published == []
+
+
+async def test_publish_userbot_rejects_oversized_file(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Файл больше лимита Telegram (2 ГБ) отклоняется до загрузки."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.posts.USERBOT_MAX_FILE_BYTES", 10
+	)
+	big = tmp_path / "big.bin"
+	big.write_bytes(b"x" * 11)
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	channel_id = await _add_channel(db)
+	with pytest.raises(PostError, match="лимит"):
+		await service.publish(PostDraft(
+			channel_id, media_path=str(big), media_kind=MediaKind.DOCUMENT,
+		))
+	assert gateway.published == []
+
+
 async def test_published_video_moves_to_published_dir(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Видео из папки результатов переезжает в опубликованные (с превью)."""
 	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts.media_dir", lambda: tmp_path / "media"
+		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
 	)
 	processed = tmp_path / "media" / "processed" / "суб"
 	processed.mkdir(parents=True)
@@ -391,7 +451,7 @@ async def test_video_outside_processed_dir_stays(
 ) -> None:
 	"""Видео не из папки результатов после публикации остаётся на месте."""
 	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts.media_dir", lambda: tmp_path / "media"
+		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
 	)
 	video = tmp_path / "чужое.mp4"
 	video.write_bytes(b"video")
@@ -408,7 +468,7 @@ async def test_move_failure_does_not_break_publish(
 ) -> None:
 	"""Сбой переезда — предупреждение в лог, публикация считается успешной."""
 	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts.media_dir", lambda: tmp_path / "media"
+		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
 	)
 
 	def _boom(*_args: object, **_kwargs: object) -> None:

@@ -30,11 +30,15 @@ from pxcontrol.engine.services.settings import (
 	VIDEO_PUBLISHED_DIR,
 	SettingsService,
 )
+from pxcontrol.engine.services.video import video_base_dir
+from pxcontrol.engine.telegram.mtproto import (
+	UserbotNotConnectedError,
+	UserbotUnavailableError,
+)
 from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source, run_tool
 from pxcontrol.engine.video.frames import resolve_timestamp
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
-from pxcontrol.paths import media_dir
 
 logger = logging.getLogger(__name__)
 
@@ -175,12 +179,19 @@ class PostsService:
 		(бот-путь прогресс не отдаёт).
 
 		Raises:
-			PostError: Черновик/канал/файл не годятся или у канала
-				нет способа публикации.
+			PostError: Черновик/канал/файл не годятся, канал выключен
+				или у канала нет способа публикации.
 			UserbotUnavailableError: Userbot отвалился по дороге.
 		"""
 		self.validate_draft(draft)
 		channel = await self._get_channel(draft.channel_id)
+		if not await self._settings.get_for(CHANNEL_ENABLED, draft.channel_id):
+			# правило системы, не интерфейса: любой будущий вход в публикацию
+			# (автопостинг из источников) не должен писать в выключенный канал
+			raise PostError(
+				f"Канал «{channel.title}» выключен — включите его "
+				"на странице «Каналы»."
+			)
 		caps = publish_capabilities(channel.bot is not None, channel.userbot_admin)
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
@@ -210,7 +221,19 @@ class PostsService:
 		media_path: str | None,
 		on_progress: ProgressCallback | None,
 	) -> None:
-		"""Полный путь через userbot (MTProto): всё, включая отложенные."""
+		"""Полный путь через userbot (MTProto): всё, включая отложенные.
+
+		Raises:
+			PostError: Файл больше лимита Telegram (2 ГБ).
+		"""
+		if media_path is not None and (
+			Path(media_path).stat().st_size > USERBOT_MAX_FILE_BYTES
+		):
+			raise PostError(
+				f"Файл больше {USERBOT_MAX_FILE_BYTES // 2**30} ГБ — лимит "
+				"Telegram на файл. Уменьшите файл (например, битрейтом "
+				"на странице «Видео»)."
+			)
 		with tempfile.TemporaryDirectory() as tmp:
 			thumb: str | None = None
 			if draft.media_kind is MediaKind.VIDEO and media_path:
@@ -264,28 +287,33 @@ class PostsService:
 		любой сбой — предупреждение в лог, публикацию не роняет (пост уже
 		ушёл; у отложенных файл уже загружен на сервер Telegram).
 		"""
-		processed = await self._settings.get(VIDEO_PROCESSED_DIR)
-		published = await self._settings.get(VIDEO_PUBLISHED_DIR)
-		processed_root = Path(processed) if processed else media_dir() / "processed"
-		published_root = Path(published) if published else media_dir() / "published"
+		processed_root = video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
+		published_root = video_base_dir(self._settings, VIDEO_PUBLISHED_DIR)
 		source = Path(media_path)
 		try:
 			rel = source.resolve().relative_to(processed_root.resolve())
 		except ValueError:
 			return  # видео не из папки результатов — оставляем на месте
+		target = published_root / rel
 		try:
-			target = published_root / rel
-			target.parent.mkdir(parents=True, exist_ok=True)
-			shutil.move(str(source), str(target))
-			preview = source.with_suffix(".png")
-			if preview.is_file():
-				shutil.move(str(preview), str(target.with_suffix(".png")))
+			# перенос между дисками — это копирование гигабайтов: в отдельном
+			# потоке, чтобы не останавливать цикл событий движка
+			await asyncio.to_thread(self._move_with_preview, source, target)
 			logger.info("Опубликованное видео перенесено: %s → %s", source, target)
 		except OSError:
 			logger.warning(
 				"Не удалось перенести опубликованное видео %s — файл остался "
 				"в папке результатов.", media_path, exc_info=True,
 			)
+
+	@staticmethod
+	def _move_with_preview(source: Path, target: Path) -> None:
+		"""Блокирующий перенос файла с соседом-превью ``.png`` (в потоке)."""
+		target.parent.mkdir(parents=True, exist_ok=True)
+		shutil.move(str(source), str(target))
+		preview = source.with_suffix(".png")
+		if preview.is_file():
+			shutil.move(str(preview), str(target.with_suffix(".png")))
 
 	@staticmethod
 	def _apply_rename(media_path: str, rename_to: str) -> str:
@@ -365,22 +393,41 @@ class PostsService:
 			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
 
 	async def list_scheduled(self) -> list[ScheduledPostDto]:
-		"""Собирает отложенные записи активных каналов из Telegram.
+		"""Собирает отложенные записи активных userbot-каналов из Telegram.
 
+		Опрашиваются только каналы с userbot-админом: у бот-канала
+		отложенных быть не может (Bot API их не умеет, ADR-0010/0011).
 		Выключенные каналы (настройка ``enabled`` = False) не опрашиваются.
+		Ошибка одного канала не роняет весь список — канал пропускается
+		с предупреждением в логе.
+
+		Raises:
+			UserbotNotConnectedError: Userbot не подключён вовсе — без него
+				опрашивать нечего, ошибка общая для всех каналов.
 		"""
 		enabled = await self._settings.get_for_all(CHANNEL_ENABLED)
 		async with self._db.session_factory() as session:
 			channels = (
 				(await session.execute(
-					select(Channel).order_by(Channel.id)
+					select(Channel)
+					.where(Channel.userbot_admin)
+					.order_by(Channel.id)
 				)).scalars().all()
 			)
 		items: list[ScheduledPostDto] = []
 		for channel in channels:
 			if not enabled.get(channel.id, CHANNEL_ENABLED.default):
 				continue
-			for message in await self._gateway.get_scheduled(channel.tg_chat_id):
+			try:
+				messages = await self._gateway.get_scheduled(channel.tg_chat_id)
+			except UserbotNotConnectedError:
+				raise
+			except UserbotUnavailableError as exc:
+				logger.warning(
+					"Отложенные канала «%s» не прочитаны: %s", channel.title, exc
+				)
+				continue
+			for message in messages:
 				items.append(self._dto(channel.title, message))
 		items.sort(key=lambda item: item.scheduled_at)
 		return items

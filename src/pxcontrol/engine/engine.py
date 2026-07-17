@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
-
 from pxcontrol.config import Settings
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import TgAccount
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.channels import ChannelsService
@@ -50,11 +47,16 @@ class Engine:
 		return self.settings.cached(FFMPEG_PATH) or self._settings.ffmpeg_path
 
 	async def start(self) -> None:
-		"""Запускает компоненты в правильном порядке."""
+		"""Запускает компоненты в правильном порядке.
+
+		Userbot активируется по сохранённой сессии: отложенные посты
+		публикует сервер Telegram (ADR-0010), но для их создания и чтения
+		нужен подключённый userbot. Неудача подключения не мешает запуску.
+		"""
 		logger.info("Запуск движка…")
 		await self.db.init()
 		await self.settings.prime()
-		await self._activate_userbot_if_logged_in()
+		await self.accounts.activate_stored_userbot()
 		await self.gateway.start()
 		logger.info("Движок запущен.")
 
@@ -62,27 +64,8 @@ class Engine:
 		"""Останавливает компоненты в обратном порядке."""
 		logger.info("Остановка движка…")
 		await self.publish_queue.shutdown()
+		await self.video.shutdown()
 		await self.gateway.stop()
 		await self.db.close()
 		logger.info("Движок остановлен.")
 
-	async def _activate_userbot_if_logged_in(self) -> None:
-		"""Подключает userbot, если в БД есть аккаунт с сессией.
-
-		Отложенные посты публикует сервер Telegram (ADR-0010), но для их
-		создания и чтения нужен подключённый userbot.
-		"""
-		async with self.db.session_factory() as session:
-			account = (
-				(await session.execute(
-					select(TgAccount)
-					.where(TgAccount.session.is_not(None))
-					.order_by(TgAccount.id)
-				)).scalars().first()
-			)
-		if account is None or account.session is None:
-			return
-		await self.gateway.activate_userbot(
-			account.api_id, account.api_hash, account.session
-		)
-		logger.info("Userbot «%s» подключён.", account.label)

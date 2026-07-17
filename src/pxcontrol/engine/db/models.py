@@ -165,7 +165,10 @@ class Channel(TimestampMixin, Base):
 	username: Mapped[str | None] = mapped_column(String(255), default=None)
 	# userbot — админ канала (проверено при подключении); бот — через bot_id
 	userbot_admin: Mapped[bool] = mapped_column(Boolean, default=False)
-	bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), default=None)
+	# бот удаляется — канал остаётся без бота (проверку ключей включает Database)
+	bot_id: Mapped[int | None] = mapped_column(
+		ForeignKey("bots.id", ondelete="SET NULL"), default=None
+	)
 
 	bot: Mapped[Bot | None] = relationship(back_populates="channels")
 
@@ -181,7 +184,9 @@ class CaptionField(TimestampMixin, Base):
 	__tablename__ = "caption_fields"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
+	channel_id: Mapped[int] = mapped_column(
+		ForeignKey("channels.id", ondelete="CASCADE")
+	)
 	name: Mapped[str] = mapped_column(String(64))
 	hashtag: Mapped[bool] = mapped_column(Boolean, default=True)
 	multiple: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -198,7 +203,9 @@ class CaptionValue(TimestampMixin, Base):
 	__tablename__ = "caption_values"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	field_id: Mapped[int] = mapped_column(ForeignKey("caption_fields.id"))
+	field_id: Mapped[int] = mapped_column(
+		ForeignKey("caption_fields.id", ondelete="CASCADE")
+	)
 	value: Mapped[str] = mapped_column(String(128))
 
 	field: Mapped[CaptionField] = relationship(back_populates="values")
@@ -210,7 +217,9 @@ class CaptionTemplate(TimestampMixin, Base):
 	__tablename__ = "caption_templates"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
+	channel_id: Mapped[int] = mapped_column(
+		ForeignKey("channels.id", ondelete="CASCADE")
+	)
 	name: Mapped[str] = mapped_column(String(64))
 	# для предвыбора «последнего использованного» шаблона в диалоге
 	last_used_at: Mapped[datetime | None] = mapped_column(
@@ -231,8 +240,12 @@ class CaptionTemplateField(Base):
 	__tablename__ = "caption_template_fields"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	template_id: Mapped[int] = mapped_column(ForeignKey("caption_templates.id"))
-	field_id: Mapped[int] = mapped_column(ForeignKey("caption_fields.id"))
+	template_id: Mapped[int] = mapped_column(
+		ForeignKey("caption_templates.id", ondelete="CASCADE")
+	)
+	field_id: Mapped[int] = mapped_column(
+		ForeignKey("caption_fields.id", ondelete="CASCADE")
+	)
 	position: Mapped[int] = mapped_column(Integer, default=0)
 	enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 

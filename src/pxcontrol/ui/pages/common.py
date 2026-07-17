@@ -5,15 +5,23 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
-from typing import TypeVar
+from typing import Generic, TypeVar
 
 from PySide6.QtCore import QDate, QTime, Signal
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+	QDialog,
+	QFileDialog,
+	QHBoxLayout,
+	QLayout,
+	QVBoxLayout,
+	QWidget,
+)
 from qfluentwidgets import (
 	BodyLabel,
 	CalendarPicker,
 	CaptionLabel,
 	CardWidget,
+	ComboBox,
 	EditableComboBox,
 	FluentIcon,
 	InfoBar,
@@ -85,12 +93,28 @@ def clear_layout(layout: QLayout) -> None:
 			widget.deleteLater()
 
 
+def exec_dialog(dialog: QDialog) -> bool:
+	"""Показывает модальный диалог и удаляет его после закрытия.
+
+	Диалоги QFluentWidgets не удаляют себя после ``exec()`` (нет
+	``WA_DeleteOnClose``) и накапливались бы детьми окна до выхода —
+	вместе с содержимым (например, плитками кадров с картинками).
+	Все страницы показывают диалоги через эту обёртку.
+
+	Returns:
+		True — диалог принят (кнопка подтверждения).
+	"""
+	accepted = bool(dialog.exec())
+	dialog.deleteLater()
+	return accepted
+
+
 def confirm_delete(parent: QWidget, text: str, accept_text: str = "Удалить") -> bool:
 	"""Спрашивает подтверждение необратимого действия."""
 	box = MessageBox("Подтверждение", text, parent.window())
 	box.yesButton.setText(accept_text)
 	box.cancelButton.setText("Отмена")
-	return bool(box.exec())
+	return exec_dialog(box)
 
 
 def show_error(parent: QWidget, message: str) -> None:
@@ -156,6 +180,84 @@ def row_card(
 		delete_button.clicked.connect(on_delete)
 		layout.addWidget(delete_button)
 	return card
+
+
+class DtoComboBox(ComboBox, Generic[_T]):
+	"""Комбобокс списка DTO, хранящий элементы рядом с виджетом.
+
+	Заменяет ручную арифметику «индекс минус служебный пункт» и парные
+	списки DTO на страницах — из этой ручной синхронизации вырастали
+	ошибки, когда выбор восстанавливался по позиции в изменившемся
+	списке и молча указывал на другой элемент.
+	"""
+
+	def __init__(self, parent: QWidget, placeholder: str | None = None) -> None:
+		"""``placeholder`` — служебный первый пункт («(не выбран)»);
+		None — список начинается сразу с элементов."""
+		super().__init__(parent)
+		self._placeholder = placeholder
+		self._dtos: list[_T] = []
+
+	def set_items(
+		self,
+		items: list[_T],
+		label: Callable[[_T], str],
+		key: Callable[[_T], object] | None = None,
+	) -> None:
+		"""Пересобирает список без промежуточных сигналов.
+
+		Сигналы блокируются на время пересборки (первый ``addItem``
+		Qt-комбобокса излучает ``currentIndexChanged``) — обработчик
+		выбора страница вызывает сама один раз после пересборки.
+
+		Args:
+			items: новые элементы списка.
+			label: текст пункта для элемента.
+			key: идентичность элемента (обычно ``lambda x: x.id``) — по ней
+				восстанавливается прежний выбор; None или элемент исчез —
+				выбор встаёт на первый пункт.
+		"""
+		previous = self.selected()
+		self.blockSignals(True)
+		try:
+			self.clear()
+			self._dtos = list(items)
+			if self._placeholder is not None:
+				self.addItem(self._placeholder)
+			for item in self._dtos:
+				self.addItem(label(item))
+			index = 0 if self.count() else -1
+			if key is not None and previous is not None:
+				wanted = key(previous)
+				for position, item in enumerate(self._dtos):
+					if key(item) == wanted:
+						index = position + self._offset()
+						break
+			self.setCurrentIndex(index)
+		finally:
+			self.blockSignals(False)
+
+	def selected(self) -> _T | None:
+		"""Выбранный элемент; None — служебный пункт или пустой список."""
+		index = int(self.currentIndex()) - self._offset()
+		# локальная переменная с типом: базовый класс не типизирован,
+		# и чтение атрибута через self даёт Any
+		dtos: list[_T] = self._dtos
+		if 0 <= index < len(dtos):
+			return dtos[index]
+		return None
+
+	def select(self, predicate: Callable[[_T], bool]) -> bool:
+		"""Выбирает первый подходящий элемент; False — такого нет."""
+		for position, item in enumerate(self._dtos):
+			if predicate(item):
+				self.setCurrentIndex(position + self._offset())
+				return True
+		return False
+
+	def _offset(self) -> int:
+		"""Сдвиг индексов элементов из-за служебного пункта."""
+		return 1 if self._placeholder is not None else 0
 
 
 class ProgressPanel(QWidget):

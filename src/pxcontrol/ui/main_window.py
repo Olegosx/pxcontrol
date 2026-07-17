@@ -12,6 +12,7 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.settings import WINDOW_GEOMETRY
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.pages.channels import ChannelsPage
+from pxcontrol.ui.pages.common import exec_dialog
 from pxcontrol.ui.pages.publish import PublishPage
 from pxcontrol.ui.pages.schedule import SchedulePage
 from pxcontrol.ui.pages.settings import SettingsPage
@@ -34,10 +35,18 @@ class MainWindow(FluentWindow):
 		self._build_navigation()
 
 	def _restore_geometry(self) -> None:
-		"""Восстанавливает сохранённое состояние окна (движок уже готов)."""
-		saved = self._worker.submit(
-			self._worker.engine.settings.get(WINDOW_GEOMETRY)
-		).result(timeout=5)
+		"""Восстанавливает сохранённое состояние окна (движок уже готов).
+
+		Симметрично ``_save_geometry``: сбой чтения (зависший движок,
+		таймаут) не должен валить запуск — окно откроется с умолчаниями.
+		"""
+		try:
+			saved = self._worker.submit(
+				self._worker.engine.settings.get(WINDOW_GEOMETRY)
+			).result(timeout=5)
+		except Exception:  # noqa: BLE001 — геометрия не стоит отказа в запуске
+			logger.warning("Не удалось прочитать состояние окна.", exc_info=True)
+			return
 		if saved:
 			self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii")))
 
@@ -80,7 +89,7 @@ class MainWindow(FluentWindow):
 			)
 			box.yesButton.setText("Выйти")
 			box.cancelButton.setText("Остаться")
-			if not box.exec():
+			if not exec_dialog(box):
 				event.ignore()
 				return
 		self._save_geometry()

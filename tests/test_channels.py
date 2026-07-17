@@ -12,12 +12,13 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.channels import ChannelError, ChannelsService
 from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
-from pxcontrol.engine.telegram.bot_api import (
-	ChannelCheckError,
-	ensure_bot_can_post,
-	normalize_chat_ref,
+from pxcontrol.engine.telegram.bot_api import ChannelCheckError, ensure_bot_can_post
+from pxcontrol.engine.telegram.mtproto import (
+	UserbotAccessError,
+	UserbotNotConnectedError,
+	UserbotUnavailableError,
 )
-from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
+from pxcontrol.engine.telegram.refs import ChatRefError, normalize_chat_ref
 from pxcontrol.engine.telegram.types import ChannelInfo
 
 
@@ -42,7 +43,7 @@ class _FakeGateway:
 
 	async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo:
 		if not self.userbot_is_admin:
-			raise UserbotUnavailableError(
+			raise UserbotAccessError(
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
@@ -151,6 +152,28 @@ async def test_recheck_updates_flags_both_ways(db: Database) -> None:
 	assert access.channel.bot_id is not None  # бот не отвязан молча
 
 
+async def test_recheck_keeps_flag_when_userbot_unreachable(db: Database) -> None:
+	"""Сбой связи/подключения userbot не сбрасывает сохранённые права.
+
+	Иначе перепроверка при мигнувшей сети молча лишала бы канал
+	отложенных постов и больших файлов (маршрутизация идёт по флагу).
+	"""
+
+	class _OfflineGateway(_FakeGateway):
+		async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo:
+			raise UserbotNotConnectedError("Userbot не подключён — войдите.")
+
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()
+	service = ChannelsService(db, gateway)
+	dto = await service.add_channel(bot_id, "@testchan")
+	assert dto.userbot_admin is True
+	offline = ChannelsService(db, _OfflineGateway())
+	access = await offline.recheck_channel(dto.id)
+	assert access.userbot_ok is None  # «не удалось проверить», не «не админ»
+	assert access.channel.userbot_admin is True  # флаг не тронут
+
+
 async def test_assign_and_unassign_bot(db: Database) -> None:
 	"""Каналу без бота назначается бот (с проверкой прав) и отвязывается."""
 	bot_id = await _make_bot(db)
@@ -179,13 +202,13 @@ async def test_unknown_bot_rejected(db: Database) -> None:
 
 
 def test_normalize_chat_ref() -> None:
-	"""Все форматы ввода приводятся к виду для Bot API."""
+	"""Все форматы ввода приводятся к виду для API Telegram."""
 	assert normalize_chat_ref("@mychannel") == "@mychannel"
 	assert normalize_chat_ref("mychannel") == "@mychannel"
 	assert normalize_chat_ref("https://t.me/mychannel") == "@mychannel"
 	assert normalize_chat_ref("t.me/mychannel/") == "@mychannel"
 	assert normalize_chat_ref("-1001234567") == -1001234567
-	with pytest.raises(ChannelCheckError):
+	with pytest.raises(ChatRefError):
 		normalize_chat_ref("   ")
 
 
@@ -195,9 +218,9 @@ def test_normalize_chat_ref_hardened() -> None:
 	assert normalize_chat_ref(" -1002233445566 ") == -1002233445566
 	assert normalize_chat_ref("https://t.me/c/2233445566/5") == -1002233445566
 	assert normalize_chat_ref("t.me/c/2233445566") == -1002233445566
-	with pytest.raises(ChannelCheckError, match="Инвайт"):
+	with pytest.raises(ChatRefError, match="Инвайт"):
 		normalize_chat_ref("https://t.me/+AbCdEfGh123")
-	with pytest.raises(ChannelCheckError, match="t.me/c"):
+	with pytest.raises(ChatRefError, match="t.me/c"):
 		normalize_chat_ref("t.me/c/abc/5")
 
 

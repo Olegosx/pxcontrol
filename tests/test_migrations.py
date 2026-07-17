@@ -41,6 +41,92 @@ def _upgrade(db_file: Path, revision: str) -> None:
 	command.upgrade(cfg, revision)
 
 
+async def test_schema_matches_models(tmp_path: Path) -> None:
+	"""Схема после всех миграций совпадает с ORM-моделями.
+
+	Autogenerate-сравнение Alembic: любой дрейф (новая колонка в модели
+	без миграции, разошедшийся nullable и т.п.) даст непустой список
+	отличий. Ловит расхождения навсегда — вместо ручной сверки.
+	"""
+	from alembic.autogenerate import compare_metadata
+	from alembic.migration import MigrationContext
+	from sqlalchemy import create_engine
+
+	from pxcontrol.engine.db.models import Base
+
+	db_file = tmp_path / "schema.db"
+	db = Database(f"sqlite+aiosqlite:///{db_file}")
+	await db.init()
+	await db.close()
+
+	engine = create_engine(f"sqlite:///{db_file}")
+	try:
+		with engine.connect() as conn:
+			ctx = MigrationContext.configure(conn)
+			diffs = compare_metadata(ctx, Base.metadata)
+	finally:
+		engine.dispose()
+	assert diffs == [], f"Схема БД разошлась с моделями: {diffs}"
+
+
+async def test_foreign_key_policies(tmp_path: Path) -> None:
+	"""Политики внешних ключей работают: каскады и SET NULL.
+
+	Проверяется связка «PRAGMA foreign_keys=ON на соединении (Database) +
+	политики в схеме (c1a4b83f7e29)»: удаление канала уносит настройки
+	и подписи, удаление бота отвязывает канал, а не оставляет висячую
+	ссылку (SQLite переиспользует id — канал мог «прилипнуть» к чужому
+	боту).
+	"""
+	from sqlalchemy import text
+
+	db_file = tmp_path / "fk.db"
+	db = Database(f"sqlite+aiosqlite:///{db_file}")
+	await db.init()
+	async with db.session_factory() as session:
+		await session.execute(text(
+			"INSERT INTO bots (label, token, created_at, updated_at) "
+			"VALUES ('b', 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		))
+		await session.execute(text(
+			"INSERT INTO channels (title, tg_chat_id, bot_id, userbot_admin,"
+			" created_at, updated_at) VALUES ('c', '-1001', 1, 0,"
+			" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		))
+		await session.execute(text(
+			"INSERT INTO channel_settings (channel_id, name, value) "
+			"VALUES (1, 'enabled', 'false')"
+		))
+		await session.execute(text(
+			"INSERT INTO caption_fields (id, channel_id, name, hashtag,"
+			" multiple, created_at, updated_at) VALUES (1, 1, 'Genre', 1, 0,"
+			" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		))
+		await session.execute(text(
+			"INSERT INTO caption_values (field_id, value, created_at,"
+			" updated_at) VALUES (1, 'drama', CURRENT_TIMESTAMP,"
+			" CURRENT_TIMESTAMP)"
+		))
+		await session.commit()
+
+	async with db.session_factory() as session:
+		await session.execute(text("DELETE FROM bots WHERE id = 1"))
+		await session.commit()
+		bot_id = (await session.execute(
+			text("SELECT bot_id FROM channels WHERE id = 1")
+		)).scalar_one()
+		assert bot_id is None  # SET NULL, а не висячая ссылка
+
+		await session.execute(text("DELETE FROM channels WHERE id = 1"))
+		await session.commit()
+		for table in ("channel_settings", "caption_fields", "caption_values"):
+			count = (await session.execute(
+				text(f"SELECT COUNT(*) FROM {table}")  # noqa: S608 — имена из констант
+			)).scalar_one()
+			assert count == 0, f"{table}: сироты после удаления канала"
+	await db.close()
+
+
 def test_channel_enabled_moves_to_settings(tmp_path: Path) -> None:
 	"""Перенос c8f1d29e4a35: выключенный канал — строкой, колонка удаляется.
 

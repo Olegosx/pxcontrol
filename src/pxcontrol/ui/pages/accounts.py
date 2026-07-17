@@ -27,6 +27,7 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	confirm_delete,
 	error_reporter,
+	exec_dialog,
 	noop,
 	page_layout,
 	row_card,
@@ -131,17 +132,16 @@ class AccountsPage(ScrollArea):
 			self, partial(self._show_diagnosis, bot), self._show_error,
 		)
 
-	def _show_diagnosis(self, bot: BotDto, lines: object) -> None:
+	def _show_diagnosis(self, bot: BotDto, lines: list[str]) -> None:
 		"""Показывает, где состоит бот (или что событий не было)."""
-		items = [str(line) for line in lines] if isinstance(lines, list) else []
-		text = "\n".join(items) or (
+		text = "\n".join(lines) or (
 			"Событий за последние 24 часа нет — Telegram хранит их сутки.\n"
 			"Добавьте бота администратором канала и проверьте снова."
 		)
 		box = MessageBox(f"Где состоит @{bot.username or bot.label}", text, self.window())
 		box.yesButton.setText("Понятно")
 		box.cancelButton.hide()
-		box.exec()
+		exec_dialog(box)
 
 	def _on_add_bot(self) -> None:
 		dialog = FormDialog(
@@ -149,7 +149,7 @@ class AccountsPage(ScrollArea):
 			[("label", "Название (для себя)"), ("token", "Токен от @BotFather")],
 			self.window(),
 		)
-		if not dialog.exec():
+		if not exec_dialog(dialog):
 			return
 		label, token = dialog.value("label"), dialog.value("token")
 		if not (label and token):
@@ -224,7 +224,7 @@ class AccountsPage(ScrollArea):
 			[("code", "Код из Telegram")],
 			self.window(), accept_text="Подтвердить",
 		)
-		if not dialog.exec():
+		if not exec_dialog(dialog):
 			self._cancel_login(account)
 			return
 		run_in_engine(
@@ -250,7 +250,7 @@ class AccountsPage(ScrollArea):
 			[("password", "Пароль 2FA")],
 			self.window(), accept_text="Войти", password_fields=("password",),
 		)
-		if not dialog.exec():
+		if not exec_dialog(dialog):
 			self._cancel_login(account)
 			return
 		run_in_engine(
@@ -279,7 +279,7 @@ class AccountsPage(ScrollArea):
 			("api_id", "api_id с my.telegram.org"), ("api_hash", "api_hash"),
 		]
 		dialog = FormDialog("Новый userbot-аккаунт", fields, self.window())
-		if not dialog.exec():
+		if not exec_dialog(dialog):
 			return
 		label, api_hash = dialog.value("label"), dialog.value("api_hash")
 		if not (label and api_hash and dialog.value("api_id").isdigit()):
@@ -329,7 +329,7 @@ class AccountsPage(ScrollArea):
 			[("label", "Название"), ("api_key", "Ключ API (sk-ant-…)")],
 			self.window(),
 		)
-		if not dialog.exec():
+		if not exec_dialog(dialog):
 			return
 		label, api_key = dialog.value("label"), dialog.value("api_key")
 		if not (label and api_key):

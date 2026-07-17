@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -341,7 +342,9 @@ class CaptionsService:
 			channel = await session.get(Channel, channel_id)
 		mapping = {
 			"video": title.strip(),
-			"quality": self._probe_quality(media_path),
+			# ffprobe — блокирующий подпроцесс: в отдельном потоке,
+			# чтобы не останавливать цикл событий движка
+			"quality": await asyncio.to_thread(self._probe_quality, media_path),
 			"channel": (channel.username or "") if channel else "",
 		}
 		for field in await self.list_fields(channel_id):

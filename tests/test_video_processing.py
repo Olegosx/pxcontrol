@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 
@@ -407,6 +408,47 @@ def test_progress_seconds() -> None:
 	assert _progress_seconds("out_time_ms=2920000\n") == pytest.approx(2.92)
 	assert _progress_seconds("progress=continue\n") is None
 	assert _progress_seconds("out_time_us=N/A\n") is None
+
+
+def _fake_ffmpeg(tmp_path: Path, body: str) -> list[str]:
+	"""Скрипт-подделка ffmpeg: команда для run_streaming без бинаря."""
+	import sys
+
+	script = tmp_path / "fake_ffmpeg.py"
+	script.write_text(body, encoding="utf-8")
+	return [sys.executable, str(script)]
+
+
+def test_run_streaming_survives_chatty_stderr(tmp_path: Path) -> None:
+	"""Болтливый stderr (больше буфера канала ОС) не блокирует кодирование.
+
+	До параллельного чтения stderr процесс замирал навсегда: ffmpeg ждал
+	освобождения буфера stderr, а мы — строк прогресса из stdout.
+	"""
+	from pxcontrol.engine.video.ffmpeg import run_streaming
+
+	cmd = _fake_ffmpeg(tmp_path, (
+		"import sys\n"
+		"sys.stderr.write('предупреждение фильтра\\n' * 20000)\n"  # ~800 КБ
+		"sys.stderr.flush()\n"
+		"sys.stdout.write('out_time_us=1000000\\nout_time_us=2000000\\n')\n"
+	))
+	received: list[float] = []
+	run_streaming(cmd, "тест", total_seconds=2.0, on_progress=received.append)
+	assert received == [pytest.approx(0.5), pytest.approx(1.0)]
+
+
+def test_run_streaming_reports_stderr_on_failure(tmp_path: Path) -> None:
+	"""Ненулевой код возврата — RuntimeError с текстом stderr."""
+	from pxcontrol.engine.video.ffmpeg import run_streaming
+
+	cmd = _fake_ffmpeg(tmp_path, (
+		"import sys\n"
+		"sys.stderr.write('битый вход: поток не распознан\\n')\n"
+		"sys.exit(1)\n"
+	))
+	with pytest.raises(RuntimeError, match="битый вход"):
+		run_streaming(cmd, "тест", total_seconds=1.0, on_progress=None)
 
 
 # --- разбор fps ------------------------------------------------------------------
