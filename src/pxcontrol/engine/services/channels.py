@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Channel
+from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
 from pxcontrol.engine.telegram.types import ChannelInfo
@@ -18,7 +19,7 @@ from pxcontrol.engine.telegram.types import ChannelInfo
 logger = logging.getLogger(__name__)
 
 
-class ChannelError(Exception):
+class ChannelError(EngineError):
 	"""Ошибка операций с каналами (с понятным человеку текстом)."""
 
 

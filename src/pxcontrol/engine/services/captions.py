@@ -27,6 +27,7 @@ from pxcontrol.engine.db.models import (
 	CaptionValue,
 	Channel,
 )
+from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
 
@@ -47,7 +48,7 @@ _FORBIDDEN_IN_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 MAX_FILENAME_BYTES = 240
 
 
-class CaptionsError(Exception):
+class CaptionsError(EngineError):
 	"""Ошибка работы с подписями (с понятным человеку текстом)."""
 
 

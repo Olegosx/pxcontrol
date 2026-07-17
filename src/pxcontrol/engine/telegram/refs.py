@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+from pxcontrol.engine.errors import EngineError
 
-class ChatRefError(Exception):
+
+class ChatRefError(EngineError):
 	"""Ссылку/имя канала не удалось разобрать (с понятным человеку текстом)."""
 
 

@@ -15,13 +15,14 @@ from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AiCredential, Bot, TgAccount
+from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.security.secrets import SecretDecryptionError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
 
 logger = logging.getLogger(__name__)
 
 
-class AccountsError(Exception):
+class AccountsError(EngineError):
 	"""Ошибка операций с аккаунтами (с понятным человеку текстом)."""
 
 

@@ -347,7 +347,9 @@ def test_watermark_window_counts_from_trimmed() -> None:
 	assert wm.start == 5.0 and wm.end == 75.0  # 80 − 5, не 100 − 5
 
 
-def test_prepare_still_shifts_by_trim(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_still_shifts_by_trim(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
 	"""Кадр заставки: момент — от обрезанной версии, извлечение — из исходника."""
 	from pxcontrol.engine.video import frames
 
@@ -359,8 +361,12 @@ def test_prepare_still_shifts_by_trim(monkeypatch: pytest.MonkeyPatch) -> None:
 	frames.prepare_still("in.mp4", "time:5", INFO, "out.png", start_offset=3.5)
 	assert captured == [8.5]  # 5-я секунда обрезанной = 8.5 исходника
 	captured.clear()
-	# своя картинка от обрезки не зависит
-	frames.prepare_still("in.mp4", "image:/x/кадр.png", INFO, "out.png", start_offset=3.5)
+	# своя картинка от обрезки не зависит (файл должен существовать)
+	image = tmp_path / "кадр.png"
+	image.write_bytes(b"png")
+	frames.prepare_still(
+		"in.mp4", f"image:{image}", INFO, "out.png", start_offset=3.5
+	)
 	assert captured == [0.0]
 
 
@@ -417,6 +423,39 @@ def _fake_ffmpeg(tmp_path: Path, body: str) -> list[str]:
 	script = tmp_path / "fake_ffmpeg.py"
 	script.write_text(body, encoding="utf-8")
 	return [sys.executable, str(script)]
+
+
+def test_error_summary_keeps_only_tail() -> None:
+	"""В текст ошибки попадает хвост журнала ffmpeg, а не весь дамп."""
+	from pxcontrol.engine.video.ffmpeg import _error_summary
+
+	dump = "\n".join([f"болтовня {i}" for i in range(50)] + [
+		"", "  Error opening input file /tmp/нет.png.  ",
+		"Error opening input files: No such file or directory",
+	])
+	summary = _error_summary(dump)
+	assert "No such file or directory" in summary
+	assert "болтовня 5" not in summary  # начало дампа отрезано
+	assert len(summary) < 500
+
+
+def test_missing_watermark_fails_before_ffmpeg(tmp_path: Path) -> None:
+	"""Несуществующий вотермарк — точная ошибка до запуска ffmpeg."""
+	from pxcontrol.engine.video import pipeline
+
+	opts = _options(watermark=str(tmp_path / "нет-такого.png"))
+	with pytest.raises(ValueError, match="вотермарка не найден"):
+		pipeline.process(opts)
+
+
+def test_missing_intro_image_fails_before_ffmpeg(tmp_path: Path) -> None:
+	"""Несуществующая картинка заставки — точная ошибка до ffmpeg."""
+	from pxcontrol.engine.video.frames import prepare_still
+
+	with pytest.raises(ValueError, match="Картинка для заставки не найдена"):
+		prepare_still(
+			"input.mp4", f"image:{tmp_path / 'нет.png'}", INFO, "out.png"
+		)
 
 
 def test_run_streaming_survives_chatty_stderr(tmp_path: Path) -> None:

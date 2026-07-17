@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
+from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.refs import normalize_chat_ref
 from pxcontrol.engine.telegram.types import (
 	ChannelInfo,
@@ -23,11 +24,11 @@ from pxcontrol.engine.telegram.types import (
 logger = logging.getLogger(__name__)
 
 
-class LoginError(Exception):
+class LoginError(EngineError):
 	"""Ошибка входа userbot с понятным человеку текстом."""
 
 
-class UserbotUnavailableError(Exception):
+class UserbotUnavailableError(EngineError):
 	"""Userbot не может выполнить операцию (базовый класс, понятный текст).
 
 	Подклассы разводят причины, по которым сервисы принимают разные

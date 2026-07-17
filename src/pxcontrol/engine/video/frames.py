@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 from pxcontrol.engine.video.constants import fitted_size
 from pxcontrol.engine.video.ffmpeg import run_tool
@@ -98,11 +99,16 @@ def prepare_still(
 
 	Raises:
 		RuntimeError: Если ffmpeg не смог подготовить картинку.
-		ValueError: Если режим источника не распознан.
+		ValueError: Режим источника не распознан или картинка не найдена.
 	"""
 	width, height = fitted_size(info.width, info.height)
 	if source.startswith("image:"):
-		extract_still(source.split(":", 1)[1], 0.0, output_path, width, height, ffmpeg_bin)
+		image_path = source.split(":", 1)[1]
+		# проверка до ffmpeg: несуществующий файл дал бы дамп журнала
+		# вместо точной причины
+		if not Path(image_path).is_file():
+			raise ValueError(f"Картинка для заставки не найдена: {image_path}")
+		extract_still(image_path, 0.0, output_path, width, height, ffmpeg_bin)
 		return
 	timestamp = resolve_timestamp(source, info)
 	extract_still(
