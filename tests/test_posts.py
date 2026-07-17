@@ -347,10 +347,11 @@ async def test_publish_userbot_unavailable(db: Database) -> None:
 async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
 	"""Список отложенных собирается из Telegram по активным каналам."""
 	service = PostsService(db, _FakeGateway())
-	await _add_channel(db)
+	channel_id = await _add_channel(db)
 	items = await service.list_scheduled()
 	assert items == [ScheduledPostDto(
-		"Канал", "Отложенный текст", datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+		channel_id, "Канал", "Отложенный текст",
+		datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
 	)]
 
 

@@ -299,6 +299,8 @@ class FieldsDialog(MessageBoxBase):
 		self._channel_id = channel_id
 		self._show_error = error_reporter(self)
 		self._fields: list[FieldDto] = []
+		# шаблон, который сейчас правится (None — форма собирает новый)
+		self._editing: TemplateDto | None = None
 		self.viewLayout.addWidget(SubtitleLabel(
 			f"Подписи канала «{channel_title}»", self
 		))
@@ -346,7 +348,9 @@ class FieldsDialog(MessageBoxBase):
 				self, f"{field.name} ({flags})", f"словарь: {len(field.values)}",
 				bind(self._on_delete_field, field), extra=dictionary,
 			))
-		self._fill_template_list()
+		# перерисовка не сбрасывает правку: состав правящегося шаблона
+		# восстанавливается в списке (например, после добавления поля)
+		self._fill_template_list(self._editing)
 		self._update_pattern_hint(fields)
 		self.widget.adjustSize()  # данные пришли после показа окна
 
@@ -412,19 +416,41 @@ class FieldsDialog(MessageBoxBase):
 			Qt.TextInteractionFlag.TextSelectableByMouse
 		)
 		self.viewLayout.addWidget(self._pattern_hint)
+		self._edit_hint = CaptionLabel("", self)
+		self._edit_hint.hide()
+		self.viewLayout.addWidget(self._edit_hint)
 		row = QHBoxLayout()
 		self._template_name = LineEdit(self)
 		self._template_name.setPlaceholderText("Имя шаблона (например, Фильм)…")
 		row.addWidget(self._template_name, stretch=1)
-		save = PushButton("Сохранить шаблон", self)
-		save.clicked.connect(self._on_save_template)
-		row.addWidget(save)
+		self._cancel_edit_button = PushButton("Отменить правку", self)
+		self._cancel_edit_button.clicked.connect(self._cancel_edit)
+		self._cancel_edit_button.hide()
+		row.addWidget(self._cancel_edit_button)
+		self._save_template_button = PushButton("Сохранить шаблон", self)
+		self._save_template_button.clicked.connect(self._on_save_template)
+		row.addWidget(self._save_template_button)
 		self.viewLayout.addLayout(row)
 
-	def _fill_template_list(self) -> None:
-		"""Заполняет набор полей для сборки нового шаблона."""
+	def _fill_template_list(self, template: TemplateDto | None = None) -> None:
+		"""Заполняет набор полей формы шаблона.
+
+		``template`` — правящийся шаблон: его поля идут первыми в порядке
+		состава и отмечены; остальные поля канала — следом, без отметки.
+		None — все поля без отметок (сборка нового шаблона).
+		"""
 		self._template_list.clear()
-		for field in self._fields:
+		template_ids = (
+			[tf.field.id for tf in template.fields] if template is not None else []
+		)
+		ordered = sorted(
+			self._fields,
+			key=lambda field: (
+				template_ids.index(field.id)
+				if field.id in template_ids else len(template_ids)
+			),
+		)
+		for field in ordered:
 			item = QListWidgetItem(field.name)
 			item.setData(Qt.ItemDataRole.UserRole, field.id)
 			item.setFlags(
@@ -432,7 +458,10 @@ class FieldsDialog(MessageBoxBase):
 				| Qt.ItemFlag.ItemIsUserCheckable
 				| Qt.ItemFlag.ItemIsDragEnabled
 			)
-			item.setCheckState(Qt.CheckState.Unchecked)
+			item.setCheckState(
+				Qt.CheckState.Checked if field.id in template_ids
+				else Qt.CheckState.Unchecked
+			)
 			self._template_list.addItem(item)
 
 	def _show_templates(self, templates: list[TemplateDto]) -> None:
@@ -442,10 +471,37 @@ class FieldsDialog(MessageBoxBase):
 			hint = ", ".join(tf.field.name for tf in template.fields)
 			if template.filename_pattern:
 				hint += " · шаблон имени файла задан"
+			edit = PushButton("Изменить…", self)
+			edit.clicked.connect(bind(self._start_edit_template, template))
 			self._templates_box.addWidget(_row_widget(
-				self, template.name, hint, bind(self._on_delete_template, template),
+				self, template.name, hint,
+				bind(self._on_delete_template, template), extra=edit,
 			))
 		self.widget.adjustSize()  # данные пришли после показа окна
+
+	def _start_edit_template(self, template: TemplateDto) -> None:
+		"""Загружает шаблон в форму: имя, состав с порядком, шаблон имени."""
+		self._editing = template
+		self._template_name.setText(template.name)
+		self._template_pattern.setText(template.filename_pattern or "")
+		self._fill_template_list(template)
+		self._edit_hint.setText(
+			f"Правка шаблона «{template.name}»: сохранение перезапишет его "
+			"(смена имени — переименует)."
+		)
+		self._edit_hint.show()
+		self._cancel_edit_button.show()
+		self._save_template_button.setText("Сохранить изменения")
+
+	def _cancel_edit(self) -> None:
+		"""Возвращает форму в режим сборки нового шаблона."""
+		self._editing = None
+		self._template_name.clear()
+		self._template_pattern.clear()
+		self._fill_template_list()
+		self._edit_hint.hide()
+		self._cancel_edit_button.hide()
+		self._save_template_button.setText("Сохранить шаблон")
 
 	def _checked_field_ids(self) -> list[int]:
 		"""Отмеченные поля в текущем порядке списка."""
@@ -457,22 +513,25 @@ class FieldsDialog(MessageBoxBase):
 		return ids
 
 	def _on_save_template(self) -> None:
+		"""Сохраняет форму: новый шаблон или перезапись правящегося."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.save_template(
 				self._channel_id, str(self._template_name.text()),
 				self._checked_field_ids(),
 				str(self._template_pattern.text()).strip() or None,
+				template_id=self._editing.id if self._editing else None,
 			),
 			self, self._on_template_saved, self._show_error,
 		)
 
 	def _on_template_saved(self, _template: TemplateDto) -> None:
-		self._template_name.clear()
-		self._template_pattern.clear()
+		self._cancel_edit()  # форма снова собирает новый шаблон
 		self._reload()
 
 	def _on_delete_template(self, template: TemplateDto) -> None:
+		if self._editing is not None and self._editing.id == template.id:
+			self._cancel_edit()  # удаляемый шаблон не должен остаться в форме
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.delete_template(template.id),
