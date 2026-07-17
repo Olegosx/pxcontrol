@@ -277,9 +277,17 @@ def process(
 
 	Raises:
 		RuntimeError: Если ffprobe/ffmpeg завершились с ошибкой.
-		ValueError: Режим источника кадра не распознан, обрезка съедает
-			всё видео, окно вотермарка или затухания не помещаются.
+		ValueError: Файл вотермарка/картинки заставки не найден, режим
+			источника кадра не распознан, обрезка съедает всё видео,
+			окно вотермарка или затухания не помещаются.
 	"""
+	# пути из параметров проверяются до запуска ffmpeg: несуществующий
+	# файл дал бы вместо точной причины многострочный журнал ffmpeg
+	if opts.watermark and not Path(opts.watermark).is_file():
+		raise ValueError(
+			f"Файл вотермарка не найден: {opts.watermark} — проверьте "
+			"путь в разделе «Вотермарк»."
+		)
 	info = probe_video(opts.input, opts.ffprobe_bin)
 	# все дальнейшие расчёты — от рабочей (обрезанной) версии
 	work_info = trimmed_info(info, opts.trim_start, opts.trim_end)

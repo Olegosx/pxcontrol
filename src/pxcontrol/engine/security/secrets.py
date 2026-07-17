@@ -13,6 +13,8 @@ from functools import lru_cache
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from pxcontrol.engine.errors import EngineError
+
 logger = logging.getLogger(__name__)
 
 #: Имя сервиса и записи в системном хранилище ключей.
@@ -20,8 +22,12 @@ KEYRING_SERVICE = "pxcontrol"
 KEYRING_KEY_NAME = "master-key"
 
 
-class SecretDecryptionError(RuntimeError):
+class SecretDecryptionError(EngineError):
 	"""Секрет не расшифровался: ключ не тот (с понятным человеку текстом)."""
+
+
+class SecretStorageError(EngineError):
+	"""Системное хранилище ключей недоступно (с понятным человеку текстом)."""
 
 
 class SecretStore:
@@ -56,7 +62,7 @@ def _load_or_create_key() -> bytes:
 	"""Читает ключ из системного хранилища; при первом запуске — создаёт.
 
 	Raises:
-		RuntimeError: Если системное хранилище ключей недоступно.
+		SecretStorageError: Системное хранилище ключей недоступно.
 	"""
 	import keyring
 	from keyring.errors import KeyringError
@@ -70,7 +76,7 @@ def _load_or_create_key() -> bytes:
 			return new_key.encode("ascii")
 		return stored.encode("ascii")
 	except KeyringError as exc:
-		raise RuntimeError(
+		raise SecretStorageError(
 			"Системное хранилище ключей (keyring) недоступно — не могу "
 			"работать с секретами. Убедитесь, что запущен GNOME Keyring "
 			"или KWallet."

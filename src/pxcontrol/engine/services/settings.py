@@ -23,13 +23,14 @@ from sqlalchemy import select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AppSetting, Channel, ChannelSetting
+from pxcontrol.engine.errors import EngineError
 
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
 
-class SettingsError(Exception):
+class SettingsError(EngineError):
 	"""Ошибка работы с настройками (с понятным человеку текстом)."""
 
 

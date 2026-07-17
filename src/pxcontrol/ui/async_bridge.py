@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, Signal
 from shiboken6 import isValid
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.errors import user_message
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,10 @@ def run_in_engine(
 		try:
 			call.done.emit(fut.result())
 		except Exception as exc:  # noqa: BLE001 — любую ошибку показываем в UI
-			# полный трейсбек — в лог; пользователю — только текст
+			# полный трейсбек — в лог; пользователю — читаемый текст:
+			# доменные ошибки как есть, неожиданные — короткой сводкой
+			# (дампы СУБД/библиотек в интерфейс не попадают)
 			logger.exception("Ошибка операции движка: %s", exc)
-			call.failed.emit(str(exc))
+			call.failed.emit(user_message(exc))
 
 	future.add_done_callback(_finished)

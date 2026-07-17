@@ -21,6 +21,7 @@ from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import VideoPreset
+from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.settings import (
 	CHANNEL_DEFAULT_PRESET,
 	VIDEO_PROCESSED_DIR,
@@ -40,7 +41,7 @@ from pxcontrol.paths import media_dir
 logger = logging.getLogger(__name__)
 
 
-class VideoError(Exception):
+class VideoError(EngineError):
 	"""Ошибка подготовки видео (с понятным человеку текстом)."""
 
 

@@ -24,6 +24,7 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.settings import (
 	CHANNEL_ENABLED,
 	VIDEO_PROCESSED_DIR,
@@ -86,7 +87,7 @@ def publish_capabilities(
 	return PublishCapabilities(userbot=userbot_admin, bot=bot_assigned)
 
 
-class PostError(Exception):
+class PostError(EngineError):
 	"""Ошибка создания/отправки поста (с понятным человеку текстом)."""
 
 
@@ -323,7 +324,8 @@ class PostsService:
 			Путь к файлу под новым именем (папка не меняется).
 
 		Raises:
-			PostError: Имя содержит путь или целевое имя уже занято.
+			PostError: Имя содержит путь, целевое имя занято или
+				переименовать не удалось (права, диск).
 		"""
 		if "/" in rename_to or "\\" in rename_to:
 			raise PostError("Новое имя файла не должно содержать путь.")
@@ -333,10 +335,15 @@ class PostsService:
 			return str(source)
 		if target.exists():
 			raise PostError(f"Файл «{rename_to}» уже существует — смените имя.")
-		source.rename(target)
-		preview = source.with_suffix(".png")
-		if preview.is_file():
-			preview.rename(target.with_suffix(".png"))
+		try:
+			source.rename(target)
+			preview = source.with_suffix(".png")
+			if preview.is_file():
+				preview.rename(target.with_suffix(".png"))
+		except OSError as exc:
+			raise PostError(
+				f"Не удалось переименовать файл в «{rename_to}»: {exc.strerror or exc}"
+			) from exc
 		logger.info("Файл переименован: %s → %s", source.name, target.name)
 		return str(target)
 

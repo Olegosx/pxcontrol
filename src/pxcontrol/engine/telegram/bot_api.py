@@ -7,17 +7,18 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.refs import normalize_chat_ref
 from pxcontrol.engine.telegram.types import ChannelInfo, MediaKind
 
 logger = logging.getLogger(__name__)
 
 
-class InvalidBotTokenError(Exception):
+class InvalidBotTokenError(EngineError):
 	"""Telegram отклонил токен бота (или токен неправильного формата)."""
 
 
-class ChannelCheckError(Exception):
+class ChannelCheckError(EngineError):
 	"""Канал не прошёл проверку подключения (с понятным текстом)."""
 
 

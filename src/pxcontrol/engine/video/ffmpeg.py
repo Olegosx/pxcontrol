@@ -18,6 +18,41 @@ logger = logging.getLogger(__name__)
 #: Колбэк прогресса: доля готовности 0.0..1.0.
 ProgressCallback = Callable[[float], None]
 
+#: Сколько последних строк журнала ffmpeg попадает в текст ошибки.
+_ERROR_TAIL_LINES = 3
+
+#: Предел длины текста ошибки — защита интерфейса от многоэкранного дампа.
+_ERROR_TAIL_CHARS = 400
+
+#: Признаки строки с причиной ошибки в журнале ffmpeg.
+_ERROR_MARKERS = ("error", "invalid", "no such", "not found", "denied", "failed")
+
+
+def _error_summary(stderr: str) -> str:
+	"""Короткая суть ошибки из журнала ffmpeg.
+
+	Текст исключения показывается пользователю как есть, поэтому дамп
+	журнала (экраны версии, конфигурации, потоков) в него не попадает:
+	берётся первая строка с признаком ошибки (ffmpeg называет причину —
+	«Invalid PNG signature», «No such file…» — раньше, чем завершается)
+	и последние строки итога. Полный журнал вызывающий пишет в лог.
+	"""
+	lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
+	tail = lines[-_ERROR_TAIL_LINES:]
+	cause = next(
+		(
+			line for line in lines
+			if any(marker in line.lower() for marker in _ERROR_MARKERS)
+		),
+		None,
+	)
+	if cause is not None and cause not in tail:
+		tail = [cause, *tail]
+	summary = " · ".join(tail)
+	if len(summary) > _ERROR_TAIL_CHARS:
+		summary = f"{summary[:_ERROR_TAIL_CHARS]}…"
+	return summary
+
 #: Источник пути к ffmpeg: готовая строка или провайдер (путь из настроек).
 FfmpegSource = str | Callable[[], str]
 
@@ -46,8 +81,13 @@ def run_tool(cmd: list[str], what: str) -> str:
 	logger.debug("%s (%s): %s", tool, what, " ".join(cmd))
 	result = subprocess.run(cmd, capture_output=True, text=True)
 	if result.returncode != 0:
+		logger.error(
+			"%s (%s) завершился с ошибкой, полный вывод:\n%s",
+			tool, what, result.stderr.strip(),
+		)
 		raise RuntimeError(
-			f"{tool} ({what}) завершился с ошибкой: {result.stderr.strip()}"
+			f"{tool} ({what}) завершился с ошибкой: "
+			f"{_error_summary(result.stderr)}"
 		)
 	return result.stdout
 
@@ -90,7 +130,13 @@ def run_streaming(
 	reader.join(timeout=10.0)
 	if proc.returncode != 0:
 		stderr = "".join(stderr_chunks)
-		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {stderr.strip()}")
+		logger.error(
+			"ffmpeg (%s) завершился с ошибкой, полный вывод:\n%s",
+			what, stderr.strip(),
+		)
+		raise RuntimeError(
+			f"ffmpeg ({what}) завершился с ошибкой: {_error_summary(stderr)}"
+		)
 
 
 def _progress_seconds(line: str) -> float | None:
