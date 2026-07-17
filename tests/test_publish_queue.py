@@ -190,7 +190,9 @@ async def test_dto_titles_and_flags(db: Database, tmp_path: Path) -> None:
 	await queue.enqueue(PostDraft(channel_id, text="о" * 100, when=when))
 	first, second = await queue.state()
 	assert first.title == "Новое имя.mp4" and not first.scheduled
+	assert first.when is None  # «сейчас» — интерфейс покажет это словом
 	assert second.title == "о" * 59 + "…" and second.scheduled
+	assert second.when == when  # момент публикации виден в карточке очереди
 	assert second.channel_title == "Канал"
 	assert await queue.has_unfinished()
 	await queue.shutdown()  # гасим воркер с висящей отправкой

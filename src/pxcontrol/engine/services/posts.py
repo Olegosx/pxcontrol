@@ -143,8 +143,13 @@ class _PostPort(Protocol):
 
 @dataclass(frozen=True)
 class ScheduledPostDto:
-	"""Отложенная запись канала (прочитана из Telegram) для интерфейса."""
+	"""Отложенная запись канала (прочитана из Telegram) для интерфейса.
 
+	``channel_id`` — id канала в нашей БД: по нему интерфейс фильтрует
+	список по каналам (название для этого не годится — не уникально).
+	"""
+
+	channel_id: int
 	channel_title: str
 	text_preview: str
 	scheduled_at: datetime
@@ -435,7 +440,7 @@ class PostsService:
 				)
 				continue
 			for message in messages:
-				items.append(self._dto(channel.title, message))
+				items.append(self._dto(channel, message))
 		items.sort(key=lambda item: item.scheduled_at)
 		return items
 
@@ -454,11 +459,13 @@ class PostsService:
 		return channel
 
 	@staticmethod
-	def _dto(channel_title: str, message: ScheduledMessage) -> ScheduledPostDto:
+	def _dto(channel: Channel, message: ScheduledMessage) -> ScheduledPostDto:
 		"""Готовит запись для интерфейса: канал, короткий текст, время."""
 		text = message.text or "(медиа без текста)"
 		preview = text_preview(text, _SCHEDULED_PREVIEW_CHARS)
-		return ScheduledPostDto(channel_title, preview, message.scheduled_at)
+		return ScheduledPostDto(
+			channel.id, channel.title, preview, message.scheduled_at
+		)
 
 
 def _make_thumbnail(

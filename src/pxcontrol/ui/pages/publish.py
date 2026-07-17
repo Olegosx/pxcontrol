@@ -532,16 +532,22 @@ class PublishPage(ScrollArea):
 
 	@staticmethod
 	def _queue_subtitle(item: QueueItemDto) -> str:
-		"""Подпись карточки: канал и человекочитаемый статус."""
+		"""Подпись карточки: канал, момент публикации и статус.
+
+		Момент хранится в UTC (как отдаётся Telegram) и показывается
+		в местном времени — как пользователь вводил его в форме.
+		"""
+		if item.when is None:
+			when_text = "сейчас"
+		else:
+			when_text = item.when.astimezone().strftime("%d.%m.%Y %H:%M")
 		if item.status is QueueItemStatus.SENDING:
 			status = "отправляется"
 		elif item.status is QueueItemStatus.ERROR:
 			status = f"ошибка: {item.error}"
 		else:
 			status = "в очереди"
-			if item.scheduled:
-				status += " · отложенный"
-		return f"{item.channel_title} · {status}"
+		return f"{item.channel_title} · публикация: {when_text} · {status}"
 
 	def _cancel_item(self, item_id: int) -> None:
 		"""Просит движок отменить элемент очереди."""

@@ -83,7 +83,12 @@ def page_layout(page: ScrollArea, spacing: int = 16) -> QVBoxLayout:
 
 
 def clear_layout(layout: QLayout) -> None:
-	"""Удаляет все виджеты из компоновки."""
+	"""Опустошает компоновку: виджеты, вложенные компоновки, распорки.
+
+	Виджеты удаляются; вложенные компоновки чистятся рекурсивно;
+	распорки просто изымаются (владение переходит Python-обёртке,
+	сборщик мусора её освобождает).
+	"""
 	while layout.count():
 		item = layout.takeAt(0)
 		if item is None:
@@ -91,6 +96,10 @@ def clear_layout(layout: QLayout) -> None:
 		widget = item.widget()
 		if widget is not None:
 			widget.deleteLater()
+			continue
+		child = item.layout()
+		if child is not None:
+			clear_layout(child)
 
 
 def exec_dialog(dialog: QDialog) -> bool:

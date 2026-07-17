@@ -16,6 +16,7 @@ import asyncio
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -49,7 +50,8 @@ class QueueItemDto:
 		id: идентификатор элемента (для отмены и снятия с показа).
 		title: человекочитаемо: имя файла или начало текста.
 		channel_title: название канала-получателя.
-		scheduled: пост отложенный (после отправки — запись в канале).
+		when: момент публикации (UTC); None — «сейчас». Задан — пост
+			отложенный: после отправки станет записью в канале.
 		status: текущий статус.
 		progress: доля загрузки 0.0..1.0 (для отправляющегося).
 		error: текст ошибки (для статуса ERROR).
@@ -58,10 +60,15 @@ class QueueItemDto:
 	id: int
 	title: str
 	channel_title: str
-	scheduled: bool
+	when: datetime | None
 	status: QueueItemStatus
 	progress: float
 	error: str | None
+
+	@property
+	def scheduled(self) -> bool:
+		"""Пост отложенный (момент публикации задан)."""
+		return self.when is not None
 
 
 class _Item:
@@ -85,7 +92,7 @@ class _Item:
 			id=self.id,
 			title=_draft_title(self.draft),
 			channel_title=self.channel_title,
-			scheduled=self.draft.when is not None,
+			when=self.draft.when,
 			status=self.status,
 			progress=self.progress,
 			error=self.error,
