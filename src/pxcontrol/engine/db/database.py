@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
 	AsyncEngine,
 	AsyncSession,
@@ -17,6 +19,19 @@ logger = logging.getLogger(__name__)
 
 #: Каталог с миграциями Alembic (внутри пакета).
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+
+
+def _enable_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
+	"""Включает проверку внешних ключей на соединении.
+
+	SQLite по умолчанию не проверяет внешние ключи: без прагмы объявленные
+	каскады (например, настройки и подписи канала) — декоративные, а ссылки
+	на удалённые строки остаются висеть. Прагма действует на соединение,
+	поэтому выставляется обработчиком события ``connect`` движка.
+	"""
+	cursor = dbapi_connection.cursor()
+	cursor.execute("PRAGMA foreign_keys=ON")
+	cursor.close()
 
 
 def _run_migrations(sync_url: str) -> None:
@@ -36,6 +51,7 @@ class Database:
 	def __init__(self, url: str) -> None:
 		self._url = url
 		self._engine: AsyncEngine = create_async_engine(url, future=True)
+		event.listens_for(self._engine.sync_engine, "connect")(_enable_foreign_keys)
 		self.session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
 			self._engine, expire_on_commit=False
 		)

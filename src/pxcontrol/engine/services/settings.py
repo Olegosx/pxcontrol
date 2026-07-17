@@ -85,7 +85,8 @@ CHANNEL_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
 )
 
 #: Стандартные времена публикации канала: список «ЧЧ:ММ», первое — по умолчанию.
-#: Элементы валидирует интерфейс при сохранении; битые пропускаются при чтении.
+#: Сервис проверяет только «это список»; формат элементов валидирует интерфейс
+#: при сохранении и отфильтровывает битые при чтении (parse_hhmm).
 PUBLISH_TIMES: SettingKey[list[str]] = SettingKey(
 	"publish_times", SettingScope.CHANNEL, [], list
 )
@@ -284,13 +285,25 @@ class SettingsService:
 
 	@classmethod
 	def _validated(cls, key: SettingKey[_T], raw: Any) -> _T:
-		"""Проверяет тип значения из БД; битое — умолчание с предупреждением."""
+		"""Проверяет тип значения из БД; битое — умолчание с предупреждением.
+
+		Изменяемые значения (списки) отдаются копией: иначе потребитель,
+		изменив список на месте, испортил бы кэш сервиса или общее
+		умолчание ключа для всего приложения.
+		"""
 		if raw is None:
-			return key.default
+			return cls._detached(key.default)
 		if cls._matches(key, raw):
-			return raw  # type: ignore[no-any-return]  # тип проверен по ключу
+			return cls._detached(raw)  # type: ignore[no-any-return]  # тип проверен по ключу
 		logger.warning(
 			"Настройка %s: значение %r не подходит по типу — умолчание.",
 			key.name, raw,
 		)
-		return key.default
+		return cls._detached(key.default)
+
+	@staticmethod
+	def _detached(value: _T) -> _T:
+		"""Копия изменяемого значения (списка); неизменяемые — как есть."""
+		if isinstance(value, list):
+			return list(value)  # type: ignore[return-value]  # копия того же типа
+		return value

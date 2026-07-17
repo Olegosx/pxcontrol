@@ -14,6 +14,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 
 from sqlalchemy import delete, select
@@ -72,6 +73,65 @@ class VideoDirs:
 	source: str
 	processed: str
 	published: str
+
+
+class IntroSourceKind(StrEnum):
+	"""Вид источника кадра заставки (протокол поля ``intro_source``).
+
+	Хранимый формат — строка «вид» или «вид:значение»; собирать и
+	разбирать её напрямую нельзя — только :func:`build_intro_source`
+	и :func:`parse_intro_source`, иначе интерфейс и движок разъедутся.
+	"""
+
+	RANDOM_MIDDLE = "random-middle"  # случайный кадр из середины
+	RANDOM_CHOICE = "random-choice"  # случайные кадры на выбор пользователю
+	TIME = "time"  # момент времени, значение — секунды
+	IMAGE = "image"  # своя картинка, значение — путь к PNG
+
+
+#: Виды источника кадра без значения (поле «секунды/путь» не нужно).
+INTRO_KINDS_WITHOUT_VALUE = frozenset(
+	{IntroSourceKind.RANDOM_MIDDLE, IntroSourceKind.RANDOM_CHOICE}
+)
+
+
+def build_intro_source(kind: IntroSourceKind, value: str = "") -> str:
+	"""Собирает строку ``intro_source`` («вид» или «вид:значение»)."""
+	if kind in INTRO_KINDS_WITHOUT_VALUE:
+		return str(kind)
+	return f"{kind}:{value.strip()}"
+
+
+def parse_intro_source(source: str) -> tuple[IntroSourceKind, str]:
+	"""Разбирает строку ``intro_source`` на вид и значение.
+
+	Неизвестный вид (битые данные) — откат к случайному кадру из середины.
+	"""
+	kind, _sep, value = source.partition(":")
+	try:
+		return IntroSourceKind(kind), value
+	except ValueError:
+		return IntroSourceKind.RANDOM_MIDDLE, ""
+
+
+#: Стандартные имена папок видео в media/ (настройка пуста — берутся они).
+_VIDEO_DIR_DEFAULTS: dict[SettingKey[str], str] = {
+	VIDEO_SOURCE_DIR: "source",
+	VIDEO_PROCESSED_DIR: "processed",
+	VIDEO_PUBLISHED_DIR: "published",
+}
+
+
+def video_base_dir(settings: SettingsService, key: SettingKey[str]) -> Path:
+	"""Действующий корень папки видео: настройка или стандарт в media/.
+
+	Единственный источник правила «настройка пуста — media/<имя>»:
+	им пользуются и подготовка видео (``VideoService``), и перенос
+	после публикации (``PostsService``) — понимание, где лежат папки,
+	не должно разъезжаться между сервисами.
+	"""
+	custom = settings.cached(key)
+	return Path(custom) if custom else media_dir() / _VIDEO_DIR_DEFAULTS[key]
 
 
 #: Символы, недопустимые в имени подпапки (разделители путей и спецсимволы ОС).
@@ -209,11 +269,6 @@ class VideoService:
 
 	# --- папки видео -----------------------------------------------------------
 
-	def _base_dir(self, key: SettingKey[str], default_name: str) -> Path:
-		"""Базовая папка из настройки; пусто — стандартная в папке приложения."""
-		custom = self._settings.cached(key)
-		return Path(custom) if custom else media_dir() / default_name
-
 	async def dirs_for(self, subdir: str) -> VideoDirs:
 		"""Действующие папки видео для подпапки пресета (создаются на месте).
 
@@ -222,12 +277,8 @@ class VideoService:
 		"""
 		cleaned = sanitize_subdir(subdir)
 		dirs = []
-		for key, default_name in (
-			(VIDEO_SOURCE_DIR, "source"),
-			(VIDEO_PROCESSED_DIR, "processed"),
-			(VIDEO_PUBLISHED_DIR, "published"),
-		):
-			path = self._base_dir(key, default_name) / cleaned
+		for key in (VIDEO_SOURCE_DIR, VIDEO_PROCESSED_DIR, VIDEO_PUBLISHED_DIR):
+			path = video_base_dir(self._settings, key) / cleaned
 			path.mkdir(parents=True, exist_ok=True)
 			dirs.append(str(path))
 		return VideoDirs(*dirs)
@@ -246,6 +297,12 @@ class VideoService:
 			if preset is not None:
 				subdir = preset.subdir
 		return (await self.dirs_for(subdir)).processed
+
+	async def shutdown(self) -> None:
+		"""Убирает временную папку кадров-кандидатов (при остановке движка)."""
+		if self._candidates_dir is not None:
+			shutil.rmtree(self._candidates_dir, ignore_errors=True)
+			self._candidates_dir = None
 
 	async def delete_preset(self, preset_id: int) -> None:
 		"""Удаляет пресет и снимает его у каналов, где он был по умолчанию.
@@ -374,7 +431,7 @@ class VideoService:
 	) -> ProcessingOptions:
 		"""Собирает параметры обработки из переданных полей."""
 		out_dir = (
-			self._base_dir(VIDEO_PROCESSED_DIR, "processed")
+			video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
 			/ sanitize_subdir(fields.subdir)
 		)
 		out_dir.mkdir(parents=True, exist_ok=True)

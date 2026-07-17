@@ -42,7 +42,7 @@ from pxcontrol.engine.services.captions import (
 	build_caption,
 )
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import bind, clear_layout, error_reporter
+from pxcontrol.ui.pages.common import bind, clear_layout, error_reporter, exec_dialog
 
 
 def _row_widget(
@@ -352,7 +352,7 @@ class FieldsDialog(MessageBoxBase):
 
 	def _open_dictionary(self, field: FieldDto) -> None:
 		"""Открывает редактор словаря поля; после — обновляет счётчики."""
-		DictionaryDialog(self._worker, field, self.window()).exec()
+		exec_dialog(DictionaryDialog(self._worker, field, self.window()))
 		self._reload()
 
 	def _update_pattern_hint(self, fields: list[FieldDto]) -> None:

@@ -8,9 +8,11 @@ Telegram, ADR-0010), чтение отложенных, в будущем — ч
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
+from pxcontrol.engine.telegram.refs import normalize_chat_ref
 from pxcontrol.engine.telegram.types import (
 	ChannelInfo,
 	MediaKind,
@@ -26,7 +28,25 @@ class LoginError(Exception):
 
 
 class UserbotUnavailableError(Exception):
-	"""Userbot не подключён или не может выполнить операцию."""
+	"""Userbot не может выполнить операцию (базовый класс, понятный текст).
+
+	Подклассы разводят причины, по которым сервисы принимают разные
+	решения: временная недоступность (не подключён, нет связи, лимит) —
+	не повод менять сохранённые в БД права; подтверждённый отказ
+	Telegram (:class:`UserbotAccessError`) — повод.
+	"""
+
+
+class UserbotNotConnectedError(UserbotUnavailableError):
+	"""Userbot не подключён или соединение с Telegram не удалось."""
+
+
+class UserbotSessionExpiredError(UserbotUnavailableError):
+	"""Сессия userbot отозвана или недействительна — нужен повторный вход."""
+
+
+class UserbotAccessError(UserbotUnavailableError):
+	"""Подтверждённый отказ Telegram: нет прав или канал не виден."""
 
 
 def _default_client(api_id: int, api_hash: str, session: str | None = None) -> Any:
@@ -54,23 +74,74 @@ def _map_login_error(exc: Exception) -> str:
 	return f"Не удалось войти: {exc}"
 
 
-def _map_post_error(exc: Exception) -> str:
-	"""Переводит ошибки операций с постами в понятные сообщения."""
+def _translate_error(exc: Exception) -> UserbotUnavailableError:
+	"""Переводит исключение операции userbot в доменную ошибку.
+
+	Разводит причины по подклассам :class:`UserbotUnavailableError`:
+	сервисы различают «подтверждённый отказ» и «временную недоступность».
+	"""
 	from telethon import errors
 
 	if isinstance(exc, errors.ChatAdminRequiredError):
-		return (
+		return UserbotAccessError(
 			"Userbot не администратор канала — добавьте аккаунт userbot "
 			"администратором с правом публиковать."
 		)
+	if isinstance(
+		exc,
+		errors.AuthKeyUnregisteredError | errors.SessionRevokedError
+		| errors.SessionExpiredError | errors.UserDeactivatedError,
+	):
+		return UserbotSessionExpiredError(
+			"Сессия userbot недействительна — войдите в аккаунт заново: "
+			"Настройки → Аккаунты."
+		)
 	if isinstance(exc, errors.FloodWaitError):
-		return f"Telegram просит подождать {exc.seconds} с."
+		return UserbotUnavailableError(
+			f"Telegram просит подождать {exc.seconds} с."
+		)
 	if isinstance(exc, ValueError):
-		return (
+		# Telethon: «Could not find the input entity» — канал не в поле
+		# зрения аккаунта (числовые ID валидируются до этой точки).
+		return UserbotAccessError(
 			"Userbot не видит этот канал — убедитесь, что аккаунт добавлен "
 			"в канал администратором."
 		)
-	return f"Telegram отклонил операцию: {exc}"
+	if isinstance(exc, ConnectionError | OSError | TimeoutError):
+		return UserbotNotConnectedError(
+			"Нет связи с Telegram — проверьте сеть и попробуйте ещё раз."
+		)
+	return UserbotUnavailableError(f"Telegram отклонил операцию: {exc}")
+
+
+@asynccontextmanager
+async def _mtproto_errors() -> AsyncIterator[None]:
+	"""Переводит исключения Telethon в доменные ошибки userbot.
+
+	Единый маппер операций транспорта (парный ``_bot_errors`` в bot_api);
+	уже доменные ошибки пропускает без изменений.
+	"""
+	try:
+		yield
+	except UserbotUnavailableError:
+		raise
+	except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+		raise _translate_error(exc) from exc
+
+
+def _peer_id(chat_id: str) -> int:
+	"""Числовой ID канала из строки БД (контракт ``ChannelInfo.chat_id``).
+
+	Raises:
+		UserbotUnavailableError: В БД оказался нечисловой ID.
+	"""
+	try:
+		return int(chat_id)
+	except ValueError as exc:
+		raise UserbotUnavailableError(
+			f"Некорректный ID канала в базе: {chat_id!r} — переподключите "
+			"канал на странице «Каналы»."
+		) from exc
 
 
 async def _safe_disconnect(client: Any) -> None:
@@ -97,15 +168,38 @@ class MtprotoTransport:
 		self._creds = (api_id, api_hash, session)
 
 	async def start(self) -> None:
-		"""Подключает клиента, если заданы реквизиты и ещё не подключён."""
+		"""Подключает клиента, если заданы реквизиты и ещё не подключён.
+
+		Клиент считается подключённым только после успешного соединения
+		и проверки, что сессия жива: неудачная попытка не оставляет
+		«полуживого» клиента — повторный ``start()`` попробует заново.
+
+		Raises:
+			UserbotNotConnectedError: Соединение с Telegram не удалось.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+		"""
 		if self._client is not None:
 			return
 		if self._creds is None:
 			logger.info("Аккаунт MTProto не настроен — userbot отключён.")
 			return
 		api_id, api_hash, session = self._creds
-		self._client = self._client_factory(api_id, api_hash, session)
-		await self._client.connect()
+		client = self._client_factory(api_id, api_hash, session)
+		try:
+			await client.connect()
+			authorized = bool(await client.is_user_authorized())
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+			await _safe_disconnect(client)
+			raise UserbotNotConnectedError(
+				f"Не удалось подключить userbot: {exc}"
+			) from exc
+		if not authorized:
+			await _safe_disconnect(client)
+			raise UserbotSessionExpiredError(
+				"Сессия userbot недействительна — войдите в аккаунт заново: "
+				"Настройки → Аккаунты."
+			)
+		self._client = client
 		logger.info("MTProto клиент подключён.")
 
 	async def stop(self) -> None:
@@ -117,7 +211,7 @@ class MtprotoTransport:
 	def _require_client(self) -> Any:
 		"""Возвращает подключённого клиента или объясняет, чего не хватает."""
 		if self._client is None:
-			raise UserbotUnavailableError(
+			raise UserbotNotConnectedError(
 				"Userbot не подключён — войдите в аккаунт: Настройки → Аккаунты."
 			)
 		return self._client
@@ -138,25 +232,24 @@ class MtprotoTransport:
 		видео — их извлекает hachoir.
 		"""
 		client = self._require_client()
+		peer = _peer_id(chat_id)
 
 		def _progress(sent: int, total: int) -> None:
 			if on_progress is not None and total > 0:
 				on_progress(sent / total)
 
-		try:
+		async with _mtproto_errors():
 			if post.media_path is None:
-				await client.send_message(int(chat_id), post.text, schedule=post.when)
+				await client.send_message(peer, post.text, schedule=post.when)
 			else:
 				await client.send_file(
-					int(chat_id), post.media_path, caption=post.text or None,
+					peer, post.media_path, caption=post.text or None,
 					schedule=post.when,
 					supports_streaming=post.media_kind is MediaKind.VIDEO,
 					force_document=post.media_kind is MediaKind.DOCUMENT,
 					progress_callback=_progress,
 					thumb=post.thumb_path,
 				)
-		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-			raise UserbotUnavailableError(_map_post_error(exc)) from exc
 		logger.info(
 			"Пост отправлен в чат %s (%s, %s).", chat_id,
 			post.media_kind if post.media_path else "текст",
@@ -170,26 +263,17 @@ class MtprotoTransport:
 		с бот-путём — ``normalize_chat_ref``).
 
 		Raises:
+			ChatRefError: Введённую ссылку/имя не удалось разобрать.
 			UserbotUnavailableError: Userbot не подключён, канал не найден,
 				userbot не админ или без права публиковать.
 		"""
 		from telethon import utils
 
-		from pxcontrol.engine.telegram.bot_api import (
-			ChannelCheckError,
-			normalize_chat_ref,
-		)
-
 		client = self._require_client()
-		try:
-			ref = normalize_chat_ref(chat_ref)
-		except ChannelCheckError as exc:
-			raise UserbotUnavailableError(str(exc)) from exc
-		try:
+		ref = normalize_chat_ref(chat_ref)
+		async with _mtproto_errors():
 			entity = await client.get_entity(ref)
 			perms = await client.get_permissions(entity, "me")
-		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-			raise UserbotUnavailableError(_map_post_error(exc)) from exc
 		self._ensure_userbot_can_post(perms)
 		return ChannelInfo(
 			chat_id=str(utils.get_peer_id(entity)),
@@ -205,13 +289,13 @@ class MtprotoTransport:
 			UserbotUnavailableError: Прав не хватает.
 		"""
 		if not perms.is_admin:
-			raise UserbotUnavailableError(
+			raise UserbotAccessError(
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
 		rights = getattr(perms.participant, "admin_rights", None)
 		if not perms.is_creator and not getattr(rights, "post_messages", False):
-			raise UserbotUnavailableError(
+			raise UserbotAccessError(
 				"У userbot нет права публиковать сообщения в канале."
 			)
 
@@ -220,11 +304,10 @@ class MtprotoTransport:
 		from telethon.tl.functions.messages import GetScheduledHistoryRequest
 
 		client = self._require_client()
-		try:
-			entity = await client.get_input_entity(int(chat_id))
+		peer_id = _peer_id(chat_id)
+		async with _mtproto_errors():
+			entity = await client.get_input_entity(peer_id)
 			result = await client(GetScheduledHistoryRequest(peer=entity, hash=0))
-		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-			raise UserbotUnavailableError(_map_post_error(exc)) from exc
 		return [
 			ScheduledMessage(
 				text=getattr(message, "message", "") or "",
@@ -305,6 +388,11 @@ class MtprotoLoginManager:
 		entry = self._pending.pop(account_id, None)
 		if entry is not None:
 			await _safe_disconnect(entry[0])
+
+	async def cancel_all(self) -> None:
+		"""Закрывает все незавершённые входы (при остановке движка)."""
+		for account_id in list(self._pending):
+			await self.cancel(account_id)
 
 	def _require(self, account_id: int) -> tuple[Any, str, str]:
 		"""Возвращает состояние входа или объясняет, что вход не начат."""

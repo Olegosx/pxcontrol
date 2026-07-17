@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.services.accounts import AccountsService, mask_secret
+from pxcontrol.engine.services.accounts import (
+	AccountsError,
+	AccountsService,
+	mask_secret,
+)
 from pxcontrol.engine.telegram.bot_api import InvalidBotTokenError
 from pxcontrol.engine.telegram.mtproto import LoginError
 
@@ -44,9 +48,14 @@ class _FakeGateway:
 	def __init__(self) -> None:
 		self.login = _FakeLogin()
 		self.activated: tuple[int, str] | None = None
+		self.deactivations = 0
 
 	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None:
 		self.activated = (api_id, session)
+
+	async def deactivate_userbot(self) -> None:
+		self.deactivations += 1
+		self.activated = None
 
 	async def check_bot_token(self, token: str) -> str:
 		if token == "bad-token":
@@ -101,13 +110,38 @@ async def test_tg_account_and_ai_key_lifecycle(db: Database) -> None:
 	assert await service.list_ai_keys() == []
 
 
+async def test_delete_active_tg_account_reconnects_userbot(db: Database) -> None:
+	"""Удаление аккаунта с сессией переключает userbot на оставшийся.
+
+	Движок не должен публиковать от имени удалённого аккаунта: шлюз
+	отключается и активируется заново по оставшимся сессиям; когда
+	сессий не осталось — userbot выключен.
+	"""
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	first = await service.add_tg_account("Первый", "+7900", 11, "h1")
+	second = await service.add_tg_account("Второй", "+7901", 22, "h2")
+	await service.start_login(first.id)
+	assert await service.confirm_login_code(first.id, "12345") is True
+	await service.start_login(second.id)
+	assert await service.confirm_login_code(second.id, "12345") is True
+
+	await service.delete_tg_account(second.id)
+	assert gateway.deactivations == 1
+	assert gateway.activated == (11, "session-string-ok")  # остался первый
+
+	await service.delete_tg_account(first.id)
+	assert gateway.deactivations == 2
+	assert gateway.activated is None  # сессий не осталось — userbot выключен
+
+
 async def test_bot_whereabouts(db: Database) -> None:
 	"""Диагностика возвращает строки событий; неизвестный бот — ошибка."""
 	service = AccountsService(db, _FakeGateway())
 	bot = await service.add_bot("Публикатор", "123456:AAAbbb")
 	lines = await service.bot_whereabouts(bot.id)
 	assert len(lines) == 1 and "administrator" in lines[0]
-	with pytest.raises(ValueError, match="Бот не найден"):
+	with pytest.raises(AccountsError, match="Бот не найден"):
 		await service.bot_whereabouts(999)
 
 

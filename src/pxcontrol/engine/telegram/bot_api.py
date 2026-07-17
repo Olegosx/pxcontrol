@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from pxcontrol.engine.telegram.refs import normalize_chat_ref
 from pxcontrol.engine.telegram.types import ChannelInfo, MediaKind
 
 logger = logging.getLogger(__name__)
@@ -50,43 +51,6 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 		raise ChannelCheckError(f"{bad_request} (Telegram: {exc.message})") from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
-
-
-def normalize_chat_ref(chat_ref: str) -> str | int:
-	"""Приводит ввод пользователя к виду для Bot API.
-
-	Принимает ``@имя``, ``имя``, ссылки ``t.me/имя`` и ``t.me/c/<число>/…``,
-	числовой ID (в том числе с пробелами внутри). Возвращает ``@имя``
-	или число.
-
-	Raises:
-		ChannelCheckError: Пустая, инвайт- или неразборчивая ссылка.
-	"""
-	ref = chat_ref.strip()
-	for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
-		if ref.lower().startswith(prefix):
-			ref = ref[len(prefix):]
-			break
-	ref = ref.strip("/")
-	if ref.startswith("+"):
-		raise ChannelCheckError(
-			"Инвайт-ссылка (t.me/+…) не подходит — укажите @имя канала "
-			"или его ID (начинается с -100)."
-		)
-	if ref.lower().startswith("c/"):
-		internal = ref[2:].split("/", 1)[0]
-		if internal.isdigit():
-			return int(f"-100{internal}")
-		raise ChannelCheckError(
-			"Не удалось разобрать ссылку t.me/c/… — укажите ID канала (-100…)."
-		)
-	ref = ref.lstrip("@")
-	digits = ref.replace(" ", "")
-	if digits.lstrip("-").isdigit() and digits.lstrip("-"):
-		return int(digits)
-	if not ref:
-		raise ChannelCheckError("Укажите @имя, ссылку t.me/… или ID канала.")
-	return f"@{ref}"
 
 
 def ensure_bot_can_post(member: Any) -> None:
@@ -198,16 +162,31 @@ async def get_bot_events(token: str) -> list[str]:
 
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен.
+		ChannelCheckError: Telegram отклонил запрос (вебхук, параллельный опрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram import Bot
-	from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+	from aiogram.exceptions import (
+		TelegramBadRequest,
+		TelegramConflictError,
+		TelegramNetworkError,
+		TelegramUnauthorizedError,
+	)
 
 	bot = Bot(token)
 	try:
 		updates = await bot.get_updates(timeout=1)
 	except TelegramUnauthorizedError as exc:
 		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
+	except TelegramConflictError as exc:
+		raise ChannelCheckError(
+			"События недоступны: у бота включён вебхук или его опрашивает "
+			"другое приложение."
+		) from exc
+	except TelegramBadRequest as exc:
+		raise ChannelCheckError(
+			f"Telegram отклонил запрос событий. ({exc.message})"
+		) from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
 	finally:
@@ -219,6 +198,7 @@ async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
 	"""Проверяет канал: существует, бот в нём админ с правом публиковать.
 
 	Raises:
+		ChatRefError: Введённую ссылку/имя не удалось разобрать.
 		ChannelCheckError: Канал не найден / бот не добавлен / нет прав.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""

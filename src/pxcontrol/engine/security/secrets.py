@@ -11,13 +11,17 @@ from __future__ import annotations
 import logging
 from functools import lru_cache
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 logger = logging.getLogger(__name__)
 
 #: Имя сервиса и записи в системном хранилище ключей.
 KEYRING_SERVICE = "pxcontrol"
 KEYRING_KEY_NAME = "master-key"
+
+
+class SecretDecryptionError(RuntimeError):
+	"""Секрет не расшифровался: ключ не тот (с понятным человеку текстом)."""
 
 
 class SecretStore:
@@ -31,8 +35,21 @@ class SecretStore:
 		return self._fernet.encrypt(plain.encode("utf-8")).decode("ascii")
 
 	def decrypt(self, token: str) -> str:
-		"""Возвращает исходную строку из зашифрованного представления."""
-		return self._fernet.decrypt(token.encode("ascii")).decode("utf-8")
+		"""Возвращает исходную строку из зашифрованного представления.
+
+		Raises:
+			SecretDecryptionError: Шифртекст не подходит текущему ключу —
+				у ``InvalidToken`` из cryptography пустой текст, и без
+				перевода пользователь видел бы ошибку «ни о чём».
+		"""
+		try:
+			return self._fernet.decrypt(token.encode("ascii")).decode("utf-8")
+		except InvalidToken as exc:
+			raise SecretDecryptionError(
+				"Секрет зашифрован другим ключом (база перенесена с другой "
+				"машины или хранилище ключей пересоздано) — введите секреты "
+				"заново: Настройки → Аккаунты."
+			) from exc
 
 
 def _load_or_create_key() -> bytes:

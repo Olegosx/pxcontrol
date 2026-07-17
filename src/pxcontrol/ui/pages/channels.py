@@ -34,10 +34,12 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	TOAST_DURATION_MS,
+	DtoComboBox,
 	bind,
 	clear_layout,
 	confirm_delete,
 	error_reporter,
+	exec_dialog,
 	noop,
 	page_layout,
 	parse_hhmm,
@@ -61,7 +63,6 @@ class _ConnectDialog(MessageBoxBase):
 
 	def __init__(self, bots: list[BotDto], parent: QWidget) -> None:
 		super().__init__(parent)
-		self._bots = bots
 		self.viewLayout.addWidget(SubtitleLabel("Подключить канал", self))
 		self._way = ComboBox(self)
 		self._way.addItem("Через userbot (аккаунт — админ канала)")
@@ -70,9 +71,10 @@ class _ConnectDialog(MessageBoxBase):
 		self.viewLayout.addWidget(self._way)
 		self._hint = BodyLabel("", self)
 		self.viewLayout.addWidget(self._hint)
-		self._combo = ComboBox(self)
-		for bot in bots:
-			self._combo.addItem(f"{bot.label} (@{bot.username or '—'})")
+		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
+		self._combo.set_items(
+			bots, label=lambda bot: f"{bot.label} (@{bot.username or '—'})"
+		)
 		self.viewLayout.addWidget(self._combo)
 		self._ref = LineEdit(self)
 		self._ref.setPlaceholderText(
@@ -96,10 +98,8 @@ class _ConnectDialog(MessageBoxBase):
 
 	def bot_id(self) -> int | None:
 		"""Идентификатор выбранного бота (None — ботов нет)."""
-		index = int(self._combo.currentIndex())
-		if 0 <= index < len(self._bots):
-			return self._bots[index].id
-		return None
+		bot = self._combo.selected()
+		return bot.id if bot is not None else None
 
 	def chat_ref(self) -> str:
 		"""Введённая ссылка на канал."""
@@ -111,23 +111,24 @@ class _AssignBotDialog(MessageBoxBase):
 
 	def __init__(self, bots: list[BotDto], parent: QWidget) -> None:
 		super().__init__(parent)
-		self._bots = bots
 		self.viewLayout.addWidget(SubtitleLabel("Назначить бота", self))
 		self.viewLayout.addWidget(BodyLabel(
 			"Бот должен быть администратором канала\n"
 			"с правом публиковать сообщения.", self,
 		))
-		self._combo = ComboBox(self)
-		for bot in bots:
-			self._combo.addItem(f"{bot.label} (@{bot.username or '—'})")
+		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
+		self._combo.set_items(
+			bots, label=lambda bot: f"{bot.label} (@{bot.username or '—'})"
+		)
 		self.viewLayout.addWidget(self._combo)
 		self.yesButton.setText("Назначить")
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(420)
 
-	def bot_id(self) -> int:
-		"""Идентификатор выбранного бота."""
-		return self._bots[int(self._combo.currentIndex())].id
+	def bot_id(self) -> int | None:
+		"""Идентификатор выбранного бота (None — ботов нет)."""
+		bot = self._combo.selected()
+		return bot.id if bot is not None else None
 
 
 class _ChannelPrefsDialog(MessageBoxBase):
@@ -144,17 +145,15 @@ class _ChannelPrefsDialog(MessageBoxBase):
 		parent: QWidget,
 	) -> None:
 		super().__init__(parent)
-		self._presets = presets
 		self.viewLayout.addWidget(SubtitleLabel("Настройки канала", self))
 		self.viewLayout.addWidget(BodyLabel(f"«{channel_title}»", self))
 		self.viewLayout.addWidget(BodyLabel("Пресет видео по умолчанию:", self))
-		self._combo = ComboBox(self)
-		self._combo.addItem("(не задан)")
-		for preset in presets:
-			self._combo.addItem(preset.name)
-		ids = [preset.id for preset in presets]
-		if current_id in ids:
-			self._combo.setCurrentIndex(ids.index(current_id) + 1)
+		self._combo: DtoComboBox[PresetDto] = DtoComboBox(
+			self, placeholder="(не задан)"
+		)
+		self._combo.set_items(presets, label=lambda preset: preset.name)
+		if current_id is not None:
+			self._combo.select(lambda preset: preset.id == current_id)
 		self.viewLayout.addWidget(self._combo)
 		self.viewLayout.addWidget(BodyLabel("Времена публикации (ЧЧ:ММ):", self))
 		self._times_edit = LineEdit(self)
@@ -178,10 +177,8 @@ class _ChannelPrefsDialog(MessageBoxBase):
 
 	def preset_id(self) -> int | None:
 		"""Идентификатор выбранного пресета (None — «не задан»)."""
-		index = int(self._combo.currentIndex())
-		if index <= 0:
-			return None
-		return self._presets[index - 1].id
+		preset = self._combo.selected()
+		return preset.id if preset is not None else None
 
 	def times(self) -> list[str]:
 		"""Времена публикации из поля — нормализованные «ЧЧ:ММ».
@@ -358,19 +355,29 @@ class ChannelsPage(ScrollArea):
 		dialog = _ChannelPrefsDialog(
 			channel.title, presets, current_id, times, self.window()
 		)
-		if not dialog.exec():
+		if not exec_dialog(dialog):
 			return
+		preset_id, times_value = dialog.preset_id(), dialog.times()
+		# записи последовательно: успех сообщается только после обеих,
+		# ошибка первой не даёт ложной плашки «сохранено»
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.set_for(
-				CHANNEL_DEFAULT_PRESET, channel.id, dialog.preset_id()
+				CHANNEL_DEFAULT_PRESET, channel.id, preset_id
 			),
-			self, noop, self._show_error,
+			self,
+			partial(self._save_publish_times, channel, times_value),
+			self._show_error,
 		)
+
+	def _save_publish_times(
+		self, channel: ChannelDto, times: list[str], _result: object = None
+	) -> None:
+		"""Вторая запись настроек канала (после успешной первой)."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.set_for(
-				PUBLISH_TIMES, channel.id, dialog.times()
+				PUBLISH_TIMES, channel.id, times
 			),
 			self, partial(self._on_prefs_saved, channel), self._show_error,
 		)
@@ -393,7 +400,11 @@ class ChannelsPage(ScrollArea):
 
 	def _on_rechecked(self, access: ChannelAccess) -> None:
 		"""Показывает итог перепроверки и обновляет список."""
-		parts = [f"userbot: {'админ' if access.userbot_ok else 'не админ'}"]
+		if access.userbot_ok is None:
+			userbot_text = "не удалось проверить (нет связи или userbot отключён)"
+		else:
+			userbot_text = "админ" if access.userbot_ok else "не админ"
+		parts = [f"userbot: {userbot_text}"]
 		if access.bot_ok is not None:
 			parts.append(f"бот: {'права на месте' if access.bot_ok else 'права потеряны'}")
 		summary = " · ".join(parts)
@@ -419,12 +430,15 @@ class ChannelsPage(ScrollArea):
 			self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
 			return
 		dialog = _AssignBotDialog(bots, self.window())
-		if not dialog.exec():
+		if not exec_dialog(dialog):
+			return
+		bot_id = dialog.bot_id()
+		if bot_id is None:
 			return
 		InfoBar.info("Проверка", "Проверяю права бота в канале…", parent=self)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.assign_bot(channel.id, dialog.bot_id()),
+			self._worker.engine.channels.assign_bot(channel.id, bot_id),
 			self, self._on_bot_changed, self._show_error,
 		)
 
@@ -455,7 +469,7 @@ class ChannelsPage(ScrollArea):
 
 	def _open_connect_dialog(self, bots: list[BotDto]) -> None:
 		dialog = _ConnectDialog(bots, self.window())
-		if not dialog.exec():
+		if not exec_dialog(dialog):
 			return
 		if not dialog.chat_ref():
 			self._show_error("Укажите @имя, ссылку или ID канала.")

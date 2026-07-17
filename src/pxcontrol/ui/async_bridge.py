@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, TypeVar
 
 from PySide6.QtCore import QObject, Signal
+from shiboken6 import isValid
 
 from pxcontrol.engine import EngineWorker
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class _AsyncCall(QObject):
@@ -27,17 +30,21 @@ class _AsyncCall(QObject):
 
 def run_in_engine(
 	worker: EngineWorker,
-	coro: Coroutine[Any, Any, Any],
+	coro: Coroutine[Any, Any, _T],
 	parent: QObject,
-	on_done: Callable[..., None],
-	on_error: Callable[..., None],
+	on_done: Callable[[_T], None] | Callable[[], None],
+	on_error: Callable[[str], None] | Callable[[], None],
 ) -> None:
 	"""Запускает корутину в движке; колбэки вызываются в потоке интерфейса.
+
+	Тип результата сквозной: mypy сверяет корутину с ``on_done``.
 
 	Args:
 		worker: Работающий носитель движка.
 		coro: Корутина движка (например, ``engine.accounts.list_bots()``).
-		parent: Владелец временного QObject (обычно страница).
+		parent: Владелец временного QObject (обычно страница). Если
+			владельца удалили до завершения корутины (закрытый диалог),
+			результат тихо выбрасывается — колбэки не вызываются.
 		on_done: Колбэк успеха. Может принимать результат корутины одним
 			аргументом или не принимать ничего — Qt усечёт лишнее.
 		on_error: Колбэк ошибки — получает текст ошибки (или ничего).
@@ -50,6 +57,11 @@ def run_in_engine(
 	future = worker.submit(coro)
 
 	def _finished(fut: Any) -> None:
+		# носитель — ребёнок владельца: удалили владельца (диалог закрыт,
+		# страница умерла) — излучать сигнал уже некуда и опасно
+		if not isValid(call):
+			logger.debug("Результат операции движка выброшен: владелец удалён.")
+			return
 		try:
 			call.done.emit(fut.result())
 		except Exception as exc:  # noqa: BLE001 — любую ошибку показываем в UI

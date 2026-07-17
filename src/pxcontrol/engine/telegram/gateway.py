@@ -43,13 +43,27 @@ class TelegramGateway:
 		await self.mtproto.start()
 
 	async def stop(self) -> None:
-		"""Останавливает подключения."""
+		"""Останавливает подключения (включая незавершённые входы)."""
+		await self.login.cancel_all()
 		await self.mtproto.stop()
 
 	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None:
-		"""Настраивает и подключает userbot (при старте или после входа)."""
+		"""Настраивает и (пере)подключает userbot (при старте или после входа).
+
+		Работающий клиент закрывается: новые реквизиты (повторный вход,
+		другой аккаунт) должны применяться без перезапуска приложения.
+
+		Raises:
+			UserbotNotConnectedError: Соединение с Telegram не удалось.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+		"""
+		await self.mtproto.stop()
 		self.mtproto.configure(api_id, api_hash, session)
 		await self.mtproto.start()
+
+	async def deactivate_userbot(self) -> None:
+		"""Отключает userbot (например, после удаления его аккаунта)."""
+		await self.mtproto.stop()
 
 	# --- Bot API ---------------------------------------------------------------
 
