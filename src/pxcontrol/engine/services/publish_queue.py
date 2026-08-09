@@ -20,7 +20,12 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
-from pxcontrol.engine.services.posts import PostDraft, PostsService, text_preview
+from pxcontrol.engine.services.posts import (
+	PostDraft,
+	PostsService,
+	refresh_draft_media,
+	text_preview,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,10 +112,11 @@ def _draft_title(draft: PostDraft) -> str:
 
 
 class PublishQueue:
-	"""Последовательная отправка постов с прогрессом и отменой.
+	"""Последовательная отправка постов с прогрессом, отменой и повтором.
 
 	Пока элемент отправляется, новые свободно встают в хвост; ошибка
-	или отмена одного элемента не трогает остальные.
+	или отмена одного элемента не трогает остальные. Элемент с ошибкой
+	можно вернуть в очередь на новую попытку (:meth:`retry`).
 	"""
 
 	def __init__(self, posts: PostsService) -> None:
@@ -154,6 +160,30 @@ class PublishQueue:
 				item.status = QueueItemStatus.CANCELLED
 				logger.info("Элемент очереди id=%s отменён (ждал).", item_id)
 				return
+
+	async def retry(self, item_id: int) -> None:
+		"""Возвращает элемент с ошибкой в очередь на новую попытку.
+
+		Черновик перепроверяется, как при постановке (файл мог исчезнуть,
+		отложенное время — пройти); если прошлая попытка успела
+		переименовать файл, черновик обновляется на новое имя. Элементы
+		в других статусах не трогаются.
+
+		Raises:
+			PostError: Черновик больше не годен к отправке — элемент
+				остаётся в ошибке с прежним текстом.
+		"""
+		for item in self._items:
+			if item.id != item_id or item.status is not QueueItemStatus.ERROR:
+				continue
+			item.draft = refresh_draft_media(item.draft)
+			self._posts.validate_draft(item.draft)
+			item.status = QueueItemStatus.PENDING
+			item.progress = 0.0
+			item.error = None
+			self._ensure_worker()
+			logger.info("Элемент id=%s возвращён в очередь на повтор.", item_id)
+			return
 
 	async def dismiss(self, item_id: int) -> None:
 		"""Убирает завершённый элемент из списка (живые не трогаются)."""

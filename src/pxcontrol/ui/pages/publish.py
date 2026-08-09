@@ -508,7 +508,8 @@ class PublishPage(ScrollArea):
 			self._queue_box.addWidget(self._queue_row(item))
 
 	def _queue_row(self, item: QueueItemDto) -> CardWidget:
-		"""Карточка элемента очереди: статус, прогресс, отмена/убрать."""
+		"""Карточка элемента очереди: статус, прогресс и действия
+		(«Отмена» у живого; «Повторить» и «Убрать» у ошибки)."""
 		trailing = QWidget(self)
 		row = QHBoxLayout(trailing)
 		row.setContentsMargins(0, 0, 0, 0)
@@ -520,6 +521,9 @@ class PublishPage(ScrollArea):
 			row.addWidget(bar)
 			self._queue_bars[item.id] = bar
 		if item.status is QueueItemStatus.ERROR:
+			retry = PushButton("Повторить", trailing)
+			retry.clicked.connect(bind(self._retry_item, item.id))
+			row.addWidget(retry)
 			action = PushButton("Убрать", trailing)
 			action.clicked.connect(bind(self._dismiss, item.id))
 		else:
@@ -548,6 +552,17 @@ class PublishPage(ScrollArea):
 		else:
 			status = "в очереди"
 		return f"{item.channel_title} · публикация: {when_text} · {status}"
+
+	def _retry_item(self, item_id: int) -> None:
+		"""Просит движок вернуть элемент с ошибкой в очередь на повтор."""
+		run_in_engine(
+			self._worker, self._worker.engine.publish_queue.retry(item_id),
+			self, self._on_retried, self._show_error,
+		)
+
+	def _on_retried(self, _result: object = None) -> None:
+		"""Повтор принят — карточка обновляется сразу, не по таймеру."""
+		self._poll_queue()
 
 	def _cancel_item(self, item_id: int) -> None:
 		"""Просит движок отменить элемент очереди."""

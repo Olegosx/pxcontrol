@@ -198,6 +198,83 @@ async def test_dto_titles_and_flags(db: Database, tmp_path: Path) -> None:
 	await queue.shutdown()  # гасим воркер с висящей отправкой
 
 
+async def test_retry_error_sends_again(db: Database) -> None:
+	"""Повтор возвращает ошибочный элемент в очередь; вторая попытка уходит."""
+	gateway = _SlowGateway()
+	gateway.release.set()  # отправка без задержки
+	gateway.fail_texts = {"сбойный"}
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="сбойный"))
+	await _wait_status(queue, item, QueueItemStatus.ERROR)
+	gateway.fail_texts = set()  # «сеть починилась»
+	await queue.retry(item)
+	retried = {i.id: i for i in await queue.state()}[item]
+	assert retried.error is None  # прежний текст ошибки снят
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert [post.text for post in gateway.published] == ["сбойный"]
+
+
+async def test_retry_validates_draft_again(db: Database, tmp_path: Path) -> None:
+	"""Повтор перепроверяет черновик: исчезнувший файл — ошибка, статус прежний."""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	gateway.fail_texts = {"с файлом"}
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	attachment = tmp_path / "вложение.pdf"
+	attachment.write_bytes(b"f")
+	item = await queue.enqueue(PostDraft(
+		channel_id, text="с файлом",
+		media_path=str(attachment), media_kind=MediaKind.DOCUMENT,
+	))
+	failed = await _wait_status(queue, item, QueueItemStatus.ERROR)
+	attachment.unlink()  # файл пропал между попытками
+	with pytest.raises(PostError, match="не найден"):
+		await queue.retry(item)
+	still = {i.id: i for i in await queue.state()}[item]
+	assert still.status is QueueItemStatus.ERROR
+	assert still.error == failed.error  # прежний текст ошибки сохранён
+
+
+async def test_retry_after_rename_uses_new_name(
+	db: Database, tmp_path: Path
+) -> None:
+	"""Файл, переименованный неудачной попыткой, при повторе уходит как есть."""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	gateway.fail_texts = {"с файлом"}
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	attachment = tmp_path / "старое.pdf"
+	attachment.write_bytes(b"f")
+	item = await queue.enqueue(PostDraft(
+		channel_id, text="с файлом",
+		media_path=str(attachment), media_kind=MediaKind.DOCUMENT,
+		rename_to="новое.pdf",
+	))
+	await _wait_status(queue, item, QueueItemStatus.ERROR)
+	assert (tmp_path / "новое.pdf").is_file()  # попытка успела переименовать
+	gateway.fail_texts = set()
+	await queue.retry(item)
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	published = gateway.published[0]
+	assert published.media_path == str(tmp_path / "новое.pdf")
+
+
+async def test_retry_ignores_unfinished(db: Database) -> None:
+	"""Повтор действует только на ошибку: живой элемент не трогается."""
+	gateway = _SlowGateway()  # отмашки нет — элемент висит в отправке
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="живой"))
+	await _wait_status(queue, item, QueueItemStatus.SENDING)
+	await queue.retry(item)
+	sending = {i.id: i for i in await queue.state()}[item]
+	assert sending.status is QueueItemStatus.SENDING
+	await queue.shutdown()
+
+
 async def test_dismiss_ignores_unfinished(db: Database) -> None:
 	"""Снять с показа можно только завершённый элемент."""
 	queue = _queue(db, _SlowGateway())

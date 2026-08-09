@@ -14,7 +14,7 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -122,6 +122,26 @@ class PostDraft:
 	media_kind: MediaKind = MediaKind.NONE
 	when: datetime | None = None
 	rename_to: str | None = None
+
+
+def refresh_draft_media(draft: PostDraft) -> PostDraft:
+	"""Возвращает черновик с учётом уже выполненного переименования файла.
+
+	Нужен при повторной отправке после ошибки: переименование выполняется
+	до загрузки, поэтому неудачная попытка могла оставить файл уже под
+	новым именем. Если исходного пути больше нет, а файл с именем
+	``rename_to`` в той же папке есть — черновик указывает на него,
+	и повторное переименование снимается.
+	"""
+	if draft.media_path is None or not draft.rename_to:
+		return draft
+	source = Path(draft.media_path)
+	if source.is_file():
+		return draft
+	target = source.with_name(draft.rename_to)
+	if target.is_file():
+		return replace(draft, media_path=str(target), rename_to=None)
+	return draft
 
 
 class _PostPort(Protocol):
