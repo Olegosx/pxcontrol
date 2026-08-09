@@ -7,6 +7,7 @@ Telegram, ADR-0010), чтение отложенных, в будущем — ч
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -163,6 +164,8 @@ class MtprotoTransport:
 		self._client_factory = client_factory or _default_client
 		self._creds: tuple[int, str, str] | None = None
 		self._client: Any | None = None
+		# одно переподключение за раз: параллельные операции ждут его итога
+		self._reconnect_lock = asyncio.Lock()
 
 	def configure(self, api_id: int, api_hash: str, session: str) -> None:
 		"""Задаёт реквизиты подключения (из БД, ADR-0009)."""
@@ -210,12 +213,50 @@ class MtprotoTransport:
 			self._client = None
 
 	def _require_client(self) -> Any:
-		"""Возвращает подключённого клиента или объясняет, чего не хватает."""
+		"""Возвращает клиента (возможно, без соединения) или объясняет, чего не хватает."""
 		if self._client is None:
 			raise UserbotNotConnectedError(
 				"Userbot не подключён — войдите в аккаунт: Настройки → Аккаунты."
 			)
 		return self._client
+
+	async def _connected_client(self) -> Any:
+		"""Возвращает клиента с живым соединением, при обрыве — переподключает.
+
+		Telethon, исчерпав свои попытки переподключения (например, сеть
+		пропала на несколько минут), остаётся отключённым насовсем —
+		без этой проверки разовый обрыв требовал бы перезапуска
+		приложения. Замок пускает в переподключение одну операцию;
+		остальные ждут и получают уже готового клиента.
+
+		Raises:
+			UserbotNotConnectedError: Userbot не настроен или связь
+				восстановить не удалось.
+			UserbotSessionExpiredError: Сессия отозвана за время простоя.
+		"""
+		client = self._require_client()
+		if client.is_connected():
+			return client
+		async with self._reconnect_lock:
+			client = self._require_client()  # клиент мог смениться за время ожидания
+			if client.is_connected():
+				return client
+			logger.info("Соединение MTProto потеряно — переподключаю…")
+			try:
+				await client.connect()
+				authorized = bool(await client.is_user_authorized())
+			except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+				raise UserbotNotConnectedError(
+					"Нет связи с Telegram — переподключить userbot не удалось. "
+					"Проверьте сеть и повторите операцию."
+				) from exc
+			if not authorized:
+				raise UserbotSessionExpiredError(
+					"Сессия userbot недействительна — войдите в аккаунт "
+					"заново: Настройки → Аккаунты."
+				)
+			logger.info("MTProto клиент переподключён.")
+			return client
 
 	async def publish(
 		self,
@@ -232,7 +273,7 @@ class MtprotoTransport:
 		Миниатюру Telegram принимает, только когда известны размеры
 		видео — их извлекает hachoir.
 		"""
-		client = self._require_client()
+		client = await self._connected_client()
 		peer = _peer_id(chat_id)
 
 		def _progress(sent: int, total: int) -> None:
@@ -270,7 +311,7 @@ class MtprotoTransport:
 		"""
 		from telethon import utils
 
-		client = self._require_client()
+		client = await self._connected_client()
 		ref = normalize_chat_ref(chat_ref)
 		async with _mtproto_errors():
 			entity = await client.get_entity(ref)
@@ -304,7 +345,7 @@ class MtprotoTransport:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""
 		from telethon.tl.functions.messages import GetScheduledHistoryRequest
 
-		client = self._require_client()
+		client = await self._connected_client()
 		peer_id = _peer_id(chat_id)
 		async with _mtproto_errors():
 			entity = await client.get_input_entity(peer_id)

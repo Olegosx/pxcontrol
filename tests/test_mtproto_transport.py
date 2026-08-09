@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -22,11 +23,16 @@ class _FakeClient:
 
 	def __init__(self) -> None:
 		self.connected = False
+		self.connect_calls = 0
 		self.sent: list[tuple[Any, str, Any]] = []
 		self.files: list[dict[str, Any]] = []
 
 	async def connect(self) -> None:
+		self.connect_calls += 1
 		self.connected = True
+
+	def is_connected(self) -> bool:
+		return self.connected
 
 	async def is_user_authorized(self) -> bool:
 		return True
@@ -107,6 +113,76 @@ async def test_start_rejects_revoked_session() -> None:
 	with pytest.raises(UserbotSessionExpiredError, match="заново"):
 		await transport.start()
 	assert revoked.connected is False  # клиент закрыт, не подвис
+
+
+async def test_reconnects_on_demand_after_network_drop() -> None:
+	"""Обрыв соединения чинится перед операцией — без перезапуска приложения."""
+	fake = _FakeClient()
+	transport = _transport(fake)
+	await transport.start()
+	fake.connected = False  # Telethon исчерпал свои попытки и отключился
+	await transport.publish("-1001234", OutgoingPost(text="после обрыва"))
+	assert fake.connected is True
+	assert fake.sent == [(-1001234, "после обрыва", None)]
+
+
+async def test_failed_reconnect_gives_clear_error() -> None:
+	"""Сеть так и не появилась: понятная ошибка; вернулась — чинится само."""
+
+	class _FlakyClient(_FakeClient):
+		def __init__(self) -> None:
+			super().__init__()
+			self.fail_connect = False
+
+		async def connect(self) -> None:
+			if self.fail_connect:
+				raise ConnectionError("нет сети")
+			await super().connect()
+
+	flaky = _FlakyClient()
+	transport = _transport(flaky)
+	await transport.start()
+	flaky.connected = False
+	flaky.fail_connect = True
+	with pytest.raises(UserbotNotConnectedError, match="повторите"):
+		await transport.publish("-1001", OutgoingPost(text="x"))
+	flaky.fail_connect = False  # сеть вернулась — следующая операция чинит сама
+	await transport.publish("-1001", OutgoingPost(text="ожил"))
+	assert [text for _peer, text, _when in flaky.sent] == ["ожил"]
+
+
+async def test_reconnect_detects_revoked_session() -> None:
+	"""Сессию отозвали за время простоя — отдельная ошибка с инструкцией."""
+
+	class _RevocableClient(_FakeClient):
+		def __init__(self) -> None:
+			super().__init__()
+			self.authorized = True
+
+		async def is_user_authorized(self) -> bool:
+			return self.authorized
+
+	client = _RevocableClient()
+	transport = _transport(client)
+	await transport.start()
+	client.connected = False
+	client.authorized = False
+	with pytest.raises(UserbotSessionExpiredError, match="заново"):
+		await transport.get_scheduled("-1001234")
+
+
+async def test_parallel_operations_reconnect_once() -> None:
+	"""Замок пускает в переподключение одну операцию, connect не дублируется."""
+	fake = _FakeClient()
+	transport = _transport(fake)
+	await transport.start()
+	fake.connected = False
+	await asyncio.gather(
+		transport.publish("-1001", OutgoingPost(text="а")),
+		transport.publish("-1001", OutgoingPost(text="б")),
+	)
+	assert fake.connect_calls == 2  # start() + одно переподключение на двоих
+	assert len(fake.sent) == 2
 
 
 async def test_bad_chat_id_gives_clear_error() -> None:
