@@ -32,7 +32,6 @@ from pxcontrol.engine.services.captions import TemplateDto, title_from_filename
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import (
 	BOT_MAX_FILE_BYTES,
-	USERBOT_MAX_FILE_BYTES,
 	PostDraft,
 	publish_capabilities,
 )
@@ -262,10 +261,14 @@ class PublishPage(ScrollArea):
 			channel.bot_id is not None, channel.userbot_admin
 		)
 		if caps.userbot:
+			# лимит зависит от Premium userbot — узнаём у движка
 			self._caps_hint.setText(
-				"Публикация через userbot: все типы контента, файлы "
-				f"до {USERBOT_MAX_FILE_BYTES // 2**30} ГБ, "
+				"Публикация через userbot: все типы контента, "
 				"«сейчас» и отложенные."
+			)
+			run_in_engine(
+				self._worker, self._worker.engine.posts.userbot_limit_gb(),
+				self, self._show_userbot_limit, noop,
 			)
 			self._when_row.set_schedule_allowed(True)
 		elif caps.bot:
@@ -282,6 +285,14 @@ class PublishPage(ScrollArea):
 				"на странице «Каналы»."
 			)
 			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
+
+	def _show_userbot_limit(self, limit_gb: int) -> None:
+		"""Дописывает лимит файла в подсказку (2 ГБ; 4 — с Premium)."""
+		premium = " (Premium)" if limit_gb >= 4 else ""
+		self._caps_hint.setText(
+			"Публикация через userbot: все типы контента, файлы "
+			f"до {limit_gb} ГБ{premium}, «сейчас» и отложенные."
+		)
 
 	def _on_kind_changed(self, kind_key: str) -> None:
 		"""Меняет состав формы под выбранный тип контента."""

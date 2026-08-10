@@ -6,6 +6,21 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+#: Лимит Bot API на отправку файла ботом.
+BOT_MAX_FILE_BYTES = 50 * 1024 * 1024
+
+#: Лимит Telegram на файл через userbot: 4000 частей по 512 КиБ
+#: (ровно 2000 МиБ — меньше «круглых» 2 ГиБ).
+USERBOT_MAX_FILE_BYTES = 4000 * 512 * 1024
+
+#: То же с подпиской Premium: 8000 частей (4000 МиБ).
+USERBOT_PREMIUM_MAX_FILE_BYTES = 8000 * 512 * 1024
+
+
+def userbot_max_file_bytes(premium: bool) -> int:
+	"""Лимит на файл через userbot по статусу подписки аккаунта."""
+	return USERBOT_PREMIUM_MAX_FILE_BYTES if premium else USERBOT_MAX_FILE_BYTES
+
 
 class MediaKind(StrEnum):
 	"""Тип вложения поста."""

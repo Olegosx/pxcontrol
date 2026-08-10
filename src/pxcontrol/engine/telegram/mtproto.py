@@ -146,6 +146,20 @@ def _peer_id(chat_id: str) -> int:
 		) from exc
 
 
+async def _fetch_premium(client: Any) -> bool:
+	"""Статус Premium аккаунта (от него зависит лимит на файл).
+
+	Запрос вспомогательный: его сбой не мешает подключению — статус
+	считается False, действует меньший (безопасный) лимит.
+	"""
+	try:
+		me = await client.get_me()
+	except Exception:  # noqa: BLE001 — деградация к меньшему лимиту
+		logger.warning("Не удалось узнать статус Premium.", exc_info=True)
+		return False
+	return bool(getattr(me, "premium", False))
+
+
 async def _safe_disconnect(client: Any) -> None:
 	"""Закрывает клиента; ошибки закрытия не роняют процесс."""
 	try:
@@ -164,8 +178,18 @@ class MtprotoTransport:
 		self._client_factory = client_factory or _default_client
 		self._creds: tuple[int, str, str] | None = None
 		self._client: Any | None = None
+		self._premium = False
 		# одно переподключение за раз: параллельные операции ждут его итога
 		self._reconnect_lock = asyncio.Lock()
+
+	@property
+	def premium(self) -> bool:
+		"""Есть ли у подключённого аккаунта подписка Premium.
+
+		Определяет лимит на файл (2000/4000 МиБ). Обновляется при каждом
+		подключении и переподключении; без подключения — False.
+		"""
+		return self._premium
 
 	def configure(self, api_id: int, api_hash: str, session: str) -> None:
 		"""Задаёт реквизиты подключения (из БД, ADR-0009)."""
@@ -204,13 +228,18 @@ class MtprotoTransport:
 				"Настройки → Аккаунты."
 			)
 		self._client = client
-		logger.info("MTProto клиент подключён.")
+		self._premium = await _fetch_premium(client)
+		logger.info(
+			"MTProto клиент подключён (Premium: %s).",
+			"да" if self._premium else "нет",
+		)
 
 	async def stop(self) -> None:
 		"""Отключает клиента MTProto."""
 		if self._client is not None:
 			await _safe_disconnect(self._client)
 			self._client = None
+		self._premium = False
 
 	def _require_client(self) -> Any:
 		"""Возвращает клиента (возможно, без соединения) или объясняет, чего не хватает."""
@@ -255,6 +284,8 @@ class MtprotoTransport:
 					"Сессия userbot недействительна — войдите в аккаунт "
 					"заново: Настройки → Аккаунты."
 				)
+			# подписка могла кончиться/появиться за время простоя
+			self._premium = await _fetch_premium(client)
 			logger.info("MTProto клиент переподключён.")
 			return client
 

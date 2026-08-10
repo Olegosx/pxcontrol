@@ -36,7 +36,21 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotUnavailableError,
 )
-from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
+
+# лимиты Telegram живут в telegram/types.py; здесь — явный реэкспорт
+# (интерфейс исторически берёт их из сервиса постов)
+from pxcontrol.engine.telegram.types import (
+	BOT_MAX_FILE_BYTES as BOT_MAX_FILE_BYTES,
+)
+from pxcontrol.engine.telegram.types import (
+	USERBOT_MAX_FILE_BYTES as USERBOT_MAX_FILE_BYTES,
+)
+from pxcontrol.engine.telegram.types import (
+	MediaKind,
+	OutgoingPost,
+	ScheduledMessage,
+	userbot_max_file_bytes,
+)
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source, run_tool
 from pxcontrol.engine.video.frames import resolve_timestamp
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
@@ -46,11 +60,6 @@ logger = logging.getLogger(__name__)
 #: Минимальный запас до времени публикации (Telegram не берёт «почти сейчас»).
 MIN_SCHEDULE_AHEAD = timedelta(seconds=60)
 
-#: Лимит Bot API на отправку файла ботом.
-BOT_MAX_FILE_BYTES = 50 * 1024 * 1024
-
-#: Лимит Telegram на файл через userbot (MTProto).
-USERBOT_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
 
 #: Миниатюра видео для Telegram: вписывается в квадрат, JPEG-качество ffmpeg.
 _THUMB_BOX_PX = 320
@@ -146,6 +155,8 @@ def refresh_draft_media(draft: PostDraft) -> PostDraft:
 
 class _PostPort(Protocol):
 	"""Часть шлюза Telegram, нужная сервису (для подмены в тестах)."""
+
+	def userbot_premium(self) -> bool: ...
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int: ...
 
@@ -250,14 +261,15 @@ class PostsService:
 		"""Полный путь через userbot (MTProto): всё, включая отложенные.
 
 		Raises:
-			PostError: Файл больше лимита Telegram (2 ГБ).
+			PostError: Файл больше лимита Telegram (2 ГБ; 4 — с Premium).
 		"""
+		limit = userbot_max_file_bytes(self._gateway.userbot_premium())
 		if media_path is not None and (
-			Path(media_path).stat().st_size > USERBOT_MAX_FILE_BYTES
+			Path(media_path).stat().st_size > limit
 		):
 			raise PostError(
-				f"Файл больше {USERBOT_MAX_FILE_BYTES // 2**30} ГБ — лимит "
-				"Telegram на файл. Уменьшите файл (например, битрейтом "
+				f"Файл больше {limit // 10**9} ГБ — лимит Telegram на файл "
+				"для этого аккаунта. Уменьшите файл (например, битрейтом "
 				"на странице «Видео»)."
 			)
 		with tempfile.TemporaryDirectory() as tmp:
@@ -395,6 +407,10 @@ class PostsService:
 			)
 			return None
 		return thumb
+
+	async def userbot_limit_gb(self) -> int:
+		"""Лимит userbot на файл в целых ГБ — для подсказок интерфейса."""
+		return userbot_max_file_bytes(self._gateway.userbot_premium()) // 10**9
 
 	async def channel_title(self, channel_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).

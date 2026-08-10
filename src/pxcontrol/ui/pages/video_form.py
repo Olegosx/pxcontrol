@@ -332,3 +332,17 @@ class PresetForm(QWidget):
 		"""Битрейт из регулятора: Мбит/с → кбит/с; 0 — «как в оригинале»."""
 		mbps = float(self._bitrate.value())
 		return int(round(mbps * 1000)) if mbps > 0 else None
+
+	def suggest_bitrate(self, mbps: float) -> bool:
+		"""Подставляет рекомендованный битрейт, если поле не занято.
+
+		Заполненное вручную или пресетом значение не трогается —
+		автоподстановка действует только на «0 — как в оригинале».
+
+		Returns:
+			True, если значение подставлено.
+		"""
+		if float(self._bitrate.value()) > 0:
+			return False
+		self._bitrate.setValue(mbps)
+		return True

@@ -190,6 +190,8 @@ class AccountsPage(ScrollArea):
 	def _account_row(self, account: TgAccountDto) -> CardWidget:
 		"""Карточка userbot-аккаунта: статус входа и кнопка «Войти»."""
 		status = "вход выполнен ✓" if account.logged_in else "вход не выполнен"
+		if account.premium:
+			status += " · Premium (файлы до 4 ГБ)"
 		trailing: QWidget | None = None
 		if not account.logged_in:
 			login_button = PushButton("Войти", self)

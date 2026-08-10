@@ -50,6 +50,9 @@ class _FakeGateway:
 		self.activated: tuple[int, str] | None = None
 		self.deactivations = 0
 
+	def userbot_premium(self) -> bool:
+		return False
+
 	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None:
 		self.activated = (api_id, session)
 

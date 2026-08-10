@@ -24,6 +24,7 @@ class _FakeClient:
 	def __init__(self) -> None:
 		self.connected = False
 		self.connect_calls = 0
+		self.me_premium = False
 		self.sent: list[tuple[Any, str, Any]] = []
 		self.files: list[dict[str, Any]] = []
 
@@ -33,6 +34,9 @@ class _FakeClient:
 
 	def is_connected(self) -> bool:
 		return self.connected
+
+	async def get_me(self) -> Any:
+		return SimpleNamespace(premium=self.me_premium)
 
 	async def is_user_authorized(self) -> bool:
 		return True
@@ -113,6 +117,44 @@ async def test_start_rejects_revoked_session() -> None:
 	with pytest.raises(UserbotSessionExpiredError, match="заново"):
 		await transport.start()
 	assert revoked.connected is False  # клиент закрыт, не подвис
+
+
+async def test_premium_tracked_across_lifecycle() -> None:
+	"""Статус Premium берётся при подключении, живёт до отключения."""
+	fake = _FakeClient()
+	fake.me_premium = True
+	transport = _transport(fake)
+	assert transport.premium is False  # до подключения статус неизвестен
+	await transport.start()
+	assert transport.premium is True
+	await transport.stop()
+	assert transport.premium is False
+
+
+async def test_premium_refreshed_on_reconnect() -> None:
+	"""Переподключение перечитывает статус: подписка могла кончиться."""
+	fake = _FakeClient()
+	fake.me_premium = True
+	transport = _transport(fake)
+	await transport.start()
+	assert transport.premium is True
+	fake.connected = False  # обрыв; за время простоя подписка кончилась
+	fake.me_premium = False
+	await transport.publish("-1001", OutgoingPost(text="x"))
+	assert transport.premium is False
+
+
+async def test_get_me_failure_defaults_to_no_premium() -> None:
+	"""Сбой get_me не мешает подключению: действует меньший лимит."""
+
+	class _NoMeClient(_FakeClient):
+		async def get_me(self) -> Any:
+			raise RuntimeError("нет ответа")
+
+	client = _NoMeClient()
+	transport = _transport(client)
+	await transport.start()  # подключение не сорвалось
+	assert transport.premium is False
 
 
 async def test_reconnects_on_demand_after_network_drop() -> None:

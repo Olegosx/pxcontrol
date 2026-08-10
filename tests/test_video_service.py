@@ -368,3 +368,60 @@ async def test_prepare_wraps_processor_errors(
 	service = VideoService(db, "ffmpeg", processor=_boom)
 	with pytest.raises(VideoError, match="Обработка не удалась"):
 		await service.prepare(str(source), PresetFields(name="Пустой"))
+
+
+# --- рекомендация битрейта -------------------------------------------------
+
+
+def test_recommended_bitrate_formula() -> None:
+	"""Битрейт даёт размер «лимит минус 1 %» за вычетом аудио 192 кбит/с."""
+	from pxcontrol.engine.services.video import recommended_bitrate_kbps
+
+	# лимит 2 000 000 000 байт, час видео: бюджет 0.99 × 8 / 3600 / 1000
+	kbps = recommended_bitrate_kbps(3600.0, 2_000_000_000)
+	assert kbps == int(2_000_000_000 * 0.99 * 8 / 3600 / 1000) - 192
+	# итоговый размер (видео + аудио) не превышает лимит
+	total_bits = (kbps + 192) * 1000 * 3600
+	assert total_bits / 8 <= 2_000_000_000
+	with pytest.raises(VideoError, match="ffprobe"):
+		recommended_bitrate_kbps(0.0, 2_000_000_000)
+	with pytest.raises(VideoError, match="длинное"):
+		recommended_bitrate_kbps(10**9, 2_000_000_000)  # вечное видео
+
+
+async def test_bitrate_advice_only_for_oversized(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Совет даётся только файлу больше лимита; учитывает Premium и обрезку."""
+	from pxcontrol.engine.services.video import BitrateAdvice
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.userbot_max_file_bytes",
+		lambda premium: 200_000_000 if premium else 2_000_000,
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.probe_video",
+		lambda _p, _b: VideoInfo(1920, 1080, 100.0, 25.0, True),
+	)
+	small = tmp_path / "small.mp4"
+	small.write_bytes(b"x" * 1_000_000)
+	big = tmp_path / "big.mp4"
+	big.write_bytes(b"x" * 2_500_000)
+
+	premium = False
+	service = VideoService(
+		db, "ffmpeg", processor=_FakeProcessor(),
+		userbot_premium=lambda: premium,
+	)
+	# файл в лимите — совета нет; несуществующий путь — тоже
+	assert await service.bitrate_advice(str(small)) is None
+	assert await service.bitrate_advice(str(tmp_path / "нет.mp4")) is None
+	# больше лимита — совет с формулой от длительности после обрезки
+	advice = await service.bitrate_advice(str(big), trim_start=40.0, trim_end=10.0)
+	assert isinstance(advice, BitrateAdvice)
+	expected = int(2_000_000 * 0.99 * 8 / 50.0 / 1000) - 192
+	assert advice.kbps == expected
+	# Premium поднимает лимит — большой файл перестаёт требовать совета
+	premium = True
+	assert await service.bitrate_advice(str(big)) is None

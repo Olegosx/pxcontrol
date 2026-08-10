@@ -39,7 +39,10 @@ class Engine:
 			self.db, self.gateway, self._ffmpeg_path, self.settings
 		)
 		self.publish_queue = PublishQueue(self.posts)
-		self.video = VideoService(self.db, self._ffmpeg_path, self.settings)
+		self.video = VideoService(
+			self.db, self._ffmpeg_path, self.settings,
+			userbot_premium=self.gateway.userbot_premium,
+		)
 		self.captions = CaptionsService(self.db, self._ffmpeg_path)
 
 	def _ffmpeg_path(self) -> str:

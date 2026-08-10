@@ -30,8 +30,9 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 	SettingsService,
 )
+from pxcontrol.engine.telegram.types import userbot_max_file_bytes
 from pxcontrol.engine.video import ProcessingOptions, process
-from pxcontrol.engine.video.constants import fitted_size
+from pxcontrol.engine.video.constants import AUDIO_BITRATE, fitted_size
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
 from pxcontrol.engine.video.frames import extract_still, resolve_timestamp
 from pxcontrol.engine.video.pipeline import ProgressCallback
@@ -43,6 +44,55 @@ logger = logging.getLogger(__name__)
 
 class VideoError(EngineError):
 	"""Ошибка подготовки видео (с понятным человеку текстом)."""
+
+
+#: Целевая доля лимита Telegram: 1 % запаса на контейнер и колебания
+#: кодека (итог должен быть «лимит минус 1 %»).
+_TARGET_SIZE_RATIO = 0.99
+
+#: Битрейт аудио конвейера в кбит/с (из constants.AUDIO_BITRATE, «192k»).
+_AUDIO_KBPS = int(AUDIO_BITRATE.rstrip("k"))
+
+
+@dataclass(frozen=True)
+class BitrateAdvice:
+	"""Рекомендация битрейта для исходника больше лимита Telegram.
+
+	Attributes:
+		limit_gb: лимит аккаунта в целых ГБ (2; 4 — с Premium).
+		kbps: битрейт видео, дающий размер «лимит минус 1 %».
+	"""
+
+	limit_gb: int
+	kbps: int
+
+	@property
+	def mbps(self) -> float:
+		"""Значение для поля «Качество, Мбит/с» (вниз до 0,01)."""
+		return self.kbps // 10 / 100
+
+
+def recommended_bitrate_kbps(duration_s: float, max_bytes: int) -> int:
+	"""Битрейт видео (кбит/с), дающий файл размером «лимит минус 1 %».
+
+	Из бюджета вычитается фиксированный битрейт аудио конвейера
+	(:data:`_AUDIO_KBPS`); запас в 1 % покрывает накладные расходы
+	контейнера MP4.
+
+	Raises:
+		VideoError: Длительность неположительна или бюджета не хватает
+			даже на минимальный битрейт видео.
+	"""
+	if duration_s <= 0:
+		raise VideoError("Длительность видео неизвестна — ffprobe не помог.")
+	total_kbps = max_bytes * _TARGET_SIZE_RATIO * 8 / duration_s / 1000
+	video_kbps = int(total_kbps) - _AUDIO_KBPS
+	if video_kbps < 100:
+		raise VideoError(
+			"Видео слишком длинное: в лимит Telegram не уложиться даже "
+			"с минимальным качеством."
+		)
+	return video_kbps
 
 
 @dataclass(frozen=True)
@@ -191,15 +241,52 @@ class VideoService:
 		ffmpeg_path: FfmpegSource,
 		settings: SettingsService | None = None,
 		processor: Callable[[ProcessingOptions, ProgressCallback | None], None] = process,
+		userbot_premium: Callable[[], bool] = lambda: False,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
 		экземпляр поверх той же БД (для тестов это эквивалентно:
-		настройки каналов не кэшируются)."""
+		настройки каналов не кэшируются). ``userbot_premium`` — провайдер
+		статуса Premium userbot (определяет лимит файла для рекомендации
+		битрейта)."""
 		self._db = db
 		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер: путь из настроек
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._processor = processor  # подменяется в тестах
+		self._userbot_premium = userbot_premium
 		self._candidates_dir: str | None = None  # партия кадров-кандидатов
+
+	async def bitrate_advice(
+		self, source_path: str, trim_start: float = 0.0, trim_end: float = 0.0
+	) -> BitrateAdvice | None:
+		"""Рекомендация битрейта, если исходник больше лимита Telegram.
+
+		None — файла нет, он не читается ffprobe (подсказка вспомогательная)
+		или укладывается в лимит аккаунта (2000/4000 МиБ по статусу
+		Premium). Длительность считается после обрезки краёв.
+
+		Raises:
+			VideoError: Даже минимальный битрейт не впишет видео в лимит.
+		"""
+		path = Path(source_path)
+		if not path.is_file():
+			return None
+		limit = userbot_max_file_bytes(self._userbot_premium())
+		if path.stat().st_size <= limit:
+			return None
+		try:
+			info = await asyncio.to_thread(
+				probe_video, source_path, ffprobe_bin_for(self._ffmpeg())
+			)
+		except (OSError, RuntimeError, ValueError):
+			logger.warning(
+				"Рекомендация битрейта: исходник %s не прочитан.",
+				source_path, exc_info=True,
+			)
+			return None
+		duration = trimmed_info(info, trim_start, trim_end).duration
+		return BitrateAdvice(
+			limit // 10**9, recommended_bitrate_kbps(duration, limit)
+		)
 
 	# --- пресеты -----------------------------------------------------------
 

@@ -56,6 +56,8 @@ class _TelegramPort(Protocol):
 
 	async def deactivate_userbot(self) -> None: ...
 
+	def userbot_premium(self) -> bool: ...
+
 
 def mask_secret(secret: str) -> str:
 	"""Возвращает замаскированное представление секрета для показа в UI.
@@ -81,13 +83,18 @@ class BotDto:
 
 @dataclass(frozen=True)
 class TgAccountDto:
-	"""Userbot-аккаунт для показа в интерфейсе."""
+	"""Userbot-аккаунт для показа в интерфейсе.
+
+	``premium`` — статус подписки подключённого аккаунта (True только
+	у активного: от него зависит лимит файла 2/4 ГБ).
+	"""
 
 	id: int
 	label: str
 	phone: str | None
 	api_id: int
 	logged_in: bool
+	premium: bool = False
 
 
 @dataclass(frozen=True)
@@ -175,10 +182,24 @@ class AccountsService:
 	# --- userbot (MTProto) --------------------------------------------------
 
 	async def list_tg_accounts(self) -> list[TgAccountDto]:
-		"""Возвращает все userbot-аккаунты."""
+		"""Возвращает все userbot-аккаунты.
+
+		Статус Premium отмечается только активному аккаунту (первый по id
+		с сессией — правило :meth:`activate_stored_userbot`): признак
+		у шлюза один на подключение, приписывать его всем вошедшим нельзя.
+		"""
 		async with self._db.session_factory() as session:
-			rows = (await session.execute(select(TgAccount).order_by(TgAccount.id))).scalars()
-			return [self._acc_dto(a) for a in rows]
+			rows = list(
+				(await session.execute(
+					select(TgAccount).order_by(TgAccount.id)
+				)).scalars()
+			)
+		active_id = next((a.id for a in rows if a.session is not None), None)
+		premium = self._gateway.userbot_premium()
+		return [
+			self._acc_dto(a, premium=premium and a.id == active_id)
+			for a in rows
+		]
 
 	async def add_tg_account(
 		self, label: str, phone: str | None, api_id: int, api_hash: str
@@ -247,9 +268,10 @@ class AccountsService:
 		logger.info("Userbot «%s» подключён.", account.label)
 
 	@staticmethod
-	def _acc_dto(acc: TgAccount) -> TgAccountDto:
+	def _acc_dto(acc: TgAccount, premium: bool = False) -> TgAccountDto:
 		return TgAccountDto(
-			acc.id, acc.label, acc.phone, acc.api_id, logged_in=acc.session is not None
+			acc.id, acc.label, acc.phone, acc.api_id,
+			logged_in=acc.session is not None, premium=premium,
 		)
 
 	# --- вход userbot ---------------------------------------------------------

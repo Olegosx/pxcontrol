@@ -65,6 +65,10 @@ class TelegramGateway:
 		"""Отключает userbot (например, после удаления его аккаунта)."""
 		await self.mtproto.stop()
 
+	def userbot_premium(self) -> bool:
+		"""Есть ли у подключённого userbot подписка Premium (лимит файла)."""
+		return self.mtproto.premium
+
 	# --- Bot API ---------------------------------------------------------------
 
 	async def check_bot_token(self, token: str) -> str:

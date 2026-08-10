@@ -33,6 +33,9 @@ class _SlowGateway:
 		self.published: list[OutgoingPost] = []
 		self.fail_texts: set[str] = set()
 
+	def userbot_premium(self) -> bool:
+		return False
+
 	async def publish(
 		self, chat_id: str, post: OutgoingPost,
 		on_progress: ProgressCallback | None = None,

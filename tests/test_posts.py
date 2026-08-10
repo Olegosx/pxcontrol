@@ -29,6 +29,10 @@ class _FakeGateway:
 		self.media: list[tuple[str, str, str, str, str]] = []
 		self.published: list[tuple[str, OutgoingPost]] = []
 		self.userbot_ok = True
+		self.premium = False
+
+	def userbot_premium(self) -> bool:
+		return self.premium
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
 		self.sent.append((token, chat_id, text))
@@ -408,20 +412,40 @@ async def test_publish_rejects_disabled_channel(db: Database) -> None:
 async def test_publish_userbot_rejects_oversized_file(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	"""Файл больше лимита Telegram (2 ГБ) отклоняется до загрузки."""
+	"""Файл больше лимита аккаунта отклоняется до загрузки; Premium — щедрее."""
 	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts.USERBOT_MAX_FILE_BYTES", 10
+		"pxcontrol.engine.services.posts.userbot_max_file_bytes",
+		lambda premium: 20 if premium else 10,
 	)
 	big = tmp_path / "big.bin"
 	big.write_bytes(b"x" * 11)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
+	draft = PostDraft(
+		channel_id, media_path=str(big), media_kind=MediaKind.DOCUMENT,
+	)
 	with pytest.raises(PostError, match="лимит"):
-		await service.publish(PostDraft(
-			channel_id, media_path=str(big), media_kind=MediaKind.DOCUMENT,
-		))
+		await service.publish(draft)
 	assert gateway.published == []
+	# тот же файл у Premium-аккаунта проходит (лимит выше)
+	gateway.premium = True
+	await service.publish(draft)
+	assert len(gateway.published) == 1
+
+
+def test_userbot_limits_are_telegram_exact() -> None:
+	"""Лимиты — точные значения Telegram (части по 512 КиБ), не «круглые» ГиБ."""
+	from pxcontrol.engine.telegram.types import (
+		USERBOT_MAX_FILE_BYTES,
+		USERBOT_PREMIUM_MAX_FILE_BYTES,
+		userbot_max_file_bytes,
+	)
+
+	assert USERBOT_MAX_FILE_BYTES == 2_097_152_000  # 2000 МиБ < 2 ГиБ
+	assert USERBOT_PREMIUM_MAX_FILE_BYTES == 4_194_304_000  # 4000 МиБ
+	assert userbot_max_file_bytes(False) == USERBOT_MAX_FILE_BYTES
+	assert userbot_max_file_bytes(True) == USERBOT_PREMIUM_MAX_FILE_BYTES
 
 
 async def test_published_video_moves_to_published_dir(

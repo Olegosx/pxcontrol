@@ -34,6 +34,7 @@ from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import text_preview
 from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET
 from pxcontrol.engine.services.video import (
+	BitrateAdvice,
 	IntroSourceKind,
 	PresetDto,
 	PresetFields,
@@ -125,8 +126,37 @@ class VideoPage(ScrollArea):
 		layout.addLayout(src_row)
 
 	def _on_source_changed(self, text: str) -> None:
-		"""Просмотр доступен, только когда путь указывает на существующий файл."""
-		self._play_button.setEnabled(Path(text.strip()).is_file())
+		"""Реакция на выбор исходника: просмотр и рекомендация битрейта.
+
+		Просмотр доступен, только когда путь указывает на существующий
+		файл. Для файла больше лимита Telegram движок считает
+		рекомендуемый битрейт (размер итога — лимит минус 1 %).
+		"""
+		path = text.strip()
+		is_file = Path(path).is_file()
+		self._play_button.setEnabled(is_file)
+		if not is_file:
+			return
+		fields = self._form.fields("")
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.bitrate_advice(
+				path, fields.trim_start, fields.trim_end
+			),
+			self, self._on_bitrate_advice, self._show_error,
+		)
+
+	def _on_bitrate_advice(self, advice: BitrateAdvice | None) -> None:
+		"""Подставляет рекомендованный битрейт (только поверх «0»)."""
+		if advice is None:
+			return
+		if self._form.suggest_bitrate(advice.mbps):
+			InfoBar.info(
+				"Исходник больше лимита Telegram",
+				f"Лимит {advice.limit_gb} ГБ — в «Качество» подставлено "
+				f"{advice.mbps:g} Мбит/с (итог: лимит минус 1 %).",
+				parent=self.window(),
+			)
 
 	def _play_source(self) -> None:
 		"""Открывает исходник системным плеером (встроенного пока нет)."""
