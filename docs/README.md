@@ -32,6 +32,7 @@
 | [README.md](03-modules/README.md) | Карта модулей | 🟡 |
 | [channels.md](03-modules/channels.md) | Управление каналами | 🟢 |
 | [telegram-gateway.md](03-modules/telegram-gateway.md) | Шлюз Telegram (Bot API + MTProto) | 🟢 |
+| [telegram-filenames.md](03-modules/telegram-filenames.md) | Правила Telegram для имён файлов (опыт) | 🟢 |
 | [scheduler.md](03-modules/scheduler.md) | Расписание: отложенные записи из Telegram | 🟢 |
 | [video-processing.md](03-modules/video-processing.md) | Подготовка видео | 🟢 |
 | [captions.md](03-modules/captions.md) | Подписи к постам (шаблоны) | 🟢 |
