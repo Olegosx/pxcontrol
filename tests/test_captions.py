@@ -154,6 +154,62 @@ async def test_render_filename(
 	assert name == "Best, Lara Croft (action, drama) 1080 (@mych).mp4"
 
 
+async def test_render_filename_fits_telegram_limit(
+	db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Длинное имя режется до законченного слова в пределах лимита Telegram."""
+	from pxcontrol.engine.services.captions import TELEGRAM_MAX_STEM_CHARS
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.captions.probe_video",
+		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
+	)
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db, username="nature_docs")
+	tags = await service.add_field(channel_id, "Tags", hashtag=True, multiple=True)
+	template = await service.save_template(
+		channel_id, "Т", [tags.id], "{video},@{channel},{Tags}"
+	)
+	values = [
+		"4K", "8K", "Sunrise", "Mountain", "Twilight", "Sunsets",
+		"Wildlife", "Lake", "Meadows",
+	]
+	name = await service.render_filename(
+		template.id, channel_id, "WinterMorningLights",
+		{tags.id: values}, "/x/v.mp4",
+	)
+	stem = name.removesuffix(".mp4")
+	assert len(stem) <= TELEGRAM_MAX_STEM_CHARS
+	# начало нетронуто; срез пришёлся на запятую после «Sunsets» —
+	# висячая запятая убрана, имя кончается законченным словом
+	assert stem == (
+		"WinterMorningLights,@nature_docs,"
+		"4K, 8K, Sunrise, Mountain, Twilight, Sunsets"
+	)
+
+
+async def test_render_filename_cuts_long_title_at_word(
+	db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Огромное название без полей режется по границе слова, без огрызков."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.captions.probe_video",
+		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
+	)
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
+	template = await service.save_template(channel_id, "Т", [field.id], "{video}")
+	name = await service.render_filename(
+		template.id, channel_id, "Длинное Слово " * 20, {}, "/x/v.mp4"
+	)
+	stem = name.removesuffix(".mp4")
+	assert len(stem) <= 78
+	assert stem.endswith("Слово") or stem.endswith("Длинное")
+	# срез не оставил обрубка: стем состоит из целых слов исходника
+	assert all(w in ("Длинное", "Слово") for w in stem.split())
+
+
 async def test_render_filename_edge_cases(
 	db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -194,11 +250,14 @@ async def test_dictionary_add_and_delete_values(db: Database) -> None:
 		await service.add_values(999, ["x"])
 
 
-async def test_render_filename_respects_byte_limit(
+async def test_render_filename_respects_limits(
 	db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	"""Длинное имя режется по байтам с учётом расширения, а не по 150 символам."""
-	from pxcontrol.engine.services.captions import MAX_FILENAME_BYTES
+	"""Сплошное слово — жёсткий срез по лимиту Telegram; байтовый предел цел."""
+	from pxcontrol.engine.services.captions import (
+		MAX_FILENAME_BYTES,
+		TELEGRAM_MAX_STEM_CHARS,
+	)
 
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.captions.probe_video",
@@ -208,17 +267,19 @@ async def test_render_filename_respects_byte_limit(
 	channel_id = await _add_channel(db)
 	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
 	template = await service.save_template(channel_id, "Т", [field.id], "{video}")
-	# латиница длиннее прежнего предела в 150 символов — целиком
+	# сплошная латиница без разделителей: границы слова нет — срез ровно
+	# по лимиту Telegram (длиннее сервер изменил бы имя сам)
 	name = await service.render_filename(
 		template.id, channel_id, "a" * 200, {}, "/x/ф.mp4"
 	)
-	assert name == "a" * 200 + ".mp4"
-	# кириллица сверх байтового предела — режется, расширение цело
+	assert name == "a" * TELEGRAM_MAX_STEM_CHARS + ".mp4"
+	# эмодзи — 4 байта на символ: байтовый предел ФС строже символьного
 	long_name = await service.render_filename(
-		template.id, channel_id, "к" * 300, {}, "/x/ф.mp4"
+		template.id, channel_id, "\U0001f600" * 100, {}, "/x/ф.mp4"
 	)
 	assert long_name.endswith(".mp4")
 	assert len(long_name.encode("utf-8")) <= MAX_FILENAME_BYTES
+	assert len(long_name.removesuffix(".mp4")) <= TELEGRAM_MAX_STEM_CHARS
 
 
 async def test_template_validation_and_delete(db: Database) -> None:

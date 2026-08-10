@@ -47,6 +47,14 @@ _FORBIDDEN_IN_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 #: два байта на букву. 240 — запас под любые ФС и перезалив.
 MAX_FILENAME_BYTES = 240
 
+#: Лимит Telegram на стем имени файла в символах Юникода: длиннее —
+#: сервер молча режет до 63–64 символов и чистит символы (вычислено
+#: опытом, см. docs/03-modules/telegram-filenames.md).
+TELEGRAM_MAX_STEM_CHARS = 78
+
+#: «Словесный» символ — буква или цифра любого алфавита (без ``_``).
+_WORD_CHAR = re.compile(r"[^\W_]")
+
 
 class CaptionsError(EngineError):
 	"""Ошибка работы с подписями (с понятным человеку текстом)."""
@@ -140,6 +148,27 @@ def sanitize_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:
 		return cleaned
 	cut = cleaned.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
 	return cut.strip()
+
+
+def _cut_readable(stem: str, limit: int) -> str:
+	"""Укорачивает стем до ``limit`` символов, не оставляя огрызков слов.
+
+	Если срез пришёлся на середину слова — откат до последнего
+	разделителя; висячие разделители на конце отбрасываются. Крайний
+	случай (одно сплошное слово без разделителей) — жёсткий срез.
+	"""
+	if len(stem) <= limit:
+		return stem
+	head = stem[:limit]
+	if _WORD_CHAR.match(stem[limit]) and _WORD_CHAR.match(head[-1]):
+		separators = [
+			i for i, ch in enumerate(head) if not _WORD_CHAR.match(ch)
+		]
+		if separators and separators[-1] > 0:
+			head = head[: separators[-1]]
+	while head and not _WORD_CHAR.match(head[-1]):
+		head = head[:-1]
+	return head or stem[:limit].strip()
 
 
 # --- сервис -------------------------------------------------------------------
@@ -331,6 +360,12 @@ class CaptionsService:
 		и правится руками. Название нарочно не ``{title}``: у каналов
 		бывает поле «Title», и различие только регистром путало.
 
+		Стем вписывается в лимит Telegram
+		(:data:`TELEGRAM_MAX_STEM_CHARS`, иначе сервер молча режет
+		и чистит имя): срез до конца последнего законченного слова
+		(:func:`_cut_readable`); сплошное слово без разделителей —
+		срез как есть.
+
 		Raises:
 			CaptionsError: Шаблон не найден, шаблон имени не задан
 				или имя получилось пустым.
@@ -353,11 +388,13 @@ class CaptionsService:
 		rendered = _PLACEHOLDER.sub(
 			lambda m: mapping.get(m.group(1), m.group(0)), pattern
 		)
-		# бюджет стема — предел имени минус расширение (оно едет как есть)
+		# байтовый бюджет — предел ФС минус расширение (оно едет как есть);
+		# поверх — лимит Telegram: срез до законченного слова
 		suffix = Path(media_path).suffix
 		stem = sanitize_filename(
 			rendered, MAX_FILENAME_BYTES - len(suffix.encode("utf-8"))
 		)
+		stem = _cut_readable(stem, TELEGRAM_MAX_STEM_CHARS)
 		if not stem:
 			raise CaptionsError("Имя файла по шаблону получилось пустым.")
 		return stem + suffix
