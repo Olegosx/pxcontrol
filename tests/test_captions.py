@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel
@@ -87,8 +88,12 @@ async def db(tmp_path: Path) -> AsyncIterator[Database]:
 
 
 async def _add_channel(db: Database, username: str | None = None) -> int:
+	"""Заводит канал; ID чата уникален — их бывает несколько в одном тесте."""
 	async with db.session_factory() as session:
-		channel = Channel(title="Канал", tg_chat_id="-1001", username=username)
+		count = len((await session.execute(select(Channel))).scalars().all())
+		channel = Channel(
+			title="Канал", tg_chat_id=f"-100{count + 1}", username=username
+		)
 		session.add(channel)
 		await session.commit()
 		await session.refresh(channel)
@@ -101,6 +106,7 @@ async def test_fields_crud_and_duplicates(db: Database) -> None:
 	channel_id = await _add_channel(db)
 	field = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
 	assert field.name == "Genre" and field.values == []
+	assert field.parent_field_id is None
 	with pytest.raises(CaptionsError, match="уже есть"):
 		await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
 	await service.delete_field(field.id)
@@ -121,7 +127,7 @@ async def test_template_roundtrip_and_shared_dictionary(db: Database) -> None:
 	await service.record_usage(movie.id, {genre.id: ["action", "Action", "drama"]})
 	templates = await service.list_templates(channel_id)
 	clip = next(t for t in templates if t.name == "Клип")
-	assert next(tf for tf in clip.fields).field.values == ["action", "drama"]
+	assert next(tf for tf in clip.fields).field.names() == ["action", "drama"]
 	film = next(t for t in templates if t.name == "Фильм")
 	assert film.last_used_at is not None
 
@@ -243,11 +249,14 @@ async def test_dictionary_add_and_delete_values(db: Database) -> None:
 	updated = await service.add_values(
 		field.id, ["action", " Action ", "", "drama"]
 	)
-	assert updated.values == ["action", "drama"]  # дубль и пустое — пропущены
-	updated = await service.delete_value(field.id, "action")
-	assert updated.values == ["drama"]
+	assert updated.names() == ["action", "drama"]  # дубль и пустое — пропущены
+	action = next(item for item in updated.values if item.value == "action")
+	updated = await service.delete_value(action.id)
+	assert updated.names() == ["drama"]
 	with pytest.raises(CaptionsError, match="не найдено"):
 		await service.add_values(999, ["x"])
+	with pytest.raises(CaptionsError, match="не найдено"):
+		await service.delete_value(999)
 
 
 async def test_render_filename_respects_limits(
@@ -295,4 +304,153 @@ async def test_template_validation_and_delete(db: Database) -> None:
 	await service.record_usage(template.id, {field.id: ["2026"]})
 	await service.delete_template(template.id)
 	assert await service.list_templates(channel_id) == []
-	assert (await service.list_fields(channel_id))[0].values == ["2026"]
+	assert (await service.list_fields(channel_id))[0].names() == ["2026"]
+
+
+# --- связанные словари (персонаж внутри тайтла) ------------------------------
+
+
+async def _linked_fields(
+	service: CaptionsService, channel_id: int
+) -> tuple[int, int]:
+	"""Готовит пару полей «Title» и зависимый от него «Character»."""
+	title = await service.add_field(channel_id, "Title", hashtag=True, multiple=False)
+	character = await service.add_field(
+		channel_id, "Character", hashtag=True, multiple=True
+	)
+	linked = await service.set_field_parent(character.id, title.id)
+	assert linked.parent_field_id == title.id
+	return title.id, character.id
+
+
+async def test_usage_binds_new_values_to_selected_parent(db: Database) -> None:
+	"""Персонажи привязываются к выбранному тайтлу; тёзка — своя запись."""
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	title_id, character_id = await _linked_fields(service, channel_id)
+	template = await service.save_template(
+		channel_id, "Фильм", [title_id, character_id]
+	)
+	await service.record_usage(
+		template.id, {title_id: ["TombRider"], character_id: ["Lara", "Zip"]}
+	)
+	await service.record_usage(
+		template.id, {title_id: ["Fallout"], character_id: ["Lara"]}
+	)
+	fields = {f.name: f for f in await service.list_fields(channel_id)}
+	titles = {item.id: item.value for item in fields["Title"].values}
+	bound = sorted(
+		(item.value, titles[item.parent_id])
+		for item in fields["Character"].values
+		if item.parent_id is not None
+	)
+	# тёзки из разных тайтлов — разные записи словаря (одна на свой тайтл)
+	assert bound == [
+		("Lara", "Fallout"), ("Lara", "TombRider"), ("Zip", "TombRider")
+	]
+
+
+async def test_available_filters_by_parent(db: Database) -> None:
+	"""Словарь зависимого поля фильтруется по выбранному значению родителя."""
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	title_id, character_id = await _linked_fields(service, channel_id)
+	template = await service.save_template(
+		channel_id, "Фильм", [title_id, character_id]
+	)
+	await service.record_usage(
+		template.id, {title_id: ["TombRider"], character_id: ["Lara"]}
+	)
+	await service.record_usage(
+		template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]}
+	)
+	# значение без привязки видно при любом выборе: иначе его не выбрать
+	await service.add_values(character_id, ["Ничей"])
+	fields = {f.name: f for f in await service.list_fields(channel_id)}
+	tomb = next(i for i in fields["Title"].values if i.value == "TombRider")
+	character = fields["Character"]
+	assert [i.value for i in character.available([tomb.id])] == ["Lara", "Ничей"]
+	assert [i.value for i in character.available([])] == ["Ничей"]
+	# независимое поле фильтру не подчиняется — отдаёт весь словарь
+	assert [i.value for i in fields["Title"].available([])] == ["Fallout", "TombRider"]
+
+
+async def test_deleting_parent_value_removes_children(db: Database) -> None:
+	"""Удаление тайтла уносит его персонажей; чужие остаются."""
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	title_id, character_id = await _linked_fields(service, channel_id)
+	template = await service.save_template(
+		channel_id, "Фильм", [title_id, character_id]
+	)
+	await service.record_usage(
+		template.id, {title_id: ["TombRider"], character_id: ["Lara"]}
+	)
+	await service.record_usage(
+		template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]}
+	)
+	fields = {f.name: f for f in await service.list_fields(channel_id)}
+	tomb = next(i for i in fields["Title"].values if i.value == "TombRider")
+	titles = await service.delete_value(tomb.id)
+	assert titles.names() == ["Fallout"]
+	character = next(
+		f for f in await service.list_fields(channel_id) if f.name == "Character"
+	)
+	assert character.names() == ["Vault Boy"]
+
+
+async def test_manual_binding_and_adoption(db: Database) -> None:
+	"""Привязка руками, отвязка и усыновление значения без родителя."""
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	title_id, character_id = await _linked_fields(service, channel_id)
+	titles = await service.add_values(title_id, ["TombRider"])
+	tomb = titles.values[0]
+	characters = await service.add_values(character_id, ["Lara"])
+	lara = characters.values[0]
+	assert lara.parent_id is None
+
+	characters = await service.assign_value_parent(lara.id, tomb.id)
+	assert characters.values[0].parent_id == tomb.id
+	characters = await service.assign_value_parent(lara.id, None)
+	assert characters.values[0].parent_id is None
+
+	# значение без привязки, использованное вместе с тайтлом, усыновляется:
+	# новой записи не появляется, у прежней проставляется родитель
+	template = await service.save_template(
+		channel_id, "Фильм", [title_id, character_id]
+	)
+	await service.record_usage(
+		template.id, {title_id: ["TombRider"], character_id: ["Lara"]}
+	)
+	characters = next(
+		f for f in await service.list_fields(channel_id) if f.name == "Character"
+	)
+	assert characters.names() == ["Lara"]
+	assert characters.values[0].parent_id == tomb.id
+
+
+async def test_parent_validation_and_unlink(db: Database) -> None:
+	"""Негодный родитель отклоняется; снятие связи чистит привязки значений."""
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	other_channel = await _add_channel(db)
+	title_id, character_id = await _linked_fields(service, channel_id)
+	with pytest.raises(CaptionsError, match="само от себя"):
+		await service.set_field_parent(character_id, character_id)
+	with pytest.raises(CaptionsError, match="кольцо"):
+		await service.set_field_parent(title_id, character_id)
+	alien = await service.add_field(other_channel, "Title", hashtag=True, multiple=False)
+	with pytest.raises(CaptionsError, match="не найдено у этого канала"):
+		await service.set_field_parent(character_id, alien.id)
+	with pytest.raises(CaptionsError, match="не найдено"):
+		await service.set_field_parent(999, title_id)
+
+	titles = await service.add_values(title_id, ["TombRider"])
+	await service.add_values(character_id, ["Lara"], titles.values[0].id)
+	# снятие связи обнуляет привязки: они указывали в словарь прежнего родителя
+	characters = await service.set_field_parent(character_id, None)
+	assert characters.parent_field_id is None
+	assert characters.values[0].parent_id is None
+	with pytest.raises(CaptionsError, match="не зависит от другого поля"):
+		await service.assign_value_parent(characters.values[0].id, titles.values[0].id)

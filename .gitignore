@@ -4,6 +4,7 @@
 !.env.example
 *.db
 *.db-journal
+*.db.bak-*
 *.session
 *.session-journal
 *.bak

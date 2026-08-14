@@ -190,6 +190,12 @@ class CaptionField(TimestampMixin, Base):
 	name: Mapped[str] = mapped_column(String(64))
 	hashtag: Mapped[bool] = mapped_column(Boolean, default=True)
 	multiple: Mapped[bool] = mapped_column(Boolean, default=False)
+	# поле зависит от другого поля канала: его значения живут внутри
+	# значений родителя («Character» внутри «Title»); родительское поле
+	# удалили — зависимое становится независимым (SET NULL)
+	parent_field_id: Mapped[int | None] = mapped_column(
+		ForeignKey("caption_fields.id", ondelete="SET NULL"), default=None
+	)
 
 	values: Mapped[list[CaptionValue]] = relationship(
 		back_populates="field", cascade="all, delete-orphan",
@@ -198,7 +204,12 @@ class CaptionField(TimestampMixin, Base):
 
 
 class CaptionValue(TimestampMixin, Base):
-	"""Значение словаря поля подписи (например, конкретный жанр)."""
+	"""Значение словаря поля подписи (например, конкретный жанр).
+
+	У зависимого поля значение может быть привязано к значению
+	родительского словаря (персонаж — к тайтлу): тайтл удаляется —
+	его персонажи уходят каскадом. NULL — «без тайтла».
+	"""
 
 	__tablename__ = "caption_values"
 
@@ -207,8 +218,14 @@ class CaptionValue(TimestampMixin, Base):
 		ForeignKey("caption_fields.id", ondelete="CASCADE")
 	)
 	value: Mapped[str] = mapped_column(String(128))
+	parent_value_id: Mapped[int | None] = mapped_column(
+		ForeignKey("caption_values.id", ondelete="CASCADE"), default=None
+	)
 
 	field: Mapped[CaptionField] = relationship(back_populates="values")
+	parent: Mapped[CaptionValue | None] = relationship(
+		remote_side="CaptionValue.id"
+	)
 
 
 class CaptionTemplate(TimestampMixin, Base):

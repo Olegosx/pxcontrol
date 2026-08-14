@@ -4,6 +4,12 @@
 шаблоны — именованные наборы полей с порядком. Сборка подписи — чистые
 функции: жирное название (Markdown, Telethon парсит его по умолчанию)
 и строки «Поле: значения» (с решётками или без).
+
+Словари бывают связанными: поле объявляется зависимым от другого поля
+канала («Character» внутри «Title»), и тогда его значения живут внутри
+значений родителя — при сборке поста показываются персонажи выбранного
+тайтла. Тайтл удаляется — его персонажи уходят вместе с ним (каскад
+в схеме, решение от 15.08.2026).
 """
 
 from __future__ import annotations
@@ -11,11 +17,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -61,14 +68,50 @@ class CaptionsError(EngineError):
 
 
 @dataclass(frozen=True)
+class ValueDto:
+	"""Значение словаря: идентификатор, текст и привязка к родителю.
+
+	``parent_id`` — значение родительского словаря, внутри которого живёт
+	это значение (персонаж внутри тайтла); None — привязки нет.
+	"""
+
+	id: int
+	value: str
+	parent_id: int | None = None
+
+
+@dataclass(frozen=True)
 class FieldDto:
-	"""Поле подписи со словарём значений (для интерфейса)."""
+	"""Поле подписи со словарём значений (для интерфейса).
+
+	``parent_field_id`` — поле, от которого зависит это поле: его значения
+	живут внутри значений родителя; None — поле независимое.
+	"""
 
 	id: int
 	name: str
 	hashtag: bool
 	multiple: bool
-	values: list[str]
+	values: list[ValueDto]
+	parent_field_id: int | None = None
+
+	def names(self) -> list[str]:
+		"""Тексты значений словаря (в порядке словаря)."""
+		return [item.value for item in self.values]
+
+	def available(self, parent_ids: Collection[int]) -> list[ValueDto]:
+		"""Значения, доступные при выбранных значениях родительского поля.
+
+		Независимое поле отдаёт весь словарь. У зависимого показываются
+		значения выбранных родителей и значения без привязки: последние
+		видны всегда, иначе их нельзя было бы ни выбрать, ни привязать.
+		"""
+		if self.parent_field_id is None:
+			return list(self.values)
+		return [
+			item for item in self.values
+			if item.parent_id is None or item.parent_id in parent_ids
+		]
 
 
 @dataclass(frozen=True)
@@ -150,6 +193,48 @@ def sanitize_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:
 	return cut.strip()
 
 
+def _parents_first(fields: dict[int, CaptionField]) -> list[int]:
+	"""Идентификаторы полей в порядке «родитель раньше зависимого».
+
+	Порядок нужен сборке: значение зависимого поля привязывается
+	к значению родителя, а оно должно быть создано (и получить id)
+	раньше. Родители вне набора пропускаются — их в этой сборке нет.
+	Кольца невозможны (проверка при задании связи), но обход всё равно
+	защищён от повторного захода: битые данные не должны его подвесить.
+	"""
+	order: list[int] = []
+	visiting: set[int] = set()
+
+	def visit(field_id: int) -> None:
+		if field_id in order or field_id in visiting or field_id not in fields:
+			return
+		visiting.add(field_id)
+		parent = fields[field_id].parent_field_id
+		if parent is not None:
+			visit(parent)
+		visiting.discard(field_id)
+		order.append(field_id)
+
+	for field_id in fields:
+		visit(field_id)
+	return order
+
+
+def _single_parent(
+	merged: dict[int, list[int]], parent_field_id: int | None
+) -> int | None:
+	"""Значение родителя для привязки — только если оно ровно одно.
+
+	Несколько выбранных значений родителя (или ни одного) оставляют
+	новое значение без привязки: «внутри какого тайтла» — вопрос
+	без однозначного ответа, а угадывать нельзя.
+	"""
+	if parent_field_id is None:
+		return None
+	picked = merged.get(parent_field_id, [])
+	return picked[0] if len(picked) == 1 else None
+
+
 def _cut_readable(stem: str, limit: int) -> str:
 	"""Укорачивает стем до ``limit`` символов, не оставляя огрызков слов.
 
@@ -199,6 +284,10 @@ class CaptionsService:
 	) -> FieldDto:
 		"""Добавляет поле в пул канала.
 
+		Связь с родительским полем задаётся отдельно
+		(:meth:`set_field_parent`): её выбирают уже среди существующих
+		полей канала.
+
 		Raises:
 			CaptionsError: Пустое имя или поле с таким именем уже есть.
 		"""
@@ -224,6 +313,61 @@ class CaptionsService:
 		logger.info("Поле подписи «%s» добавлено (канал id=%s).", name, channel_id)
 		return FieldDto(field.id, field.name, field.hashtag, field.multiple, [])
 
+	async def set_field_parent(
+		self, field_id: int, parent_field_id: int | None
+	) -> FieldDto:
+		"""Объявляет поле зависимым от другого поля канала (None — снимает связь).
+
+		Смена связи сбрасывает привязки значений: они указывали на словарь
+		прежнего родителя и после смены ничего не значат.
+
+		Returns:
+			Поле с обновлённой связью и словарём.
+
+		Raises:
+			CaptionsError: Поле не найдено, родитель не годится (другой
+				канал, само поле, кольцо связей).
+		"""
+		async with self._db.session_factory() as session:
+			field = await session.get(CaptionField, field_id)
+			if field is None:
+				raise CaptionsError("Поле не найдено — обновите список.")
+			if parent_field_id is not None:
+				await self._validate_parent(session, field, parent_field_id)
+			if field.parent_field_id != parent_field_id:
+				await session.execute(
+					update(CaptionValue)
+					.where(CaptionValue.field_id == field_id)
+					.values(parent_value_id=None)
+				)
+			field.parent_field_id = parent_field_id
+			await session.commit()
+		logger.info(
+			"Поле id=%s: родитель — %s.", field_id, parent_field_id or "нет"
+		)
+		return await self._get_field(field_id)
+
+	@staticmethod
+	async def _validate_parent(
+		session: AsyncSession, field: CaptionField, parent_field_id: int
+	) -> None:
+		"""Проверяет пригодность родительского поля.
+
+		Raises:
+			CaptionsError: Родитель — само поле, из другого канала,
+				не найден или связь замкнулась бы в кольцо.
+		"""
+		if parent_field_id == field.id:
+			raise CaptionsError("Поле не может зависеть само от себя.")
+		parent = await session.get(CaptionField, parent_field_id)
+		if parent is None or parent.channel_id != field.channel_id:
+			raise CaptionsError("Родительское поле не найдено у этого канала.")
+		ancestor: CaptionField | None = parent
+		while ancestor is not None and ancestor.parent_field_id is not None:
+			if ancestor.parent_field_id == field.id:
+				raise CaptionsError("Связь полей замкнулась бы в кольцо.")
+			ancestor = await session.get(CaptionField, ancestor.parent_field_id)
+
 	async def delete_field(self, field_id: int) -> None:
 		"""Удаляет поле, его словарь и строки состава шаблонов."""
 		async with self._db.session_factory() as session:
@@ -239,41 +383,102 @@ class CaptionsService:
 			)
 			await session.commit()
 
-	async def add_values(self, field_id: int, values: list[str]) -> FieldDto:
+	async def add_values(
+		self, field_id: int, values: list[str], parent_value_id: int | None = None
+	) -> FieldDto:
 		"""Пополняет словарь поля (редактор словаря в «Полях подписи»).
 
 		Дубли значений (без учёта регистра) и пустые строки пропускаются —
 		правила те же, что при автопополнении из сборки подписи.
+		``parent_value_id`` — значение родительского словаря, внутрь
+		которого кладутся новые значения (например, тайтл для персонажей).
 
 		Returns:
 			Поле с обновлённым словарём.
 
 		Raises:
-			CaptionsError: Поле не найдено.
+			CaptionsError: Поле не найдено или родительское значение
+				не из словаря родительского поля.
 		"""
 		async with self._db.session_factory() as session:
-			if await session.get(CaptionField, field_id) is None:
+			field = await session.get(CaptionField, field_id)
+			if field is None:
 				raise CaptionsError("Поле не найдено — обновите список.")
-			await self._merge_values(session, field_id, values)
+			if parent_value_id is not None:
+				await self._validate_parent_value(session, field, parent_value_id)
+			await self._merge_values(session, field_id, values, parent_value_id)
 			await session.commit()
 		return await self._get_field(field_id)
 
-	async def delete_value(self, field_id: int, value: str) -> FieldDto:
-		"""Удаляет значение из словаря поля.
+	async def assign_value_parent(
+		self, value_id: int, parent_value_id: int | None
+	) -> FieldDto:
+		"""Привязывает значение словаря к значению родителя (None — отвязывает).
+
+		Ручная правка связей из редактора словаря: персонажу назначается
+		тайтл, внутри которого он живёт.
+
+		Returns:
+			Поле значения с обновлённым словарём.
+
+		Raises:
+			CaptionsError: Значение не найдено, поле независимое или
+				родительское значение не из словаря родительского поля.
+		"""
+		async with self._db.session_factory() as session:
+			row = await session.get(CaptionValue, value_id)
+			if row is None:
+				raise CaptionsError("Значение не найдено — обновите список.")
+			field = await session.get(CaptionField, row.field_id)
+			if field is None or field.parent_field_id is None:
+				raise CaptionsError(
+					"Поле не зависит от другого поля — привязывать значение не к чему."
+				)
+			if parent_value_id is not None:
+				await self._validate_parent_value(session, field, parent_value_id)
+			row.parent_value_id = parent_value_id
+			await session.commit()
+			field_id = row.field_id
+		return await self._get_field(field_id)
+
+	@staticmethod
+	async def _validate_parent_value(
+		session: AsyncSession, field: CaptionField, parent_value_id: int
+	) -> None:
+		"""Проверяет, что значение принадлежит словарю родительского поля.
+
+		Raises:
+			CaptionsError: Поле независимое или значение из чужого словаря.
+		"""
+		if field.parent_field_id is None:
+			raise CaptionsError(
+				f"Поле «{field.name}» не зависит от другого поля — "
+				"привязывать значение не к чему."
+			)
+		parent = await session.get(CaptionValue, parent_value_id)
+		if parent is None or parent.field_id != field.parent_field_id:
+			raise CaptionsError(
+				"Родительское значение не из словаря родительского поля."
+			)
+
+	async def delete_value(self, value_id: int) -> FieldDto:
+		"""Удаляет значение словаря.
+
+		У значения-родителя (тайтла) вместе с ним уходят привязанные
+		значения зависимого поля — каскадом в схеме.
 
 		Returns:
 			Поле с обновлённым словарём.
 
 		Raises:
-			CaptionsError: Поле не найдено.
+			CaptionsError: Значение не найдено.
 		"""
 		async with self._db.session_factory() as session:
-			await session.execute(
-				delete(CaptionValue).where(
-					CaptionValue.field_id == field_id,
-					CaptionValue.value == value,
-				)
-			)
+			row = await session.get(CaptionValue, value_id)
+			if row is None:
+				raise CaptionsError("Значение не найдено — обновите список.")
+			field_id = row.field_id
+			await session.delete(row)
 			await session.commit()
 		return await self._get_field(field_id)
 
@@ -413,37 +618,105 @@ class CaptionsService:
 		"""Фиксирует использование шаблона: словари пополняются сами.
 
 		``used_values`` — значения по id полей; новые (без учёта регистра)
-		добавляются в словарь. Шаблону отмечается момент использования —
-		для предвыбора в диалоге.
+		добавляются в словарь. Поля обрабатываются от родителей к зависимым:
+		новое значение зависимого поля привязывается к значению родителя
+		из этой же сборки (новый персонаж — к выбранному тайтлу). Привязка
+		возможна, когда у родителя выбрано ровно одно значение: иначе
+		«внутри какого тайтла» — вопрос без ответа.
+
+		Шаблону отмечается момент использования — для предвыбора в диалоге.
 		"""
 		async with self._db.session_factory() as session:
-			for field_id, values in used_values.items():
-				await self._merge_values(session, field_id, values)
+			fields = await self._fields_by_id(session, list(used_values))
+			merged: dict[int, list[int]] = {}
+			for field_id in _parents_first(fields):
+				merged[field_id] = await self._merge_values(
+					session, field_id, used_values[field_id],
+					_single_parent(merged, fields[field_id].parent_field_id),
+				)
 			template = await session.get(CaptionTemplate, template_id)
 			if template is not None:
 				template.last_used_at = datetime.now(UTC)
 			await session.commit()
 
+	@staticmethod
+	async def _fields_by_id(
+		session: AsyncSession, field_ids: list[int]
+	) -> dict[int, CaptionField]:
+		"""Поля по идентификаторам (для связей внутри одной сборки)."""
+		if not field_ids:
+			return {}
+		rows = (await session.execute(
+			select(CaptionField).where(CaptionField.id.in_(field_ids))
+		)).scalars().all()
+		return {row.id: row for row in rows}
+
 	# --- внутреннее ---------------------------------------------------------
 
-	@staticmethod
+	@classmethod
 	async def _merge_values(
-		session: AsyncSession, field_id: int, values: list[str]
-	) -> None:
+		cls,
+		session: AsyncSession,
+		field_id: int,
+		values: list[str],
+		parent_value_id: int | None = None,
+	) -> list[int]:
 		"""Добавляет в словарь поля новые значения (в открытой сессии).
 
-		Пустые строки и дубли (без учёта регистра) пропускаются.
+		Пустые строки пропускаются. Дубли считаются в пределах родителя:
+		один персонаж живёт внутри своего тайтла, тёзка в другом тайтле —
+		отдельная запись словаря.
+
+		Returns:
+			Идентификаторы значений (существующих и созданных) по порядку.
 		"""
-		known = {
-			v.lower() for (v,) in await session.execute(
-				select(CaptionValue.value)
-				.where(CaptionValue.field_id == field_id)
-			)
-		}
+		rows = (await session.execute(
+			select(CaptionValue).where(CaptionValue.field_id == field_id)
+		)).scalars().all()
+		known = {(row.parent_value_id, row.value.lower()): row for row in rows}
+		ids: list[int] = []
 		for value in dict.fromkeys(v.strip() for v in values):
-			if value and value.lower() not in known:
-				session.add(CaptionValue(field_id=field_id, value=value))
-				known.add(value.lower())
+			if not value:
+				continue
+			row = cls._existing_value(known, value, parent_value_id)
+			if row is None:
+				row = CaptionValue(
+					field_id=field_id, value=value,
+					parent_value_id=parent_value_id,
+				)
+				session.add(row)
+				await session.flush()  # нужен id: к нему привяжутся зависимые
+			known[(row.parent_value_id, value.lower())] = row
+			ids.append(row.id)
+		return ids
+
+	@staticmethod
+	def _existing_value(
+		known: dict[tuple[int | None, str], CaptionValue],
+		value: str,
+		parent_value_id: int | None,
+	) -> CaptionValue | None:
+		"""Ищет в словаре подходящую запись под нужным родителем.
+
+		Точное совпадение «родитель + значение» — используется как есть.
+		Значение без привязки, использованное вместе с родителем,
+		привязывается к нему (словарь связывается по мере работы).
+		Без выбранного родителя годится любая запись с таким текстом —
+		дубль-двойник не заводится.
+		"""
+		key = value.lower()
+		exact = known.get((parent_value_id, key))
+		if exact is not None:
+			return exact
+		if parent_value_id is not None:
+			orphan = known.get((None, key))
+			if orphan is not None:
+				orphan.parent_value_id = parent_value_id
+				return orphan
+			return None
+		return next(
+			(row for (_parent, name), row in known.items() if name == key), None
+		)
 
 	async def _get_field(self, field_id: int) -> FieldDto:
 		"""Возвращает поле со словарём значений.
@@ -485,7 +758,11 @@ class CaptionsService:
 	def _field_dto(field: CaptionField) -> FieldDto:
 		return FieldDto(
 			field.id, field.name, field.hashtag, field.multiple,
-			[v.value for v in field.values],
+			[
+				ValueDto(v.id, v.value, v.parent_value_id)
+				for v in field.values
+			],
+			field.parent_field_id,
 		)
 
 	@classmethod
