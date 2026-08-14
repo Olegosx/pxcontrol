@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -138,6 +139,55 @@ async def test_dirs_for_and_processed_dir_for_channel(
 	preset = await service.save_preset(PresetFields(name="Суб", subdir="суб"))
 	await settings.set_for(CHANNEL_DEFAULT_PRESET, channel.id, preset.id)
 	assert (await service.processed_dir_for_channel(channel.id)).endswith("/суб")
+
+
+async def test_list_processed_shows_whole_subdir(
+	db: Database, tmp_path: Path
+) -> None:
+	"""Список — все видео подпапки (новые сверху), посторонние файлы — мимо."""
+	settings = SettingsService(db)
+	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "результаты"))
+	service = VideoService(db, "ffmpeg", settings=settings, processor=_FakeProcessor())
+	folder = tmp_path / "результаты" / "паб"
+	folder.mkdir(parents=True)
+	old, new = folder / "старое.mp4", folder / "новое.mkv"
+	old.write_bytes(b"a" * 10)
+	new.write_bytes(b"b" * 20)
+	os.utime(old, (1_700_000_000, 1_700_000_000))
+	os.utime(new, (1_800_000_000, 1_800_000_000))
+	(folder / "новое.png").write_bytes(b"preview")  # превью — не видео
+	(folder / "заметка.txt").write_bytes(b"note")
+
+	listing = await service.list_processed("паб")
+	assert listing.directory == str(folder)
+	assert [item.name for item in listing.items] == ["новое.mkv", "старое.mp4"]
+	assert listing.items[0].size_bytes == 20
+	assert listing.items[0].path == str(new)
+	# несуществующая подпапка — пустой список, а не ошибка
+	empty = await service.list_processed("ещё-нет")
+	assert empty.items == []
+
+
+async def test_delete_processed_removes_preview_and_guards_root(
+	db: Database, tmp_path: Path
+) -> None:
+	"""Удаление уносит превью; файл вне папки результатов не трогается."""
+	settings = SettingsService(db)
+	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "результаты"))
+	service = VideoService(db, "ffmpeg", settings=settings, processor=_FakeProcessor())
+	folder = tmp_path / "результаты" / "паб"
+	folder.mkdir(parents=True)
+	video, preview = folder / "ролик.mp4", folder / "ролик.png"
+	video.write_bytes(b"video")
+	preview.write_bytes(b"preview")
+	await service.delete_processed(str(video))
+	assert not video.exists() and not preview.exists()
+
+	outsider = tmp_path / "чужое.mp4"
+	outsider.write_bytes(b"video")
+	with pytest.raises(VideoError, match="только файлы из папки результатов"):
+		await service.delete_processed(str(outsider))
+	assert outsider.exists()
 
 
 async def test_delete_preset_clears_channel_defaults(db: Database) -> None:

@@ -38,6 +38,8 @@ from pxcontrol.engine.services.video import (
 	IntroSourceKind,
 	PresetDto,
 	PresetFields,
+	ProcessedListing,
+	ProcessedVideo,
 	VideoDirs,
 	build_intro_source,
 	parse_intro_source,
@@ -51,6 +53,7 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	confirm_delete,
 	exec_dialog,
+	human_size,
 	page_layout,
 	pick_file,
 	row_card,
@@ -81,9 +84,14 @@ class VideoPage(ScrollArea):
 		self._reload_presets()
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
-		"""Обновляет список каналов при каждом открытии страницы."""
+		"""Обновляет каналы и готовые видео при каждом открытии страницы.
+
+		Список перечитывается с диска: файлы могли уехать в опубликованные
+		(после отправки поста) или измениться мимо приложения.
+		"""
 		super().showEvent(event)
 		self._reload_channels()
+		self._reload_processed()
 
 	# --- сборка страницы ---------------------------------------------------------
 
@@ -104,9 +112,20 @@ class VideoPage(ScrollArea):
 		self._build_process_row(layout)
 		self._progress = ProgressPanel(self)
 		layout.addWidget(self._progress)
+		self._build_processed_block(layout)
+		layout.addStretch()
+
+	def _build_processed_block(self, layout: QVBoxLayout) -> None:
+		"""Раздел готовых видео: папка результатов текущей подпапки."""
+		layout.addSpacing(8)
+		layout.addWidget(SubtitleLabel("Готовые видео", self))
+		self._processed_hint = CaptionLabel("", self)
+		self._processed_hint.setWordWrap(True)
+		layout.addWidget(self._processed_hint)
 		self._result_box = QVBoxLayout()
 		layout.addLayout(self._result_box)
-		layout.addStretch()
+		# список идёт за подпапкой: она задаёт папку, куда уйдёт результат
+		self._form.subdir_changed.connect(self._reload_processed)
 
 	def _build_source_row(self, layout: QVBoxLayout) -> None:
 		"""Строка исходника: путь, «Обзор…» и просмотр системным плеером."""
@@ -407,27 +426,76 @@ class VideoPage(ScrollArea):
 		)
 
 	def _on_processed(self, output_path: str) -> None:
-		"""Показывает итог обработки и карточку результата с действиями."""
+		"""Сообщает об итоге обработки и обновляет список готовых видео."""
 		self._hide_progress()
-		path = Path(output_path)
 		# всплывашка не переносит строки — длинное имя укорачиваем
-		InfoBar.success("Готово", text_preview(path.name, _TOAST_NAME_CHARS), parent=self)
+		InfoBar.success(
+			"Готово", text_preview(Path(output_path).name, _TOAST_NAME_CHARS),
+			parent=self,
+		)
+		self._reload_processed()
+
+	# --- готовые видео -----------------------------------------------------------
+
+	def _reload_processed(self, *_args: object) -> None:
+		"""Перечитывает список готовых видео текущей подпапки."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.list_processed(self._form.fields("").subdir),
+			self, self._show_processed, self._show_error,
+		)
+
+	def _show_processed(self, listing: ProcessedListing) -> None:
+		"""Показывает готовые видео карточками (новые — сверху)."""
+		self._processed_hint.setText(f"Папка: {listing.directory}")
 		clear_layout(self._result_box)
+		if not listing.items:
+			self._result_box.addWidget(CaptionLabel(
+				"Готовых видео пока нет — обработайте исходник кнопкой выше.",
+				self,
+			))
+			return
+		for item in listing.items:
+			self._result_box.addWidget(self._processed_card(item))
+
+	def _processed_card(self, item: ProcessedVideo) -> QWidget:
+		"""Карточка готового видео: размер, дата и действия над файлом."""
 		open_btn = PushButton(FluentIcon.PLAY, "Открыть", self)
-		open_btn.clicked.connect(bind(self._open_path, str(path)))
+		open_btn.clicked.connect(bind(self._open_path, item.path))
 		folder_btn = PushButton(FluentIcon.FOLDER, "Показать в папке", self)
-		folder_btn.clicked.connect(bind(self._open_path, str(path.parent)))
+		folder_btn.clicked.connect(
+			bind(self._open_path, str(Path(item.path).parent))
+		)
 		publish_btn = PrimaryPushButton(FluentIcon.SEND, "Опубликовать…", self)
-		publish_btn.clicked.connect(bind(self._request_publish, str(path)))
+		publish_btn.clicked.connect(bind(self._request_publish, item.path))
 		buttons = QWidget(self)
 		buttons_layout = QHBoxLayout(buttons)
 		buttons_layout.setContentsMargins(0, 0, 0, 0)
-		buttons_layout.addWidget(open_btn)
-		buttons_layout.addWidget(folder_btn)
-		buttons_layout.addWidget(publish_btn)
-		self._result_box.addWidget(row_card(
-			self, path.name, f"Результат: {path.parent}", trailing=buttons,
-		))
+		for button in (open_btn, folder_btn, publish_btn):
+			buttons_layout.addWidget(button)
+		subtitle = (
+			f"{human_size(item.size_bytes)} · "
+			f"{item.modified_at.strftime('%d.%m.%Y %H:%M')}"
+		)
+		card: QWidget = row_card(
+			self, item.name, subtitle, trailing=buttons,
+			on_delete=bind(self._on_delete_processed, item),
+		)
+		return card
+
+	def _on_delete_processed(self, item: ProcessedVideo) -> None:
+		"""Удаляет готовое видео с диска (вместе с кадром-превью)."""
+		if not confirm_delete(
+			self,
+			f"Удалить файл «{item.name}» с диска? Вместе с ним удалится "
+			"кадр-превью. Отменить удаление будет нельзя.",
+		):
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.delete_processed(item.path),
+			self, lambda *_a: self._reload_processed(), self._show_error,
+		)
 
 	def _request_publish(self, path: str) -> None:
 		"""Передаёт файл на «Публикацию» вместе с выбранным каналом."""

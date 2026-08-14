@@ -102,6 +102,24 @@ def clear_layout(layout: QLayout) -> None:
 			clear_layout(child)
 
 
+def human_size(size_bytes: int) -> str:
+	"""Размер файла для человека: «412 МБ», «1,8 ГБ», «6,4 КБ».
+
+	Единицы десятичные (КБ = 1000 байт) — как их считает Telegram
+	и файловые менеджеры; дробная часть — через запятую, по-русски.
+	"""
+	units = ("Б", "КБ", "МБ", "ГБ", "ТБ")
+	value = float(size_bytes)
+	unit = 0
+	while value >= 1000 and unit < len(units) - 1:
+		value /= 1000
+		unit += 1
+	if unit == 0:
+		return f"{int(value)} {units[unit]}"
+	text = f"{value:.1f}" if value < 100 else f"{value:.0f}"
+	return f"{text.replace('.', ',')} {units[unit]}"
+
+
 def exec_dialog(dialog: QDialog) -> bool:
 	"""Показывает модальный диалог и удаляет его после закрытия.
 

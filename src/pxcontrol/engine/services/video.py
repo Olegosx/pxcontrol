@@ -111,6 +111,40 @@ class FrameCandidate:
 	path: str
 
 
+#: Расширения видеофайлов в списке результатов (те же, что в диалоге
+#: выбора исходника). Прочее (превью .png, черновики) списку не место.
+VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".mkv", ".avi", ".webm"})
+
+
+@dataclass(frozen=True)
+class ProcessedVideo:
+	"""Готовое видео в папке результатов (для списка на странице «Видео»).
+
+	Attributes:
+		name: имя файла.
+		path: полный путь (контракт с публикацией — путь к файлу).
+		size_bytes: размер файла.
+		modified_at: время последнего изменения (местное).
+	"""
+
+	name: str
+	path: str
+	size_bytes: int
+	modified_at: datetime
+
+
+@dataclass(frozen=True)
+class ProcessedListing:
+	"""Содержимое папки результатов: сама папка и её видео.
+
+	Папка возвращается вместе со списком, чтобы интерфейс мог показать
+	её путь, даже когда видео в ней ещё нет.
+	"""
+
+	directory: str
+	items: list[ProcessedVideo]
+
+
 @dataclass(frozen=True)
 class VideoDirs:
 	"""Действующие папки видео (с учётом подпапки пресета).
@@ -370,6 +404,80 @@ class VideoService:
 			path.mkdir(parents=True, exist_ok=True)
 			dirs.append(str(path))
 		return VideoDirs(*dirs)
+
+	async def list_processed(self, subdir: str) -> ProcessedListing:
+		"""Готовые видео из подпапки папки результатов (новые — первыми).
+
+		Показывается вся подпапка, а не только последний результат: файлы
+		накапливаются между запусками, и страница «Видео» — естественное
+		место, где их видно, откуда их публикуют и удаляют. Вложенные
+		папки не обходятся: у каждого пресета своя подпапка.
+
+		Чтение каталога блокирующее — выполняется в отдельном потоке,
+		чтобы не останавливать цикл событий движка.
+		"""
+		directory = (
+			video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
+			/ sanitize_subdir(subdir)
+		)
+		items = await asyncio.to_thread(self._scan_processed, directory)
+		return ProcessedListing(str(directory), items)
+
+	@staticmethod
+	def _scan_processed(directory: Path) -> list[ProcessedVideo]:
+		"""Блокирующий обход папки результатов (выполняется в потоке).
+
+		Несуществующая папка — пустой список: подпапка создаётся при
+		первой обработке, и до неё показывать нечего.
+		"""
+		if not directory.is_dir():
+			return []
+		items: list[ProcessedVideo] = []
+		for path in directory.iterdir():
+			if not path.is_file() or path.suffix.lower() not in VIDEO_SUFFIXES:
+				continue
+			stat = path.stat()
+			items.append(ProcessedVideo(
+				path.name, str(path), stat.st_size,
+				datetime.fromtimestamp(stat.st_mtime),
+			))
+		items.sort(key=lambda item: item.modified_at, reverse=True)
+		return items
+
+	async def delete_processed(self, path: str) -> None:
+		"""Удаляет готовое видео с диска вместе с кадром-превью (сосед .png).
+
+		Удалять разрешено только внутри папки результатов: путь извне
+		отклоняется, чтобы промах интерфейса не стёр чужой файл.
+
+		Raises:
+			VideoError: Файл вне папки результатов или удалить не удалось.
+		"""
+		target = Path(path)
+		root = video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
+		try:
+			target.resolve().relative_to(root.resolve())
+		except ValueError as exc:
+			raise VideoError(
+				"Удалять можно только файлы из папки результатов обработки."
+			) from exc
+		await asyncio.to_thread(self._remove_with_preview, target)
+		logger.info("Готовое видео удалено: %s", path)
+
+	@staticmethod
+	def _remove_with_preview(target: Path) -> None:
+		"""Блокирующее удаление файла и его превью (выполняется в потоке).
+
+		Raises:
+			VideoError: Удаление не удалось (права, файл занят).
+		"""
+		try:
+			target.unlink(missing_ok=True)
+			target.with_suffix(".png").unlink(missing_ok=True)
+		except OSError as exc:
+			raise VideoError(
+				f"Не удалось удалить файл: {exc.strerror or exc}"
+			) from exc
 
 	async def processed_dir_for_channel(self, channel_id: int) -> str:
 		"""Папка результатов канала: подпапка его пресета по умолчанию.

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
@@ -46,6 +47,11 @@ _INTRO_SOURCES = [
 
 class PresetForm(QWidget):
 	"""Панель параметров обработки (бывший диалог пресета, без имени)."""
+
+	#: Подпапка сменилась — правкой поля или загрузкой пресета. Страница
+	#: перечитывает по ней список готовых видео: он всегда показывает
+	#: ту папку, в которую уйдёт следующий результат.
+	subdir_changed = Signal(str)
 
 	def __init__(self, parent: QWidget) -> None:
 		super().__init__(parent)
@@ -225,6 +231,7 @@ class PresetForm(QWidget):
 			"результаты и опубликованные этого пресета. При создании пресета "
 			"заполняется его именем."
 		)
+		self._subdir.textChanged.connect(self.subdir_changed)
 		subdir_row.addWidget(self._subdir, stretch=1)
 		box.addLayout(subdir_row)
 		return card
