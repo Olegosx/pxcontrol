@@ -359,10 +359,12 @@ class PostsService:
 			PostError: Имя содержит путь, целевое имя занято или
 				переименовать не удалось (права, диск).
 		"""
-		if "/" in rename_to or "\\" in rename_to:
-			raise PostError("Новое имя файла не должно содержать путь.")
+		PostsService.check_rename_name(rename_to)
 		source = Path(media_path)
-		target = source.with_name(rename_to)
+		try:
+			target = source.with_name(rename_to)
+		except ValueError as exc:  # страховка: Path строже наших проверок
+			raise PostError(f"Имя «{rename_to}» не годится для файла.") from exc
 		if target == source:
 			return str(source)
 		if target.exists():
@@ -417,8 +419,21 @@ class PostsService:
 		return (await self._get_channel(channel_id)).title
 
 	@staticmethod
+	def check_rename_name(rename_to: str) -> None:
+		"""Отклоняет негодное имя для «переименовать при отправке».
+
+		Raises:
+			PostError: Имя содержит путь или служебное («.», «..»).
+		"""
+		if "/" in rename_to or "\\" in rename_to:
+			raise PostError("Новое имя файла не должно содержать путь.")
+		if rename_to in (".", ".."):
+			raise PostError("Укажите настоящее имя файла («.» и «..» — служебные).")
+
+	@staticmethod
 	def validate_draft(draft: PostDraft) -> None:
-		"""Отклоняет пустой черновик, битый путь и время «почти сейчас».
+		"""Отклоняет пустой черновик, битый путь, негодное имя переименования
+		и время «почти сейчас».
 
 		Публичная: очередь отправки проверяет черновик при постановке,
 		чтобы ошибка всплыла сразу, а не при отправке.
@@ -428,6 +443,8 @@ class PostsService:
 		"""
 		if not draft.text and draft.media_path is None:
 			raise PostError("Пост пуст — добавьте текст или файл.")
+		if draft.rename_to:
+			PostsService.check_rename_name(draft.rename_to)
 		if draft.media_path is not None and draft.media_kind is MediaKind.NONE:
 			raise PostError("У вложения не указан тип контента.")
 		if draft.media_path is not None and not Path(draft.media_path).is_file():

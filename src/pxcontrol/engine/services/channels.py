@@ -216,6 +216,9 @@ class ChannelsService:
 		Raises:
 			ChannelError: Канал не найден.
 		"""
+		# сессии короткие, сетевые зонды — между ними (образец — assign_bot):
+		# открытая транзакция чтения на время походов в Telegram держала бы
+		# SQLite занятым для параллельных задач движка
 		async with self._db.session_factory() as session:
 			channel = (
 				await session.execute(
@@ -226,18 +229,22 @@ class ChannelsService:
 			).scalar_one_or_none()
 			if channel is None:
 				raise ChannelError("Канал не найден — обновите список.")
+			tg_chat_id = channel.tg_chat_id
 			bot_label = channel.bot.label if channel.bot is not None else None
 			bot_token = channel.bot.token if channel.bot is not None else None
-			userbot_ok = await self._probe_userbot(channel.tg_chat_id)
-			bot_ok: bool | None = None
-			if bot_token is not None:
-				bot_ok = await self._probe_bot(bot_token, channel.tg_chat_id)
+		userbot_ok = await self._probe_userbot(tg_chat_id)
+		bot_ok: bool | None = None
+		if bot_token is not None:
+			bot_ok = await self._probe_bot(bot_token, tg_chat_id)
+		async with self._db.session_factory() as session:
+			channel = await session.get(Channel, channel_id)
+			if channel is None:
+				raise ChannelError("Канал не найден — обновите список.")
 			if userbot_ok is not None:
 				channel.userbot_admin = userbot_ok
-			await session.commit()
-			await session.refresh(channel)
-			enabled = await self._settings.get_for(CHANNEL_ENABLED, channel_id)
-			dto = self._dto(channel, bot_label=bot_label, enabled=enabled)
+				await session.commit()
+		enabled = await self._settings.get_for(CHANNEL_ENABLED, channel_id)
+		dto = self._dto(channel, bot_label=bot_label, enabled=enabled)
 		logger.info(
 			"Доступы канала «%s»: userbot=%s, бот=%s.",
 			dto.title,

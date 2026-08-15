@@ -267,3 +267,17 @@ def test_ensure_bot_can_post() -> None:
 		ensure_bot_can_post(SimpleNamespace(status="member"))
 	with pytest.raises(ChannelCheckError, match="нет права"):
 		ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=False))
+
+
+def test_bot_caption_markup_to_html() -> None:
+	"""Разметка поля текста (``**жирный**``) доносится бот-путём как HTML.
+
+	Bot API без parse_mode показал бы подписчикам буквальные звёздочки;
+	спецсимволы HTML в значениях полей экранируются.
+	"""
+	from pxcontrol.engine.telegram.bot_api import to_html
+
+	assert to_html("**Название**\nГод: 2026") == "<b>Название</b>\nГод: 2026"
+	assert to_html("**Re: Zero <2 сезон> & ещё**") == "<b>Re: Zero &lt;2 сезон&gt; &amp; ещё</b>"
+	assert to_html("без разметки") == "без разметки"
+	assert to_html("непарные 2**3") == "непарные 2**3"

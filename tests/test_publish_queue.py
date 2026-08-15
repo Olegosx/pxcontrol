@@ -298,3 +298,48 @@ async def test_dismiss_ignores_unfinished(db: Database) -> None:
 	await queue.dismiss(item)
 	assert [i.id for i in await queue.state()] == [item]
 	await queue.shutdown()
+
+
+async def test_unexpected_error_shown_collapsed(db: Database) -> None:
+	"""Карточка очереди показывает сводку, а не дамп (контракт errors.py).
+
+	Мост интерфейса сворачивает недоменные исключения через user_message;
+	очередь пишет текст в карточку сама и обязана делать то же.
+	"""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	dump = "Traceback (most recent call last)\n" + "  строка дампа\n" * 40
+
+	async def _boom(*_args: object, **_kwargs: object) -> None:
+		raise RuntimeError(dump)
+
+	gateway.publish = _boom  # type: ignore[method-assign]
+	item_id = await queue.enqueue(PostDraft(channel_id, text="x"))
+	failed = await _wait_status(queue, item_id, QueueItemStatus.ERROR)
+	assert failed.error is not None
+	assert "строка дампа" not in failed.error  # многострочный дамп не попал
+	assert "Внутренняя ошибка" in failed.error
+
+
+async def test_retry_resets_cancel_flag(db: Database) -> None:
+	"""Повтор снимает застрявший флаг отмены.
+
+	Флаг взводится, когда отмена совпала с завершением попытки ошибкой;
+	без сброса остановка движка при следующей отправке была бы принята
+	за отмену пользователем и подвесила бы shutdown.
+	"""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	gateway.fail_texts = {"сбойный"}
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item_id = await queue.enqueue(PostDraft(channel_id, text="сбойный"))
+	await _wait_status(queue, item_id, QueueItemStatus.ERROR)
+	internal = next(item for item in queue._items if item.id == item_id)  # noqa: SLF001
+	internal.cancel_requested = True  # отмена пришла в момент ошибки
+	gateway.fail_texts = set()
+	await queue.retry(item_id)
+	assert internal.cancel_requested is False
+	await _wait_status(queue, item_id, QueueItemStatus.DONE)

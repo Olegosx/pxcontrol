@@ -368,12 +368,21 @@ class CaptionsService:
 			ancestor = await session.get(CaptionField, ancestor.parent_field_id)
 
 	async def delete_field(self, field_id: int) -> None:
-		"""Удаляет поле, его словарь и строки состава шаблонов."""
+		"""Удаляет поле, его словарь и строки состава шаблонов.
+
+		Значения зависимых полей перед этим отвязываются (как при смене
+		связи в :meth:`set_field_parent`): зависимое поле становится
+		независимым с целым словарём — а не остаётся пустым из-за каскада
+		``parent_value_id``. Сам словарь поля и строки состава шаблонов
+		убирают каскады схемы (внешние ключи включены).
+		"""
 		async with self._db.session_factory() as session:
+			doomed_values = select(CaptionValue.id).where(CaptionValue.field_id == field_id)
 			await session.execute(
-				delete(CaptionTemplateField).where(CaptionTemplateField.field_id == field_id)
+				update(CaptionValue)
+				.where(CaptionValue.parent_value_id.in_(doomed_values))
+				.values(parent_value_id=None)
 			)
-			await session.execute(delete(CaptionValue).where(CaptionValue.field_id == field_id))
 			await session.execute(delete(CaptionField).where(CaptionField.id == field_id))
 			await session.commit()
 

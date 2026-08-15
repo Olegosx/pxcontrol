@@ -47,9 +47,10 @@ class _FakeGateway:
 		self.login = _FakeLogin()
 		self.activated: tuple[int, str] | None = None
 		self.deactivations = 0
+		self.premium = False  # статус подписки «подключённого» аккаунта
 
 	def userbot_premium(self) -> bool:
-		return False
+		return self.premium
 
 	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None:
 		self.activated = (api_id, session)
@@ -189,3 +190,28 @@ async def test_login_bad_code_keeps_logged_out(db: Database) -> None:
 	with pytest.raises(LoginError, match="Неверный код"):
 		await service.confirm_login_code(account.id, "bad")
 	assert (await service.list_tg_accounts())[0].logged_in is False
+
+
+async def test_premium_follows_activated_account(db: Database) -> None:
+	"""Premium светится у фактически подключённого аккаунта.
+
+	После входа во второй аккаунт активен именно он (шлюз подключён
+	к нему), а после «перезапуска» (activate_stored_userbot) — первый
+	по id с сессией: признак должен следовать за фактом, не за эвристикой.
+	"""
+	gateway = _FakeGateway()
+	gateway.premium = True
+	service = AccountsService(db, gateway)
+	first = await service.add_tg_account("Первый", "+7900", 11, "h1")
+	second = await service.add_tg_account("Второй", "+7901", 22, "h2")
+	await service.start_login(first.id)
+	assert await service.confirm_login_code(first.id, "12345") is True
+	await service.start_login(second.id)
+	assert await service.confirm_login_code(second.id, "12345") is True
+
+	flags = {a.id: a.premium for a in await service.list_tg_accounts()}
+	assert flags == {first.id: False, second.id: True}  # активен второй
+
+	await service.activate_stored_userbot()  # как при перезапуске приложения
+	flags = {a.id: a.premium for a in await service.list_tg_accounts()}
+	assert flags == {first.id: True, second.id: False}  # правило «первый с сессией»

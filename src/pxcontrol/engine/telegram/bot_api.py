@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -72,6 +74,24 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 		raise ChannelCheckError(f"Telegram отклонил операцию: {exc}") from exc
 
 
+#: Пара ``**…**`` — жирный в разметке, принятой полем текста поста (Telethon).
+_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+
+
+def to_html(text: str) -> str:
+	"""Переводит текст поста из разметки поля ввода в HTML для Bot API.
+
+	Поле текста поста живёт в разметке, которую Telethon (основной путь,
+	ADR-0011) разбирает сам: ``**жирный**``. Bot API без ``parse_mode``
+	не разбирает ничего, а его Markdown-режимы с двойными звёздочками
+	несовместимы — единственный совместимый режим ``HTML``. Экранируем
+	служебные символы HTML и переводим пары звёздочек в ``<b>…</b>`` —
+	бот-канал выглядит так же, как userbot-канал.
+	"""
+	escaped = html.escape(text, quote=False)
+	return _BOLD.sub(r"<b>\1</b>", escaped)
+
+
 def _chat_id(chat_id: str) -> int:
 	"""Числовой ID канала из строки БД (контракт ``ChannelInfo.chat_id``).
 
@@ -120,19 +140,26 @@ async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, capti
 
 	bot = Bot(token)
 	file = FSInputFile(path)
-	text = caption or None
+	text = to_html(caption) if caption else None
+	mode = "HTML"
 	try:
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			if kind is MediaKind.PHOTO:
-				message = await bot.send_photo(_chat_id(chat_id), file, caption=text)
+				message = await bot.send_photo(
+					_chat_id(chat_id), file, caption=text, parse_mode=mode
+				)
 			elif kind is MediaKind.VIDEO:
 				message = await bot.send_video(
-					_chat_id(chat_id), file, caption=text, supports_streaming=True
+					_chat_id(chat_id), file, caption=text, parse_mode=mode, supports_streaming=True
 				)
 			elif kind is MediaKind.AUDIO:
-				message = await bot.send_audio(_chat_id(chat_id), file, caption=text)
+				message = await bot.send_audio(
+					_chat_id(chat_id), file, caption=text, parse_mode=mode
+				)
 			else:
-				message = await bot.send_document(_chat_id(chat_id), file, caption=text)
+				message = await bot.send_document(
+					_chat_id(chat_id), file, caption=text, parse_mode=mode
+				)
 			return int(message.message_id)
 	finally:
 		await bot.session.close()
@@ -153,7 +180,7 @@ async def send_text(token: str, chat_id: str, text: str) -> int:
 	bot = Bot(token)
 	try:
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
-			message = await bot.send_message(_chat_id(chat_id), text)
+			message = await bot.send_message(_chat_id(chat_id), to_html(text), parse_mode="HTML")
 			return int(message.message_id)
 	finally:
 		await bot.session.close()

@@ -547,3 +547,22 @@ async def test_move_failure_does_not_break_publish(
 		)
 	)
 	assert len(gateway.published) == 1  # пост ушёл, несмотря на сбой переезда
+
+
+def test_validate_draft_checks_rename_early(tmp_path: Path) -> None:
+	"""Негодное имя переименования ловится при постановке в очередь.
+
+	Докстринг validate_draft обещает раннюю ошибку; раньше «.» и «..»
+	доходили до отправки и роняли её сырым ValueError из Path.with_name.
+	"""
+	media = tmp_path / "clip.mp4"
+	media.write_bytes(b"x")
+	for bad_name in (".", "..", "a/b.mp4", "a\\b.mp4"):
+		draft = PostDraft(
+			1,
+			media_path=str(media),
+			media_kind=MediaKind.VIDEO,
+			rename_to=bad_name,
+		)
+		with pytest.raises(PostError):
+			PostsService.validate_draft(draft)

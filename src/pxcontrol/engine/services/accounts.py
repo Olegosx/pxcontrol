@@ -109,6 +109,10 @@ class AccountsService:
 	def __init__(self, db: Database, gateway: _TelegramPort) -> None:
 		self._db = db
 		self._gateway = gateway
+		# id фактически активированного userbot-аккаунта: признак Premium
+		# в списке принадлежит ему, а не «первому с сессией» (после входа
+		# во второй аккаунт активен именно он — до перезапуска приложения)
+		self._active_account_id: int | None = None
 
 	# --- боты -------------------------------------------------------------
 
@@ -180,15 +184,14 @@ class AccountsService:
 	async def list_tg_accounts(self) -> list[TgAccountDto]:
 		"""Возвращает все userbot-аккаунты.
 
-		Статус Premium отмечается только активному аккаунту (первый по id
-		с сессией — правило :meth:`activate_stored_userbot`): признак
-		у шлюза один на подключение, приписывать его всем вошедшим нельзя.
+		Статус Premium отмечается только фактически активированному
+		аккаунту (``_active_account_id``): признак у шлюза один
+		на подключение, приписывать его всем вошедшим нельзя.
 		"""
 		async with self._db.session_factory() as session:
 			rows = list((await session.execute(select(TgAccount).order_by(TgAccount.id))).scalars())
-		active_id = next((a.id for a in rows if a.session is not None), None)
 		premium = self._gateway.userbot_premium()
-		return [self._acc_dto(a, premium=premium and a.id == active_id) for a in rows]
+		return [self._acc_dto(a, premium=premium and a.id == self._active_account_id) for a in rows]
 
 	async def add_tg_account(
 		self, label: str, phone: str | None, api_id: int, api_hash: str
@@ -229,6 +232,7 @@ class AccountsService:
 		приложение работает дальше, userbot подключится после повторного
 		входа. Вызывается движком при старте и после удаления аккаунта.
 		"""
+		self._active_account_id = None
 		try:
 			async with self._db.session_factory() as session:
 				account = (
@@ -254,6 +258,7 @@ class AccountsService:
 		except UserbotUnavailableError as exc:
 			logger.warning("Userbot «%s» не подключён: %s", account.label, exc)
 			return
+		self._active_account_id = account.id
 		logger.info("Userbot «%s» подключён.", account.label)
 
 	@staticmethod
@@ -328,6 +333,8 @@ class AccountsService:
 			await self._gateway.activate_userbot(api_id, api_hash, session_string)
 		except Exception:  # noqa: BLE001 — вход удался, подключение не критично
 			logger.exception("Не удалось подключить userbot сразу после входа.")
+		else:
+			self._active_account_id = account_id
 
 	# --- ключи ИИ -----------------------------------------------------------
 

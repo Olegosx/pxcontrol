@@ -20,6 +20,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
+from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostsService,
@@ -181,6 +182,10 @@ class PublishQueue:
 			item.status = QueueItemStatus.PENDING
 			item.progress = 0.0
 			item.error = None
+			# флаг мог взвестись, если отмена совпала с ошибкой прошлой
+			# попытки: не сбросить — остановка движка при следующей отправке
+			# была бы принята за отмену пользователем (см. _send)
+			item.cancel_requested = False
 			self._ensure_worker()
 			logger.info("Элемент id=%s возвращён в очередь на повтор.", item_id)
 			return
@@ -249,7 +254,9 @@ class PublishQueue:
 			logger.info("Отправка id=%s отменена пользователем.", item.id)
 		except Exception as exc:  # noqa: BLE001 — исход элемента, не очереди
 			item.status = QueueItemStatus.ERROR
-			item.error = str(exc)
+			# карточка очереди показывает этот текст как есть — сворачиваем
+			# недоменные исключения, как мост интерфейса (контракт errors.py)
+			item.error = user_message(exc)
 			logger.exception("Отправка id=%s не удалась.", item.id)
 		else:
 			item.status = QueueItemStatus.DONE

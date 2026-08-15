@@ -418,3 +418,26 @@ async def test_parent_validation_and_unlink(db: Database) -> None:
 	assert characters.values[0].parent_id is None
 	with pytest.raises(CaptionsError, match="не зависит от другого поля"):
 		await service.assign_value_parent(characters.values[0].id, titles.values[0].id)
+
+
+async def test_delete_parent_field_keeps_dependent_dictionary(db: Database) -> None:
+	"""Удаление родительского поля не стирает словарь зависимого.
+
+	Зависимое поле становится независимым (SET NULL у связи полей),
+	его значения отвязываются — как при снятии связи через
+	set_field_parent, а не гибнут каскадом parent_value_id.
+	"""
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db)
+	title_id, character_id = await _linked_fields(service, channel_id)
+	titles = await service.add_values(title_id, ["TombRider"])
+	await service.add_values(character_id, ["Lara"], titles.values[0].id)
+
+	await service.delete_field(title_id)
+
+	fields = await service.list_fields(channel_id)
+	assert [f.name for f in fields] == ["Character"]  # Title удалён
+	character = fields[0]
+	assert character.parent_field_id is None  # поле стало независимым
+	assert character.names() == ["Lara"]  # словарь цел
+	assert character.values[0].parent_id is None  # привязка снята, не каскад
