@@ -57,6 +57,11 @@ class PresetForm(QWidget):
 
 	def __init__(self, parent: QWidget) -> None:
 		super().__init__(parent)
+		# текущее значение «Качество, Мбит/с» — автоподстановка рекомендации?
+		# Автоподстановку можно обновлять и сбрасывать; введённое руками
+		# или пресетом — неприкосновенно (ноль снова освобождает поле)
+		self._bitrate_suggested = False
+		self._suggest_guard = False  # различает программную запись и ручную правку
 		self._layout = QVBoxLayout(self)
 		self._layout.setContentsMargins(0, 0, 0, 0)
 		self._layout.setSpacing(12)
@@ -65,6 +70,7 @@ class PresetForm(QWidget):
 		self._layout.addWidget(self._watermark_card())
 		self._layout.addWidget(self._intro_card())
 		self._layout.addWidget(self._output_card())
+		self._bitrate.valueChanged.connect(self._on_bitrate_edited)
 
 	# --- сборка ----------------------------------------------------------------
 
@@ -338,13 +344,45 @@ class PresetForm(QWidget):
 	def suggest_bitrate(self, mbps: float) -> bool:
 		"""Подставляет рекомендованный битрейт, если поле не занято.
 
-		Заполненное вручную или пресетом значение не трогается —
-		автоподстановка действует только на «0 — как в оригинале».
+		Свободное поле — «0 — как в оригинале» или прежняя автоподстановка
+		(рекомендация нового файла обновляет рекомендацию старого).
+		Заполненное вручную или пресетом значение не трогается; ручной
+		«0» снова освобождает поле.
 
 		Returns:
 			True, если значение подставлено.
 		"""
-		if float(self._bitrate.value()) > 0:
+		if float(self._bitrate.value()) > 0 and not self._bitrate_suggested:
 			return False
-		self._bitrate.setValue(mbps)
+		self._set_bitrate_programmatically(mbps)
+		self._bitrate_suggested = True
 		return True
+
+	def clear_suggested_bitrate(self) -> None:
+		"""Сбрасывает автоподстановку в «0» (рекомендация больше не нужна).
+
+		Значение, введённое руками или пресетом, не трогается — иначе
+		выбор файла затирал бы осознанно выставленный битрейт.
+		"""
+		if not self._bitrate_suggested:
+			return
+		self._set_bitrate_programmatically(0.0)
+		self._bitrate_suggested = False
+
+	def _set_bitrate_programmatically(self, mbps: float) -> None:
+		"""Пишет значение в поле, не снимая пометку «автоподстановка»."""
+		self._suggest_guard = True
+		try:
+			self._bitrate.setValue(mbps)
+		finally:
+			self._suggest_guard = False
+
+	def _on_bitrate_edited(self, _value: float) -> None:
+		"""Любая правка поля не через автоподстановку снимает её пометку.
+
+		Сюда попадают и ручной ввод, и загрузка пресета (``fill``) — оба
+		случая означают осознанное значение, которое подстановка рекомендаций
+		трогать не должна.
+		"""
+		if not self._suggest_guard:
+			self._bitrate_suggested = False

@@ -177,8 +177,14 @@ class VideoPage(ScrollArea):
 		)
 
 	def _on_bitrate_advice(self, advice: BitrateAdvice | None) -> None:
-		"""Подставляет рекомендованный битрейт (только поверх «0»)."""
+		"""Подставляет рекомендованный битрейт или снимает ненужный.
+
+		None — файл в лимите (или не читается): прежняя автоподстановка
+		сбрасывается в «0», иначе рекомендация от предыдущего файла
+		молча ушла бы в кодирование нового.
+		"""
 		if advice is None:
+			self._form.clear_suggested_bitrate()
 			return
 		if self._form.suggest_bitrate(advice.mbps):
 			InfoBar.info(

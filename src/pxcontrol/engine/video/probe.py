@@ -96,6 +96,28 @@ def _parse_fps(rate: str) -> float:
 	return float(rate)
 
 
+def _rotation_degrees(stream: dict[str, Any]) -> int:
+	"""Поворот кадра из метаданных видеопотока (0 — не задан/нечитаем).
+
+	Телефоны и мессенджеры часто пишут вертикальное видео альбомным
+	кадром с флагом поворота. Современные файлы хранят его в
+	``side_data_list`` («Display Matrix», поле ``rotation``), старые —
+	тегом ``rotate``.
+	"""
+	for side in stream.get("side_data_list") or []:
+		rotation = side.get("rotation")
+		if rotation is not None:
+			try:
+				return round(float(rotation))
+			except (TypeError, ValueError):
+				return 0
+	raw = (stream.get("tags") or {}).get("rotate")
+	try:
+		return int(str(raw)) if raw is not None else 0
+	except (TypeError, ValueError):
+		return 0
+
+
 def _parse_bitrate_kbps(video: dict[str, Any], fmt: dict[str, Any]) -> int | None:
 	"""Битрейт видеопотока в кбит/с: из потока, иначе из контейнера.
 
@@ -148,9 +170,16 @@ def probe_video(path: str, ffprobe_bin: str = "ffprobe") -> VideoInfo:
 		duration = 0.0
 	if duration <= 0:
 		raise RuntimeError(f"Не удалось определить длительность для '{path}'")
+	width, height = int(video["width"]), int(video["height"])
+	# флаг поворота: ffprobe отдаёт размеры хранимого кадра, а ffmpeg
+	# при декодировании сам поворачивает изображение — расчёты (вписывание
+	# в FullHD, вотермарк, кадры) должны идти от повёрнутых размеров,
+	# иначе «книжное» видео с флагом кодировалось бы растянутым альбомным
+	if _rotation_degrees(video) % 180 != 0:
+		width, height = height, width
 	return VideoInfo(
-		width=int(video["width"]),
-		height=int(video["height"]),
+		width=width,
+		height=height,
 		duration=duration,
 		fps=fps,
 		has_audio=any(s.get("codec_type") == "audio" for s in streams),

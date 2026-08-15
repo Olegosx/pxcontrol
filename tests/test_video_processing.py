@@ -673,3 +673,28 @@ def test_ffprobe_bin_for_keeps_dir_and_suffix() -> None:
 	assert ffprobe_bin_for("/usr/bin/ffmpeg") == "/usr/bin/ffprobe"
 	assert ffprobe_bin_for("bin/ffmpeg") == "bin/ffprobe"  # относительный, но с каталогом
 	assert ffprobe_bin_for("/opt/ff/ffmpeg.exe") == "/opt/ff/ffprobe.exe"
+
+
+def test_probe_swaps_dimensions_for_rotated_video(monkeypatch: pytest.MonkeyPatch) -> None:
+	"""Флаг поворота ±90° меняет ширину и высоту местами.
+
+	ffmpeg сам поворачивает кадры при декодировании — расчёты вписывания
+	и вотермарка должны идти от повёрнутых размеров, иначе «книжное»
+	видео с флагом кодировалось бы растянутым альбомным.
+	"""
+	from pxcontrol.engine.video import probe
+
+	base = {"codec_type": "video", "width": 1920, "height": 1080, "avg_frame_rate": "30/1"}
+	cases = [
+		({"side_data_list": [{"side_data_type": "Display Matrix", "rotation": 90}]}, True),
+		({"side_data_list": [{"side_data_type": "Display Matrix", "rotation": -90}]}, True),
+		({"tags": {"rotate": "270"}}, True),  # легаси-тег старых файлов
+		({"side_data_list": [{"side_data_type": "Display Matrix", "rotation": 180}]}, False),
+		({}, False),
+	]
+	for extra, swapped in cases:
+		data = {"streams": [base | extra], "format": {"duration": "10.0"}}
+		monkeypatch.setattr(probe, "_run_ffprobe", lambda _p, _b, d=data: d)
+		info = probe.probe_video("x.mp4")
+		expected = (1080, 1920) if swapped else (1920, 1080)
+		assert (info.width, info.height) == expected, extra
