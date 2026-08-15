@@ -64,7 +64,11 @@ class FramePickerDialog(MessageBoxBase):
 		parent: QWidget,
 		trim_start: float = 0.0,
 		trim_end: float = 0.0,
+		file_label: str | None = None,
 	) -> None:
+		"""``file_label`` — подпись с именем файла под заголовком: пакетная
+		обработка показывает диалог по разу на файл, и без подписи не видно,
+		для какого видео сейчас выбирается кадр."""
 		super().__init__(parent)
 		self._worker = worker
 		self._source = source_path
@@ -75,6 +79,10 @@ class FramePickerDialog(MessageBoxBase):
 		self._group = QButtonGroup(self)
 		self._group.setExclusive(True)
 		self.viewLayout.addWidget(SubtitleLabel("Выберите кадр заставки", self))
+		if file_label:
+			name_label = CaptionLabel(file_label, self)
+			name_label.setWordWrap(True)
+			self.viewLayout.addWidget(name_label)
 		self._build_controls_row()
 		self._grid_box = QWidget(self)
 		self._grid = QGridLayout(self._grid_box)

@@ -1,28 +1,34 @@
-"""Страница «Видео»: панель параметров обработки и подготовка файла.
+"""Страница «Видео»: панель параметров обработки и очередь подготовки.
 
 Параметры живут прямо на странице: «Обработать» применяет то, что на
 экране, ничего не сохраняя. Пресет — «загрузчик»: выбор в списке
 заполняет панель (:mod:`video_form`), сохранение — только по явным
-кнопкам. Результат — файл в папке результатов; кнопка «Опубликовать…»
-передаёт его странице «Публикация» (контракт — путь к файлу). Выбор
-кадра заставки — отдельный диалог (:mod:`frame_picker`).
+кнопкам. Обработка — и одиночная, и пакетная («Обработать папку…»,
+диалог :mod:`video_batch`) — идёт через очередь движка (ADR-0014):
+кнопки ставят элементы в хвост, карточки очереди видны на странице.
+Результат — файл в папке результатов; кнопка «Опубликовать…» передаёт
+его странице «Публикация» (контракт — путь к файлу). Выбор кадра
+заставки — отдельный диалог (:mod:`frame_picker`).
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
+	CardWidget,
 	FluentIcon,
 	InfoBar,
 	LineEdit,
 	PrimaryPushButton,
+	ProgressBar,
 	PushButton,
 	ScrollArea,
 	SubtitleLabel,
@@ -30,8 +36,8 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.services.channels import ChannelDto
-from pxcontrol.engine.services.posts import text_preview
 from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET
 from pxcontrol.engine.services.video import (
 	BitrateAdvice,
@@ -44,12 +50,16 @@ from pxcontrol.engine.services.video import (
 	build_intro_source,
 	parse_intro_source,
 )
+from pxcontrol.engine.services.video_queue import (
+	ProcessingRequest,
+	VideoItemDto,
+	VideoItemStatus,
+)
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	INPUT_DEBOUNCE_MS,
 	DtoComboBox,
 	FormDialog,
-	ProgressPanel,
 	bind,
 	clear_layout,
 	confirm_delete,
@@ -57,19 +67,25 @@ from pxcontrol.ui.pages.common import (
 	exec_dialog,
 	format_local,
 	human_size,
+	noop,
 	page_layout,
+	pick_dir,
 	pick_file,
 	row_card,
 	show_error,
 )
 from pxcontrol.ui.pages.frame_picker import FramePickerDialog
+from pxcontrol.ui.pages.video_batch import BatchScanDialog
 from pxcontrol.ui.pages.video_form import PresetForm
 
 #: Имя «пресета» в имени файла результата, когда пресет не выбран.
 _MANUAL_NAME = "ручные"
 
-#: Предел длины имени файла во всплывающей плашке (не переносит строки).
-_TOAST_NAME_CHARS = 60
+#: Период опроса состояния очереди обработки (мс) — как у очереди отправки.
+_QUEUE_POLL_MS = 500
+
+#: Сколько ждать копирования выбранного кадра в папку очереди (сек).
+_STASH_TIMEOUT_S = 10.0
 
 
 class VideoPage(ScrollArea):
@@ -83,8 +99,18 @@ class VideoPage(ScrollArea):
 		super().__init__(parent)
 		self.setObjectName("video")
 		self._worker = worker
+		self._queue_signature: tuple[tuple[int, VideoItemStatus, str | None, str | None], ...] = ()
+		self._queue_bars: dict[int, ProgressBar] = {}
+		self._queue_busy = False
+		self._done_seen: set[int] = set()  # готовые, уже обновившие список
 		self._build()
 		self._reload_presets()
+		# опрос очереди живёт всегда (не только при видимой странице):
+		# кэш занятости нужен подтверждению выхода из приложения
+		self._queue_timer = QTimer(self)
+		self._queue_timer.setInterval(_QUEUE_POLL_MS)
+		self._queue_timer.timeout.connect(self._poll_queue)
+		self._queue_timer.start()
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
 		"""Обновляет каналы и готовые видео при каждом открытии страницы.
@@ -116,10 +142,18 @@ class VideoPage(ScrollArea):
 		self._form = PresetForm(self)
 		layout.addWidget(self._form)
 		self._build_process_row(layout)
-		self._progress = ProgressPanel(self)
-		layout.addWidget(self._progress)
+		self._build_queue_block(layout)
 		self._build_processed_block(layout)
 		layout.addStretch()
+
+	def _build_queue_block(self, layout: QVBoxLayout) -> None:
+		"""Панель очереди обработки: итоговая строка и карточки элементов."""
+		self._queue_summary = CaptionLabel("", self)
+		self._queue_summary.hide()
+		layout.addWidget(self._queue_summary)
+		self._queue_box = QVBoxLayout()
+		self._queue_box.setSpacing(8)
+		layout.addLayout(self._queue_box)
 
 	def _build_processed_block(self, layout: QVBoxLayout) -> None:
 		"""Раздел готовых видео: папка результатов текущей подпапки."""
@@ -236,18 +270,19 @@ class VideoPage(ScrollArea):
 		self._process_button = PrimaryPushButton(FluentIcon.PLAY, "Обработать", self)
 		self._process_button.clicked.connect(self._on_process)
 		run_row.addWidget(self._process_button)
+		batch_button = PushButton(FluentIcon.FOLDER, "Обработать папку…", self)
+		batch_button.setToolTip(
+			"Рекурсивно найти видео в папке и обработать выбранные "
+			"текущими параметрами (пакет — в свою подпапку результатов)"
+		)
+		batch_button.clicked.connect(self._on_batch)
+		run_row.addWidget(batch_button)
 		run_row.addStretch()
 		layout.addLayout(run_row)
 
 	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку и гасит индикатор прогресса."""
-		self._hide_progress()
+		"""Показывает ошибку всплывающей плашкой."""
 		show_error(self, message)
-
-	def _hide_progress(self) -> None:
-		"""Прячет полосу прогресса и возвращает кнопку."""
-		self._progress.finish()
-		self._process_button.setEnabled(True)
 
 	# --- пресеты -------------------------------------------------------------------
 
@@ -416,59 +451,268 @@ class VideoPage(ScrollArea):
 		if path:
 			self._source.setText(path)
 
+	def _fields(self) -> PresetFields:
+		"""Параметры с экрана; имя — от выбранного пресета или «ручные»."""
+		preset = self._preset_combo.selected()
+		return self._form.fields(preset.name if preset else _MANUAL_NAME)
+
 	def _on_process(self) -> None:
-		"""Собирает параметры с экрана и запускает обработку."""
+		"""Ставит выбранный исходник в очередь обработки."""
 		source = str(self._source.text()).strip()
 		if not source:
 			self._show_error("Выберите исходный видеофайл.")
 			return
-		preset = self._preset_combo.selected()
-		fields = self._form.fields(preset.name if preset else _MANUAL_NAME)
-		kind, _value = parse_intro_source(fields.intro_source)
-		needs_choice = kind is IntroSourceKind.RANDOM_CHOICE and (fields.intro or fields.cover)
-		if not needs_choice:
-			self._start_prepare(source, fields, None)
-			return
-		dialog = FramePickerDialog(
-			self._worker,
-			source,
-			self.window(),
-			trim_start=fields.trim_start,
-			trim_end=fields.trim_end,
-		)
-		accepted = exec_dialog(dialog)
-		chosen = dialog.chosen_path()
-		if not accepted or chosen is None:
-			return
-		self._start_prepare(source, fields, build_intro_source(IntroSourceKind.IMAGE, chosen))
+		fields = self._fields()
+		requests = self._requests_with_frames([source], fields)
+		if requests:
+			self._enqueue(requests, fields, "")
 
-	def _start_prepare(self, source: str, fields: PresetFields, intro_source: str | None) -> None:
-		"""Запускает обработку (с подменой источника кадра или без)."""
-		self._process_button.setEnabled(False)
-		self._progress.begin("Кодирование", "Анализ файла и подготовка кадра заставки…")
+	def _on_batch(self) -> None:
+		"""Пакетная обработка: выбор папки → сканирование → очередь."""
+		subdir = str(self._form.fields("").subdir)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.video.prepare(
-				source,
-				fields,
-				intro_source=intro_source,
-				on_progress=self._progress.emit_progress,
-			),
+			self._worker.engine.video.dirs_for(subdir),
 			self,
-			self._on_processed,
+			self._pick_batch_root,
 			self._show_error,
 		)
 
-	def _on_processed(self, output_path: str) -> None:
-		"""Сообщает об итоге обработки и обновляет список готовых видео."""
-		self._hide_progress()
-		# всплывашка не переносит строки — длинное имя укорачиваем
-		InfoBar.success(
-			"Готово",
-			text_preview(Path(output_path).name, _TOAST_NAME_CHARS),
-			parent=self,
+	def _pick_batch_root(self, dirs: VideoDirs) -> None:
+		"""Открывает выбор папки пакета (по умолчанию — папка исходников)."""
+		root = pick_dir(self, "Папка с исходниками", start_dir=dirs.source)
+		if not root:
+			return
+		dialog = BatchScanDialog(self._worker, root, self.window())
+		if not exec_dialog(dialog):
+			return
+		files = dialog.selected()
+		if not files:
+			return
+		fields = self._fields()
+		requests = self._requests_with_frames([video.path for video in files], fields)
+		if not requests:
+			return
+		# подпапка пакета: штамп запуска + имя папки-источника (узнаваемость);
+		# внутри подпапки пресета, спецсимволы вычистит движок
+		batch_subdir = f"{datetime.now():%Y%m%d-%H%M%S}_{Path(root).name}"
+		self._enqueue(requests, fields, batch_subdir)
+
+	def _requests_with_frames(
+		self, paths: list[str], fields: PresetFields
+	) -> list[ProcessingRequest] | None:
+		"""Собирает заявки; для «случайных кадров на выбор» — проход по файлам.
+
+		Интерактивный источник кадра несовместим с фоновой очередью,
+		поэтому кадры выбираются заранее: диалог по разу на файл, выбранный
+		кадр копируется в папку очереди (следующая партия кандидатов стёрла
+		бы его). Отмена выбора: для одиночного файла — отмена запуска, для
+		пакета — предложение исключить файл (остальные не теряются).
+
+		Returns:
+			Заявки на обработку; None или пустой список — запуск отменён.
+		"""
+		kind, _value = parse_intro_source(fields.intro_source)
+		if not (kind is IntroSourceKind.RANDOM_CHOICE and (fields.intro or fields.cover)):
+			return [ProcessingRequest(path) for path in paths]
+		single = len(paths) == 1
+		requests: list[ProcessingRequest] = []
+		for path in paths:
+			while True:
+				dialog = FramePickerDialog(
+					self._worker,
+					path,
+					self.window(),
+					trim_start=fields.trim_start,
+					trim_end=fields.trim_end,
+					file_label=None if single else Path(path).name,
+				)
+				accepted = exec_dialog(dialog)
+				chosen = dialog.chosen_path()
+				if accepted and chosen is not None:
+					stashed = self._stash_frame(chosen)
+					if stashed is None:
+						return None  # ошибка уже показана
+					requests.append(
+						ProcessingRequest(path, build_intro_source(IntroSourceKind.IMAGE, stashed))
+					)
+					break
+				if single:
+					return None
+				if confirm_delete(
+					self,
+					f"Кадр для «{Path(path).name}» не выбран. Исключить файл из пакета?",
+					accept_text="Исключить",
+				):
+					break  # файл пропущен, заявка не создаётся
+				# «Отмена» в подтверждении — вернуться к выбору кадра
+		return requests
+
+	def _stash_frame(self, chosen: str) -> str | None:
+		"""Копирует выбранный кадр в папку очереди (синхронно, с таймаутом).
+
+		Синхронный вызов оправдан: копирование PNG — мгновенное, а проход
+		выбора кадров — последовательность модальных диалогов, где колбэки
+		моста только запутали бы поток управления.
+		"""
+		try:
+			future = self._worker.submit(self._worker.engine.video_queue.stash_frame(chosen))
+			stashed: str = future.result(timeout=_STASH_TIMEOUT_S)
+			return stashed
+		except Exception as exc:  # noqa: BLE001 — показываем и прерываем постановку
+			self._show_error(user_message(exc))
+			return None
+
+	def _enqueue(
+		self, requests: list[ProcessingRequest], fields: PresetFields, batch_subdir: str
+	) -> None:
+		"""Ставит заявки в очередь обработки движка."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video_queue.enqueue_many(requests, fields, batch_subdir),
+			self,
+			partial(self._on_enqueued, len(requests)),
+			self._show_error,
 		)
-		self._reload_processed()
+
+	def _on_enqueued(self, count: int, _ids: list[int]) -> None:
+		"""Заявки приняты — панель очереди обновляется сразу, не по таймеру."""
+		if count > 1:
+			InfoBar.success("Пакет в очереди", f"Файлов: {count}", parent=self)
+		self._poll_queue()
+
+	# --- панель очереди обработки -------------------------------------------------
+
+	def queue_busy(self) -> bool:
+		"""Есть ли необработанное в очереди (для подтверждения выхода)."""
+		return self._queue_busy
+
+	def _poll_queue(self) -> None:
+		"""Запрашивает состояние очереди (по таймеру и после постановки)."""
+		# ошибки опроса не показываем плашками: мост пишет их в лог,
+		# а раз в полсекунды спамить пользователя нечем и незачем
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video_queue.state(),
+			self,
+			self._show_queue,
+			noop,
+		)
+
+	def _show_queue(self, items: list[VideoItemDto]) -> None:
+		"""Обновляет панель очереди; новые готовые обновляют список видео."""
+		self._queue_busy = any(not item.status.finished() for item in items)
+		done_ids = {item.id for item in items if item.status is VideoItemStatus.DONE}
+		if done_ids - self._done_seen:
+			self._reload_processed()
+		self._done_seen = done_ids
+		signature = tuple((i.id, i.status, i.error, i.note) for i in items)
+		if signature != self._queue_signature:
+			self._queue_signature = signature
+			self._rebuild_queue(items)
+		for item in items:  # прогресс — без пересборки карточек
+			bar = self._queue_bars.get(item.id)
+			if bar is not None:
+				bar.setValue(int(item.progress * 100))
+		self._update_queue_summary(items)
+
+	def _update_queue_summary(self, items: list[VideoItemDto]) -> None:
+		"""Итоговая строка над карточками: «готово M из N, ошибок K»."""
+		if not items:
+			self._queue_summary.hide()
+			return
+		done = sum(1 for item in items if item.status is VideoItemStatus.DONE)
+		errors = sum(1 for item in items if item.status is VideoItemStatus.ERROR)
+		text = f"Очередь обработки: готово {done} из {len(items)}"
+		if errors:
+			text += f", ошибок {errors}"
+		self._queue_summary.setText(text)
+		self._queue_summary.show()
+
+	def _rebuild_queue(self, items: list[VideoItemDto]) -> None:
+		"""Перестраивает карточки очереди (только при смене состава/статусов)."""
+		clear_layout(self._queue_box)
+		self._queue_bars = {}
+		for item in items:
+			self._queue_box.addWidget(self._queue_row(item))
+
+	def _queue_row(self, item: VideoItemDto) -> CardWidget:
+		"""Карточка элемента очереди: статус, прогресс и действия."""
+		trailing = QWidget(self)
+		row = QHBoxLayout(trailing)
+		row.setContentsMargins(0, 0, 0, 0)
+		if item.status is VideoItemStatus.PROCESSING:
+			bar = ProgressBar(trailing)
+			bar.setRange(0, 100)
+			bar.setValue(int(item.progress * 100))
+			bar.setFixedWidth(160)
+			row.addWidget(bar)
+			self._queue_bars[item.id] = bar
+		if item.status in (VideoItemStatus.PENDING, VideoItemStatus.PROCESSING):
+			cancel = PushButton("Отмена", trailing)
+			cancel.clicked.connect(bind(self._cancel_item, item.id))
+			row.addWidget(cancel)
+		if item.status is VideoItemStatus.ERROR:
+			retry = PushButton("Повторить", trailing)
+			retry.clicked.connect(bind(self._retry_item, item.id))
+			row.addWidget(retry)
+		if item.status is VideoItemStatus.DONE and item.output_path:
+			publish = PrimaryPushButton(FluentIcon.SEND, "Опубликовать…", trailing)
+			publish.clicked.connect(bind(self._request_publish, item.output_path))
+			row.addWidget(publish)
+		if item.status.finished():
+			dismiss = PushButton("Убрать", trailing)
+			dismiss.clicked.connect(bind(self._dismiss_item, item.id))
+			row.addWidget(dismiss)
+		return row_card(self, item.title, self._queue_subtitle(item), trailing=trailing)
+
+	@staticmethod
+	def _queue_subtitle(item: VideoItemDto) -> str:
+		"""Подпись карточки: пакет, статус и пометки выполнения."""
+		status_text = {
+			VideoItemStatus.PENDING: "в очереди",
+			VideoItemStatus.PROCESSING: "кодируется",
+			VideoItemStatus.DONE: "готово",
+			VideoItemStatus.ERROR: f"ошибка: {item.error}",
+			VideoItemStatus.CANCELLED: "отменено",
+		}[item.status]
+		parts = []
+		if item.batch:
+			parts.append(f"пакет «{item.batch}»")
+		parts.append(status_text)
+		if item.note:
+			parts.append(item.note)
+		return " · ".join(parts)
+
+	def _cancel_item(self, item_id: int) -> None:
+		"""Просит движок отменить элемент очереди обработки."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video_queue.cancel(item_id),
+			self,
+			noop,
+			self._show_error,
+		)
+
+	def _retry_item(self, item_id: int) -> None:
+		"""Возвращает элемент с ошибкой в очередь на новую попытку."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video_queue.retry(item_id),
+			self,
+			lambda *_a: self._poll_queue(),
+			self._show_error,
+		)
+
+	def _dismiss_item(self, item_id: int) -> None:
+		"""Убирает завершённый элемент с показа."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video_queue.dismiss(item_id),
+			self,
+			lambda *_a: self._poll_queue(),
+			noop,
+		)
 
 	# --- готовые видео -----------------------------------------------------------
 

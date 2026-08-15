@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -121,7 +122,8 @@ class ProcessedVideo:
 	"""Готовое видео в папке результатов (для списка на странице «Видео»).
 
 	Attributes:
-		name: имя файла.
+		name: путь относительно папки списка (файл в подпапке пакета
+			показывается как «пакет/файл.mp4»).
 		path: полный путь (контракт с публикацией — путь к файлу).
 		size_bytes: размер файла.
 		modified_at: время последнего изменения (местное).
@@ -131,6 +133,29 @@ class ProcessedVideo:
 	path: str
 	size_bytes: int
 	modified_at: datetime
+
+
+@dataclass(frozen=True)
+class FoundVideo:
+	"""Видео, найденное при сканировании папки (для пакетной обработки).
+
+	Attributes:
+		name: путь относительно выбранной папки (для показа в списке).
+		path: полный путь к файлу.
+		size_bytes: размер файла.
+		duration_s: длительность в секундах; None — файл не прочитался
+			ffprobe (такой в обработке всё равно упадёт).
+	"""
+
+	name: str
+	path: str
+	size_bytes: int
+	duration_s: float | None
+
+
+#: Колбэк хода сканирования папки: (прочитано файлов, всего файлов).
+#: Вызывается из рабочего потока — интерфейс доставляет через сигнал Qt.
+ScanProgress = Callable[[int, int], None]
 
 
 @dataclass(frozen=True)
@@ -232,6 +257,40 @@ def sanitize_subdir(name: str) -> str:
 	"""
 	cleaned = "".join(ch for ch in name if ch not in _SUBDIR_FORBIDDEN)
 	return cleaned.strip(" .")[:128]
+
+
+def _is_hidden(name: str) -> bool:
+	"""Скрытый файл или папка: имя начинается с точки (соглашение Unix)."""
+	return name.startswith(".")
+
+
+def _walk_videos(directory: Path, excluded: list[Path] | None = None) -> list[Path]:
+	"""Рекурсивно собирает видеофайлы папки (отсортированы по пути).
+
+	Скрытые файлы и папки пропускаются; папки из ``excluded`` (уже
+	развёрнутые ``resolve()``) не обходятся вовсе. ``os.walk`` вместо
+	``rglob``: список папок правится на месте — исключённые ветки
+	отсекаются без захода внутрь.
+	"""
+	roots = excluded or []
+	found: list[Path] = []
+	for dirpath, dirnames, filenames in os.walk(directory):
+		current = Path(dirpath)
+		dirnames[:] = sorted(
+			name
+			for name in dirnames
+			if not _is_hidden(name) and not _is_under((current / name).resolve(), roots)
+		)
+		for name in sorted(filenames):
+			if _is_hidden(name) or Path(name).suffix.lower() not in VIDEO_SUFFIXES:
+				continue
+			found.append(current / name)
+	return found
+
+
+def _is_under(path: Path, roots: list[Path]) -> bool:
+	"""Лежит ли развёрнутый путь внутри одного из корней (или равен ему)."""
+	return any(path == root or root in path.parents for root in roots)
 
 
 @dataclass(frozen=True)
@@ -413,8 +472,10 @@ class VideoService:
 
 		Показывается вся подпапка, а не только последний результат: файлы
 		накапливаются между запусками, и страница «Видео» — естественное
-		место, где их видно, откуда их публикуют и удаляют. Вложенные
-		папки не обходятся: у каждого пресета своя подпапка.
+		место, где их видно, откуда их публикуют и удаляют. Обход
+		рекурсивный: пакетная обработка кладёт результаты в подпапку
+		пакета (ADR-0014), и они должны быть видны в общем списке —
+		имя такого файла показывается с подпапкой («пакет/файл.mp4»).
 
 		Чтение каталога блокирующее — выполняется в отдельном потоке,
 		чтобы не останавливать цикл событий движка.
@@ -425,7 +486,7 @@ class VideoService:
 
 	@staticmethod
 	def _scan_processed(directory: Path) -> list[ProcessedVideo]:
-		"""Блокирующий обход папки результатов (выполняется в потоке).
+		"""Блокирующий рекурсивный обход папки результатов (в потоке).
 
 		Несуществующая папка — пустой список: подпапка создаётся при
 		первой обработке, и до неё показывать нечего.
@@ -433,16 +494,14 @@ class VideoService:
 		if not directory.is_dir():
 			return []
 		items: list[ProcessedVideo] = []
-		for path in directory.iterdir():
-			if not path.is_file() or path.suffix.lower() not in VIDEO_SUFFIXES:
-				continue
+		for path in _walk_videos(directory):
 			try:
 				stat = path.stat()
-			except OSError:  # файл исчез между iterdir() и stat()
+			except OSError:  # файл исчез между обходом и stat()
 				continue
 			items.append(
 				ProcessedVideo(
-					path.name,
+					path.relative_to(directory).as_posix(),
 					str(path),
 					stat.st_size,
 					datetime.fromtimestamp(stat.st_mtime),
@@ -450,6 +509,59 @@ class VideoService:
 			)
 		items.sort(key=lambda item: item.modified_at, reverse=True)
 		return items
+
+	# --- сканирование исходников (пакетная обработка) --------------------------
+
+	async def scan_sources(
+		self, root: str, on_progress: ScanProgress | None = None
+	) -> list[FoundVideo]:
+		"""Рекурсивно ищет видео в папке и читает их длительность (ffprobe).
+
+		Для диалога пакетной обработки (ADR-0014): пользователь выбирает
+		из найденного, что отправить в очередь. Папки результатов
+		и опубликованных исключаются — иначе выбор корня ``media/``
+		повторно обработал бы уже готовые файлы. Скрытые файлы и папки
+		(имя с точки) пропускаются. Обход и пробы блокирующие —
+		выполняются в отдельном потоке; ``on_progress`` вызывается
+		из него после каждого прочитанного файла.
+
+		Raises:
+			VideoError: Папка не существует или ffmpeg/ffprobe не найдены.
+		"""
+		directory = Path(root)
+		if not directory.is_dir():
+			raise VideoError(f"Папка не найдена: {root}")
+		self._require_ffmpeg()
+		return await asyncio.to_thread(self._scan_sources, directory, on_progress)
+
+	def _scan_sources(self, directory: Path, on_progress: ScanProgress | None) -> list[FoundVideo]:
+		"""Блокирующий обход папки и пробы файлов (выполняется в потоке)."""
+		excluded = [
+			video_base_dir(self._settings, key).resolve()
+			for key in (VIDEO_PROCESSED_DIR, VIDEO_PUBLISHED_DIR)
+		]
+		files = _walk_videos(directory, excluded)
+		ffprobe = ffprobe_bin_for(self._ffmpeg())
+		found: list[FoundVideo] = []
+		for index, path in enumerate(files, start=1):
+			try:
+				size = path.stat().st_size
+			except OSError:  # файл исчез между обходом и stat()
+				continue
+			duration: float | None
+			try:
+				duration = probe_video(str(path), ffprobe).duration
+			except (OSError, RuntimeError, ValueError):
+				# нечитаемый файл показывается в списке с пометкой —
+				# решать, что с ним делать, будет человек
+				logger.warning("Сканирование: файл %s не прочитан ffprobe.", path, exc_info=True)
+				duration = None
+			found.append(
+				FoundVideo(path.relative_to(directory).as_posix(), str(path), size, duration)
+			)
+			if on_progress is not None:
+				on_progress(index, len(files))
+		return found
 
 	async def delete_processed(self, path: str) -> None:
 		"""Удаляет готовое видео с диска вместе с кадром-превью (сосед .png).
@@ -522,6 +634,7 @@ class VideoService:
 		fields: PresetFields,
 		intro_source: str | None = None,
 		on_progress: ProgressCallback | None = None,
+		extra_subdir: str = "",
 	) -> str:
 		"""Готовит видео по переданным параметрам; возвращает путь к результату.
 
@@ -531,14 +644,16 @@ class VideoService:
 		чтобы не останавливать цикл событий движка. ``on_progress``
 		вызывается из этого потока с долей готовности 0.0..1.0.
 		``intro_source`` подменяет источник кадра заставки только для
-		этого запуска (выбор кадра из кандидатов).
+		этого запуска (выбор кадра из кандидатов). ``extra_subdir`` —
+		подпапка внутри подпапки пресета: пакетная обработка (ADR-0014)
+		складывает результаты пакета в его собственную папку.
 
 		Raises:
 			VideoError: Файл/ffmpeg не найдены или обработка упала.
 		"""
 		self._require_ready(source_path)
 		source = Path(source_path)
-		options = self._build_options(source, fields, intro_source)
+		options = self._build_options(source, fields, intro_source, extra_subdir)
 		logger.info("Обработка видео: %s (параметры «%s»)…", source.name, fields.name)
 		try:
 			await asyncio.to_thread(self._processor, options, on_progress)
@@ -615,6 +730,18 @@ class VideoService:
 			frames.append(FrameCandidate(timestamp, path))
 		return frames
 
+	def ensure_ready(self, source_path: str) -> None:
+		"""Проверяет пригодность исходника к обработке (для очереди).
+
+		Очередь обработки (ADR-0014) зовёт эту проверку при постановке
+		элемента: битый путь честно отклоняется сразу, а не в момент,
+		когда до него дойдёт обработка.
+
+		Raises:
+			VideoError: Файл или ffmpeg не найдены.
+		"""
+		self._require_ready(source_path)
+
 	def _require_ready(self, source_path: str) -> None:
 		"""Проверяет, что исходник существует и ffmpeg доступен.
 
@@ -623,6 +750,14 @@ class VideoService:
 		"""
 		if not Path(source_path).is_file():
 			raise VideoError(f"Файл не найден: {source_path}")
+		self._require_ffmpeg()
+
+	def _require_ffmpeg(self) -> None:
+		"""Проверяет доступность ffmpeg (ffprobe лежит рядом с ним).
+
+		Raises:
+			VideoError: ffmpeg не найден.
+		"""
 		if shutil.which(self._ffmpeg()) is None:
 			raise VideoError(
 				f"Не найден ffmpeg («{self._ffmpeg()}») — установите его "
@@ -630,12 +765,19 @@ class VideoService:
 			)
 
 	def _build_options(
-		self, source: Path, fields: PresetFields, intro_source: str | None = None
+		self,
+		source: Path,
+		fields: PresetFields,
+		intro_source: str | None = None,
+		extra_subdir: str = "",
 	) -> ProcessingOptions:
 		"""Собирает параметры обработки из переданных полей."""
 		out_dir = video_base_dir(self._settings, VIDEO_PROCESSED_DIR) / sanitize_subdir(
 			fields.subdir
 		)
+		extra = sanitize_subdir(extra_subdir)
+		if extra:
+			out_dir = out_dir / extra
 		out_dir.mkdir(parents=True, exist_ok=True)
 		stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 		# имя пресета — свободный текст: чистим спецсимволы ОС (как подпапку)

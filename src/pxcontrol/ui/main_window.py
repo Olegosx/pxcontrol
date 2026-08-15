@@ -53,11 +53,11 @@ class MainWindow(FluentWindow):
 	def _build_navigation(self) -> None:
 		"""Наполняет боковую навигацию разделами приложения."""
 		self.addSubInterface(ChannelsPage(self._worker, self), FluentIcon.HOME, "Каналы")
-		video_page = VideoPage(self._worker, self)
-		self.addSubInterface(video_page, FluentIcon.VIDEO, "Видео")
+		self._video_page = VideoPage(self._worker, self)
+		self.addSubInterface(self._video_page, FluentIcon.VIDEO, "Видео")
 		self._publish_page = PublishPage(self._worker, self)
 		self.addSubInterface(self._publish_page, FluentIcon.SEND, "Публикация")
-		video_page.publish_requested.connect(self._open_publish_with_video)
+		self._video_page.publish_requested.connect(self._open_publish_with_video)
 		self.addSubInterface(SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание")
 		# категории настроек (Общие, Аккаунты) — внутри самой страницы
 		self.addSubInterface(
@@ -73,16 +73,22 @@ class MainWindow(FluentWindow):
 		self.switchTo(self._publish_page)
 
 	def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — API Qt
-		"""Подтверждает выход, если очередь отправки не пуста.
+		"""Подтверждает выход, если очереди отправки или обработки не пусты.
 
-		Очередь живёт в памяти (ADR-0012): при выходе неотправленные
-		посты пропадут — без вопроса терять их нельзя.
+		Обе очереди живут в памяти (ADR-0012, ADR-0014): при выходе
+		неотправленные посты и необработанные видео пропадут из очередей —
+		без вопроса терять их нельзя (готовые файлы при этом остаются
+		на диске: результат обработки пишется атомарно).
 		"""
+		reasons = []
 		if self._publish_page.queue_busy():
+			reasons.append("неотправленные посты")
+		if self._video_page.queue_busy():
+			reasons.append("необработанные видео")
+		if reasons:
 			box = MessageBox(
-				"Отправка не завершена",
-				"В очереди публикации остались неотправленные посты — "
-				"при выходе они пропадут. Выйти?",
+				"Работа не завершена",
+				f"В очередях остались {' и '.join(reasons)} — при выходе они пропадут. Выйти?",
 				self,
 			)
 			box.yesButton.setText("Выйти")

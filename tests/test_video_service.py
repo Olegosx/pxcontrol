@@ -169,6 +169,28 @@ async def test_list_processed_shows_whole_subdir(db: Database, tmp_path: Path) -
 	assert empty.items == []
 
 
+async def test_list_processed_recurses_into_batch_subdirs(db: Database, tmp_path: Path) -> None:
+	"""Результаты пакета (вложенная папка) видны с относительным именем."""
+	settings = SettingsService(db)
+	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "результаты"))
+	service = VideoService(db, "ffmpeg", settings=settings, processor=_FakeProcessor())
+	folder = tmp_path / "результаты" / "паб"
+	batch = folder / "20260815-1200_пакет"
+	batch.mkdir(parents=True)
+	flat, nested = folder / "обычное.mp4", batch / "пакетное.mp4"
+	flat.write_bytes(b"a")
+	nested.write_bytes(b"b")
+	os.utime(flat, (1_700_000_000, 1_700_000_000))
+	os.utime(nested, (1_800_000_000, 1_800_000_000))
+
+	listing = await service.list_processed("паб")
+	assert [item.name for item in listing.items] == [
+		"20260815-1200_пакет/пакетное.mp4",
+		"обычное.mp4",
+	]
+	assert listing.items[0].path == str(nested)
+
+
 async def test_delete_processed_removes_preview_and_guards_root(
 	db: Database, tmp_path: Path
 ) -> None:
@@ -491,3 +513,101 @@ async def test_prepare_sanitizes_preset_name_in_filename(
 	assert Path(output).parent == tmp_path / "res" / "паб"
 	assert "_КаналТест-HD_" in Path(output).name
 	assert title_from_filename(output) == "Lara Croft"
+
+
+async def test_prepare_extra_subdir_for_batch(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Подпапка пакета вкладывается в подпапку пресета (и чистится)."""
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	source = tmp_path / "src.mp4"
+	source.write_bytes(b"src")
+	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
+	output = await service.prepare(
+		str(source),
+		PresetFields(name="Тест", subdir="паб"),
+		extra_subdir="2026/пакет",  # разделитель пути вычищается
+	)
+	assert Path(output).parent == tmp_path / "media" / "processed" / "паб" / "2026пакет"
+	# пустая подпапка пакета — прежнее поведение
+	plain = await service.prepare(str(source), PresetFields(name="Тест", subdir="паб"))
+	assert Path(plain).parent == tmp_path / "media" / "processed" / "паб"
+
+
+# --- сканирование исходников (пакетная обработка) ---------------------------
+
+
+async def test_scan_sources_finds_videos_recursively(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Рекурсивный поиск: фильтр расширений, скрытое и служебное — мимо."""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.probe_video",
+		lambda path, _b: VideoInfo(1920, 1080, 42.0, 25.0, True),
+	)
+	root = tmp_path / "исходники"
+	(root / "вложенная").mkdir(parents=True)
+	(root / ".скрытая").mkdir()
+	(root / "а.mp4").write_bytes(b"v" * 10)
+	(root / "вложенная" / "б.MOV").write_bytes(b"v" * 20)  # регистр не важен
+	(root / ".скрытая" / "мимо.mp4").write_bytes(b"v")  # скрытая папка
+	(root / ".тайное.mp4").write_bytes(b"v")  # скрытый файл
+	(root / "заметка.txt").write_bytes(b"t")  # не видео
+	(root / "недописанное.mp4.part").write_bytes(b"v")  # черновик ffmpeg
+
+	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
+	progress: list[tuple[int, int]] = []
+	found = await service.scan_sources(str(root), on_progress=lambda i, n: progress.append((i, n)))
+
+	assert [video.name for video in found] == ["а.mp4", "вложенная/б.MOV"]
+	assert found[0].size_bytes == 10 and found[0].duration_s == 42.0
+	assert found[1].path == str(root / "вложенная" / "б.MOV")
+	assert progress == [(1, 2), (2, 2)]
+
+
+async def test_scan_sources_excludes_results_dirs_and_marks_unreadable(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Папки результатов/опубликованных не обходятся; битый файл — с None."""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+
+	def _probe(path: str, _b: str) -> VideoInfo:
+		if "битое" in path:
+			raise RuntimeError("ffprobe завершился с ошибкой")
+		return VideoInfo(1920, 1080, 42.0, 25.0, True)
+
+	monkeypatch.setattr("pxcontrol.engine.services.video.probe_video", _probe)
+	root = tmp_path / "медиа"
+	settings = SettingsService(db)
+	await settings.set(VIDEO_PROCESSED_DIR, str(root / "processed"))
+	(root / "processed").mkdir(parents=True)
+	(root / "processed" / "готовое.mp4").write_bytes(b"v")  # уже результат
+	(root / "хорошее.mp4").write_bytes(b"v")
+	(root / "битое.mp4").write_bytes(b"v")
+
+	service = VideoService(db, "ffmpeg", settings=settings, processor=_FakeProcessor())
+	found = await service.scan_sources(str(root))
+	assert [video.name for video in found] == ["битое.mp4", "хорошее.mp4"]
+	assert found[0].duration_s is None  # нечитаемый — с пометкой, не ошибка
+	assert found[1].duration_s == 42.0
+
+
+async def test_scan_sources_requires_existing_dir_and_ffmpeg(db: Database, tmp_path: Path) -> None:
+	"""Понятные ошибки: нет папки, нет ffmpeg."""
+	service = VideoService(db, "/нет/такого/ffmpeg", processor=_FakeProcessor())
+	with pytest.raises(VideoError, match="Папка не найдена"):
+		await service.scan_sources(str(tmp_path / "нет"))
+	with pytest.raises(VideoError, match="ffmpeg"):
+		await service.scan_sources(str(tmp_path))

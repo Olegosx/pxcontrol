@@ -13,6 +13,7 @@ from pxcontrol.engine.services.posts import PostsService
 from pxcontrol.engine.services.publish_queue import PublishQueue
 from pxcontrol.engine.services.settings import FFMPEG_PATH, SettingsService
 from pxcontrol.engine.services.video import VideoService
+from pxcontrol.engine.services.video_queue import ProcessingQueue
 from pxcontrol.engine.telegram.gateway import TelegramGateway
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class Engine:
 			self.settings,
 			userbot_premium=self.gateway.userbot_premium,
 		)
+		self.video_queue = ProcessingQueue(self.video)
 		self.captions = CaptionsService(self.db, self._ffmpeg_path)
 
 	def _ffmpeg_path(self) -> str:
@@ -67,6 +69,7 @@ class Engine:
 		"""Останавливает компоненты в обратном порядке."""
 		logger.info("Остановка движка…")
 		await self.publish_queue.shutdown()
+		await self.video_queue.shutdown()
 		await self.video.shutdown()
 		await self.gateway.stop()
 		await self.db.close()
