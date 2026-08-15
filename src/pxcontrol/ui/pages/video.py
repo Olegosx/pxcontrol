@@ -102,7 +102,8 @@ class VideoPage(ScrollArea):
 		self._queue_signature: tuple[tuple[int, VideoItemStatus, str | None, str | None], ...] = ()
 		self._queue_bars: dict[int, ProgressBar] = {}
 		self._queue_busy = False
-		self._done_seen: set[int] = set()  # готовые, уже обновившие список
+		self._handled_ids: set[int] = set()  # завершённые, уже учтённые
+		self._session_done = 0  # готовых с последней итоговой плашки
 		self._build()
 		self._reload_presets()
 		# опрос очереди живёт всегда (не только при видимой странице):
@@ -605,33 +606,84 @@ class VideoPage(ScrollArea):
 		)
 
 	def _show_queue(self, items: list[VideoItemDto]) -> None:
-		"""Обновляет панель очереди; новые готовые обновляют список видео."""
-		self._queue_busy = any(not item.status.finished() for item in items)
-		done_ids = {item.id for item in items if item.status is VideoItemStatus.DONE}
-		if done_ids - self._done_seen:
-			self._reload_processed()
-		self._done_seen = done_ids
-		signature = tuple((i.id, i.status, i.error, i.note) for i in items)
+		"""Обновляет панель очереди; завершённые снимаются с показа сами.
+
+		Готовый файл — не элемент очереди, а строка «Готовых видео»
+		(двух списков одного и того же быть не должно): готовые
+		и отменённые убираются автоматически, в очереди остаются только
+		ждущие, кодирующиеся и ошибки (им нужны «Повторить»/«Убрать»).
+		"""
+		visible: list[VideoItemDto] = []
+		for item in items:
+			if item.status is VideoItemStatus.DONE:
+				self._finish_item(item, done=True)
+			elif item.status is VideoItemStatus.CANCELLED:
+				self._finish_item(item, done=False)
+			else:
+				visible.append(item)
+		# id, исчезнувшие из состояния движка (после dismiss), больше
+		# не встретятся — набор «уже учтённых» не растёт бесконечно
+		self._handled_ids &= {item.id for item in items}
+		busy = any(not item.status.finished() for item in visible)
+		if self._queue_busy and not busy:
+			self._notify_drained(visible)
+		self._queue_busy = busy
+		signature = tuple((i.id, i.status, i.error, i.note) for i in visible)
 		if signature != self._queue_signature:
 			self._queue_signature = signature
-			self._rebuild_queue(items)
-		for item in items:  # прогресс — без пересборки карточек
+			self._rebuild_queue(visible)
+		for item in visible:  # прогресс — без пересборки карточек
 			bar = self._queue_bars.get(item.id)
 			if bar is not None:
 				bar.setValue(int(item.progress * 100))
-		self._update_queue_summary(items)
+		self._update_queue_summary(visible)
+
+	def _finish_item(self, item: VideoItemDto, done: bool) -> None:
+		"""Учитывает завершённый элемент и снимает его с показа.
+
+		Снятие асинхронное, до него элемент успевает попасть в опрос
+		ещё раз-другой — набор «уже учтённых» защищает от двойного счёта.
+		"""
+		if item.id in self._handled_ids:
+			return
+		self._handled_ids.add(item.id)
+		if done:
+			self._session_done += 1
+			self._reload_processed()  # готовый файл появляется в списке
+		self._dismiss_item(item.id)
+
+	def _notify_drained(self, visible: list[VideoItemDto]) -> None:
+		"""Одна итоговая плашка, когда очередь доработала (вместо плашки
+		на каждый файл — пакет их наплодил бы десятками)."""
+		errors = sum(1 for item in visible if item.status is VideoItemStatus.ERROR)
+		if self._session_done:
+			text = f"Готово файлов: {self._session_done}"
+			if errors:
+				text += f" · ошибок: {errors} (см. карточки)"
+			InfoBar.success("Обработка завершена", text, parent=self)
+		elif errors:
+			InfoBar.warning(
+				"Обработка завершена",
+				f"Ошибок: {errors} — «Повторить» или «Убрать» на карточках.",
+				parent=self,
+			)
+		self._session_done = 0
 
 	def _update_queue_summary(self, items: list[VideoItemDto]) -> None:
-		"""Итоговая строка над карточками: «готово M из N, ошибок K»."""
+		"""Итоговая строка над карточками: сколько осталось и ошибки."""
 		if not items:
 			self._queue_summary.hide()
 			return
-		done = sum(1 for item in items if item.status is VideoItemStatus.DONE)
+		left = sum(1 for item in items if not item.status.finished())
 		errors = sum(1 for item in items if item.status is VideoItemStatus.ERROR)
-		text = f"Очередь обработки: готово {done} из {len(items)}"
+		parts = []
+		if left:
+			parts.append(f"осталось {left}")
+		if self._session_done:
+			parts.append(f"готово {self._session_done}")
 		if errors:
-			text += f", ошибок {errors}"
-		self._queue_summary.setText(text)
+			parts.append(f"ошибок {errors}")
+		self._queue_summary.setText("Очередь обработки: " + ", ".join(parts))
 		self._queue_summary.show()
 
 	def _rebuild_queue(self, items: list[VideoItemDto]) -> None:
@@ -642,7 +694,11 @@ class VideoPage(ScrollArea):
 			self._queue_box.addWidget(self._queue_row(item))
 
 	def _queue_row(self, item: VideoItemDto) -> CardWidget:
-		"""Карточка элемента очереди: статус, прогресс и действия."""
+		"""Карточка элемента очереди: статус, прогресс и действия.
+
+		Показываются только живые элементы и ошибки: готовые и отменённые
+		сняты с показа раньше (см. ``_show_queue``).
+		"""
 		trailing = QWidget(self)
 		row = QHBoxLayout(trailing)
 		row.setContentsMargins(0, 0, 0, 0)
@@ -661,11 +717,6 @@ class VideoPage(ScrollArea):
 			retry = PushButton("Повторить", trailing)
 			retry.clicked.connect(bind(self._retry_item, item.id))
 			row.addWidget(retry)
-		if item.status is VideoItemStatus.DONE and item.output_path:
-			publish = PrimaryPushButton(FluentIcon.SEND, "Опубликовать…", trailing)
-			publish.clicked.connect(bind(self._request_publish, item.output_path))
-			row.addWidget(publish)
-		if item.status.finished():
 			dismiss = PushButton("Убрать", trailing)
 			dismiss.clicked.connect(bind(self._dismiss_item, item.id))
 			row.addWidget(dismiss)
