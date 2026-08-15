@@ -168,7 +168,12 @@ class VideoPage(ScrollArea):
 		self._form.subdir_changed.connect(self._reload_processed)
 
 	def _build_source_row(self, layout: QVBoxLayout) -> None:
-		"""Строка исходника: путь, «Обзор…» и просмотр системным плеером."""
+		"""Строка исходника: файл ИЛИ папка — выбор источника в одном месте.
+
+		«Обзор…» и просмотр — про одиночный файл; «Обработать папку…» —
+		альтернативный источник (пакет): рядом, потому что это выбор
+		«что обрабатываем», а не действие запуска.
+		"""
 		src_row = QHBoxLayout()
 		self._source = LineEdit(self)
 		self._source.setPlaceholderText("Исходный видеофайл…")
@@ -183,9 +188,16 @@ class VideoPage(ScrollArea):
 		self._play_button.setToolTip("Посмотреть выбранный файл (системный плеер)")
 		self._play_button.setEnabled(False)  # активируется выбором файла
 		self._play_button.clicked.connect(self._play_source)
+		batch_button = PushButton(FluentIcon.FOLDER, "Обработать папку…", self)
+		batch_button.setToolTip(
+			"Вместо одного файла: рекурсивно найти видео в папке и обработать "
+			"выбранные текущими параметрами (пакет — в свою подпапку результатов)"
+		)
+		batch_button.clicked.connect(self._on_batch)
 		src_row.addWidget(self._source)
 		src_row.addWidget(browse)
 		src_row.addWidget(self._play_button)
+		src_row.addWidget(batch_button)
 		layout.addLayout(src_row)
 
 	def _on_source_changed(self) -> None:
@@ -270,13 +282,6 @@ class VideoPage(ScrollArea):
 		self._process_button = PrimaryPushButton(FluentIcon.PLAY, "Обработать", self)
 		self._process_button.clicked.connect(self._on_process)
 		run_row.addWidget(self._process_button)
-		batch_button = PushButton(FluentIcon.FOLDER, "Обработать папку…", self)
-		batch_button.setToolTip(
-			"Рекурсивно найти видео в папке и обработать выбранные "
-			"текущими параметрами (пакет — в свою подпапку результатов)"
-		)
-		batch_button.clicked.connect(self._on_batch)
-		run_row.addWidget(batch_button)
 		run_row.addStretch()
 		layout.addLayout(run_row)
 
