@@ -53,8 +53,14 @@ class EngineWorker:
 			return
 		self._ready.set()
 		self._loop.run_forever()
-		self._loop.run_until_complete(self._engine.stop())
-		self._loop.close()
+		try:
+			self._loop.run_until_complete(self._engine.stop())
+		except Exception:  # noqa: BLE001 — завершение не должно ронять поток
+			# ошибка остановки (сеть у Telethon, диск у БД) — в лог; цикл
+			# всё равно закрывается, иначе поток умрёт с сырой трассировкой
+			logger.exception("Ошибка при остановке движка.")
+		finally:
+			self._loop.close()
 
 	@property
 	def engine(self) -> Engine:
@@ -83,6 +89,16 @@ class EngineWorker:
 		(движок не стартовал) не трогаем, только дожидаемся потока.
 		"""
 		if self._loop is not None and not self._loop.is_closed():
-			self._loop.call_soon_threadsafe(self._loop.stop)
+			try:
+				self._loop.call_soon_threadsafe(self._loop.stop)
+			except RuntimeError:
+				# узкое окно: аварийная ветка _run закрыла цикл между
+				# нашей проверкой и вызовом — остановка уже не нужна
+				logger.debug("Цикл движка закрылся раньше запроса остановки.")
 		if self._thread is not None:
 			self._thread.join(timeout=timeout)
+			if self._thread.is_alive():
+				logger.warning(
+					"Поток движка не завершился за %.0f с — процесс закроет его принудительно.",
+					timeout,
+				)

@@ -51,3 +51,21 @@ def test_level_filters_messages(tmp_path: Path) -> None:
 	text = log_file.read_text(encoding="utf-8")
 	assert "шёпот" not in text
 	assert "крик" in text
+
+
+def test_unknown_level_falls_back_to_info(tmp_path: Path) -> None:
+	"""Опечатка в LOG_LEVEL не роняет запуск: откат к INFO с предупреждением."""
+	log_file = setup_logging("VERBOSE", log_dir=tmp_path)  # такого уровня нет
+	root = logging.getLogger()
+	assert root.level == logging.INFO
+	content = log_file.read_text(encoding="utf-8")
+	assert "LOG_LEVEL" in content  # предупреждение попало в лог
+
+
+def test_repeated_setup_closes_old_handlers(tmp_path: Path) -> None:
+	"""Повторная настройка закрывает прежние обработчики (нет утечки файла)."""
+	setup_logging("INFO", log_dir=tmp_path / "первая")
+	old_handlers = list(logging.getLogger().handlers)
+	setup_logging("INFO", log_dir=tmp_path / "вторая")
+	closed = [h for h in old_handlers if isinstance(h, logging.FileHandler)]
+	assert closed and all(h.stream is None or h.stream.closed for h in closed)

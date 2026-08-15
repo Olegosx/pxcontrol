@@ -73,7 +73,9 @@ def _load_or_create_key() -> bytes:
 			new_key = Fernet.generate_key().decode("ascii")
 			keyring.set_password(KEYRING_SERVICE, KEYRING_KEY_NAME, new_key)
 			logger.info("Создан новый ключ шифрования в системном хранилище.")
-			return new_key.encode("ascii")
+			# перечитываем из хранилища: если два первых запуска создали
+			# ключи наперегонки, оба процесса будут шифровать победившим
+			stored = keyring.get_password(KEYRING_SERVICE, KEYRING_KEY_NAME) or new_key
 		return stored.encode("ascii")
 	except KeyringError as exc:
 		raise SecretStorageError(

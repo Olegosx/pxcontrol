@@ -32,11 +32,37 @@ def run() -> int:
 	settings = get_settings()
 	setup_logging(settings.log_level)
 	worker = EngineWorker(settings)
-	worker.start()
+	try:
+		worker.start()
+	except Exception as exc:  # noqa: BLE001 — единственное место показа ошибки старта
+		# без этого ошибка старта (миграция, keyring) уходила только
+		# в stderr: при запуске из ярлыка окно «просто не открывалось»,
+		# а лог-файл оставался пустым (ADR-0009 обещает честное падение)
+		logger.critical("Движок не запустился.", exc_info=True)
+		_show_startup_error(exc)
+		return 1
 	try:
 		return _run_qt(worker)
 	finally:
 		worker.stop()
+
+
+def _show_startup_error(exc: BaseException) -> None:
+	"""Показывает ошибку старта системным диалогом (терминала может не быть)."""
+	try:
+		from PySide6.QtWidgets import QApplication, QMessageBox
+
+		from pxcontrol.engine.errors import user_message
+
+		QApplication.instance() or QApplication([])
+		QMessageBox.critical(
+			None,
+			"pXcontrol — ошибка запуска",
+			f"Движок не запустился: {user_message(exc.__cause__ or exc)}\n\n"
+			"Подробности — в logs/pxcontrol.log.",
+		)
+	except Exception:  # noqa: BLE001 — диалог вспомогательный, лог уже записан
+		logger.debug("Диалог ошибки запуска показать не удалось.", exc_info=True)
 
 
 def _run_qt(worker: EngineWorker) -> int:
@@ -73,7 +99,11 @@ def run_headless(seconds: float = 0.0) -> None:
 	settings = get_settings()
 	setup_logging(settings.log_level)
 	worker = EngineWorker(settings)
-	worker.start()
+	try:
+		worker.start()
+	except Exception:
+		logger.critical("Движок не запустился.", exc_info=True)
+		raise
 	try:
 		if seconds:
 			time.sleep(seconds)

@@ -43,14 +43,25 @@ def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> Path:
 	file_handler.setFormatter(formatter)
 
 	root = logging.getLogger()
-	root.setLevel(level.upper())
+	for old_handler in root.handlers:
+		old_handler.close()  # иначе дескриптор прежнего лог-файла утекает
 	root.handlers.clear()
 	root.addHandler(console)
 	root.addHandler(file_handler)
+	level_name = str(level).upper()
+	if level_name not in logging.getLevelNamesMapping():
+		# опечатка в LOG_LEVEL не стоит отказа в запуске — откат к INFO
+		root.setLevel(logging.INFO)
+		level_name = "INFO"
+		logging.getLogger(__name__).warning(
+			"Неизвестный уровень LOG_LEVEL=%r — использую INFO.", level
+		)
+	else:
+		root.setLevel(level_name)
 	logging.getLogger(__name__).info(
 		"pXcontrol v%s: логирование настроено (уровень %s, файл %s).",
 		__version__,
-		level.upper(),
+		level_name,
 		log_file,
 	)
 	return log_file

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import event
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
 	AsyncEngine,
 	AsyncSession,
@@ -62,7 +63,11 @@ class Database:
 		Alembic работает синхронно, поэтому выполняется в отдельном потоке,
 		чтобы не блокировать цикл событий движка.
 		"""
-		sync_url = self._url.replace("+aiosqlite", "")
+		# синхронный адрес — штатным разбором URL, а не строковой заменой:
+		# замена подстроки молча отдавала бы асинхронный адрес для любого
+		# драйвера, кроме aiosqlite, и миграции падали бы не о том
+		url = make_url(self._url)
+		sync_url = url.set(drivername=url.get_backend_name()).render_as_string(hide_password=False)
 		await asyncio.to_thread(_run_migrations, sync_url)
 		logger.info("База данных готова (миграции применены).")
 
