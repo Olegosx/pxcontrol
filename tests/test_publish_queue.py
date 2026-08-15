@@ -343,3 +343,39 @@ async def test_retry_resets_cancel_flag(db: Database) -> None:
 	await queue.retry(item_id)
 	assert internal.cancel_requested is False
 	await _wait_status(queue, item_id, QueueItemStatus.DONE)
+
+
+async def test_enqueue_many_keeps_order_and_sends_all(db: Database) -> None:
+	"""Пакет черновиков ставится целиком и отправляется по порядку."""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	ids = await queue.enqueue_many(
+		[
+			PostDraft(channel_id, text="первый"),
+			PostDraft(channel_id, text="второй"),
+			PostDraft(channel_id, text="третий"),
+		]
+	)
+	assert ids == sorted(ids) and len(ids) == 3
+	for item_id in ids:
+		await _wait_status(queue, item_id, QueueItemStatus.DONE)
+	assert [post.text for post in gateway.published] == ["первый", "второй", "третий"]
+
+
+async def test_enqueue_many_validates_before_adding(db: Database) -> None:
+	"""Негодный черновик в середине пакета — отказ целиком, очередь пуста."""
+	gateway = _SlowGateway()
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	with pytest.raises(PostError, match="пуст"):
+		await queue.enqueue_many(
+			[
+				PostDraft(channel_id, text="годный"),
+				PostDraft(channel_id, text=""),  # пустой пост — негодный
+			]
+		)
+	assert await queue.state() == []
+	with pytest.raises(PostError, match="Пакет пуст"):
+		await queue.enqueue_many([])

@@ -611,3 +611,24 @@ async def test_scan_sources_requires_existing_dir_and_ffmpeg(db: Database, tmp_p
 		await service.scan_sources(str(tmp_path / "нет"))
 	with pytest.raises(VideoError, match="ffmpeg"):
 		await service.scan_sources(str(tmp_path))
+
+
+async def test_scan_ready_lists_videos_without_probe(db: Database, tmp_path: Path) -> None:
+	"""Готовая папка: рекурсивный список с размером, без ffprobe и исключений."""
+	root = tmp_path / "результаты" / "паб" / "пакет"
+	(root / "вложенная").mkdir(parents=True)
+	(root / "а.mp4").write_bytes(b"v" * 10)
+	(root / "вложенная" / "б.mkv").write_bytes(b"v" * 20)
+	(root / ".скрытое.mp4").write_bytes(b"v")
+	(root / "черновик.mp4.part").write_bytes(b"v")
+	(root / "превью.png").write_bytes(b"p")
+
+	# ffmpeg сознательно «не найден»: scan_ready он не нужен
+	service = VideoService(db, "/нет/такого/ffmpeg", processor=_FakeProcessor())
+	found = await service.scan_ready(str(root))
+	assert [(video.name, video.size_bytes) for video in found] == [
+		("а.mp4", 10),
+		("вложенная/б.mkv", 20),
+	]
+	with pytest.raises(VideoError, match="Папка не найдена"):
+		await service.scan_ready(str(tmp_path / "нет"))

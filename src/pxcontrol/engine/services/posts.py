@@ -410,6 +410,15 @@ class PostsService:
 		"""Лимит userbot на файл в целых ГБ — для подсказок интерфейса."""
 		return userbot_max_file_bytes(self._gateway.userbot_premium()) // 10**9
 
+	async def userbot_limit_bytes(self) -> int:
+		"""Точный лимит userbot на файл в байтах (2000/4000 МиБ по Premium).
+
+		Для пометки «больше лимита канала» в пакете отправки (ADR-0015):
+		округление до целых ГБ здесь дало бы ложные пометки у файлов
+		между 2 ГБ и фактическими 2000 МиБ.
+		"""
+		return userbot_max_file_bytes(self._gateway.userbot_premium())
+
 	async def channel_title(self, channel_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).
 

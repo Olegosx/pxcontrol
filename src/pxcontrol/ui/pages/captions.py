@@ -302,12 +302,20 @@ class CaptionDialog(MessageBoxBase):
 
 	def caption(self) -> str:
 		"""Собранный текст подписи (только включённые поля)."""
-		lines = [
+		return build_caption(str(self._title.text()), self.lines())
+
+	def lines(self) -> list[CaptionLine]:
+		"""Строки включённых полей — без названия.
+
+		Пакетная отправка (ADR-0015) собирает по ним подпись каждому
+		файлу отдельно: общие значения одни, название — своё из имени
+		файла (:func:`build_caption` с другим ``title``).
+		"""
+		return [
 			CaptionLine(row.field.name, row.field.hashtag, row.values())
 			for row in self._rows
 			if row.check.isChecked()
 		]
-		return build_caption(str(self._title.text()), lines)
 
 	def used_values(self) -> dict[int, list[str]]:
 		"""Значения по полям — для автопополнения словарей."""

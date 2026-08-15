@@ -159,6 +159,24 @@ ScanProgress = Callable[[int, int], None]
 
 
 @dataclass(frozen=True)
+class ReadyVideo:
+	"""Готовое видео для пакетной отправки (ADR-0015).
+
+	В отличие от :class:`FoundVideo` — без длительности: отправке она
+	не нужна, а без ffprobe сканирование мгновенно.
+
+	Attributes:
+		name: путь относительно выбранной папки (для показа в списке).
+		path: полный путь к файлу.
+		size_bytes: размер файла (для пометки «больше лимита канала»).
+	"""
+
+	name: str
+	path: str
+	size_bytes: int
+
+
+@dataclass(frozen=True)
 class ProcessedListing:
 	"""Содержимое папки результатов: сама папка и её видео.
 
@@ -533,6 +551,35 @@ class VideoService:
 			raise VideoError(f"Папка не найдена: {root}")
 		self._require_ffmpeg()
 		return await asyncio.to_thread(self._scan_sources, directory, on_progress)
+
+	async def scan_ready(self, root: str) -> list[ReadyVideo]:
+		"""Рекурсивно ищет видео в готовой папке (для пакетной отправки).
+
+		В отличие от :meth:`scan_sources` папки результатов не исключаются
+		(они и есть источник пакета отправки, ADR-0015) и ffprobe
+		не вызывается — только имя, путь и размер. Скрытые файлы и папки,
+		недописанные ``.part`` пропускаются. Обход блокирующий —
+		выполняется в отдельном потоке.
+
+		Raises:
+			VideoError: Папка не существует.
+		"""
+		directory = Path(root)
+		if not directory.is_dir():
+			raise VideoError(f"Папка не найдена: {root}")
+		return await asyncio.to_thread(self._scan_ready, directory)
+
+	@staticmethod
+	def _scan_ready(directory: Path) -> list[ReadyVideo]:
+		"""Блокирующий обход готовой папки (выполняется в потоке)."""
+		found: list[ReadyVideo] = []
+		for path in _walk_videos(directory):
+			try:
+				size = path.stat().st_size
+			except OSError:  # файл исчез между обходом и stat()
+				continue
+			found.append(ReadyVideo(path.relative_to(directory).as_posix(), str(path), size))
+		return found
 
 	def _scan_sources(self, directory: Path, on_progress: ScanProgress | None) -> list[FoundVideo]:
 		"""Блокирующий обход папки и пробы файлов (выполняется в потоке)."""

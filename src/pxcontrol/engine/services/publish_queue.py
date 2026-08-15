@@ -23,6 +23,7 @@ from pathlib import Path
 from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.services.posts import (
 	PostDraft,
+	PostError,
 	PostsService,
 	refresh_draft_media,
 	text_preview,
@@ -134,19 +135,42 @@ class PublishQueue:
 		Raises:
 			PostError: Черновик не готов к отправке или канал не найден.
 		"""
-		self._posts.validate_draft(draft)
-		channel_title = await self._posts.channel_title(draft.channel_id)
-		item = _Item(self._next_id, draft, channel_title)
-		self._next_id += 1
-		self._items.append(item)
+		return (await self.enqueue_many([draft]))[0]
+
+	async def enqueue_many(self, drafts: list[PostDraft]) -> list[int]:
+		"""Ставит пакет черновиков в очередь; проверки — до постановки.
+
+		Постановка атомарна (ADR-0015): сначала проверяются все черновики
+		и каналы, потом добавляются все элементы — негодный черновик
+		в середине списка не оставляет пакет поставленным наполовину.
+
+		Returns:
+			Идентификаторы элементов в порядке черновиков.
+
+		Raises:
+			PostError: Список пуст, черновик не готов или канал не найден.
+		"""
+		if not drafts:
+			raise PostError("Пакет пуст — отправлять нечего.")
+		titles: dict[int, str] = {}
+		for draft in drafts:
+			self._posts.validate_draft(draft)
+			if draft.channel_id not in titles:
+				titles[draft.channel_id] = await self._posts.channel_title(draft.channel_id)
+		ids: list[int] = []
+		for draft in drafts:
+			item = _Item(self._next_id, draft, titles[draft.channel_id])
+			self._next_id += 1
+			self._items.append(item)
+			ids.append(item.id)
+			logger.info(
+				"Пост «%s» → «%s»: в очереди (id=%s).",
+				_draft_title(draft),
+				item.channel_title,
+				item.id,
+			)
 		self._ensure_worker()
-		logger.info(
-			"Пост «%s» → «%s»: в очереди (id=%s).",
-			_draft_title(draft),
-			channel_title,
-			item.id,
-		)
-		return item.id
+		return ids
 
 	async def cancel(self, item_id: int) -> None:
 		"""Отменяет элемент: ожидающий убирается, отправляющийся обрывается."""

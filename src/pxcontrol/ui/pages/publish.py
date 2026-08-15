@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from functools import partial
 
 from PySide6.QtCore import QTimer
@@ -30,7 +31,7 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.captions import TemplateDto, title_from_filename
+from pxcontrol.engine.services.captions import CaptionLine, TemplateDto, title_from_filename
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import (
 	BOT_MAX_FILE_BYTES,
@@ -39,7 +40,7 @@ from pxcontrol.engine.services.posts import (
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
 from pxcontrol.engine.services.settings import PUBLISH_LAST_CHANNEL_ID, PUBLISH_TIMES
-from pxcontrol.engine.services.video import VideoDirs
+from pxcontrol.engine.services.video import ReadyVideo, VideoDirs
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
@@ -53,12 +54,33 @@ from pxcontrol.ui.pages.common import (
 	format_local,
 	noop,
 	page_layout,
+	pick_dir,
 	pick_file,
 	row_card,
 )
+from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
 
 #: Период опроса состояния очереди отправки (мс).
 _QUEUE_POLL_MS = 500
+
+
+@dataclass
+class _BatchSetup:
+	"""Собираемые данные пакета отправки (ADR-0015).
+
+	Заполняется по шагам цепочки колбэков (папка → сканирование →
+	общий шаблон подписи → времена канала → лимит файла), чтобы
+	не таскать длинный список аргументов через каждую функцию.
+	"""
+
+	channel: ChannelDto
+	root: str
+	files: list[ReadyVideo] = field(default_factory=list)
+	caption_lines: list[CaptionLine] | None = None
+	filename_template_id: int | None = None
+	used_values: dict[int, list[str]] = field(default_factory=dict)
+	times: list[str] = field(default_factory=list)
+
 
 #: Сегменты типов контента: подпись → тип → фильтр диалога выбора файла.
 _KINDS: list[tuple[str, MediaKind, str]] = [
@@ -178,11 +200,18 @@ class PublishPage(ScrollArea):
 		self._rename_box.hide()
 
 	def _build_send_row(self, layout: QVBoxLayout) -> None:
-		"""Кнопка отправки и панель очереди отправки под ней."""
+		"""Кнопки отправки (одиночной и пакетной) и панель очереди под ними."""
 		row = QHBoxLayout()
 		self._send_button = PrimaryPushButton(FluentIcon.SEND, "Отправить", self)
 		self._send_button.clicked.connect(self._on_send)
 		row.addWidget(self._send_button)
+		batch_button = PushButton(FluentIcon.FOLDER, "Пакет из папки…", self)
+		batch_button.setToolTip(
+			"Собрать черновики постов из всех видео готовой папки: подписи "
+			"по общему шаблону, раскладка времени, правка построчно (ADR-0015)"
+		)
+		batch_button.clicked.connect(self._on_batch)
+		row.addWidget(batch_button)
 		row.addStretch()
 		layout.addLayout(row)
 		self._queue_box = QVBoxLayout()
@@ -452,6 +481,143 @@ class PublishPage(ScrollArea):
 		self._rename_edit.setText(filename)
 		self._rename_check.setChecked(True)
 		self._rename_box.show()
+
+	# --- пакет из папки (ADR-0015) --------------------------------------------------
+
+	def _on_batch(self) -> None:
+		"""Пакетная отправка: канал → папка → сканирование → черновики."""
+		channel = self._current_channel()
+		if channel is None:
+			return
+		caps = publish_capabilities(channel.bot_id is not None, channel.userbot_admin)
+		if not (caps.userbot or caps.bot):
+			self._show_error("Нет способа публикации — проверьте доступы на странице «Каналы».")
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.processed_dir_for_channel(channel.id),
+			self,
+			partial(self._pick_batch_dir, channel),
+			self._show_error,
+		)
+
+	def _pick_batch_dir(self, channel: ChannelDto, start_dir: str) -> None:
+		"""Выбор готовой папки (по умолчанию — папка результатов канала)."""
+		root = pick_dir(self, "Готовая папка с видео", start_dir=start_dir)
+		if not root:
+			return
+		setup = _BatchSetup(channel, root)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.scan_ready(root),
+			self,
+			partial(self._on_batch_scanned, setup),
+			self._show_error,
+		)
+
+	def _on_batch_scanned(self, setup: _BatchSetup, files: list[ReadyVideo]) -> None:
+		"""Файлы найдены — общий шаблон подписи (если шаблоны настроены)."""
+		if not files:
+			InfoBar.info(
+				"Видео не найдено",
+				f"В папке нет видеофайлов (включая вложенные): {setup.root}",
+				parent=self,
+			)
+			return
+		setup.files = files
+		run_in_engine(
+			self._worker,
+			self._worker.engine.captions.list_templates(setup.channel.id),
+			self,
+			partial(self._batch_caption_pass, setup),
+			self._show_error,
+		)
+
+	def _batch_caption_pass(self, setup: _BatchSetup, templates: list[TemplateDto]) -> None:
+		"""Один проход диалога подписи: шаблон и общие значения на весь пакет.
+
+		Название у каждой строки будет своё (из имени файла), поэтому поле
+		названия в диалоге пустое. Отмена диалога — пакет без подписей,
+		а не отмена пакета: подписи правятся построчно дальше.
+		"""
+		usable = [template for template in templates if template.fields]
+		if usable:
+			dialog = CaptionDialog(usable, "", self.window())
+			if exec_dialog(dialog):
+				setup.caption_lines = dialog.lines()
+				setup.used_values = dialog.used_values()
+				template = next(t for t in usable if t.id == dialog.template_id())
+				if template.filename_pattern:
+					setup.filename_template_id = template.id
+				run_in_engine(
+					self._worker,
+					self._worker.engine.captions.record_usage(template.id, setup.used_values),
+					self,
+					noop,
+					self._show_error,
+				)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get_for(PUBLISH_TIMES, setup.channel.id),
+			self,
+			partial(self._batch_times_loaded, setup),
+			self._show_error,
+		)
+
+	def _batch_times_loaded(self, setup: _BatchSetup, times: list[str]) -> None:
+		"""Времена канала получены — осталась граница размера файла."""
+		setup.times = times
+		caps = publish_capabilities(setup.channel.bot_id is not None, setup.channel.userbot_admin)
+		if caps.userbot:
+			run_in_engine(
+				self._worker,
+				self._worker.engine.posts.userbot_limit_bytes(),
+				self,
+				partial(self._open_batch_dialog, setup, True),
+				self._show_error,
+			)
+		else:
+			# запасной бот-путь: лимит 50 МБ и только «сейчас» (ADR-0011)
+			self._open_batch_dialog(setup, False, BOT_MAX_FILE_BYTES)
+
+	def _open_batch_dialog(
+		self, setup: _BatchSetup, schedule_allowed: bool, limit_bytes: int
+	) -> None:
+		"""Показывает черновики пакета; принятые ставит в очередь отправки."""
+		dialog = PublishBatchDialog(
+			self._worker,
+			setup.channel,
+			setup.root,
+			setup.files,
+			self.window(),
+			caption_lines=setup.caption_lines,
+			filename_template_id=setup.filename_template_id,
+			used_values=setup.used_values,
+			channel_times=setup.times,
+			limit_bytes=limit_bytes,
+			schedule_allowed=schedule_allowed,
+		)
+		if not exec_dialog(dialog):
+			return
+		try:
+			drafts = dialog.drafts(setup.channel.id)
+		except ValueError as exc:  # страховка: validate диалога это уже проверил
+			self._show_error(str(exc))
+			return
+		if not drafts:
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.publish_queue.enqueue_many(drafts),
+			self,
+			partial(self._on_batch_enqueued, len(drafts)),
+			self._show_error,
+		)
+
+	def _on_batch_enqueued(self, count: int, _ids: list[int]) -> None:
+		"""Пакет принят в очередь — карточки видны сразу, не по таймеру."""
+		InfoBar.success("Пакет в очереди", f"Постов: {count}", parent=self)
+		self._poll_queue()
 
 	# --- отправка через очередь ---------------------------------------------------
 
