@@ -19,7 +19,7 @@
 ## 02. Архитектура
 | Документ | Назначение | Статус |
 |---|---|---|
-| [overview.md](02-architecture/overview.md) | Общая картина системы | 🟡 |
+| [overview.md](02-architecture/overview.md) | Общая картина системы | 🟢 |
 | [components.md](02-architecture/components.md) | Состав компонентов | 🟢 |
 | [data-flow.md](02-architecture/data-flow.md) | Поток данных (контент → публикация) | 🟡 |
 | [runtime.md](02-architecture/runtime.md) | Порядок запуска и остановки | 🟢 |
@@ -65,7 +65,7 @@
 ## 08. Разработка
 | Документ | Назначение | Статус |
 |---|---|---|
-| [setup.md](08-development/setup.md) | Настройка окружения разработчика | 🟡 |
+| [setup.md](08-development/setup.md) | Настройка окружения разработчика | 🟢 |
 | [testing.md](08-development/testing.md) | Подход к тестированию | 🟡 |
 | [coding-standards.md](08-development/coding-standards.md) | Стандарты кода | 🟡 |
 

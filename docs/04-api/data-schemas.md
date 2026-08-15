@@ -1,6 +1,6 @@
 # Схемы данных (типы границы движка)
 
-> Статус: 🟢 готов · Обновлено: 2026-07-16 · Владелец: olegosx
+> Статус: 🟢 готов · Обновлено: 2026-08-15 · Владелец: olegosx
 
 ## Назначение документа
 
@@ -32,7 +32,11 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `PublishCapabilities`, `ScheduledPostDto` | `posts.py` | возможности канала; отложенная запись из Telegram |
 | `QueueItemDto`, `QueueItemStatus` | `publish_queue.py` | элемент очереди отправки и его статус |
 | `PresetDto`, `PresetFields`, `FrameCandidate` | `video.py` | пресет обработки видео и кадры-кандидаты |
+| `BitrateAdvice` | `video.py` | рекомендация битрейта для исходника больше лимита Telegram |
+| `ProcessedVideo`, `ProcessedListing` | `video.py` | готовое видео и содержимое подпапки результатов |
+| `VideoDirs`, `IntroSourceKind` | `video.py` | действующие папки видео; вид источника кадра заставки |
 | `FieldDto`, `TemplateDto`, `TemplateFieldDto`, `CaptionLine` | `captions.py` | поля со словарями и шаблоны подписей |
+| `ValueDto` | `captions.py` | значение словаря поля (с привязкой к родительскому значению) |
 
 ### Телеграм-слой (`engine/telegram/types.py`) — граница «сервисы → транспорты»
 

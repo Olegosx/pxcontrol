@@ -5,6 +5,10 @@
 >
 > Уточняет [ADR-0007](0007-hybrid-botapi-mtproto.md)
 > и [ADR-0010](0010-posts-fire-and-forget.md) (пункты 2–3 решения).
+>
+> ⚠️ Лимит «2 ГБ» уточнён (2026-08-15): фактические значения Telegram —
+> 2000 МиБ (4000 МиБ с Premium, статус читается при подключении);
+> см. [telegram-gateway.md](../../03-modules/telegram-gateway.md).
 
 ## Контекст
 
