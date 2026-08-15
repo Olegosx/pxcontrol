@@ -243,15 +243,25 @@ class _FoldersSettings(QWidget):
 			edit.setText(path)
 
 	def _on_save(self) -> None:
-		"""Сохраняет все три пути (пусто — вернуться к стандартной папке)."""
-		for _label, key, _hint in _VIDEO_FOLDERS:
-			run_in_engine(
-				self._worker,
-				self._worker.engine.settings.set(key, str(self._edits[key.name].text()).strip()),
-				self,
-				noop,
-				self._show_error,
-			)
+		"""Сохраняет все три пути (пусто — вернуться к стандартной папке).
+
+		Одна операция — одна транзакция (set_many): успех сообщается
+		по факту записи, а не до неё (образец честной плашки — channels).
+		"""
+		items = [
+			(key, str(self._edits[key.name].text()).strip())
+			for _label, key, _hint in _VIDEO_FOLDERS
+		]
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set_many(items),
+			self,
+			self._on_saved,
+			self._show_error,
+		)
+
+	def _on_saved(self, _result: object = None) -> None:
+		"""Подтверждает сохранение папок (вызывается по факту записи)."""
 		InfoBar.success(
 			"Сохранено",
 			"Папки видео применены.",

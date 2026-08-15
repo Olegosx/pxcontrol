@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from functools import partial
 
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
@@ -27,7 +28,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.posts import ScheduledPostDto
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import clear_layout, error_reporter, page_layout
+from pxcontrol.ui.pages.common import clear_layout, error_reporter, format_local, page_layout
 
 
 class SchedulePage(ScrollArea):
@@ -39,9 +40,24 @@ class SchedulePage(ScrollArea):
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		self._items: list[ScheduledPostDto] = []
-		# снятые галки фильтра (id каналов): выбор переживает «Обновить»
+		# снятые галки фильтра (id каналов): выбор переживает «Обновить».
+		# Оговорка: канал, пропавший из списка и вернувшийся позже,
+		# останется скрытым, пока галку не поставят заново, — набор
+		# по текущему списку не чистится намеренно (временное отсутствие
+		# отложенных не должно сбрасывать выбор пользователя)
 		self._unchecked: set[int] = set()
 		self._build()
+		# первичной загрузки здесь нет: её делает showEvent при первом
+		# показе — Telegram не опрашивается, пока страницу не открыли
+
+	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — имя Qt
+		"""Перечитывает список при каждом показе страницы.
+
+		Истина — сам канал (ADR-0010): отложенные создаются на соседней
+		«Публикации» и правятся из любого клиента Telegram, поэтому
+		страница обновляется при открытии, как «Видео» и «Публикация».
+		"""
+		super().showEvent(event)
 		self._reload()
 
 	def _build(self) -> None:
@@ -152,7 +168,7 @@ class SchedulePage(ScrollArea):
 		box = QVBoxLayout(card)
 		box.setContentsMargins(16, 10, 16, 10)
 		box.setSpacing(2)
-		when = StrongBodyLabel(f"{item.scheduled_at.astimezone():%d.%m.%Y %H:%M}", card)
+		when = StrongBodyLabel(format_local(item.scheduled_at), card)
 		when.setTextColor(themeColor(), themeColor())
 		box.addWidget(when)
 		text = BodyLabel(item.text_preview, card)

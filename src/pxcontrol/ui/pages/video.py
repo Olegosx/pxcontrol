@@ -46,13 +46,16 @@ from pxcontrol.engine.services.video import (
 )
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	INPUT_DEBOUNCE_MS,
 	DtoComboBox,
 	FormDialog,
 	ProgressPanel,
 	bind,
 	clear_layout,
 	confirm_delete,
+	debounced,
 	exec_dialog,
+	format_local,
 	human_size,
 	page_layout,
 	pick_file,
@@ -135,7 +138,11 @@ class VideoPage(ScrollArea):
 		src_row = QHBoxLayout()
 		self._source = LineEdit(self)
 		self._source.setPlaceholderText("Исходный видеофайл…")
-		self._source.textChanged.connect(self._on_source_changed)
+		# после паузы ввода: промежуточная строка, совпавшая с файлом,
+		# запускала бы ffprobe (рекомендация битрейта) на каждый символ
+		self._source.textChanged.connect(
+			debounced(self, INPUT_DEBOUNCE_MS, self._on_source_changed)
+		)
 		browse = PushButton("Обзор…", self)
 		browse.clicked.connect(self._pick_source)
 		self._play_button = ToolButton(FluentIcon.PLAY, self)
@@ -147,14 +154,15 @@ class VideoPage(ScrollArea):
 		src_row.addWidget(self._play_button)
 		layout.addLayout(src_row)
 
-	def _on_source_changed(self, text: str) -> None:
+	def _on_source_changed(self) -> None:
 		"""Реакция на выбор исходника: просмотр и рекомендация битрейта.
 
 		Просмотр доступен, только когда путь указывает на существующий
 		файл. Для файла больше лимита Telegram движок считает
 		рекомендуемый битрейт (размер итога — лимит минус 1 %).
+		Вызывается после паузы ввода (см. подключение сигнала).
 		"""
-		path = text.strip()
+		path = str(self._source.text()).strip()
 		is_file = Path(path).is_file()
 		self._play_button.setEnabled(is_file)
 		if not is_file:
@@ -177,7 +185,7 @@ class VideoPage(ScrollArea):
 				"Исходник больше лимита Telegram",
 				f"Лимит {advice.limit_gb} ГБ — в «Качество» подставлено "
 				f"{advice.mbps:g} Мбит/с (итог: лимит минус 1 %).",
-				parent=self.window(),
+				parent=self,  # сообщение относится к странице, как остальные её плашки
 			)
 
 	def _play_source(self) -> None:
@@ -496,7 +504,7 @@ class VideoPage(ScrollArea):
 		buttons_layout.setContentsMargins(0, 0, 0, 0)
 		for button in (open_btn, folder_btn, publish_btn):
 			buttons_layout.addWidget(button)
-		subtitle = f"{human_size(item.size_bytes)} · {item.modified_at.strftime('%d.%m.%Y %H:%M')}"
+		subtitle = f"{human_size(item.size_bytes)} · {format_local(item.modified_at)}"
 		card: QWidget = row_card(
 			self,
 			item.name,

@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
@@ -48,6 +50,7 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	error_reporter,
 	exec_dialog,
+	format_local,
 	noop,
 	page_layout,
 	pick_file,
@@ -227,22 +230,30 @@ class PublishPage(ScrollArea):
 			label=lambda channel: channel.title,
 			key=lambda channel: channel.id,
 		)
-		self._apply_channel_restore()
-		self._on_channel_changed()
+		# успешное восстановление само запускает обработчик смены (сигнал
+		# select); явный вызов нужен только когда восстанавливать нечего
+		if not self._apply_channel_restore():
+			self._on_channel_changed()
 
 	def _on_last_channel_loaded(self, channel_id: int | None) -> None:
 		"""Пришёл канал прошлой публикации — применяем, если список готов."""
 		self._restore_channel_id = channel_id
 		self._apply_channel_restore()
 
-	def _apply_channel_restore(self) -> None:
-		"""Предвыбирает канал прошлой публикации (один раз)."""
+	def _apply_channel_restore(self) -> bool:
+		"""Предвыбирает канал прошлой публикации (один раз).
+
+		Returns:
+			True — выбор применён; обработчик смены уже запущен сигналом
+			``select`` (см. контракт DtoComboBox.select), звать его не нужно.
+		"""
 		wanted = self._restore_channel_id
 		if wanted is None:
-			return
+			return False
 		if self._channel_combo.select(lambda channel: channel.id == wanted):
 			self._restore_channel_id = None
-			self._on_channel_changed()
+			return True
+		return False
 
 	def _channel_or_none(self) -> ChannelDto | None:
 		"""Выбранный канал без показа ошибок (для адаптации формы)."""
@@ -260,7 +271,7 @@ class PublishPage(ScrollArea):
 			self._worker,
 			self._worker.engine.settings.get_for(PUBLISH_TIMES, channel.id),
 			self,
-			self._when_row.set_times,
+			partial(self._apply_times, channel.id),
 			noop,
 		)
 		caps = publish_capabilities(channel.bot_id is not None, channel.userbot_admin)
@@ -273,7 +284,7 @@ class PublishPage(ScrollArea):
 				self._worker,
 				self._worker.engine.posts.userbot_limit_gb(),
 				self,
-				self._show_userbot_limit,
+				partial(self._show_userbot_limit, channel.id),
 				noop,
 			)
 			self._when_row.set_schedule_allowed(True)
@@ -289,8 +300,25 @@ class PublishPage(ScrollArea):
 			)
 			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
 
-	def _show_userbot_limit(self, limit_gb: int) -> None:
+	def _is_stale(self, channel_id: int) -> bool:
+		"""Пришёл ли ответ движка для уже переключённого канала.
+
+		Пока движок занят (очередь отправки в том же цикле, ADR-0012),
+		ответы задерживаются: без проверки подсказка и времена канала A
+		перезаписали бы уже показанные данные канала B.
+		"""
+		current = self._channel_or_none()
+		return current is None or current.id != channel_id
+
+	def _apply_times(self, channel_id: int, times: list[str]) -> None:
+		"""Подставляет времена канала, если он всё ещё выбран."""
+		if not self._is_stale(channel_id):
+			self._when_row.set_times(times)
+
+	def _show_userbot_limit(self, channel_id: int, limit_gb: int) -> None:
 		"""Дописывает лимит файла в подсказку (2 ГБ; 4 — с Premium)."""
+		if self._is_stale(channel_id):
+			return
 		premium = " (Premium)" if limit_gb >= 4 else ""
 		self._caps_hint.setText(
 			"Публикация через userbot: все типы контента, файлы "
@@ -372,14 +400,17 @@ class PublishPage(ScrollArea):
 
 	def _open_caption_dialog(self, templates: list[TemplateDto]) -> None:
 		"""Собирает подпись по шаблону и вставляет её в поле текста."""
-		if not templates or not all(t.fields for t in templates):
+		# пустой (например, только что созданный) шаблон не должен
+		# блокировать сборку по остальным — в диалог идут пригодные
+		usable = [template for template in templates if template.fields]
+		if not usable:
 			self._show_error("Сначала настройте поля и шаблон — кнопка «Поля подписи…».")
 			return
 		media = str(self._file_edit.text()).strip()
 		title = ""
 		if self._kind is not MediaKind.NONE and media:
 			title = title_from_filename(media)
-		dialog = CaptionDialog(templates, title, self.window())
+		dialog = CaptionDialog(usable, title, self.window())
 		if not exec_dialog(dialog):
 			return
 		self._text.setPlainText(dialog.caption())
@@ -505,6 +536,9 @@ class PublishPage(ScrollArea):
 		self._queue_busy = any(
 			item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING) for item in visible
 		)
+		# id, исчезнувшие из состояния движка (после dismiss), больше
+		# не встретятся — набор «уже показанных» не растёт бесконечно
+		self._handled_ids &= {item.id for item in items}
 		signature = tuple((i.id, i.status, i.error) for i in visible)
 		if signature != self._queue_signature:
 			self._queue_signature = signature
@@ -568,10 +602,7 @@ class PublishPage(ScrollArea):
 		Момент хранится в UTC (как отдаётся Telegram) и показывается
 		в местном времени — как пользователь вводил его в форме.
 		"""
-		if item.when is None:
-			when_text = "сейчас"
-		else:
-			when_text = item.when.astimezone().strftime("%d.%m.%Y %H:%M")
+		when_text = "сейчас" if item.when is None else format_local(item.when)
 		if item.status is QueueItemStatus.SENDING:
 			status = "отправляется"
 		elif item.status is QueueItemStatus.ERROR:

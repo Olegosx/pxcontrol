@@ -611,6 +611,11 @@ class FieldsDialog(MessageBoxBase):
 		self._reload()
 
 	def _on_delete_field(self, field: FieldDto) -> None:
+		# необратимая потеря словаря, копившегося автопополнением, —
+		# как и везде в приложении, требует подтверждения
+		details = f" вместе со словарём ({len(field.values)} знач.)" if field.values else ""
+		if not confirm_delete(self, f"Удалить поле «{field.name}»{details}?"):
+			return
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.delete_field(field.id),
@@ -758,6 +763,8 @@ class FieldsDialog(MessageBoxBase):
 		self._reload()
 
 	def _on_delete_template(self, template: TemplateDto) -> None:
+		if not confirm_delete(self, f"Удалить шаблон «{template.name}»?"):
+			return
 		if self._editing is not None and self._editing.id == template.id:
 			self._cancel_edit()  # удаляемый шаблон не должен остаться в форме
 		run_in_engine(

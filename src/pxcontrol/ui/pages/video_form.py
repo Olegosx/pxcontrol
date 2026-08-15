@@ -29,7 +29,7 @@ from pxcontrol.engine.services.video import (
 	build_intro_source,
 	parse_intro_source,
 )
-from pxcontrol.ui.pages.common import pick_file
+from pxcontrol.ui.pages.common import INPUT_DEBOUNCE_MS, debounced, pick_file
 
 #: Углы вотермарка: подпись → код (коды понимает движок, filtergraph).
 _CORNERS = [
@@ -221,7 +221,14 @@ class PresetForm(QWidget):
 			"результаты и опубликованные этого пресета. При создании пресета "
 			"заполняется его именем."
 		)
-		self._subdir.textChanged.connect(self.subdir_changed)
+		# после паузы ввода, не на каждый символ: подписчик сканирует диск
+		self._subdir.textChanged.connect(
+			debounced(
+				self,
+				INPUT_DEBOUNCE_MS,
+				lambda: self.subdir_changed.emit(str(self._subdir.text())),
+			)
+		)
 		subdir_row.addWidget(self._subdir, stretch=1)
 		box.addLayout(subdir_row)
 		return card

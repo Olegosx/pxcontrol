@@ -17,6 +17,8 @@ from pxcontrol.engine.services.settings import (
 	PUBLISH_LAST_CHANNEL_ID,
 	PUBLISH_TIMES,
 	THEME_DARK,
+	VIDEO_PROCESSED_DIR,
+	VIDEO_SOURCE_DIR,
 	SettingsError,
 	SettingsService,
 )
@@ -175,3 +177,32 @@ async def test_drop_channel_value_removes_matching_refs(db: Database) -> None:
 	await service.drop_channel_value(CHANNEL_DEFAULT_PRESET, 5)
 	assert await service.get_for(CHANNEL_DEFAULT_PRESET, first) is None
 	assert await service.get_for(CHANNEL_DEFAULT_PRESET, second) == 7
+
+
+async def test_set_many_atomic(db: Database) -> None:
+	"""set_many пишет всё одной транзакцией; негодное значение — ничего.
+
+	Честная плашка «Сохранено» в интерфейсе опирается на этот контракт:
+	успех вызова означает, что записаны все значения, а не часть.
+	"""
+	service = SettingsService(db)
+	await service.set_many([(VIDEO_SOURCE_DIR, "/a"), (VIDEO_PROCESSED_DIR, "/b")])
+	assert await service.get(VIDEO_SOURCE_DIR) == "/a"
+	assert await service.get(VIDEO_PROCESSED_DIR) == "/b"
+	# одно негодное значение отменяет всю запись
+	with pytest.raises(SettingsError, match="не подходит по типу"):
+		await service.set_many([(VIDEO_SOURCE_DIR, "/новое"), (VIDEO_PROCESSED_DIR, 123)])
+	assert await service.get(VIDEO_SOURCE_DIR) == "/a"  # не перезаписано
+
+
+async def test_set_for_many_atomic(db: Database) -> None:
+	"""set_for_many: обе настройки канала одной записью; чужой канал — ошибка."""
+	service = SettingsService(db)
+	channel_id = await _add_channel(db)
+	await service.set_for_many(
+		channel_id, [(PUBLISH_TIMES, ["10:00", "18:00"]), (CHANNEL_ENABLED, False)]
+	)
+	assert await service.get_for(PUBLISH_TIMES, channel_id) == ["10:00", "18:00"]
+	assert await service.get_for(CHANNEL_ENABLED, channel_id) is False
+	with pytest.raises(SettingsError, match="не найден"):
+		await service.set_for_many(999, [(CHANNEL_ENABLED, True)])

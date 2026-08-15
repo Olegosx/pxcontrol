@@ -15,11 +15,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Generic, TypeVar
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AppSetting, Channel, ChannelSetting
@@ -133,23 +135,44 @@ class SettingsService:
 		Raises:
 			SettingsError: Значение не подходит ключу по типу.
 		"""
-		self._require_scope(key, SettingScope.APP)
-		self._require_valid(key, value)
+		await self.set_many([(key, value)])
+
+	async def set_many(self, items: Sequence[tuple[SettingKey[Any], Any]]) -> None:
+		"""Сохраняет несколько настроек приложения одной транзакцией.
+
+		Одна пользовательская операция («Сохранить» на странице настроек) —
+		одна запись: при сбое не остаётся «наполовину сохранено», а успех
+		честно сообщается по завершении вызова, а не до него.
+
+		Raises:
+			SettingsError: Какое-то значение не подходит ключу по типу —
+				не записывается ничего.
+		"""
+		for key, value in items:
+			self._require_scope(key, SettingScope.APP)
+			self._require_valid(key, value)
 		async with self._db.session_factory() as session:
-			row = await session.get(AppSetting, key.name)
-			if value is None:
-				if row is not None:
-					await session.delete(row)
-			elif row is None:
-				session.add(AppSetting(name=key.name, value=value))
-			else:
-				row.value = value
+			for key, value in items:
+				await self._apply_app(session, key, value)
 			await session.commit()
+		for key, value in items:
+			if value is None:
+				self._cache.pop(key.name, None)
+			else:
+				self._cache[key.name] = value
+		logger.info("Настройки сохранены: %s.", ", ".join(key.name for key, _value in items))
+
+	@staticmethod
+	async def _apply_app(session: AsyncSession, key: SettingKey[Any], value: Any) -> None:
+		"""Пишет одно значение настройки приложения в открытую сессию."""
+		row = await session.get(AppSetting, key.name)
 		if value is None:
-			self._cache.pop(key.name, None)
+			if row is not None:
+				await session.delete(row)
+		elif row is None:
+			session.add(AppSetting(name=key.name, value=value))
 		else:
-			self._cache[key.name] = value
-		logger.info("Настройка %s сохранена.", key.name)
+			row.value = value
 
 	def cached(self, key: SettingKey[_T]) -> _T:
 		"""Настройка приложения из кэша (синхронно, без похода в БД).
@@ -222,21 +245,42 @@ class SettingsService:
 		Raises:
 			SettingsError: Канал не найден или значение не подходит по типу.
 		"""
-		self._require_scope(key, SettingScope.CHANNEL)
-		self._require_valid(key, value)
+		await self.set_for_many(channel_id, [(key, value)])
+
+	async def set_for_many(
+		self, channel_id: int, items: Sequence[tuple[SettingKey[Any], Any]]
+	) -> None:
+		"""Сохраняет несколько настроек канала одной транзакцией.
+
+		Диалог «Настройки канала» сохраняет пресет и времена одной
+		пользовательской операцией — движок и пишет их одной записью,
+		а не цепочкой отдельных вызовов из интерфейса.
+
+		Raises:
+			SettingsError: Канал не найден или значение не подходит
+				по типу — не записывается ничего.
+		"""
+		for key, value in items:
+			self._require_scope(key, SettingScope.CHANNEL)
+			self._require_valid(key, value)
 		async with self._db.session_factory() as session:
 			if await session.get(Channel, channel_id) is None:
 				raise SettingsError("Канал не найден — обновите список.")
-			row = await session.get(ChannelSetting, (channel_id, key.name))
-			if value is None:
-				if row is not None:
-					await session.delete(row)
-			elif row is None:
-				session.add(ChannelSetting(channel_id=channel_id, name=key.name, value=value))
-			else:
-				row.value = value
+			for key, value in items:
+				row = await session.get(ChannelSetting, (channel_id, key.name))
+				if value is None:
+					if row is not None:
+						await session.delete(row)
+				elif row is None:
+					session.add(ChannelSetting(channel_id=channel_id, name=key.name, value=value))
+				else:
+					row.value = value
 			await session.commit()
-		logger.info("Настройка %s канала id=%s сохранена.", key.name, channel_id)
+		logger.info(
+			"Настройки канала id=%s сохранены: %s.",
+			channel_id,
+			", ".join(key.name for key, _value in items),
+		)
 
 	# --- внутреннее -------------------------------------------------------------
 

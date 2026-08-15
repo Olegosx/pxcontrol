@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Generic, TypeVar
 
-from PySide6.QtCore import QDate, QTime, Signal
+from PySide6.QtCore import QDate, QObject, QTime, QTimer, Signal
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
@@ -44,9 +44,47 @@ TOAST_DURATION_MS = 6000
 #: Отступы содержимого страницы от краёв окна (слева, сверху, справа, снизу).
 PAGE_MARGINS = (28, 24, 28, 24)
 
+#: Пауза после последнего нажатия клавиши до реакции на ввод (мс):
+#: достаточно, чтобы не дёргать движок/диск на каждый символ, и незаметно
+#: для пользователя, закончившего печатать.
+INPUT_DEBOUNCE_MS = 400
+
+
+def debounced(parent: QObject, interval_ms: int, action: Callable[[], None]) -> Callable[..., None]:
+	"""Обёртка «выполнить после паузы»: перезапускает одноразовый таймер.
+
+	Подключается к сигналам вроде ``textChanged``: действие выполняется
+	один раз, через ``interval_ms`` после последнего срабатывания, —
+	набор слова не превращается в серию обращений к движку и диску.
+	Аргументы сигнала игнорируются: действие само читает текущее состояние.
+	"""
+	timer = QTimer(parent)
+	timer.setSingleShot(True)
+	timer.setInterval(interval_ms)
+	timer.timeout.connect(action)
+
+	def restart(*_args: object) -> None:
+		timer.start()
+
+	return restart
+
 
 def noop(*_args: object) -> None:
 	"""Пустой колбэк для операций, результат которых не нужен интерфейсу."""
+
+
+def format_local(moment: datetime) -> str:
+	"""Дата-время для показа: хранится UTC — показывается местное.
+
+	Единая точка правила проекта; наивные значения (mtime файла)
+	трактуются как местные и показываются как есть.
+	"""
+	return moment.astimezone().strftime("%d.%m.%Y %H:%M")
+
+
+def bot_caption(label: str, username: str | None) -> str:
+	"""Единая метка бота в списках и диалогах: «Имя (@username)»."""
+	return f"{label} (@{username or '—'})"
 
 
 def bind(action: Callable[[_T], None], item: _T) -> Callable[[], None]:
@@ -274,7 +312,12 @@ class DtoComboBox(ComboBox, Generic[_T]):
 		return None
 
 	def select(self, predicate: Callable[[_T], bool]) -> bool:
-		"""Выбирает первый подходящий элемент; False — такого нет."""
+		"""Выбирает первый подходящий элемент; False — такого нет.
+
+		Контракт: успешный выбор излучает ``currentIndexChanged`` (сигналы
+		не блокируются) — обработчик смены сработает сам, звать его следом
+		вручную не нужно (страницы полагаются на это поведение).
+		"""
 		for position, item in enumerate(self._dtos):
 			if predicate(item):
 				self.setCurrentIndex(position + self._offset())
@@ -290,8 +333,9 @@ class ProgressPanel(QWidget):
 	"""Полоса прогресса с подписью и мостом из потока движка.
 
 	``emit_progress`` передаётся колбэком в движок: сигнал Qt доставляет
-	долю готовности (0.0..1.0) в поток интерфейса. Используется страницами
-	«Видео» (кодирование) и «Публикация» (загрузка файла).
+	долю готовности (0.0..1.0) в поток интерфейса. Используется страницей
+	«Видео» (кодирование); «Публикация» показывает прогресс иначе —
+	опросом состояния очереди отправки (ADR-0012).
 	"""
 
 	_progressed = Signal(float)
@@ -438,7 +482,14 @@ class WhenRow:
 
 
 class FormDialog(MessageBoxBase):
-	"""Диалог с набором текстовых полей."""
+	"""Диалог с набором текстовых полей.
+
+	``validator`` — правило пригодности введённого: получает словарь
+	«ключ поля → текст», возвращает текст ошибки или None («всё годно»).
+	При ошибке диалог показывает её и НЕ закрывается — введённое
+	не пропадает (крючок ``validate`` библиотеки, как в диалоге
+	настроек канала).
+	"""
 
 	def __init__(
 		self,
@@ -447,10 +498,15 @@ class FormDialog(MessageBoxBase):
 		parent: QWidget,
 		accept_text: str = "Добавить",
 		password_fields: tuple[str, ...] = (),
+		validator: Callable[[dict[str, str]], str | None] | None = None,
 	) -> None:
 		super().__init__(parent)
 		self.viewLayout.addWidget(SubtitleLabel(title, self))
 		self._edits: dict[str, LineEdit] = {}
+		self._validator = validator
+		self._error = CaptionLabel("", self)
+		self._error.setTextColor("#c42b1c", "#ff99a4")
+		self._error.hide()
 		for key, placeholder in fields:
 			edit = LineEdit(self)
 			edit.setPlaceholderText(placeholder)
@@ -459,6 +515,7 @@ class FormDialog(MessageBoxBase):
 				edit.setEchoMode(LineEdit.EchoMode.Password)
 			self.viewLayout.addWidget(edit)
 			self._edits[key] = edit
+		self.viewLayout.addWidget(self._error)
 		self.yesButton.setText(accept_text)
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(420)
@@ -466,3 +523,26 @@ class FormDialog(MessageBoxBase):
 	def value(self, key: str) -> str:
 		"""Возвращает введённый текст поля без крайних пробелов."""
 		return str(self._edits[key].text()).strip()
+
+	def validate(self) -> bool:
+		"""Крючок MessageBoxBase: False не даёт диалогу закрыться."""
+		if self._validator is None:
+			return True
+		message = self._validator({key: self.value(key) for key in self._edits})
+		if message is None:
+			self._error.hide()
+			return True
+		self._error.setText(message)
+		self._error.show()
+		return False
+
+
+def require_filled(
+	*keys: str, message: str = "Заполните все поля."
+) -> Callable[[dict[str, str]], str | None]:
+	"""Готовый валидатор FormDialog: перечисленные поля непусты."""
+
+	def check(values: dict[str, str]) -> str | None:
+		return None if all(values.get(key) for key in keys) else message
+
+	return check

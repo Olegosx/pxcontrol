@@ -29,6 +29,19 @@ class _AsyncCall(QObject):
 	failed = Signal(str)
 
 
+def _safe_emit(signal: Any, payload: Any) -> None:
+	"""Излучает сигнал, переживая удаление носителя в момент доставки.
+
+	Колбэк выполняется в потоке движка: владелец может быть удалён
+	потоком интерфейса между проверкой isValid и излучением — тогда
+	shiboken бросает RuntimeError, а результат просто выбрасывается.
+	"""
+	try:
+		signal.emit(payload)
+	except RuntimeError:
+		logger.debug("Результат операции движка выброшен: владелец удалён в момент доставки.")
+
+
 def run_in_engine(
 	worker: EngineWorker,
 	coro: Coroutine[Any, Any, _T],
@@ -63,13 +76,18 @@ def run_in_engine(
 		if not isValid(call):
 			logger.debug("Результат операции движка выброшен: владелец удалён.")
 			return
+		# результат — отдельно от излучения: RuntimeError может быть
+		# и честной ошибкой операции (ffmpeg), и признаком удалённого
+		# носителя при emit — смешивать их в одном try нельзя
 		try:
-			call.done.emit(fut.result())
+			result = fut.result()
 		except Exception as exc:  # noqa: BLE001 — любую ошибку показываем в UI
 			# полный трейсбек — в лог; пользователю — читаемый текст:
 			# доменные ошибки как есть, неожиданные — короткой сводкой
 			# (дампы СУБД/библиотек в интерфейс не попадают)
 			logger.exception("Ошибка операции движка: %s", exc)
-			call.failed.emit(user_message(exc))
+			_safe_emit(call.failed, user_message(exc))
+			return
+		_safe_emit(call.done, result)
 
 	future.add_done_callback(_finished)

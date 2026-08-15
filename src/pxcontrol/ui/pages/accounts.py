@@ -30,6 +30,7 @@ from pxcontrol.ui.pages.common import (
 	exec_dialog,
 	noop,
 	page_layout,
+	require_filled,
 	row_card,
 )
 
@@ -154,17 +155,14 @@ class AccountsPage(ScrollArea):
 			"Новый бот",
 			[("label", "Название (для себя)"), ("token", "Токен от @BotFather")],
 			self.window(),
+			validator=require_filled("label", "token", message="Заполните оба поля."),
 		)
 		if not exec_dialog(dialog):
-			return
-		label, token = dialog.value("label"), dialog.value("token")
-		if not (label and token):
-			self._show_error("Заполните оба поля.")
 			return
 		InfoBar.info("Проверка", "Проверяю токен через Telegram…", parent=self)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.accounts.add_bot(label, token),
+			self._worker.engine.accounts.add_bot(dialog.value("label"), dialog.value("token")),
 			self,
 			self._on_bot_added,
 			self._show_error,
@@ -309,15 +307,20 @@ class AccountsPage(ScrollArea):
 			("api_id", "api_id с my.telegram.org"),
 			("api_hash", "api_hash"),
 		]
-		dialog = FormDialog("Новый userbot-аккаунт", fields, self.window())
+
+		def _check(values: dict[str, str]) -> str | None:
+			if values["label"] and values["api_hash"] and values["api_id"].isdigit():
+				return None
+			return "Обязательны: название, числовой api_id и api_hash."
+
+		dialog = FormDialog("Новый userbot-аккаунт", fields, self.window(), validator=_check)
 		if not exec_dialog(dialog):
 			return
-		label, api_hash = dialog.value("label"), dialog.value("api_hash")
-		if not (label and api_hash and dialog.value("api_id").isdigit()):
-			self._show_error("Обязательны: название, числовой api_id и api_hash.")
-			return
 		coro = self._worker.engine.accounts.add_tg_account(
-			label, dialog.value("phone") or None, int(dialog.value("api_id")), api_hash
+			dialog.value("label"),
+			dialog.value("phone") or None,
+			int(dialog.value("api_id")),
+			dialog.value("api_hash"),
 		)
 		run_in_engine(self._worker, coro, self, self._on_account_added, self._show_error)
 
@@ -365,16 +368,13 @@ class AccountsPage(ScrollArea):
 			"Новый ключ ИИ (Anthropic)",
 			[("label", "Название"), ("api_key", "Ключ API (sk-ant-…)")],
 			self.window(),
+			validator=require_filled("label", "api_key", message="Заполните оба поля."),
 		)
 		if not exec_dialog(dialog):
 			return
-		label, api_key = dialog.value("label"), dialog.value("api_key")
-		if not (label and api_key):
-			self._show_error("Заполните оба поля.")
-			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.accounts.add_ai_key(label, api_key),
+			self._worker.engine.accounts.add_ai_key(dialog.value("label"), dialog.value("api_key")),
 			self,
 			self._on_key_added,
 			self._show_error,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
@@ -29,6 +30,7 @@ from pxcontrol.engine.services.settings import (
 	CHANNEL_DEFAULT_PRESET,
 	CHANNEL_ENABLED,
 	PUBLISH_TIMES,
+	SettingKey,
 )
 from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -36,6 +38,7 @@ from pxcontrol.ui.pages.common import (
 	TOAST_DURATION_MS,
 	DtoComboBox,
 	bind,
+	bot_caption,
 	clear_layout,
 	confirm_delete,
 	error_reporter,
@@ -72,16 +75,34 @@ class _ConnectDialog(MessageBoxBase):
 		self._hint = BodyLabel("", self)
 		self.viewLayout.addWidget(self._hint)
 		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
-		self._combo.set_items(bots, label=lambda bot: f"{bot.label} (@{bot.username or '—'})")
+		self._combo.set_items(bots, label=lambda bot: bot_caption(bot.label, bot.username))
 		self.viewLayout.addWidget(self._combo)
 		self._ref = LineEdit(self)
 		self._ref.setPlaceholderText("@имя, ссылка t.me/… или ID -100… (приватный канал)")
 		self._ref.setClearButtonEnabled(True)
 		self.viewLayout.addWidget(self._ref)
+		self._error = CaptionLabel("", self)
+		self._error.setTextColor("#c42b1c", "#ff99a4")
+		self._error.hide()
+		self.viewLayout.addWidget(self._error)
 		self.yesButton.setText("Подключить")
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(460)
 		self._on_way_changed(0)
+
+	def validate(self) -> bool:
+		"""Крючок MessageBoxBase: при ошибке диалог не закрывается —
+		введённая ссылка не пропадает."""
+		if not self.chat_ref():
+			message = "Укажите @имя, ссылку или ID канала."
+		elif self.way() == "bot" and self.bot_id() is None:
+			message = "Сначала добавьте бота: Настройки → Аккаунты."
+		else:
+			self._error.hide()
+			return True
+		self._error.setText(message)
+		self._error.show()
+		return False
 
 	def _on_way_changed(self, index: int) -> None:
 		"""Показывает выбор бота только для бот-способа."""
@@ -115,7 +136,7 @@ class _AssignBotDialog(MessageBoxBase):
 			)
 		)
 		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
-		self._combo.set_items(bots, label=lambda bot: f"{bot.label} (@{bot.username or '—'})")
+		self._combo.set_items(bots, label=lambda bot: bot_caption(bot.label, bot.username))
 		self.viewLayout.addWidget(self._combo)
 		self.yesButton.setText("Назначить")
 		self.cancelButton.setText("Отмена")
@@ -345,28 +366,19 @@ class ChannelsPage(ScrollArea):
 		current_id: int | None,
 		times: list[str],
 	) -> None:
-		"""Диалог настроек; сохранение — двумя настройками канала."""
+		"""Диалог настроек; сохранение — одной транзакцией движка."""
 		dialog = _ChannelPrefsDialog(channel.title, presets, current_id, times, self.window())
 		if not exec_dialog(dialog):
 			return
-		preset_id, times_value = dialog.preset_id(), dialog.times()
-		# записи последовательно: успех сообщается только после обеих,
-		# ошибка первой не даёт ложной плашки «сохранено»
+		# обе настройки — одна пользовательская операция: движок пишет их
+		# одной транзакцией (set_for_many), успех сообщается по факту записи
+		items: list[tuple[SettingKey[Any], Any]] = [
+			(CHANNEL_DEFAULT_PRESET, dialog.preset_id()),
+			(PUBLISH_TIMES, dialog.times()),
+		]
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.set_for(CHANNEL_DEFAULT_PRESET, channel.id, preset_id),
-			self,
-			partial(self._save_publish_times, channel, times_value),
-			self._show_error,
-		)
-
-	def _save_publish_times(
-		self, channel: ChannelDto, times: list[str], _result: object = None
-	) -> None:
-		"""Вторая запись настроек канала (после успешной первой)."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.set_for(PUBLISH_TIMES, channel.id, times),
+			self._worker.engine.settings.set_for_many(channel.id, items),
 			self,
 			partial(self._on_prefs_saved, channel),
 			self._show_error,
@@ -474,12 +486,10 @@ class ChannelsPage(ScrollArea):
 		dialog = _ConnectDialog(bots, self.window())
 		if not exec_dialog(dialog):
 			return
-		if not dialog.chat_ref():
-			self._show_error("Укажите @имя, ссылку или ID канала.")
-			return
+		# пригодность ввода проверил validate() диалога — здесь только сборка
 		if dialog.way() == "bot":
 			bot_id = dialog.bot_id()
-			if bot_id is None:
+			if bot_id is None:  # недостижимо после validate(), страховка типа
 				self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
 				return
 			coro = self._worker.engine.channels.add_channel(bot_id, dialog.chat_ref())
