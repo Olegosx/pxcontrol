@@ -24,7 +24,11 @@ TARGET_COLOR_MATRIX = "bt709"
 VIDEO_CODEC = "libx264"
 ENCODE_PRESET = "medium"
 AUDIO_CODEC = "aac"
-AUDIO_BITRATE = "192k"
+# Битрейт звука: число — для расчётов (рекомендация битрейта видео),
+# строка — производная для аргумента ffmpeg (не наоборот: обратный разбор
+# строки сломался бы молча при смене формата).
+AUDIO_KBPS = 192
+AUDIO_BITRATE = f"{AUDIO_KBPS}k"
 
 # Запасное качество, когда битрейт не задан и ffprobe его не сообщил.
 FALLBACK_CRF = "20"

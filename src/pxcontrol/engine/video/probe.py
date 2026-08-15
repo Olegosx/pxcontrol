@@ -11,10 +11,16 @@ from pxcontrol.engine.video.ffmpeg import run_tool
 
 
 def ffprobe_bin_for(ffmpeg_bin: str) -> str:
-	"""Путь к ffprobe: рядом с заданным ffmpeg или по имени в PATH."""
+	"""Путь к ffprobe: рядом с заданным ffmpeg или по имени в PATH.
+
+	Расширение сохраняется (``ffmpeg.exe`` → ``ffprobe.exe``), путь
+	с каталогом — включая относительный (``bin/ffmpeg``) — даёт соседний
+	ffprobe: молчаливый разнобой версий ffmpeg и ffprobe из PATH хуже,
+	чем честная ошибка «не найден».
+	"""
 	ffmpeg = Path(ffmpeg_bin)
-	if ffmpeg.is_absolute():
-		return str(ffmpeg.with_name("ffprobe"))
+	if ffmpeg.parent != Path("."):
+		return str(ffmpeg.with_name("ffprobe" + ffmpeg.suffix))
 	return "ffprobe"
 
 
@@ -110,11 +116,21 @@ def probe_video(path: str, ffprobe_bin: str = "ffprobe") -> VideoInfo:
 	"""Возвращает метаданные видео: размеры, длительность, fps, наличие звука.
 
 	Raises:
-		RuntimeError: Если нет видеопотока или не удалось определить fps.
+		RuntimeError: Нет видеопотока, не удалось определить fps
+			или длительность.
 	"""
 	data = _run_ffprobe(path, ffprobe_bin)
 	streams = data.get("streams", [])
-	video = next((s for s in streams if s.get("codec_type") == "video"), None)
+	# вшитая обложка (attached_pic) выглядит как видеопоток; у скачанных
+	# файлов она бывает первым потоком — размеры и fps читались бы с картинки
+	video = next(
+		(
+			s
+			for s in streams
+			if s.get("codec_type") == "video" and not s.get("disposition", {}).get("attached_pic")
+		),
+		None,
+	)
 	if video is None:
 		raise RuntimeError(f"В файле '{path}' нет видеопотока")
 	fps = _parse_fps(video.get("avg_frame_rate", "0/0")) or _parse_fps(
@@ -123,10 +139,19 @@ def probe_video(path: str, ffprobe_bin: str = "ffprobe") -> VideoInfo:
 	if fps <= 0:
 		raise RuntimeError(f"Не удалось определить кадровую частоту для '{path}'")
 	fmt = dict(data.get("format", {}))
+	# длительность — оборонительно, как битрейт: ffprobe отдаёт «N/A»
+	# у потоковых/битых контейнеров, а без поля молчаливый 0.0 давал бы
+	# врущие ошибки дальше по конвейеру (обрезка, окно вотермарка)
+	try:
+		duration = float(str(fmt.get("duration")))
+	except (TypeError, ValueError):
+		duration = 0.0
+	if duration <= 0:
+		raise RuntimeError(f"Не удалось определить длительность для '{path}'")
 	return VideoInfo(
 		width=int(video["width"]),
 		height=int(video["height"]),
-		duration=float(fmt.get("duration", 0.0)),
+		duration=duration,
 		fps=fps,
 		has_audio=any(s.get("codec_type") == "audio" for s in streams),
 		bitrate_kbps=_parse_bitrate_kbps(video, fmt),

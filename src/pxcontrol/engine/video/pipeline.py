@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -192,8 +193,10 @@ def _assemble_command(
 		cmd += ["-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE]
 	if meta_comment:
 		cmd += ["-metadata", f"comment={meta_comment}"]
-	# -progress pipe:1 — ffmpeg пишет ход кодирования в stdout (для прогресс-бара)
-	cmd += ["-progress", "pipe:1", "-nostats", "-movflags", "+faststart", output]
+	# -progress pipe:1 — ffmpeg пишет ход кодирования в stdout (для прогресс-бара);
+	# -f mp4 — формат явно: результат пишется во временное имя «….part»,
+	# по такому расширению ffmpeg контейнер не определит
+	cmd += ["-progress", "pipe:1", "-nostats", "-movflags", "+faststart", "-f", "mp4", output]
 	return cmd
 
 
@@ -262,6 +265,9 @@ def _attach_cover(ffmpeg_bin: str, video_path: str, cover_path: str, output: str
 		# но ремукс с обложкой без флага увёл бы индекс в хвост)
 		"-movflags",
 		"+faststart",
+		# формат явно: результат пишется во временное имя «….part»
+		"-f",
+		"mp4",
 		output,
 	]
 	run_tool(cmd, "вшивание обложки")
@@ -326,9 +332,19 @@ def process(opts: ProcessingOptions, on_progress: ProgressCallback | None = None
 				opts.ffmpeg_bin,
 				start_offset=opts.trim_start,
 			)
-		main_output = opts.output if not opts.cover else os.path.join(tmp, "main.mp4")
-		_run_main(opts, work_info, still_path, main_output, on_progress)
-		if opts.cover:
-			_attach_cover(opts.ffmpeg_bin, main_output, str(still_path), opts.output)
+		# результат собирается во временном имени в папке результатов
+		# (не в системной tmp: она бывает в ОЗУ, а видео — гигабайты)
+		# и переезжает в конечное имя атомарно и только при успехе —
+		# упавшее кодирование не оставляет обрезок в «Готовых видео»
+		part = f"{opts.output}.part"
+		main_output = os.path.join(tmp, "main.mp4") if opts.cover else part
+		try:
+			_run_main(opts, work_info, still_path, main_output, on_progress)
+			if opts.cover:
+				_attach_cover(opts.ffmpeg_bin, main_output, str(still_path), part)
+			os.replace(part, opts.output)
+		finally:
+			with suppress(OSError):
+				os.remove(part)
 		_save_preview(opts, work_info, still_path)
 	logger.info("Готово: %s", opts.output)

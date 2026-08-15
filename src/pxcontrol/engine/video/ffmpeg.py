@@ -77,7 +77,9 @@ def run_tool(cmd: list[str], what: str) -> str:
 	"""
 	tool = Path(cmd[0]).name
 	logger.debug("%s (%s): %s", tool, what, " ".join(cmd))
-	result = subprocess.run(cmd, capture_output=True, text=True)
+	# кодировка явная: ffmpeg пишет журнал в UTF-8 (пути с кириллицей —
+	# норма проекта), а локаль системы бывает иной (Windows: cp1251)
+	result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 	if result.returncode != 0:
 		logger.error(
 			"%s (%s) завершился с ошибкой, полный вывод:\n%s",
@@ -107,22 +109,38 @@ def run_streaming(
 		RuntimeError: Если ffmpeg завершился с ненулевым кодом.
 	"""
 	logger.debug("ffmpeg (%s): %s", what, " ".join(cmd))
-	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-	if proc.stdout is None or proc.stderr is None:  # для mypy: оба — PIPE
-		raise RuntimeError(f"ffmpeg ({what}): каналы процесса не открылись.")
-	stderr_pipe = proc.stderr
-	stderr_chunks: list[str] = []
-	reader = threading.Thread(
-		target=lambda: stderr_chunks.append(stderr_pipe.read()),
-		name="ffmpeg-stderr",
-		daemon=True,
+	proc = subprocess.Popen(
+		cmd,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
+		text=True,
+		encoding="utf-8",  # журнал ffmpeg — UTF-8 независимо от локали системы
+		errors="replace",
 	)
-	reader.start()
-	for line in proc.stdout:
-		seconds = _progress_seconds(line)
-		if seconds is not None and on_progress is not None and total_seconds > 0:
-			on_progress(min(seconds / total_seconds, 1.0))
-	proc.wait()
+	# контекст закрывает каналы и дожидается процесса даже при исключении;
+	# kill в except не даёт «осиротевшему» ffmpeg дописывать файл, если
+	# упало чтение прогресса (например, колбэк вызывающей стороны)
+	with proc:
+		if proc.stdout is None or proc.stderr is None:  # для mypy: оба — PIPE
+			proc.kill()
+			raise RuntimeError(f"ffmpeg ({what}): каналы процесса не открылись.")
+		stderr_pipe = proc.stderr
+		stderr_chunks: list[str] = []
+		reader = threading.Thread(
+			target=lambda: stderr_chunks.append(stderr_pipe.read()),
+			name="ffmpeg-stderr",
+			daemon=True,
+		)
+		reader.start()
+		try:
+			for line in proc.stdout:
+				seconds = _progress_seconds(line)
+				if seconds is not None and on_progress is not None and total_seconds > 0:
+					on_progress(min(seconds / total_seconds, 1.0))
+		except BaseException:
+			proc.kill()
+			raise
+		proc.wait()
 	reader.join(timeout=10.0)
 	if proc.returncode != 0:
 		stderr = "".join(stderr_chunks)
@@ -131,7 +149,8 @@ def run_streaming(
 			what,
 			stderr.strip(),
 		)
-		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {_error_summary(stderr)}")
+		summary = _error_summary(stderr) or "журнал ffmpeg недоступен"
+		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {summary}")
 
 
 def _progress_seconds(line: str) -> float | None:

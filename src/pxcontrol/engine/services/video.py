@@ -32,7 +32,7 @@ from pxcontrol.engine.services.settings import (
 )
 from pxcontrol.engine.telegram.types import userbot_max_file_bytes
 from pxcontrol.engine.video import ProcessingOptions, process
-from pxcontrol.engine.video.constants import AUDIO_BITRATE, fitted_size
+from pxcontrol.engine.video.constants import AUDIO_KBPS, fitted_size
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
 from pxcontrol.engine.video.frames import extract_still, resolve_timestamp
 from pxcontrol.engine.video.pipeline import ProgressCallback
@@ -50,8 +50,9 @@ class VideoError(EngineError):
 #: кодека (итог должен быть «лимит минус 1 %»).
 _TARGET_SIZE_RATIO = 0.99
 
-#: Битрейт аудио конвейера в кбит/с (из constants.AUDIO_BITRATE, «192k»).
-_AUDIO_KBPS = int(AUDIO_BITRATE.rstrip("k"))
+#: Порог осмысленного битрейта видео: ниже ~100 кбит/с H.264 в FullHD
+#: даёт кашу из артефактов — честнее отказать, чем выдать нечитаемый файл.
+_MIN_VIDEO_KBPS = 100
 
 
 @dataclass(frozen=True)
@@ -76,8 +77,8 @@ def recommended_bitrate_kbps(duration_s: float, max_bytes: int) -> int:
 	"""Битрейт видео (кбит/с), дающий файл размером «лимит минус 1 %».
 
 	Из бюджета вычитается фиксированный битрейт аудио конвейера
-	(:data:`_AUDIO_KBPS`); запас в 1 % покрывает накладные расходы
-	контейнера MP4.
+	(:data:`~pxcontrol.engine.video.constants.AUDIO_KBPS`); запас в 1 %
+	покрывает накладные расходы контейнера MP4.
 
 	Raises:
 		VideoError: Длительность неположительна или бюджета не хватает
@@ -86,8 +87,8 @@ def recommended_bitrate_kbps(duration_s: float, max_bytes: int) -> int:
 	if duration_s <= 0:
 		raise VideoError("Длительность видео неизвестна — ffprobe не помог.")
 	total_kbps = max_bytes * _TARGET_SIZE_RATIO * 8 / duration_s / 1000
-	video_kbps = int(total_kbps) - _AUDIO_KBPS
-	if video_kbps < 100:
+	video_kbps = int(total_kbps) - AUDIO_KBPS
+	if video_kbps < _MIN_VIDEO_KBPS:
 		raise VideoError(
 			"Видео слишком длинное: в лимит Telegram не уложиться даже с минимальным качеством."
 		)
@@ -435,7 +436,10 @@ class VideoService:
 		for path in directory.iterdir():
 			if not path.is_file() or path.suffix.lower() not in VIDEO_SUFFIXES:
 				continue
-			stat = path.stat()
+			try:
+				stat = path.stat()
+			except OSError:  # файл исчез между iterdir() и stat()
+				continue
 			items.append(
 				ProcessedVideo(
 					path.name,
@@ -594,7 +598,7 @@ class VideoService:
 		"""
 		info = probe_video(source_path, ffprobe_bin_for(self._ffmpeg()))
 		work_info = trimmed_info(info, trim_start, trim_end)
-		width, height = fitted_size(info.width, info.height)
+		width, height = fitted_size(work_info.width, work_info.height)
 		stamps = sorted(resolve_timestamp("random-choice", work_info) for _ in range(count))
 		frames: list[FrameCandidate] = []
 		for index, timestamp in enumerate(stamps):
@@ -622,7 +626,7 @@ class VideoService:
 		if shutil.which(self._ffmpeg()) is None:
 			raise VideoError(
 				f"Не найден ffmpeg («{self._ffmpeg()}») — установите его "
-				"или укажите путь в FFMPEG_PATH."
+				"или укажите путь в «Настройки → Общие»."
 			)
 
 	def _build_options(
@@ -634,7 +638,11 @@ class VideoService:
 		)
 		out_dir.mkdir(parents=True, exist_ok=True)
 		stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-		output = out_dir / f"{source.stem}_{fields.name}_{stamp}.mp4"
+		# имя пресета — свободный текст: чистим спецсимволы ОС (как подпапку)
+		# и меняем «_» на «-», чтобы суффикс _<пресет>_<штамп> оставался
+		# разборчивым для title_from_filename (captions)
+		preset_part = sanitize_subdir(fields.name).replace("_", "-").strip(" .") or "preset"
+		output = out_dir / f"{source.stem}_{preset_part}_{stamp}.mp4"
 		ffprobe = ffprobe_bin_for(self._ffmpeg())
 		return ProcessingOptions(
 			input=str(source),

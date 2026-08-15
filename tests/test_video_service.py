@@ -466,3 +466,28 @@ async def test_bitrate_advice_only_for_oversized(
 	# Premium поднимает лимит — большой файл перестаёт требовать совета
 	premium = True
 	assert await service.bitrate_advice(str(big)) is None
+
+
+async def test_prepare_sanitizes_preset_name_in_filename(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Имя пресета в имени файла чистится и не ломает разбор суффикса.
+
+	Разделители путей не создают лишних каталогов (раньше «Канал/Тест»
+	ронял ffmpeg в самом конце кодирования), а «_» меняется на «-»,
+	чтобы title_from_filename срезал суффикс _<пресет>_<штамп> целиком.
+	"""
+	from pxcontrol.engine.services.captions import title_from_filename
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	settings = SettingsService(db)
+	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "res"))
+	service = VideoService(db, "ffmpeg", settings=settings, processor=_FakeProcessor())
+	source = tmp_path / "Lara Croft.mp4"
+	source.write_bytes(b"src")
+	output = await service.prepare(str(source), PresetFields(name="Канал/Тест_HD", subdir="паб"))
+	assert Path(output).parent == tmp_path / "res" / "паб"
+	assert "_КаналТест-HD_" in Path(output).name
+	assert title_from_filename(output) == "Lara Croft"

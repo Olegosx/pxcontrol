@@ -553,3 +553,123 @@ def test_video_quality_args_modes() -> None:
 	assert _video_quality_args(_options(video_bitrate_kbps=3000), _info(1500)) == ["-b:v", "3000k"]
 	assert _video_quality_args(_options(video_bitrate_kbps=None), _info(1500)) == ["-b:v", "1500k"]
 	assert _video_quality_args(_options(video_bitrate_kbps=None), _info(None)) == ["-crf", "20"]
+
+
+# --- надёжность конвейера (аудит 2026-08-15) --------------------------------------
+
+
+def test_run_streaming_kills_process_when_callback_fails(tmp_path: Path) -> None:
+	"""Исключение из колбэка прогресса не оставляет «осиротевшего» ffmpeg.
+
+	Подставной «ffmpeg» печатает прогресс и засыпает на полминуты; если
+	процесс не убит, тест ждал бы его и появился бы файл-маркер.
+	"""
+	import sys
+	import time
+
+	from pxcontrol.engine.video.ffmpeg import run_streaming
+
+	marker = tmp_path / "survived.txt"
+	script = (
+		"import time\n"
+		"print('out_time_us=1000000', flush=True)\n"
+		"time.sleep(30)\n"
+		f"open({str(marker)!r}, 'w').write('survived')\n"
+	)
+
+	def _boom(_fraction: float) -> None:
+		raise RuntimeError("колбэк упал")
+
+	started = time.monotonic()
+	with pytest.raises(RuntimeError, match="колбэк упал"):
+		run_streaming([sys.executable, "-c", script], "тест", 10.0, _boom)
+	assert time.monotonic() - started < 10  # не дожидались sleep(30)
+	assert not marker.exists()
+
+
+def test_failed_encode_leaves_no_partial_output(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	"""Упавшее кодирование не оставляет ни результата, ни «.part»-хвоста.
+
+	Раньше без обложки ffmpeg писал сразу в конечный путь — обрезок
+	попадал в «Готовые видео» и мог быть опубликован.
+	"""
+	from pxcontrol.engine.video import pipeline
+
+	out = tmp_path / "res.mp4"
+	monkeypatch.setattr(pipeline, "probe_video", lambda _p, _b: INFO)
+
+	def _crash(cmd: list[str], _what: str, _total: float, _cb: object) -> None:
+		Path(cmd[-1]).write_bytes(b"partial")  # ffmpeg успел записать кусок
+		raise RuntimeError("кончилось место")
+
+	monkeypatch.setattr(pipeline, "run_streaming", _crash)
+	with pytest.raises(RuntimeError, match="кончилось место"):
+		pipeline.process(_options(input="src.mp4", output=str(out)))
+	assert list(tmp_path.iterdir()) == []  # ни res.mp4, ни res.mp4.part
+
+
+def test_successful_encode_moves_part_to_output(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	"""Успешное кодирование: результат появляется атомарно, без «.part»."""
+	from pxcontrol.engine.video import pipeline
+
+	out = tmp_path / "res.mp4"
+	monkeypatch.setattr(pipeline, "probe_video", lambda _p, _b: INFO)
+	monkeypatch.setattr(pipeline, "extract_still", lambda *a, **k: None)
+
+	def _encode(cmd: list[str], _what: str, _total: float, _cb: object) -> None:
+		assert cmd[-1].endswith(".part")  # пишем во временное имя
+		assert cmd[-3:-1] == ["-f", "mp4"]  # формат задан явно
+		Path(cmd[-1]).write_bytes(b"ok")
+
+	monkeypatch.setattr(pipeline, "run_streaming", _encode)
+	pipeline.process(_options(input="src.mp4", output=str(out)))
+	assert out.read_bytes() == b"ok"
+	assert not Path(f"{out}.part").exists()
+
+
+def test_probe_rejects_unknown_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+	"""«N/A» и отсутствие длительности — понятная ошибка, не 0.0 и не дамп."""
+	from pxcontrol.engine.video import probe
+
+	stream = {"codec_type": "video", "width": 10, "height": 10, "avg_frame_rate": "30/1"}
+	for fmt in ({"duration": "N/A"}, {}):
+		data = {"streams": [stream], "format": fmt}
+		monkeypatch.setattr(probe, "_run_ffprobe", lambda _p, _b, d=data: d)
+		with pytest.raises(RuntimeError, match="длительность"):
+			probe.probe_video("x.mp4")
+
+
+def test_probe_skips_attached_pic_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+	"""Вшитая обложка не принимается за основной видеопоток."""
+	from pxcontrol.engine.video import probe
+
+	data = {
+		"streams": [
+			{
+				"codec_type": "video",
+				"width": 600,
+				"height": 600,
+				"avg_frame_rate": "0/0",
+				"disposition": {"attached_pic": 1},
+			},
+			{"codec_type": "video", "width": 1920, "height": 1080, "avg_frame_rate": "30/1"},
+		],
+		"format": {"duration": "10.0"},
+	}
+	monkeypatch.setattr(probe, "_run_ffprobe", lambda _p, _b: data)
+	info = probe.probe_video("x.mp4")
+	assert (info.width, info.height, info.fps) == (1920, 1080, 30.0)
+
+
+def test_ffprobe_bin_for_keeps_dir_and_suffix() -> None:
+	"""ffprobe ищется рядом с ffmpeg (с расширением), в PATH — только по имени."""
+	from pxcontrol.engine.video.probe import ffprobe_bin_for
+
+	assert ffprobe_bin_for("ffmpeg") == "ffprobe"
+	assert ffprobe_bin_for("/usr/bin/ffmpeg") == "/usr/bin/ffprobe"
+	assert ffprobe_bin_for("bin/ffmpeg") == "bin/ffprobe"  # относительный, но с каталогом
+	assert ffprobe_bin_for("/opt/ff/ffmpeg.exe") == "/opt/ff/ffprobe.exe"
