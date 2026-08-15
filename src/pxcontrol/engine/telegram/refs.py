@@ -41,8 +41,11 @@ def normalize_chat_ref(chat_ref: str) -> str | int:
 		raise ChatRefError("Не удалось разобрать ссылку t.me/c/… — укажите ID канала (-100…).")
 	ref = ref.lstrip("@")
 	digits = ref.replace(" ", "")
-	if digits.lstrip("-").isdigit() and digits.lstrip("-"):
-		return int(digits)
+	if digits.lstrip("-").isdigit():
+		try:
+			return int(digits)
+		except ValueError as exc:  # ввод вида «--123»: минусов больше одного
+			raise ChatRefError("Укажите @имя, ссылку t.me/… или ID канала.") from exc
 	if not ref:
 		raise ChatRefError("Укажите @имя, ссылку t.me/… или ID канала.")
 	return f"@{ref}"

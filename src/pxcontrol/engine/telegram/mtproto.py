@@ -1,8 +1,10 @@
 """Транспорт MTProto (через Telethon, отдельный аккаунт).
 
-Роли: создание отложенных постов прямо в канале (серверное планирование
-Telegram, ADR-0010), чтение отложенных, в будущем — чтение каналов-источников.
-Здесь же — пошаговый вход userbot (код → 2FA → строка сессии).
+Основной путь публикации (ADR-0011): все типы контента, файлы до
+2000/4000 МиБ (по Premium), отложенные — прямо в канале (серверное
+планирование Telegram, ADR-0010). Здесь же — чтение отложенных, проверка
+каналов и пошаговый вход userbot (код → 2FA → строка сессии); в будущем —
+чтение каналов-источников.
 """
 
 from __future__ import annotations
@@ -88,6 +90,18 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		return UserbotAccessError(
 			"Userbot не администратор канала — добавьте аккаунт userbot "
 			"администратором с правом публиковать."
+		)
+	if isinstance(
+		exc,
+		errors.UserNotParticipantError
+		| errors.ChannelPrivateError
+		| errors.ChatWriteForbiddenError,
+	):
+		# подтверждённый отказ: userbot удалили из канала / канал закрыли
+		# от него / запретили писать — основание снять хранимый флаг прав
+		return UserbotAccessError(
+			"Userbot не состоит в канале или не может в нём публиковать — "
+			"добавьте аккаунт администратором с правом публиковать."
 		)
 	if isinstance(
 		exc,
@@ -209,25 +223,31 @@ class MtprotoTransport:
 		if self._creds is None:
 			logger.info("Аккаунт MTProto не настроен — userbot отключён.")
 			return
-		api_id, api_hash, session = self._creds
-		client = self._client_factory(api_id, api_hash, session)
-		try:
-			await client.connect()
-			authorized = bool(await client.is_user_authorized())
-		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-			await _safe_disconnect(client)
-			raise UserbotNotConnectedError(f"Не удалось подключить userbot: {exc}") from exc
-		if not authorized:
-			await _safe_disconnect(client)
-			raise UserbotSessionExpiredError(
-				"Сессия userbot недействительна — войдите в аккаунт заново: Настройки → Аккаунты."
+		# замок общий с переподключением: два одновременных старта не должны
+		# создать двух клиентов (второй остался бы подключённым без владельца)
+		async with self._reconnect_lock:
+			if self._client is not None:
+				return
+			api_id, api_hash, session = self._creds
+			client = self._client_factory(api_id, api_hash, session)
+			try:
+				await client.connect()
+				authorized = bool(await client.is_user_authorized())
+			except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+				await _safe_disconnect(client)
+				raise UserbotNotConnectedError(f"Не удалось подключить userbot: {exc}") from exc
+			if not authorized:
+				await _safe_disconnect(client)
+				raise UserbotSessionExpiredError(
+					"Сессия userbot недействительна — войдите в аккаунт заново: "
+					"Настройки → Аккаунты."
+				)
+			self._client = client
+			self._premium = await _fetch_premium(client)
+			logger.info(
+				"MTProto клиент подключён (Premium: %s).",
+				"да" if self._premium else "нет",
 			)
-		self._client = client
-		self._premium = await _fetch_premium(client)
-		logger.info(
-			"MTProto клиент подключён (Premium: %s).",
-			"да" if self._premium else "нет",
-		)
 
 	async def stop(self) -> None:
 		"""Отключает клиента MTProto."""
@@ -250,14 +270,19 @@ class MtprotoTransport:
 		Telethon, исчерпав свои попытки переподключения (например, сеть
 		пропала на несколько минут), остаётся отключённым насовсем —
 		без этой проверки разовый обрыв требовал бы перезапуска
-		приложения. Замок пускает в переподключение одну операцию;
-		остальные ждут и получают уже готового клиента.
+		приложения. Тот же ремонт покрывает неудачный старт (приложение
+		запустили до появления сети): клиента ещё нет, но реквизиты
+		сохранены — операция сама пробует ``start()``. Замок пускает
+		в переподключение одну операцию; остальные ждут и получают уже
+		готового клиента.
 
 		Raises:
 			UserbotNotConnectedError: Userbot не настроен или связь
 				восстановить не удалось.
 			UserbotSessionExpiredError: Сессия отозвана за время простоя.
 		"""
+		if self._client is None and self._creds is not None:
+			await self.start()  # запуск без сети — чиним повторным стартом
 		client = self._require_client()
 		if client.is_connected():
 			return client
@@ -357,7 +382,8 @@ class MtprotoTransport:
 		"""Требует права админа с публикацией (владельцу можно всё).
 
 		Raises:
-			UserbotUnavailableError: Прав не хватает.
+			UserbotAccessError: Прав не хватает (подтверждённый отказ —
+				основание для сервисов менять хранимый флаг прав).
 		"""
 		if not perms.is_admin:
 			raise UserbotAccessError(
@@ -409,6 +435,11 @@ class MtprotoLoginManager:
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 			await _safe_disconnect(client)
 			raise LoginError(_map_login_error(exc)) from exc
+		# пока ждали сеть, параллельный «Войти» мог начать другой вход —
+		# закрываем его клиента, иначе тот останется подключённым без владельца
+		stale = self._pending.pop(account_id, None)
+		if stale is not None:
+			await _safe_disconnect(stale[0])
 		self._pending[account_id] = (client, sent.phone_code_hash, phone)
 		logger.info("Userbot id=%s: код отправлен.", account_id)
 

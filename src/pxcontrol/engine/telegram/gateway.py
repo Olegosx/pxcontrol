@@ -109,6 +109,12 @@ class TelegramGateway:
 
 		Текст или медиа с подписью; сразу (when=None) или отложенно —
 		отложенные хранит и публикует сервер Telegram (ADR-0010).
+
+		Raises:
+			UserbotNotConnectedError: Userbot не настроен или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotAccessError: Telegram подтвердил отсутствие прав/канала.
+			UserbotUnavailableError: Прочие отказы Telegram (лимиты и т.п.).
 		"""
 		await self.mtproto.publish(chat_id, post, on_progress)
 

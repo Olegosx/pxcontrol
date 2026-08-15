@@ -37,13 +37,10 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotUnavailableError,
 )
 
-# лимиты Telegram живут в telegram/types.py; здесь — явный реэкспорт
-# (интерфейс исторически берёт их из сервиса постов)
+# лимит Bot API живёт в telegram/types.py; здесь — явный реэкспорт
+# (интерфейс исторически берёт его из сервиса постов)
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES as BOT_MAX_FILE_BYTES,
-)
-from pxcontrol.engine.telegram.types import (
-	USERBOT_MAX_FILE_BYTES as USERBOT_MAX_FILE_BYTES,
 )
 from pxcontrol.engine.telegram.types import (
 	MediaKind,

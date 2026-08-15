@@ -220,6 +220,8 @@ def test_normalize_chat_ref_hardened() -> None:
 		normalize_chat_ref("https://t.me/+AbCdEfGh123")
 	with pytest.raises(ChatRefError, match="t.me/c"):
 		normalize_chat_ref("t.me/c/abc/5")
+	with pytest.raises(ChatRefError, match="Укажите"):
+		normalize_chat_ref("--123")  # лишний минус — доменная ошибка, не ValueError
 
 
 def test_describe_update() -> None:

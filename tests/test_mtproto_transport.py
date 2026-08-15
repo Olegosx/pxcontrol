@@ -94,15 +94,40 @@ async def test_failed_connect_leaves_transport_restartable() -> None:
 
 	class _BrokenClient(_FakeClient):
 		async def connect(self) -> None:
+			self.connect_calls += 1
 			raise ConnectionError("нет сети")
 
 	broken = _BrokenClient()
 	transport = _transport(broken)
 	with pytest.raises(UserbotNotConnectedError):
 		await transport.start()
-	# клиент не сохранён — операции честно говорят «не подключён»
-	with pytest.raises(UserbotNotConnectedError, match="войдите"):
+	# клиент не сохранён — операция сама пробует подключиться ещё раз
+	with pytest.raises(UserbotNotConnectedError, match="подключить"):
 		await transport.publish("-1001", OutgoingPost(text="x"))
+	assert broken.connect_calls == 2
+
+
+async def test_operation_repairs_failed_start_when_network_returns() -> None:
+	"""Запуск без сети: первая же операция чинит транспорт повторным стартом."""
+
+	class _FlakyClient(_FakeClient):
+		def __init__(self) -> None:
+			super().__init__()
+			self.fail_first = True
+
+		async def connect(self) -> None:
+			self.connect_calls += 1
+			if self.fail_first:
+				self.fail_first = False
+				raise ConnectionError("нет сети")
+			self.connected = True
+
+	flaky = _FlakyClient()
+	transport = _transport(flaky)
+	with pytest.raises(UserbotNotConnectedError):
+		await transport.start()  # приложение запустили до появления сети
+	await transport.publish("-1001", OutgoingPost(text="x"))  # сеть вернулась
+	assert flaky.sent  # пост ушёл без перезапуска приложения и повторного входа
 
 
 async def test_start_rejects_revoked_session() -> None:
@@ -338,3 +363,49 @@ async def test_get_scheduled_returns_messages() -> None:
 	assert len(messages) == 1
 	assert messages[0].text == "из телеграма"
 	assert messages[0].scheduled_at == datetime(2026, 7, 13, tzinfo=UTC)
+
+
+def test_translate_error_confirmed_refusals() -> None:
+	"""«Выгнали из канала» и родня — подтверждённый отказ, не временный сбой.
+
+	От класса зависит поведение системы: только UserbotAccessError даёт
+	recheck_channel право снять хранимый флаг userbot-админа.
+	"""
+	from telethon import errors
+
+	from pxcontrol.engine.telegram.mtproto import UserbotAccessError, _translate_error
+
+	for exc in (
+		errors.UserNotParticipantError(request=None),
+		errors.ChannelPrivateError(request=None),
+		errors.ChatWriteForbiddenError(request=None),
+		errors.ChatAdminRequiredError(request=None),
+	):
+		assert isinstance(_translate_error(exc), UserbotAccessError)
+	# сетевой сбой — по-прежнему временная недоступность
+	assert not isinstance(_translate_error(ConnectionError("x")), UserbotAccessError)
+
+
+async def test_bot_errors_translate_flood_and_server_failures() -> None:
+	"""Флуд-лимит, «файл велик» и 5xx Bot API — понятные тексты, не дампы."""
+	from aiogram.methods import GetMe
+
+	from pxcontrol.engine.telegram.bot_api import ChannelCheckError, _bot_errors
+
+	async def _raise_inside(exc: BaseException) -> None:
+		async with _bot_errors("нет прав", "отклонено"):
+			raise exc
+
+	from aiogram.exceptions import (
+		TelegramEntityTooLarge,
+		TelegramRetryAfter,
+		TelegramServerError,
+	)
+
+	with pytest.raises(ChannelCheckError, match="подождать 17 с"):
+		await _raise_inside(TelegramRetryAfter(GetMe(), "flood", retry_after=17))
+	# «файл велик» наследует сетевую ошибку — не должен стать «нет связи»
+	with pytest.raises(ChannelCheckError, match="лимита Bot API"):
+		await _raise_inside(TelegramEntityTooLarge(GetMe(), "too large"))
+	with pytest.raises(ChannelCheckError, match="отклонил операцию"):
+		await _raise_inside(TelegramServerError(GetMe(), "internal"))

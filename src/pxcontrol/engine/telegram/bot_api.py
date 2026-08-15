@@ -1,4 +1,9 @@
-"""Транспорт Bot API (через aiogram). В первую очередь — публикация постов."""
+"""Транспорт Bot API (через aiogram).
+
+В первую очередь — проверки токена и прав бота и диагностика; публикация —
+запасной путь (текст и файлы до 50 МБ, только «сейчас»), когда у канала
+нет userbot-админа: основной транспорт публикации — MTProto (ADR-0011).
+"""
 
 from __future__ import annotations
 
@@ -36,9 +41,12 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.exceptions import (
+		TelegramAPIError,
 		TelegramBadRequest,
+		TelegramEntityTooLarge,
 		TelegramForbiddenError,
 		TelegramNetworkError,
+		TelegramRetryAfter,
 		TelegramUnauthorizedError,
 	)
 
@@ -48,10 +56,38 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 		raise ChannelCheckError("Telegram отклонил токен бота.") from exc
 	except TelegramForbiddenError as exc:
 		raise ChannelCheckError(f"{forbidden} (Telegram: {exc.message})") from exc
+	except TelegramRetryAfter as exc:
+		# лимит частоты (429) — парный текст в _translate_error (mtproto)
+		raise ChannelCheckError(f"Telegram просит подождать {exc.retry_after} с.") from exc
 	except TelegramBadRequest as exc:
 		raise ChannelCheckError(f"{bad_request} (Telegram: {exc.message})") from exc
+	except TelegramEntityTooLarge as exc:
+		# наследует сетевую ошибку — ветка обязана стоять раньше неё,
+		# иначе «файл велик» превратился бы в ложное «нет связи»
+		raise ChannelCheckError("Файл больше лимита Bot API (50 МБ) — уменьшите файл.") from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
+	except TelegramAPIError as exc:
+		# запасная ветка: серверные сбои (5xx) и прочие отказы API
+		raise ChannelCheckError(f"Telegram отклонил операцию: {exc}") from exc
+
+
+def _chat_id(chat_id: str) -> int:
+	"""Числовой ID канала из строки БД (контракт ``ChannelInfo.chat_id``).
+
+	Парный помощник ``_peer_id`` в mtproto: нечисловая строка — повреждённая
+	запись, а не сетевой сбой, и заслуживает понятного текста.
+
+	Raises:
+		ChannelCheckError: В БД оказался нечисловой ID.
+	"""
+	try:
+		return int(chat_id)
+	except ValueError as exc:
+		raise ChannelCheckError(
+			f"Некорректный ID канала в базе: {chat_id!r} — переподключите "
+			"канал на странице «Каналы»."
+		) from exc
 
 
 def ensure_bot_can_post(member: Any) -> None:
@@ -88,15 +124,15 @@ async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, capti
 	try:
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			if kind is MediaKind.PHOTO:
-				message = await bot.send_photo(int(chat_id), file, caption=text)
+				message = await bot.send_photo(_chat_id(chat_id), file, caption=text)
 			elif kind is MediaKind.VIDEO:
 				message = await bot.send_video(
-					int(chat_id), file, caption=text, supports_streaming=True
+					_chat_id(chat_id), file, caption=text, supports_streaming=True
 				)
 			elif kind is MediaKind.AUDIO:
-				message = await bot.send_audio(int(chat_id), file, caption=text)
+				message = await bot.send_audio(_chat_id(chat_id), file, caption=text)
 			else:
-				message = await bot.send_document(int(chat_id), file, caption=text)
+				message = await bot.send_document(_chat_id(chat_id), file, caption=text)
 			return int(message.message_id)
 	finally:
 		await bot.session.close()
@@ -117,7 +153,7 @@ async def send_text(token: str, chat_id: str, text: str) -> int:
 	bot = Bot(token)
 	try:
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
-			message = await bot.send_message(int(chat_id), text)
+			message = await bot.send_message(_chat_id(chat_id), text)
 			return int(message.message_id)
 	finally:
 		await bot.session.close()
