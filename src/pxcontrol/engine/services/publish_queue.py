@@ -79,9 +79,7 @@ class QueueItemDto:
 class _Item:
 	"""Внутреннее состояние элемента очереди (изменяемое)."""
 
-	def __init__(
-		self, item_id: int, draft: PostDraft, channel_title: str
-	) -> None:
+	def __init__(self, item_id: int, draft: PostDraft, channel_title: str) -> None:
 		self.id = item_id
 		self.draft = draft
 		self.channel_title = channel_title
@@ -143,7 +141,9 @@ class PublishQueue:
 		self._ensure_worker()
 		logger.info(
 			"Пост «%s» → «%s»: в очереди (id=%s).",
-			_draft_title(draft), channel_title, item.id,
+			_draft_title(draft),
+			channel_title,
+			item.id,
 		)
 		return item.id
 
@@ -188,8 +188,7 @@ class PublishQueue:
 	async def dismiss(self, item_id: int) -> None:
 		"""Убирает завершённый элемент из списка (живые не трогаются)."""
 		self._items = [
-			item for item in self._items
-			if not (item.id == item_id and item.status.finished())
+			item for item in self._items if not (item.id == item_id and item.status.finished())
 		]
 
 	async def state(self) -> list[QueueItemDto]:
@@ -234,9 +233,7 @@ class PublishQueue:
 			item.progress = fraction
 
 		item.status = QueueItemStatus.SENDING
-		task = asyncio.create_task(
-			self._posts.publish(item.draft, on_progress=_on_progress)
-		)
+		task = asyncio.create_task(self._posts.publish(item.draft, on_progress=_on_progress))
 		self._active = (item.id, task)
 		try:
 			await task

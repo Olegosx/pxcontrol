@@ -23,9 +23,7 @@ class _FakeLogin:
 	def __init__(self) -> None:
 		self.cancelled: list[int] = []
 
-	async def start(
-		self, account_id: int, api_id: int, api_hash: str, phone: str
-	) -> None:
+	async def start(self, account_id: int, api_id: int, api_hash: str, phone: str) -> None:
 		return None
 
 	async def confirm_code(self, account_id: int, code: str) -> str | None:

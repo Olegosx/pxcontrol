@@ -103,21 +103,30 @@ class _GeneralSettings(QWidget):
 		save.clicked.connect(self._on_save_ffmpeg)
 		ffmpeg_row.addWidget(save)
 		layout.addLayout(ffmpeg_row)
-		layout.addWidget(CaptionLabel(
-			"ffprobe ищется рядом с указанным ffmpeg; смена пути "
-			"применяется сразу, без перезапуска.", self,
-		))
+		layout.addWidget(
+			CaptionLabel(
+				"ffprobe ищется рядом с указанным ffmpeg; смена пути "
+				"применяется сразу, без перезапуска.",
+				self,
+			)
+		)
 		layout.addStretch()
 
 	def _load(self) -> None:
 		"""Подтягивает сохранённые значения из движка."""
 		run_in_engine(
-			self._worker, self._worker.engine.settings.get(THEME_DARK),
-			self, self._show_theme, noop,
+			self._worker,
+			self._worker.engine.settings.get(THEME_DARK),
+			self,
+			self._show_theme,
+			noop,
 		)
 		run_in_engine(
-			self._worker, self._worker.engine.settings.get(FFMPEG_PATH),
-			self, self._ffmpeg_edit.setText, noop,
+			self._worker,
+			self._worker.engine.settings.get(FFMPEG_PATH),
+			self,
+			self._ffmpeg_edit.setText,
+			noop,
 		)
 
 	def _show_theme(self, dark: bool) -> None:
@@ -130,16 +139,22 @@ class _GeneralSettings(QWidget):
 		"""Переключает тему на лету и сохраняет выбор."""
 		apply_theme(dark=dark)
 		run_in_engine(
-			self._worker, self._worker.engine.settings.set(THEME_DARK, dark),
-			self, noop, self._show_error,
+			self._worker,
+			self._worker.engine.settings.set(THEME_DARK, dark),
+			self,
+			noop,
+			self._show_error,
 		)
 
 	def _on_save_ffmpeg(self) -> None:
 		"""Сохраняет путь к ffmpeg (пусто — вернуться к .env/PATH)."""
 		path = str(self._ffmpeg_edit.text()).strip()
 		run_in_engine(
-			self._worker, self._worker.engine.settings.set(FFMPEG_PATH, path),
-			self, self._on_ffmpeg_saved, self._show_error,
+			self._worker,
+			self._worker.engine.settings.set(FFMPEG_PATH, path),
+			self,
+			self._on_ffmpeg_saved,
+			self._show_error,
 		)
 
 	def _on_ffmpeg_saved(self, _result: object = None) -> None:
@@ -199,19 +214,25 @@ class _FoldersSettings(QWidget):
 		save_row.addWidget(save)
 		save_row.addStretch()
 		layout.addLayout(save_row)
-		layout.addWidget(CaptionLabel(
-			"Внутри каждой папки — подпапка пресета (поле «Подпапка» "
-			"на «Видео»). После публикации видео переезжает из результатов "
-			"в опубликованные.", self,
-		))
+		layout.addWidget(
+			CaptionLabel(
+				"Внутри каждой папки — подпапка пресета (поле «Подпапка» "
+				"на «Видео»). После публикации видео переезжает из результатов "
+				"в опубликованные.",
+				self,
+			)
+		)
 		layout.addStretch()
 
 	def _load(self) -> None:
 		"""Подтягивает сохранённые пути из движка."""
 		for _label, key, _hint in _VIDEO_FOLDERS:
 			run_in_engine(
-				self._worker, self._worker.engine.settings.get(key),
-				self, self._edits[key.name].setText, noop,
+				self._worker,
+				self._worker.engine.settings.get(key),
+				self,
+				self._edits[key.name].setText,
+				noop,
 			)
 
 	def _pick_folder(self, key_name: str) -> None:
@@ -226,11 +247,13 @@ class _FoldersSettings(QWidget):
 		for _label, key, _hint in _VIDEO_FOLDERS:
 			run_in_engine(
 				self._worker,
-				self._worker.engine.settings.set(
-					key, str(self._edits[key.name].text()).strip()
-				),
-				self, noop, self._show_error,
+				self._worker.engine.settings.set(key, str(self._edits[key.name].text()).strip()),
+				self,
+				noop,
+				self._show_error,
 			)
 		InfoBar.success(
-			"Сохранено", "Папки видео применены.", parent=self,
+			"Сохранено",
+			"Папки видео применены.",
+			parent=self,
 		)

@@ -116,10 +116,14 @@ class FramePickerDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.extract_random_frames(
-				self._source, int(self._count.value()),
-				trim_start=self._trim_start, trim_end=self._trim_end,
+				self._source,
+				int(self._count.value()),
+				trim_start=self._trim_start,
+				trim_end=self._trim_end,
 			),
-			self, self._show_frames, self._show_error,
+			self,
+			self._show_frames,
+			self._show_error,
 		)
 
 	def _clear_grid(self) -> None:
@@ -152,16 +156,16 @@ class FramePickerDialog(MessageBoxBase):
 		# картинка — QLabel внутри кнопки: родная отрисовка иконки
 		# смещала её от центра и обрезала; подпись прозрачна для мыши
 		inner = QVBoxLayout(button)
-		inner.setContentsMargins(
-			_TILE_PADDING, _TILE_PADDING, _TILE_PADDING, _TILE_PADDING
-		)
+		inner.setContentsMargins(_TILE_PADDING, _TILE_PADDING, _TILE_PADDING, _TILE_PADDING)
 		image = QLabel(button)
-		image.setPixmap(QPixmap(frame.path).scaled(
-			_TILE_SIZE.width() - 2 * _TILE_PADDING,
-			_TILE_SIZE.height() - 2 * _TILE_PADDING,
-			Qt.AspectRatioMode.KeepAspectRatio,
-			Qt.TransformationMode.SmoothTransformation,
-		))
+		image.setPixmap(
+			QPixmap(frame.path).scaled(
+				_TILE_SIZE.width() - 2 * _TILE_PADDING,
+				_TILE_SIZE.height() - 2 * _TILE_PADDING,
+				Qt.AspectRatioMode.KeepAspectRatio,
+				Qt.TransformationMode.SmoothTransformation,
+			)
+		)
 		image.setAlignment(Qt.AlignmentFlag.AlignCenter)
 		image.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 		inner.addWidget(image)

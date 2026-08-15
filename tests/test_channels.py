@@ -36,9 +36,7 @@ class _FakeGateway:
 		if chat_ref == "@notfound":
 			raise ChannelCheckError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_is_admin:
-			raise ChannelCheckError(
-				"У бота нет права публиковать сообщения в канале."
-			)
+			raise ChannelCheckError("У бота нет права публиковать сообщения в канале.")
 		return ChannelInfo("-1001234", "Тестовый канал", "testchan")
 
 	async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo:
@@ -233,9 +231,7 @@ def test_describe_update() -> None:
 	membership = SimpleNamespace(
 		date=datetime(2026, 7, 12, 16, 30),
 		chat=SimpleNamespace(title="Мой канал", type="channel", id=-1004344346478),
-		new_chat_member=SimpleNamespace(
-			status="administrator", can_post_messages=True
-		),
+		new_chat_member=SimpleNamespace(status="administrator", can_post_messages=True),
 	)
 	line = describe_update(SimpleNamespace(my_chat_member=membership, channel_post=None))
 	assert line is not None
@@ -264,12 +260,8 @@ async def test_channel_enabled_comes_from_settings(db: Database) -> None:
 def test_ensure_bot_can_post() -> None:
 	"""Право публиковать: владелец и админ с правом проходят, прочие — нет."""
 	ensure_bot_can_post(SimpleNamespace(status="creator"))
-	ensure_bot_can_post(
-		SimpleNamespace(status="administrator", can_post_messages=True)
-	)
+	ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=True))
 	with pytest.raises(ChannelCheckError, match="не администратор"):
 		ensure_bot_can_post(SimpleNamespace(status="member"))
 	with pytest.raises(ChannelCheckError, match="нет права"):
-		ensure_bot_can_post(
-			SimpleNamespace(status="administrator", can_post_messages=False)
-		)
+		ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=False))

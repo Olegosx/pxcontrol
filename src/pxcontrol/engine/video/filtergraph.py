@@ -66,10 +66,7 @@ class FilterGraph:
 
 def _prep(label_in: str, fps: str, label_out: str) -> str:
 	"""Приводит поток к единому fps, формату пикселей и SAR для стыковки в xfade."""
-	return (
-		f"{label_in}fps={fps},format={TARGET_PIX_FMT},setsar=1,"
-		f"setpts=PTS-STARTPTS{label_out}"
-	)
+	return f"{label_in}fps={fps},format={TARGET_PIX_FMT},setsar=1,setpts=PTS-STARTPTS{label_out}"
 
 
 def _main_chain(fps: str, width: int, height: int) -> str:
@@ -136,7 +133,11 @@ def _watermark_fades(wm: WatermarkOptions, offset: float) -> str:
 
 
 def _watermark_chains(
-	wm: WatermarkOptions, wm_index: int, base: str, offset: float, fps: str,
+	wm: WatermarkOptions,
+	wm_index: int,
+	base: str,
+	offset: float,
+	fps: str,
 	duration: float,
 ) -> tuple[list[str], str]:
 	"""Цепочки вотермарка: масштабирование под кадр, прозрачность, наложение.
@@ -210,9 +211,7 @@ def _audio_chains(
 		start = hold if has_intro else 0.0
 		filters.append(f"afade=t=in:st={start:.3f}:d={fade_in:.3f}")
 	if fade_out > 0:
-		filters.append(
-			f"afade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}"
-		)
+		filters.append(f"afade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}")
 	if not filters:
 		return [], "0:a"
 	return [f"[0:a]{','.join(filters)}[aout]"], "[aout]"
@@ -269,9 +268,7 @@ def build_filter_complex(
 	if wm is not None:
 		if wm_index is None:
 			raise ValueError("Вотермарк задан, но вход с его картинкой — нет")
-		wm_chains, video_label = _watermark_chains(
-			wm, wm_index, base, offset, fps, duration
-		)
+		wm_chains, video_label = _watermark_chains(wm, wm_index, base, offset, fps, duration)
 		chains += wm_chains
 	else:
 		video_label = base
@@ -281,8 +278,6 @@ def build_filter_complex(
 		video_label = "[vfinal]"
 	audio_label: str | None = None
 	if has_audio:
-		audio_chains, audio_label = _audio_chains(
-			has_intro, hold, fade_in, fade_out, duration
-		)
+		audio_chains, audio_label = _audio_chains(has_intro, hold, fade_in, fade_out, duration)
 		chains += audio_chains
 	return FilterGraph(";".join(chains), video_label, audio_label)

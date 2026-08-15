@@ -51,9 +51,7 @@ def _run_qt(worker: EngineWorker) -> int:
 	# сохранённая тема — до создания окна (движок уже готов, ожидание — мс);
 	# сбой чтения не валит запуск — откат к тёмной теме (умолчание ключа)
 	try:
-		dark = bool(
-			worker.submit(worker.engine.settings.get(THEME_DARK)).result(timeout=5)
-		)
+		dark = bool(worker.submit(worker.engine.settings.get(THEME_DARK)).result(timeout=5))
 	except Exception:  # noqa: BLE001 — тема не стоит отказа в запуске
 		logger.warning("Не удалось прочитать тему — использую умолчание.", exc_info=True)
 		dark = THEME_DARK.default

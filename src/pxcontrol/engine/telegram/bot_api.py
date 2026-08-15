@@ -64,16 +64,12 @@ def ensure_bot_can_post(member: Any) -> None:
 	if status == "creator":
 		return
 	if status != "administrator":
-		raise ChannelCheckError(
-			"Бот не администратор канала — добавьте его администратором."
-		)
+		raise ChannelCheckError("Бот не администратор канала — добавьте его администратором.")
 	if getattr(member, "can_post_messages", None) is not True:
 		raise ChannelCheckError("У бота нет права публиковать сообщения в канале.")
 
 
-async def send_media(
-	token: str, chat_id: str, kind: MediaKind, path: str, caption: str
-) -> int:
+async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, caption: str) -> int:
 	"""Отправляет медиа в канал через Bot API (лимит — 50 МБ на файл).
 
 	Returns:
@@ -90,9 +86,7 @@ async def send_media(
 	file = FSInputFile(path)
 	text = caption or None
 	try:
-		async with _bot_errors(
-			"Бот не может писать в канал.", "Telegram отклонил отправку."
-		):
+		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			if kind is MediaKind.PHOTO:
 				message = await bot.send_photo(int(chat_id), file, caption=text)
 			elif kind is MediaKind.VIDEO:
@@ -122,9 +116,7 @@ async def send_text(token: str, chat_id: str, text: str) -> int:
 
 	bot = Bot(token)
 	try:
-		async with _bot_errors(
-			"Бот не может писать в канал.", "Telegram отклонил отправку."
-		):
+		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			message = await bot.send_message(int(chat_id), text)
 			return int(message.message_id)
 	finally:
@@ -181,13 +173,10 @@ async def get_bot_events(token: str) -> list[str]:
 		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
 	except TelegramConflictError as exc:
 		raise ChannelCheckError(
-			"События недоступны: у бота включён вебхук или его опрашивает "
-			"другое приложение."
+			"События недоступны: у бота включён вебхук или его опрашивает другое приложение."
 		) from exc
 	except TelegramBadRequest as exc:
-		raise ChannelCheckError(
-			f"Telegram отклонил запрос событий. ({exc.message})"
-		) from exc
+		raise ChannelCheckError(f"Telegram отклонил запрос событий. ({exc.message})") from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
 	finally:

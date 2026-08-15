@@ -61,14 +61,10 @@ class SettingKey(Generic[_T]):
 # Добавить настройку = добавить ключ здесь (и потребителя).
 
 #: Тёмная тема оформления.
-THEME_DARK: SettingKey[bool] = SettingKey(
-	"theme_dark", SettingScope.APP, True, bool
-)
+THEME_DARK: SettingKey[bool] = SettingKey("theme_dark", SettingScope.APP, True, bool)
 
 #: Состояние главного окна (Qt saveGeometry, base64); None — умолчания Qt.
-WINDOW_GEOMETRY: SettingKey[str | None] = SettingKey(
-	"window_geometry", SettingScope.APP, None, str
-)
+WINDOW_GEOMETRY: SettingKey[str | None] = SettingKey("window_geometry", SettingScope.APP, None, str)
 
 #: Канал, в который публиковали в прошлый раз (предвыбор на «Публикации»).
 PUBLISH_LAST_CHANNEL_ID: SettingKey[int | None] = SettingKey(
@@ -76,9 +72,7 @@ PUBLISH_LAST_CHANNEL_ID: SettingKey[int | None] = SettingKey(
 )
 
 #: Путь к ffmpeg; пусто — бутстрап из .env / поиск в PATH.
-FFMPEG_PATH: SettingKey[str] = SettingKey(
-	"ffmpeg_path", SettingScope.APP, "", str
-)
+FFMPEG_PATH: SettingKey[str] = SettingKey("ffmpeg_path", SettingScope.APP, "", str)
 
 #: Пресет обработки видео по умолчанию для канала (id пресета).
 CHANNEL_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
@@ -88,29 +82,19 @@ CHANNEL_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
 #: Стандартные времена публикации канала: список «ЧЧ:ММ», первое — по умолчанию.
 #: Сервис проверяет только «это список»; формат элементов валидирует интерфейс
 #: при сохранении и отфильтровывает битые при чтении (parse_hhmm).
-PUBLISH_TIMES: SettingKey[list[str]] = SettingKey(
-	"publish_times", SettingScope.CHANNEL, [], list
-)
+PUBLISH_TIMES: SettingKey[list[str]] = SettingKey("publish_times", SettingScope.CHANNEL, [], list)
 
 #: Папка исходных видео для обработки; пусто — media/source в папке приложения.
-VIDEO_SOURCE_DIR: SettingKey[str] = SettingKey(
-	"video_source_dir", SettingScope.APP, "", str
-)
+VIDEO_SOURCE_DIR: SettingKey[str] = SettingKey("video_source_dir", SettingScope.APP, "", str)
 
 #: Папка результатов обработки; пусто — media/processed в папке приложения.
-VIDEO_PROCESSED_DIR: SettingKey[str] = SettingKey(
-	"video_processed_dir", SettingScope.APP, "", str
-)
+VIDEO_PROCESSED_DIR: SettingKey[str] = SettingKey("video_processed_dir", SettingScope.APP, "", str)
 
 #: Папка опубликованных видео; пусто — media/published в папке приложения.
-VIDEO_PUBLISHED_DIR: SettingKey[str] = SettingKey(
-	"video_published_dir", SettingScope.APP, "", str
-)
+VIDEO_PUBLISHED_DIR: SettingKey[str] = SettingKey("video_published_dir", SettingScope.APP, "", str)
 
 #: Канал активен: участвует в публикации и опросе расписания.
-CHANNEL_ENABLED: SettingKey[bool] = SettingKey(
-	"enabled", SettingScope.CHANNEL, True, bool
-)
+CHANNEL_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.CHANNEL, True, bool)
 
 
 class SettingsService:
@@ -194,9 +178,9 @@ class SettingsService:
 		"""
 		self._require_scope(key, SettingScope.CHANNEL)
 		async with self._db.session_factory() as session:
-			rows = (await session.execute(
-				select(ChannelSetting).where(ChannelSetting.name == key.name)
-			)).scalars()
+			rows = (
+				await session.execute(select(ChannelSetting).where(ChannelSetting.name == key.name))
+			).scalars()
 			return {row.channel_id: self._validated(key, row.value) for row in rows}
 
 	async def drop_channel_value(self, key: SettingKey[_T], value: _T) -> None:
@@ -209,9 +193,15 @@ class SettingsService:
 		"""
 		self._require_scope(key, SettingScope.CHANNEL)
 		async with self._db.session_factory() as session:
-			rows = (await session.execute(
-				select(ChannelSetting).where(ChannelSetting.name == key.name)
-			)).scalars().all()
+			rows = (
+				(
+					await session.execute(
+						select(ChannelSetting).where(ChannelSetting.name == key.name)
+					)
+				)
+				.scalars()
+				.all()
+			)
 			removed = 0
 			for row in rows:
 				if row.value == value:
@@ -221,12 +211,12 @@ class SettingsService:
 		if removed:
 			logger.info(
 				"Настройка %s со значением %r снята у %d канал(ов).",
-				key.name, value, removed,
+				key.name,
+				value,
+				removed,
 			)
 
-	async def set_for(
-		self, key: SettingKey[_T], channel_id: int, value: _T
-	) -> None:
+	async def set_for(self, key: SettingKey[_T], channel_id: int, value: _T) -> None:
 		"""Сохраняет настройку канала (None — сброс к умолчанию).
 
 		Raises:
@@ -242,9 +232,7 @@ class SettingsService:
 				if row is not None:
 					await session.delete(row)
 			elif row is None:
-				session.add(ChannelSetting(
-					channel_id=channel_id, name=key.name, value=value
-				))
+				session.add(ChannelSetting(channel_id=channel_id, name=key.name, value=value))
 			else:
 				row.value = value
 			await session.commit()
@@ -256,9 +244,7 @@ class SettingsService:
 	def _require_scope(key: SettingKey[Any], scope: SettingScope) -> None:
 		"""Защита от вызова не того метода для ключа другого владельца."""
 		if key.scope is not scope:
-			raise SettingsError(
-				f"Настройка «{key.name}» принадлежит {key.scope}, не {scope}."
-			)
+			raise SettingsError(f"Настройка «{key.name}» принадлежит {key.scope}, не {scope}.")
 
 	@staticmethod
 	def _matches(key: SettingKey[Any], value: Any) -> bool:
@@ -280,9 +266,7 @@ class SettingsService:
 		"""
 		if value is None or cls._matches(key, value):
 			return
-		raise SettingsError(
-			f"Настройка «{key.name}»: значение {value!r} не подходит по типу."
-		)
+		raise SettingsError(f"Настройка «{key.name}»: значение {value!r} не подходит по типу.")
 
 	@classmethod
 	def _validated(cls, key: SettingKey[_T], raw: Any) -> _T:
@@ -298,7 +282,8 @@ class SettingsService:
 			return cls._detached(raw)  # type: ignore[no-any-return]  # тип проверен по ключу
 		logger.warning(
 			"Настройка %s: значение %r не подходит по типу — умолчание.",
-			key.name, raw,
+			key.name,
+			raw,
 		)
 		return cls._detached(key.default)
 

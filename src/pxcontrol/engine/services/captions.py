@@ -109,8 +109,7 @@ class FieldDto:
 		if self.parent_field_id is None:
 			return list(self.values)
 		return [
-			item for item in self.values
-			if item.parent_id is None or item.parent_id in parent_ids
+			item for item in self.values if item.parent_id is None or item.parent_id in parent_ids
 		]
 
 
@@ -166,9 +165,7 @@ def build_caption(title: str, lines: list[CaptionLine]) -> str:
 		values = [v for v in (raw.strip() for raw in line.values) if v]
 		if not values:
 			continue
-		rendered = ", ".join(
-			hashtag(v) if line.hashtag else v for v in values
-		)
+		rendered = ", ".join(hashtag(v) if line.hashtag else v for v in values)
 		rows.append(f"{line.name}: {rendered}")
 	return "\n".join(rows)
 
@@ -220,9 +217,7 @@ def _parents_first(fields: dict[int, CaptionField]) -> list[int]:
 	return order
 
 
-def _single_parent(
-	merged: dict[int, list[int]], parent_field_id: int | None
-) -> int | None:
+def _single_parent(merged: dict[int, list[int]], parent_field_id: int | None) -> int | None:
 	"""Значение родителя для привязки — только если оно ровно одно.
 
 	Несколько выбранных значений родителя (или ни одного) оставляют
@@ -246,9 +241,7 @@ def _cut_readable(stem: str, limit: int) -> str:
 		return stem
 	head = stem[:limit]
 	if _WORD_CHAR.match(stem[limit]) and _WORD_CHAR.match(head[-1]):
-		separators = [
-			i for i, ch in enumerate(head) if not _WORD_CHAR.match(ch)
-		]
+		separators = [i for i, ch in enumerate(head) if not _WORD_CHAR.match(ch)]
 		if separators and separators[-1] > 0:
 			head = head[: separators[-1]]
 	while head and not _WORD_CHAR.match(head[-1]):
@@ -271,12 +264,18 @@ class CaptionsService:
 	async def list_fields(self, channel_id: int) -> list[FieldDto]:
 		"""Возвращает поля канала со словарями значений."""
 		async with self._db.session_factory() as session:
-			rows = (await session.execute(
-				select(CaptionField)
-				.options(selectinload(CaptionField.values))
-				.where(CaptionField.channel_id == channel_id)
-				.order_by(CaptionField.id)
-			)).scalars().all()
+			rows = (
+				(
+					await session.execute(
+						select(CaptionField)
+						.options(selectinload(CaptionField.values))
+						.where(CaptionField.channel_id == channel_id)
+						.order_by(CaptionField.id)
+					)
+				)
+				.scalars()
+				.all()
+			)
 			return [self._field_dto(f) for f in rows]
 
 	async def add_field(
@@ -295,17 +294,21 @@ class CaptionsService:
 		if not name:
 			raise CaptionsError("У поля должно быть имя.")
 		async with self._db.session_factory() as session:
-			exists = (await session.execute(
-				select(CaptionField).where(
-					CaptionField.channel_id == channel_id,
-					CaptionField.name == name,
+			exists = (
+				await session.execute(
+					select(CaptionField).where(
+						CaptionField.channel_id == channel_id,
+						CaptionField.name == name,
+					)
 				)
-			)).scalar_one_or_none()
+			).scalar_one_or_none()
 			if exists is not None:
 				raise CaptionsError(f"Поле «{name}» уже есть у канала.")
 			field = CaptionField(
-				channel_id=channel_id, name=name,
-				hashtag=hashtag, multiple=multiple,
+				channel_id=channel_id,
+				name=name,
+				hashtag=hashtag,
+				multiple=multiple,
 			)
 			session.add(field)
 			await session.commit()
@@ -313,9 +316,7 @@ class CaptionsService:
 		logger.info("Поле подписи «%s» добавлено (канал id=%s).", name, channel_id)
 		return FieldDto(field.id, field.name, field.hashtag, field.multiple, [])
 
-	async def set_field_parent(
-		self, field_id: int, parent_field_id: int | None
-	) -> FieldDto:
+	async def set_field_parent(self, field_id: int, parent_field_id: int | None) -> FieldDto:
 		"""Объявляет поле зависимым от другого поля канала (None — снимает связь).
 
 		Смена связи сбрасывает привязки значений: они указывали на словарь
@@ -342,9 +343,7 @@ class CaptionsService:
 				)
 			field.parent_field_id = parent_field_id
 			await session.commit()
-		logger.info(
-			"Поле id=%s: родитель — %s.", field_id, parent_field_id or "нет"
-		)
+		logger.info("Поле id=%s: родитель — %s.", field_id, parent_field_id or "нет")
 		return await self._get_field(field_id)
 
 	@staticmethod
@@ -372,15 +371,10 @@ class CaptionsService:
 		"""Удаляет поле, его словарь и строки состава шаблонов."""
 		async with self._db.session_factory() as session:
 			await session.execute(
-				delete(CaptionTemplateField)
-				.where(CaptionTemplateField.field_id == field_id)
+				delete(CaptionTemplateField).where(CaptionTemplateField.field_id == field_id)
 			)
-			await session.execute(
-				delete(CaptionValue).where(CaptionValue.field_id == field_id)
-			)
-			await session.execute(
-				delete(CaptionField).where(CaptionField.id == field_id)
-			)
+			await session.execute(delete(CaptionValue).where(CaptionValue.field_id == field_id))
+			await session.execute(delete(CaptionField).where(CaptionField.id == field_id))
 			await session.commit()
 
 	async def add_values(
@@ -410,9 +404,7 @@ class CaptionsService:
 			await session.commit()
 		return await self._get_field(field_id)
 
-	async def assign_value_parent(
-		self, value_id: int, parent_value_id: int | None
-	) -> FieldDto:
+	async def assign_value_parent(self, value_id: int, parent_value_id: int | None) -> FieldDto:
 		"""Привязывает значение словаря к значению родителя (None — отвязывает).
 
 		Ручная правка связей из редактора словаря: персонажу назначается
@@ -452,14 +444,11 @@ class CaptionsService:
 		"""
 		if field.parent_field_id is None:
 			raise CaptionsError(
-				f"Поле «{field.name}» не зависит от другого поля — "
-				"привязывать значение не к чему."
+				f"Поле «{field.name}» не зависит от другого поля — привязывать значение не к чему."
 			)
 		parent = await session.get(CaptionValue, parent_value_id)
 		if parent is None or parent.field_id != field.parent_field_id:
-			raise CaptionsError(
-				"Родительское значение не из словаря родительского поля."
-			)
+			raise CaptionsError("Родительское значение не из словаря родительского поля.")
 
 	async def delete_value(self, value_id: int) -> FieldDto:
 		"""Удаляет значение словаря.
@@ -487,21 +476,31 @@ class CaptionsService:
 	async def list_templates(self, channel_id: int) -> list[TemplateDto]:
 		"""Возвращает шаблоны канала с полным составом полей."""
 		async with self._db.session_factory() as session:
-			rows = (await session.execute(
-				select(CaptionTemplate)
-				.options(
-					selectinload(CaptionTemplate.fields)
-					.selectinload(CaptionTemplateField.field)
-					.selectinload(CaptionField.values)
+			rows = (
+				(
+					await session.execute(
+						select(CaptionTemplate)
+						.options(
+							selectinload(CaptionTemplate.fields)
+							.selectinload(CaptionTemplateField.field)
+							.selectinload(CaptionField.values)
+						)
+						.where(CaptionTemplate.channel_id == channel_id)
+						.order_by(CaptionTemplate.id)
+					)
 				)
-				.where(CaptionTemplate.channel_id == channel_id)
-				.order_by(CaptionTemplate.id)
-			)).scalars().all()
+				.scalars()
+				.all()
+			)
 			return [self._template_dto(t) for t in rows]
 
 	async def save_template(
-		self, channel_id: int, name: str, field_ids: list[int],
-		filename_pattern: str | None = None, template_id: int | None = None,
+		self,
+		channel_id: int,
+		name: str,
+		field_ids: list[int],
+		filename_pattern: str | None = None,
+		template_id: int | None = None,
 	) -> TemplateDto:
 		"""Создаёт или перезаписывает шаблон (состав — в порядке списка).
 
@@ -517,20 +516,21 @@ class CaptionsService:
 		if not field_ids:
 			raise CaptionsError("Выберите хотя бы одно поле для шаблона.")
 		async with self._db.session_factory() as session:
-			template = await self._get_or_create_template(
-				session, channel_id, name, template_id
-			)
+			template = await self._get_or_create_template(session, channel_id, name, template_id)
 			template.filename_pattern = (filename_pattern or "").strip() or None
 			saved_id = template.id
 			await session.execute(
-				delete(CaptionTemplateField)
-				.where(CaptionTemplateField.template_id == saved_id)
+				delete(CaptionTemplateField).where(CaptionTemplateField.template_id == saved_id)
 			)
 			for position, field_id in enumerate(field_ids):
-				session.add(CaptionTemplateField(
-					template_id=saved_id, field_id=field_id,
-					position=position, enabled=True,
-				))
+				session.add(
+					CaptionTemplateField(
+						template_id=saved_id,
+						field_id=field_id,
+						position=position,
+						enabled=True,
+					)
+				)
 			await session.commit()
 		logger.info("Шаблон подписи «%s» сохранён (канал id=%s).", name, channel_id)
 		templates = await self.list_templates(channel_id)
@@ -540,12 +540,9 @@ class CaptionsService:
 		"""Удаляет шаблон и его состав (словари полей не трогаются)."""
 		async with self._db.session_factory() as session:
 			await session.execute(
-				delete(CaptionTemplateField)
-				.where(CaptionTemplateField.template_id == template_id)
+				delete(CaptionTemplateField).where(CaptionTemplateField.template_id == template_id)
 			)
-			await session.execute(
-				delete(CaptionTemplate).where(CaptionTemplate.id == template_id)
-			)
+			await session.execute(delete(CaptionTemplate).where(CaptionTemplate.id == template_id))
 			await session.commit()
 
 	async def render_filename(
@@ -590,15 +587,11 @@ class CaptionsService:
 		}
 		for field in await self.list_fields(channel_id):
 			mapping[field.name] = ", ".join(used_values.get(field.id, []))
-		rendered = _PLACEHOLDER.sub(
-			lambda m: mapping.get(m.group(1), m.group(0)), pattern
-		)
+		rendered = _PLACEHOLDER.sub(lambda m: mapping.get(m.group(1), m.group(0)), pattern)
 		# байтовый бюджет — предел ФС минус расширение (оно едет как есть);
 		# поверх — лимит Telegram: срез до законченного слова
 		suffix = Path(media_path).suffix
-		stem = sanitize_filename(
-			rendered, MAX_FILENAME_BYTES - len(suffix.encode("utf-8"))
-		)
+		stem = sanitize_filename(rendered, MAX_FILENAME_BYTES - len(suffix.encode("utf-8")))
 		stem = _cut_readable(stem, TELEGRAM_MAX_STEM_CHARS)
 		if not stem:
 			raise CaptionsError("Имя файла по шаблону получилось пустым.")
@@ -612,9 +605,7 @@ class CaptionsService:
 			return ""
 		return str(min(info.width, info.height))
 
-	async def record_usage(
-		self, template_id: int, used_values: dict[int, list[str]]
-	) -> None:
+	async def record_usage(self, template_id: int, used_values: dict[int, list[str]]) -> None:
 		"""Фиксирует использование шаблона: словари пополняются сами.
 
 		``used_values`` — значения по id полей; новые (без учёта регистра)
@@ -631,7 +622,9 @@ class CaptionsService:
 			merged: dict[int, list[int]] = {}
 			for field_id in _parents_first(fields):
 				merged[field_id] = await self._merge_values(
-					session, field_id, used_values[field_id],
+					session,
+					field_id,
+					used_values[field_id],
 					_single_parent(merged, fields[field_id].parent_field_id),
 				)
 			template = await session.get(CaptionTemplate, template_id)
@@ -640,15 +633,15 @@ class CaptionsService:
 			await session.commit()
 
 	@staticmethod
-	async def _fields_by_id(
-		session: AsyncSession, field_ids: list[int]
-	) -> dict[int, CaptionField]:
+	async def _fields_by_id(session: AsyncSession, field_ids: list[int]) -> dict[int, CaptionField]:
 		"""Поля по идентификаторам (для связей внутри одной сборки)."""
 		if not field_ids:
 			return {}
-		rows = (await session.execute(
-			select(CaptionField).where(CaptionField.id.in_(field_ids))
-		)).scalars().all()
+		rows = (
+			(await session.execute(select(CaptionField).where(CaptionField.id.in_(field_ids))))
+			.scalars()
+			.all()
+		)
 		return {row.id: row for row in rows}
 
 	# --- внутреннее ---------------------------------------------------------
@@ -670,9 +663,11 @@ class CaptionsService:
 		Returns:
 			Идентификаторы значений (существующих и созданных) по порядку.
 		"""
-		rows = (await session.execute(
-			select(CaptionValue).where(CaptionValue.field_id == field_id)
-		)).scalars().all()
+		rows = (
+			(await session.execute(select(CaptionValue).where(CaptionValue.field_id == field_id)))
+			.scalars()
+			.all()
+		)
 		known = {(row.parent_value_id, row.value.lower()): row for row in rows}
 		ids: list[int] = []
 		for value in dict.fromkeys(v.strip() for v in values):
@@ -681,7 +676,8 @@ class CaptionsService:
 			row = cls._existing_value(known, value, parent_value_id)
 			if row is None:
 				row = CaptionValue(
-					field_id=field_id, value=value,
+					field_id=field_id,
+					value=value,
 					parent_value_id=parent_value_id,
 				)
 				session.add(row)
@@ -714,9 +710,7 @@ class CaptionsService:
 				orphan.parent_value_id = parent_value_id
 				return orphan
 			return None
-		return next(
-			(row for (_parent, name), row in known.items() if name == key), None
-		)
+		return next((row for (_parent, name), row in known.items() if name == key), None)
 
 	async def _get_field(self, field_id: int) -> FieldDto:
 		"""Возвращает поле со словарём значений.
@@ -725,11 +719,13 @@ class CaptionsService:
 			CaptionsError: Поле не найдено.
 		"""
 		async with self._db.session_factory() as session:
-			field = (await session.execute(
-				select(CaptionField)
-				.options(selectinload(CaptionField.values))
-				.where(CaptionField.id == field_id)
-			)).scalar_one_or_none()
+			field = (
+				await session.execute(
+					select(CaptionField)
+					.options(selectinload(CaptionField.values))
+					.where(CaptionField.id == field_id)
+				)
+			).scalar_one_or_none()
 		if field is None:
 			raise CaptionsError("Поле не найдено — обновите список.")
 		return self._field_dto(field)
@@ -757,21 +753,20 @@ class CaptionsService:
 	@staticmethod
 	def _field_dto(field: CaptionField) -> FieldDto:
 		return FieldDto(
-			field.id, field.name, field.hashtag, field.multiple,
-			[
-				ValueDto(v.id, v.value, v.parent_value_id)
-				for v in field.values
-			],
+			field.id,
+			field.name,
+			field.hashtag,
+			field.multiple,
+			[ValueDto(v.id, v.value, v.parent_value_id) for v in field.values],
 			field.parent_field_id,
 		)
 
 	@classmethod
 	def _template_dto(cls, template: CaptionTemplate) -> TemplateDto:
 		return TemplateDto(
-			template.id, template.name, template.last_used_at,
-			[
-				TemplateFieldDto(cls._field_dto(row.field), row.enabled)
-				for row in template.fields
-			],
+			template.id,
+			template.name,
+			template.last_used_at,
+			[TemplateFieldDto(cls._field_dto(row.field), row.enabled) for row in template.fields],
 			template.filename_pattern,
 		)

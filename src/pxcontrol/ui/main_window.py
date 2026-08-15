@@ -41,9 +41,9 @@ class MainWindow(FluentWindow):
 		таймаут) не должен валить запуск — окно откроется с умолчаниями.
 		"""
 		try:
-			saved = self._worker.submit(
-				self._worker.engine.settings.get(WINDOW_GEOMETRY)
-			).result(timeout=5)
+			saved = self._worker.submit(self._worker.engine.settings.get(WINDOW_GEOMETRY)).result(
+				timeout=5
+			)
 		except Exception:  # noqa: BLE001 — геометрия не стоит отказа в запуске
 			logger.warning("Не удалось прочитать состояние окна.", exc_info=True)
 			return
@@ -58,20 +58,18 @@ class MainWindow(FluentWindow):
 		self._publish_page = PublishPage(self._worker, self)
 		self.addSubInterface(self._publish_page, FluentIcon.SEND, "Публикация")
 		video_page.publish_requested.connect(self._open_publish_with_video)
-		self.addSubInterface(
-			SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание"
-		)
+		self.addSubInterface(SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание")
 		# категории настроек (Общие, Аккаунты) — внутри самой страницы
 		self.addSubInterface(
-			SettingsPage(self._worker, self), FluentIcon.SETTING, "Настройки",
+			SettingsPage(self._worker, self),
+			FluentIcon.SETTING,
+			"Настройки",
 			NavigationItemPosition.BOTTOM,
 		)
 
 	def _open_publish_with_video(self, path: str, channel_id: int) -> None:
 		"""Переходит на «Публикацию» с видеофайлом и каналом со страницы «Видео»."""
-		self._publish_page.prefill_media(
-			MediaKind.VIDEO, path, channel_id=channel_id or None
-		)
+		self._publish_page.prefill_media(MediaKind.VIDEO, path, channel_id=channel_id or None)
 		self.switchTo(self._publish_page)
 
 	def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — API Qt
@@ -99,8 +97,8 @@ class MainWindow(FluentWindow):
 		"""Сохраняет состояние окна (движок ещё жив: он гасится после Qt)."""
 		data = bytes(self.saveGeometry().toBase64()).decode("ascii")
 		try:
-			self._worker.submit(
-				self._worker.engine.settings.set(WINDOW_GEOMETRY, data)
-			).result(timeout=5)
+			self._worker.submit(self._worker.engine.settings.set(WINDOW_GEOMETRY, data)).result(
+				timeout=5
+			)
 		except Exception:  # noqa: BLE001 — потеря геометрии не мешает выходу
 			logger.warning("Не удалось сохранить состояние окна.", exc_info=True)

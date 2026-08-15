@@ -8,9 +8,17 @@ from pathlib import Path
 from pxcontrol.engine.db.database import MIGRATIONS_DIR, Database
 
 EXPECTED_TABLES = {
-	"app_settings", "channel_settings", "bots", "tg_accounts", "ai_credentials",
-	"video_presets", "channels",
-	"caption_fields", "caption_values", "caption_templates", "caption_template_fields",
+	"app_settings",
+	"channel_settings",
+	"bots",
+	"tg_accounts",
+	"ai_credentials",
+	"video_presets",
+	"channels",
+	"caption_fields",
+	"caption_values",
+	"caption_templates",
+	"caption_template_fields",
 }
 
 
@@ -22,9 +30,7 @@ async def test_migrations_create_all_tables(tmp_path: Path) -> None:
 	await db.close()
 
 	with sqlite3.connect(db_file) as conn:
-		rows = conn.execute(
-			"SELECT name FROM sqlite_master WHERE type='table'"
-		).fetchall()
+		rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
 	tables = {name for (name,) in rows}
 	assert tables >= EXPECTED_TABLES
 	assert "alembic_version" in tables
@@ -84,45 +90,57 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 	db = Database(f"sqlite+aiosqlite:///{db_file}")
 	await db.init()
 	async with db.session_factory() as session:
-		await session.execute(text(
-			"INSERT INTO bots (label, token, created_at, updated_at) "
-			"VALUES ('b', 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-		))
-		await session.execute(text(
-			"INSERT INTO channels (title, tg_chat_id, bot_id, userbot_admin,"
-			" created_at, updated_at) VALUES ('c', '-1001', 1, 0,"
-			" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-		))
-		await session.execute(text(
-			"INSERT INTO channel_settings (channel_id, name, value) "
-			"VALUES (1, 'enabled', 'false')"
-		))
-		await session.execute(text(
-			"INSERT INTO caption_fields (id, channel_id, name, hashtag,"
-			" multiple, created_at, updated_at) VALUES (1, 1, 'Genre', 1, 0,"
-			" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-		))
-		await session.execute(text(
-			"INSERT INTO caption_values (field_id, value, created_at,"
-			" updated_at) VALUES (1, 'drama', CURRENT_TIMESTAMP,"
-			" CURRENT_TIMESTAMP)"
-		))
+		await session.execute(
+			text(
+				"INSERT INTO bots (label, token, created_at, updated_at) "
+				"VALUES ('b', 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+			)
+		)
+		await session.execute(
+			text(
+				"INSERT INTO channels (title, tg_chat_id, bot_id, userbot_admin,"
+				" created_at, updated_at) VALUES ('c', '-1001', 1, 0,"
+				" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+			)
+		)
+		await session.execute(
+			text(
+				"INSERT INTO channel_settings (channel_id, name, value) "
+				"VALUES (1, 'enabled', 'false')"
+			)
+		)
+		await session.execute(
+			text(
+				"INSERT INTO caption_fields (id, channel_id, name, hashtag,"
+				" multiple, created_at, updated_at) VALUES (1, 1, 'Genre', 1, 0,"
+				" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+			)
+		)
+		await session.execute(
+			text(
+				"INSERT INTO caption_values (field_id, value, created_at,"
+				" updated_at) VALUES (1, 'drama', CURRENT_TIMESTAMP,"
+				" CURRENT_TIMESTAMP)"
+			)
+		)
 		await session.commit()
 
 	async with db.session_factory() as session:
 		await session.execute(text("DELETE FROM bots WHERE id = 1"))
 		await session.commit()
-		bot_id = (await session.execute(
-			text("SELECT bot_id FROM channels WHERE id = 1")
-		)).scalar_one()
+		bot_id = (
+			await session.execute(text("SELECT bot_id FROM channels WHERE id = 1"))
+		).scalar_one()
 		assert bot_id is None  # SET NULL, а не висячая ссылка
 
 		await session.execute(text("DELETE FROM channels WHERE id = 1"))
 		await session.commit()
 		for table in ("channel_settings", "caption_fields", "caption_values"):
-			count = (await session.execute(
-				text(f"SELECT COUNT(*) FROM {table}")  # noqa: S608 — имена из констант
-			)).scalar_one()
+			count = (
+				await session.execute(
+					text(f"SELECT COUNT(*) FROM {table}")  # noqa: S608 — имена из констант
+				)
+			).scalar_one()
 			assert count == 0, f"{table}: сироты после удаления канала"
 	await db.close()
 

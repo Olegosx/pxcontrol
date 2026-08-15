@@ -89,8 +89,7 @@ def recommended_bitrate_kbps(duration_s: float, max_bytes: int) -> int:
 	video_kbps = int(total_kbps) - _AUDIO_KBPS
 	if video_kbps < 100:
 		raise VideoError(
-			"Видео слишком длинное: в лимит Telegram не уложиться даже "
-			"с минимальным качеством."
+			"Видео слишком длинное: в лимит Telegram не уложиться даже с минимальным качеством."
 		)
 	return video_kbps
 
@@ -314,27 +313,22 @@ class VideoService:
 		except (OSError, RuntimeError, ValueError):
 			logger.warning(
 				"Рекомендация битрейта: исходник %s не прочитан.",
-				source_path, exc_info=True,
+				source_path,
+				exc_info=True,
 			)
 			return None
 		duration = trimmed_info(info, trim_start, trim_end).duration
-		return BitrateAdvice(
-			limit // 10**9, recommended_bitrate_kbps(duration, limit)
-		)
+		return BitrateAdvice(limit // 10**9, recommended_bitrate_kbps(duration, limit))
 
 	# --- пресеты -----------------------------------------------------------
 
 	async def list_presets(self) -> list[PresetDto]:
 		"""Возвращает все пресеты обработки."""
 		async with self._db.session_factory() as session:
-			rows = (
-				await session.execute(select(VideoPreset).order_by(VideoPreset.id))
-			).scalars()
+			rows = (await session.execute(select(VideoPreset).order_by(VideoPreset.id))).scalars()
 			return [PresetDto(p.id, p.name) for p in rows]
 
-	async def save_preset(
-		self, fields: PresetFields, preset_id: int | None = None
-	) -> PresetDto:
+	async def save_preset(self, fields: PresetFields, preset_id: int | None = None) -> PresetDto:
 		"""Создаёт пресет или обновляет существующий (``preset_id``).
 
 		Raises:
@@ -374,16 +368,24 @@ class VideoService:
 			raise VideoError("Пресет не найден — обновите список.")
 		return PresetFields(
 			name=preset.name,
-			trim_start=preset.trim_start, trim_end=preset.trim_end,
-			fade_in=preset.fade_in, fade_out=preset.fade_out,
+			trim_start=preset.trim_start,
+			trim_end=preset.trim_end,
+			fade_in=preset.fade_in,
+			fade_out=preset.fade_out,
 			watermark_path=preset.watermark_path,
-			wm_corner=preset.wm_corner, wm_margin=preset.wm_margin,
-			wm_opacity=preset.wm_opacity, wm_scale=preset.wm_scale,
+			wm_corner=preset.wm_corner,
+			wm_margin=preset.wm_margin,
+			wm_opacity=preset.wm_opacity,
+			wm_scale=preset.wm_scale,
 			wm_start_offset=preset.wm_start_offset,
-			wm_end_offset=preset.wm_end_offset, wm_fade=preset.wm_fade,
-			intro=preset.intro, intro_source=preset.intro_source,
-			intro_hold=preset.intro_hold, xfade=preset.xfade,
-			cover=preset.cover, no_audio=preset.no_audio,
+			wm_end_offset=preset.wm_end_offset,
+			wm_fade=preset.wm_fade,
+			intro=preset.intro,
+			intro_source=preset.intro_source,
+			intro_hold=preset.intro_hold,
+			xfade=preset.xfade,
+			cover=preset.cover,
+			no_audio=preset.no_audio,
 			video_bitrate_kbps=preset.video_bitrate_kbps,
 			meta_comment=preset.meta_comment,
 			subdir=preset.subdir,
@@ -416,10 +418,7 @@ class VideoService:
 		Чтение каталога блокирующее — выполняется в отдельном потоке,
 		чтобы не останавливать цикл событий движка.
 		"""
-		directory = (
-			video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
-			/ sanitize_subdir(subdir)
-		)
+		directory = video_base_dir(self._settings, VIDEO_PROCESSED_DIR) / sanitize_subdir(subdir)
 		items = await asyncio.to_thread(self._scan_processed, directory)
 		return ProcessedListing(str(directory), items)
 
@@ -437,10 +436,14 @@ class VideoService:
 			if not path.is_file() or path.suffix.lower() not in VIDEO_SUFFIXES:
 				continue
 			stat = path.stat()
-			items.append(ProcessedVideo(
-				path.name, str(path), stat.st_size,
-				datetime.fromtimestamp(stat.st_mtime),
-			))
+			items.append(
+				ProcessedVideo(
+					path.name,
+					str(path),
+					stat.st_size,
+					datetime.fromtimestamp(stat.st_mtime),
+				)
+			)
 		items.sort(key=lambda item: item.modified_at, reverse=True)
 		return items
 
@@ -458,9 +461,7 @@ class VideoService:
 		try:
 			target.resolve().relative_to(root.resolve())
 		except ValueError as exc:
-			raise VideoError(
-				"Удалять можно только файлы из папки результатов обработки."
-			) from exc
+			raise VideoError("Удалять можно только файлы из папки результатов обработки.") from exc
 		await asyncio.to_thread(self._remove_with_preview, target)
 		logger.info("Готовое видео удалено: %s", path)
 
@@ -475,9 +476,7 @@ class VideoService:
 			target.unlink(missing_ok=True)
 			target.with_suffix(".png").unlink(missing_ok=True)
 		except OSError as exc:
-			raise VideoError(
-				f"Не удалось удалить файл: {exc.strerror or exc}"
-			) from exc
+			raise VideoError(f"Не удалось удалить файл: {exc.strerror or exc}") from exc
 
 	async def processed_dir_for_channel(self, channel_id: int) -> str:
 		"""Папка результатов канала: подпапка его пресета по умолчанию.
@@ -507,9 +506,7 @@ class VideoService:
 		внешнего ключа у строки настройки нет, поэтому ссылки чистятся здесь.
 		"""
 		async with self._db.session_factory() as session:
-			await session.execute(
-				delete(VideoPreset).where(VideoPreset.id == preset_id)
-			)
+			await session.execute(delete(VideoPreset).where(VideoPreset.id == preset_id))
 			await session.commit()
 		await self._settings.drop_channel_value(CHANNEL_DEFAULT_PRESET, preset_id)
 
@@ -572,8 +569,12 @@ class VideoService:
 		self._candidates_dir = tempfile.mkdtemp(prefix="pxcontrol-frames-")
 		try:
 			return await asyncio.to_thread(
-				self._extract_candidates, source_path, count,
-				self._candidates_dir, trim_start, trim_end,
+				self._extract_candidates,
+				source_path,
+				count,
+				self._candidates_dir,
+				trim_start,
+				trim_end,
 			)
 		except (RuntimeError, ValueError, OSError) as exc:
 			raise VideoError(f"Не удалось извлечь кадры: {exc}") from exc
@@ -594,16 +595,18 @@ class VideoService:
 		info = probe_video(source_path, ffprobe_bin_for(self._ffmpeg()))
 		work_info = trimmed_info(info, trim_start, trim_end)
 		width, height = fitted_size(info.width, info.height)
-		stamps = sorted(
-			resolve_timestamp("random-choice", work_info) for _ in range(count)
-		)
+		stamps = sorted(resolve_timestamp("random-choice", work_info) for _ in range(count))
 		frames: list[FrameCandidate] = []
 		for index, timestamp in enumerate(stamps):
 			path = str(Path(out_dir) / f"frame_{index:02d}.png")
 			# извлечение — из исходника, время кандидата — от обрезанной версии
 			extract_still(
-				source_path, trim_start + timestamp, path,
-				width, height, self._ffmpeg(),
+				source_path,
+				trim_start + timestamp,
+				path,
+				width,
+				height,
+				self._ffmpeg(),
 			)
 			frames.append(FrameCandidate(timestamp, path))
 		return frames
@@ -626,27 +629,36 @@ class VideoService:
 		self, source: Path, fields: PresetFields, intro_source: str | None = None
 	) -> ProcessingOptions:
 		"""Собирает параметры обработки из переданных полей."""
-		out_dir = (
-			video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
-			/ sanitize_subdir(fields.subdir)
+		out_dir = video_base_dir(self._settings, VIDEO_PROCESSED_DIR) / sanitize_subdir(
+			fields.subdir
 		)
 		out_dir.mkdir(parents=True, exist_ok=True)
 		stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 		output = out_dir / f"{source.stem}_{fields.name}_{stamp}.mp4"
 		ffprobe = ffprobe_bin_for(self._ffmpeg())
 		return ProcessingOptions(
-			input=str(source), output=str(output),
-			trim_start=fields.trim_start, trim_end=fields.trim_end,
-			fade_in=fields.fade_in, fade_out=fields.fade_out,
-			watermark=fields.watermark_path, wm_corner=fields.wm_corner,
-			wm_margin=fields.wm_margin, wm_opacity=fields.wm_opacity,
-			wm_scale=fields.wm_scale, wm_start_offset=fields.wm_start_offset,
-			wm_end_offset=fields.wm_end_offset, wm_fade=fields.wm_fade,
+			input=str(source),
+			output=str(output),
+			trim_start=fields.trim_start,
+			trim_end=fields.trim_end,
+			fade_in=fields.fade_in,
+			fade_out=fields.fade_out,
+			watermark=fields.watermark_path,
+			wm_corner=fields.wm_corner,
+			wm_margin=fields.wm_margin,
+			wm_opacity=fields.wm_opacity,
+			wm_scale=fields.wm_scale,
+			wm_start_offset=fields.wm_start_offset,
+			wm_end_offset=fields.wm_end_offset,
+			wm_fade=fields.wm_fade,
 			intro=fields.intro,
 			intro_source=intro_source or fields.intro_source,
 			intro_hold=fields.intro_hold,
-			xfade=fields.xfade, cover=fields.cover, no_audio=fields.no_audio,
+			xfade=fields.xfade,
+			cover=fields.cover,
+			no_audio=fields.no_audio,
 			video_bitrate_kbps=fields.video_bitrate_kbps,
 			meta_comment=fields.meta_comment,
-			ffmpeg_bin=self._ffmpeg(), ffprobe_bin=ffprobe,
+			ffmpeg_bin=self._ffmpeg(),
+			ffprobe_bin=ffprobe,
 		)

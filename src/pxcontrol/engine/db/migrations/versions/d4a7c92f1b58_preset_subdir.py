@@ -9,6 +9,7 @@ Revision ID: d4a7c92f1b58
 Revises: c8f1d29e4a35
 Create Date: 2026-07-16
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -21,9 +22,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-	op.add_column("video_presets", sa.Column(
-		"subdir", sa.String(128), nullable=False, server_default="",
-	))
+	op.add_column(
+		"video_presets",
+		sa.Column(
+			"subdir",
+			sa.String(128),
+			nullable=False,
+			server_default="",
+		),
+	)
 
 
 def downgrade() -> None:

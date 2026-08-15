@@ -9,6 +9,7 @@ Revision ID: e5cc5457ed7a
 Revises:
 Create Date: 2026-07-03
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -21,12 +22,16 @@ depends_on = None
 
 _TIMESTAMPS = (
 	sa.Column(
-		"created_at", sa.DateTime(timezone=True),
-		server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False,
+		"created_at",
+		sa.DateTime(timezone=True),
+		server_default=sa.text("(CURRENT_TIMESTAMP)"),
+		nullable=False,
 	),
 	sa.Column(
-		"updated_at", sa.DateTime(timezone=True),
-		server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False,
+		"updated_at",
+		sa.DateTime(timezone=True),
+		server_default=sa.text("(CURRENT_TIMESTAMP)"),
+		nullable=False,
 	),
 )
 
@@ -95,8 +100,10 @@ def upgrade() -> None:
 		sa.Column("enabled", sa.Boolean(), nullable=False),
 		sa.Column("bot_id", sa.Integer(), sa.ForeignKey("bots.id"), nullable=True),
 		sa.Column(
-			"video_preset_id", sa.Integer(),
-			sa.ForeignKey("video_presets.id"), nullable=True,
+			"video_preset_id",
+			sa.Integer(),
+			sa.ForeignKey("video_presets.id"),
+			nullable=True,
 		),
 		*_timestamps(),
 	)

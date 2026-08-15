@@ -27,10 +27,19 @@ from pxcontrol.engine.telegram.refs import ChatRefError
 
 #: Все доменные ошибки проекта — их текст безопасен для интерфейса.
 DOMAIN_ERRORS = [
-	AccountsError, CaptionsError, ChannelCheckError, ChannelError,
-	ChatRefError, InvalidBotTokenError, LoginError, PostError,
-	SecretDecryptionError, SecretStorageError, SettingsError,
-	UserbotUnavailableError, VideoError,
+	AccountsError,
+	CaptionsError,
+	ChannelCheckError,
+	ChannelError,
+	ChatRefError,
+	InvalidBotTokenError,
+	LoginError,
+	PostError,
+	SecretDecryptionError,
+	SecretStorageError,
+	SettingsError,
+	UserbotUnavailableError,
+	VideoError,
 ]
 
 
@@ -45,9 +54,7 @@ def test_user_message_passes_domain_text_verbatim() -> None:
 	text = "Канал не найден — обновите список."
 	assert user_message(ChannelError(text)) == text
 	# сетевые ошибки на границах транспортов тоже несут наш текст
-	assert user_message(ConnectionError("Нет связи с Telegram.")) == (
-		"Нет связи с Telegram."
-	)
+	assert user_message(ConnectionError("Нет связи с Telegram.")) == ("Нет связи с Telegram.")
 
 
 def test_user_message_collapses_dump() -> None:

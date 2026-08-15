@@ -9,6 +9,7 @@ Revision ID: f2b8d61c3a97
 Revises: e7a1c94f5d28
 Create Date: 2026-07-14
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -23,22 +24,30 @@ depends_on = None
 def upgrade() -> None:
 	with op.batch_alter_table("video_presets") as batch:
 		batch.alter_column(
-			"wm_start", new_column_name="wm_start_offset",
-			existing_type=sa.Float(), existing_nullable=True,
+			"wm_start",
+			new_column_name="wm_start_offset",
+			existing_type=sa.Float(),
+			existing_nullable=True,
 		)
 		batch.alter_column(
-			"wm_end", new_column_name="wm_end_offset",
-			existing_type=sa.Float(), existing_nullable=True,
+			"wm_end",
+			new_column_name="wm_end_offset",
+			existing_type=sa.Float(),
+			existing_nullable=True,
 		)
 
 
 def downgrade() -> None:
 	with op.batch_alter_table("video_presets") as batch:
 		batch.alter_column(
-			"wm_start_offset", new_column_name="wm_start",
-			existing_type=sa.Float(), existing_nullable=True,
+			"wm_start_offset",
+			new_column_name="wm_start",
+			existing_type=sa.Float(),
+			existing_nullable=True,
 		)
 		batch.alter_column(
-			"wm_end_offset", new_column_name="wm_end",
-			existing_type=sa.Float(), existing_nullable=True,
+			"wm_end_offset",
+			new_column_name="wm_end",
+			existing_type=sa.Float(),
+			existing_nullable=True,
 		)

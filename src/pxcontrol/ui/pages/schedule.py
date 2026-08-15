@@ -57,7 +57,8 @@ class SchedulePage(ScrollArea):
 		hint = CaptionLabel(
 			"Список читается из Telegram. Создание постов — на странице "
 			"«Публикация»; править и удалять отложенные можно из любого "
-			"клиента Telegram.", self,
+			"клиента Telegram.",
+			self,
 		)
 		layout.addWidget(hint)
 		self._filter_box = QHBoxLayout()
@@ -72,8 +73,11 @@ class SchedulePage(ScrollArea):
 
 	def _reload(self) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.posts.list_scheduled(),
-			self, self._show_scheduled, self._show_error,
+			self._worker,
+			self._worker.engine.posts.list_scheduled(),
+			self,
+			self._show_scheduled,
+			self._show_error,
 		)
 
 	def _show_scheduled(self, items: list[ScheduledPostDto]) -> None:
@@ -118,19 +122,21 @@ class SchedulePage(ScrollArea):
 		"""Перерисовывает карточки с учётом фильтра."""
 		clear_layout(self._list)
 		if not self._items:
-			self._list.addWidget(CaptionLabel(
-				"Отложенных записей нет. Создайте пост на странице «Публикация».",
-				self,
-			))
+			self._list.addWidget(
+				CaptionLabel(
+					"Отложенных записей нет. Создайте пост на странице «Публикация».",
+					self,
+				)
+			)
 			return
-		visible = [
-			item for item in self._items
-			if item.channel_id not in self._unchecked
-		]
+		visible = [item for item in self._items if item.channel_id not in self._unchecked]
 		if not visible:
-			self._list.addWidget(CaptionLabel(
-				"Все каналы скрыты фильтром — включите хотя бы один.", self,
-			))
+			self._list.addWidget(
+				CaptionLabel(
+					"Все каналы скрыты фильтром — включите хотя бы один.",
+					self,
+				)
+			)
 			return
 		for item in visible:
 			self._list.addWidget(self._item_row(item))
@@ -146,9 +152,7 @@ class SchedulePage(ScrollArea):
 		box = QVBoxLayout(card)
 		box.setContentsMargins(16, 10, 16, 10)
 		box.setSpacing(2)
-		when = StrongBodyLabel(
-			f"{item.scheduled_at.astimezone():%d.%m.%Y %H:%M}", card
-		)
+		when = StrongBodyLabel(f"{item.scheduled_at.astimezone():%d.%m.%Y %H:%M}", card)
 		when.setTextColor(themeColor(), themeColor())
 		box.addWidget(when)
 		text = BodyLabel(item.text_preview, card)

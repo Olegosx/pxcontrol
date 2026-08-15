@@ -40,10 +40,7 @@ def _error_summary(stderr: str) -> str:
 	lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
 	tail = lines[-_ERROR_TAIL_LINES:]
 	cause = next(
-		(
-			line for line in lines
-			if any(marker in line.lower() for marker in _ERROR_MARKERS)
-		),
+		(line for line in lines if any(marker in line.lower() for marker in _ERROR_MARKERS)),
 		None,
 	)
 	if cause is not None and cause not in tail:
@@ -52,6 +49,7 @@ def _error_summary(stderr: str) -> str:
 	if len(summary) > _ERROR_TAIL_CHARS:
 		summary = f"{summary[:_ERROR_TAIL_CHARS]}…"
 	return summary
+
 
 #: Источник пути к ffmpeg: готовая строка или провайдер (путь из настроек).
 FfmpegSource = str | Callable[[], str]
@@ -83,12 +81,11 @@ def run_tool(cmd: list[str], what: str) -> str:
 	if result.returncode != 0:
 		logger.error(
 			"%s (%s) завершился с ошибкой, полный вывод:\n%s",
-			tool, what, result.stderr.strip(),
+			tool,
+			what,
+			result.stderr.strip(),
 		)
-		raise RuntimeError(
-			f"{tool} ({what}) завершился с ошибкой: "
-			f"{_error_summary(result.stderr)}"
-		)
+		raise RuntimeError(f"{tool} ({what}) завершился с ошибкой: {_error_summary(result.stderr)}")
 	return result.stdout
 
 
@@ -110,16 +107,15 @@ def run_streaming(
 		RuntimeError: Если ffmpeg завершился с ненулевым кодом.
 	"""
 	logger.debug("ffmpeg (%s): %s", what, " ".join(cmd))
-	proc = subprocess.Popen(
-		cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-	)
+	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 	if proc.stdout is None or proc.stderr is None:  # для mypy: оба — PIPE
 		raise RuntimeError(f"ffmpeg ({what}): каналы процесса не открылись.")
 	stderr_pipe = proc.stderr
 	stderr_chunks: list[str] = []
 	reader = threading.Thread(
 		target=lambda: stderr_chunks.append(stderr_pipe.read()),
-		name="ffmpeg-stderr", daemon=True,
+		name="ffmpeg-stderr",
+		daemon=True,
 	)
 	reader.start()
 	for line in proc.stdout:
@@ -132,11 +128,10 @@ def run_streaming(
 		stderr = "".join(stderr_chunks)
 		logger.error(
 			"ffmpeg (%s) завершился с ошибкой, полный вывод:\n%s",
-			what, stderr.strip(),
+			what,
+			stderr.strip(),
 		)
-		raise RuntimeError(
-			f"ffmpeg ({what}) завершился с ошибкой: {_error_summary(stderr)}"
-		)
+		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {_error_summary(stderr)}")
 
 
 def _progress_seconds(line: str) -> float | None:
@@ -147,7 +142,7 @@ def _progress_seconds(line: str) -> float | None:
 	"""
 	for key in ("out_time_us=", "out_time_ms="):
 		if line.startswith(key):
-			value = line[len(key):].strip()
+			value = line[len(key) :].strip()
 			try:
 				return int(value) / 1_000_000
 			except ValueError:

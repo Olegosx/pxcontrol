@@ -11,6 +11,7 @@ Revision ID: a5d8f31c9b27
 Revises: b9e2c74a51d3
 Create Date: 2026-07-16
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -28,8 +29,10 @@ def upgrade() -> None:
 	op.create_table(
 		"channel_settings",
 		sa.Column(
-			"channel_id", sa.Integer(),
-			sa.ForeignKey("channels.id", ondelete="CASCADE"), nullable=False,
+			"channel_id",
+			sa.Integer(),
+			sa.ForeignKey("channels.id", ondelete="CASCADE"),
+			nullable=False,
 		),
 		sa.Column("name", sa.String(128), nullable=False),
 		sa.Column("value", sa.JSON(), nullable=False),
@@ -43,10 +46,14 @@ def upgrade() -> None:
 
 def downgrade() -> None:
 	with op.batch_alter_table("channels") as batch:
-		batch.add_column(sa.Column(
-			"video_preset_id", sa.Integer(),
-			sa.ForeignKey("video_presets.id"), nullable=True,
-		))
+		batch.add_column(
+			sa.Column(
+				"video_preset_id",
+				sa.Integer(),
+				sa.ForeignKey("video_presets.id"),
+				nullable=True,
+			)
+		)
 	op.drop_table("channel_settings")
 	op.alter_column("app_settings", "name", new_column_name="key")
 	op.rename_table("app_settings", "settings")

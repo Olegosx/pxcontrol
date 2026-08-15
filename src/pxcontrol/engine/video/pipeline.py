@@ -103,16 +103,11 @@ def _watermark_options(opts: ProcessingOptions, info: VideoInfo) -> WatermarkOpt
 		window = (end if end is not None else info.duration) - (start or 0.0)
 		if window <= 0:
 			raise ValueError(
-				"Окно показа вотермарка пустое: отступы "
-				"не помещаются в длительность ролика."
+				"Окно показа вотермарка пустое: отступы не помещаются в длительность ролика."
 			)
-		fade_span = opts.wm_fade * (
-			(start is not None) + (end is not None)
-		)
+		fade_span = opts.wm_fade * ((start is not None) + (end is not None))
 		if fade_span > window:
-			raise ValueError(
-				"Плавность переходов не помещается в окно показа вотермарка."
-			)
+			raise ValueError("Плавность переходов не помещается в окно показа вотермарка.")
 	return WatermarkOptions(
 		corner=opts.wm_corner,
 		margin=opts.wm_margin,
@@ -153,8 +148,14 @@ def _build_inputs(
 	if opts.intro:
 		duration = opts.intro_hold + opts.xfade + _STILL_INPUT_MARGIN
 		inputs += [
-			"-loop", "1", "-framerate", _fps_arg(info.fps),
-			"-t", f"{duration:.3f}", "-i", str(still_path),
+			"-loop",
+			"1",
+			"-framerate",
+			_fps_arg(info.fps),
+			"-t",
+			f"{duration:.3f}",
+			"-i",
+			str(still_path),
 		]
 		still_index, index = index, index + 1
 	return inputs, wm_index, still_index
@@ -173,8 +174,13 @@ def _video_quality_args(opts: ProcessingOptions, info: VideoInfo) -> list[str]:
 
 
 def _assemble_command(
-	ffmpeg_bin: str, inputs: list[str], filter_complex: str, video_label: str,
-	audio_label: str | None, quality: list[str], meta_comment: str | None,
+	ffmpeg_bin: str,
+	inputs: list[str],
+	filter_complex: str,
+	video_label: str,
+	audio_label: str | None,
+	quality: list[str],
+	meta_comment: str | None,
 	output: str,
 ) -> list[str]:
 	"""Собирает полную команду ffmpeg для основной обработки."""
@@ -205,43 +211,63 @@ def _run_main(
 	# длительность итога = исходник + удержание кадра заставки (см. SPEC)
 	total = info.duration + (opts.intro_hold if opts.intro else 0.0)
 	if opts.fade_in + opts.fade_out > total:
-		raise ValueError(
-			"Затухания в начале и в конце не помещаются "
-			"в длительность ролика."
-		)
+		raise ValueError("Затухания в начале и в конце не помещаются в длительность ролика.")
 	graph = build_filter_complex(
-		fps=_fps_arg(info.fps), width=width, height=height, duration=total,
-		hold=opts.intro_hold, xfade=opts.xfade, still_index=still_index,
+		fps=_fps_arg(info.fps),
+		width=width,
+		height=height,
+		duration=total,
+		hold=opts.intro_hold,
+		xfade=opts.xfade,
+		still_index=still_index,
 		wm=_watermark_options(opts, info) if opts.watermark else None,
-		wm_index=wm_index, has_audio=has_audio,
-		fade_in=opts.fade_in, fade_out=opts.fade_out,
+		wm_index=wm_index,
+		has_audio=has_audio,
+		fade_in=opts.fade_in,
+		fade_out=opts.fade_out,
 	)
 	cmd = _assemble_command(
-		opts.ffmpeg_bin, inputs, graph.filter_complex, graph.video_label,
-		graph.audio_label, _video_quality_args(opts, info),
-		opts.meta_comment, output,
+		opts.ffmpeg_bin,
+		inputs,
+		graph.filter_complex,
+		graph.video_label,
+		graph.audio_label,
+		_video_quality_args(opts, info),
+		opts.meta_comment,
+		output,
 	)
 	run_streaming(cmd, "обработка видео", total, on_progress)
 
 
-def _attach_cover(
-	ffmpeg_bin: str, video_path: str, cover_path: str, output: str
-) -> None:
+def _attach_cover(ffmpeg_bin: str, video_path: str, cover_path: str, output: str) -> None:
 	"""Вшивает картинку как обложку mp4 (attached_pic) без перекодирования."""
 	cmd = [
-		ffmpeg_bin, "-y", "-i", video_path, "-i", cover_path,
-		"-map", "0", "-map", "1", "-c", "copy", "-c:v:1", "png",
-		"-disposition:v:1", "attached_pic",
+		ffmpeg_bin,
+		"-y",
+		"-i",
+		video_path,
+		"-i",
+		cover_path,
+		"-map",
+		"0",
+		"-map",
+		"1",
+		"-c",
+		"copy",
+		"-c:v:1",
+		"png",
+		"-disposition:v:1",
+		"attached_pic",
 		# +faststart — moov в начало файла (главный проход его уже ставил,
 		# но ремукс с обложкой без флага увёл бы индекс в хвост)
-		"-movflags", "+faststart", output,
+		"-movflags",
+		"+faststart",
+		output,
 	]
 	run_tool(cmd, "вшивание обложки")
 
 
-def _save_preview(
-	opts: ProcessingOptions, info: VideoInfo, still_path: str | None
-) -> None:
+def _save_preview(opts: ProcessingOptions, info: VideoInfo, still_path: str | None) -> None:
 	"""Сохраняет кадр-превью рядом с результатом (тот же стем, .png).
 
 	Кадр заставки/обложки, если готовился (он и задуман «лицом» ролика),
@@ -262,9 +288,7 @@ def _save_preview(
 		logger.info("Превью сохранено: %s", preview)
 
 
-def process(
-	opts: ProcessingOptions, on_progress: ProgressCallback | None = None
-) -> None:
+def process(opts: ProcessingOptions, on_progress: ProgressCallback | None = None) -> None:
 	"""Обрабатывает одно видео по заданным параметрам (блокирующе).
 
 	Вызывающая сторона отвечает за вынос в поток/executor — модуль
@@ -285,8 +309,7 @@ def process(
 	# файл дал бы вместо точной причины многострочный журнал ffmpeg
 	if opts.watermark and not Path(opts.watermark).is_file():
 		raise ValueError(
-			f"Файл вотермарка не найден: {opts.watermark} — проверьте "
-			"путь в разделе «Вотермарк»."
+			f"Файл вотермарка не найден: {opts.watermark} — проверьте путь в разделе «Вотермарк»."
 		)
 	info = probe_video(opts.input, opts.ffprobe_bin)
 	# все дальнейшие расчёты — от рабочей (обрезанной) версии
@@ -296,8 +319,12 @@ def process(
 		if opts.intro or opts.cover:
 			still_path = os.path.join(tmp, "still.png")
 			prepare_still(
-				opts.input, opts.intro_source, work_info, still_path,
-				opts.ffmpeg_bin, start_offset=opts.trim_start,
+				opts.input,
+				opts.intro_source,
+				work_info,
+				still_path,
+				opts.ffmpeg_bin,
+				start_offset=opts.trim_start,
 			)
 		main_output = opts.output if not opts.cover else os.path.join(tmp, "main.mp4")
 		_run_main(opts, work_info, still_path, main_output, on_progress)

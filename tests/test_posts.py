@@ -38,15 +38,11 @@ class _FakeGateway:
 		self.sent.append((token, chat_id, text))
 		return 42
 
-	async def send_media(
-		self, token: str, chat_id: str, kind: str, path: str, caption: str
-	) -> int:
+	async def send_media(self, token: str, chat_id: str, kind: str, path: str, caption: str) -> int:
 		self.media.append((token, chat_id, kind, path, caption))
 		return 43
 
-	async def publish(
-		self, chat_id: str, post: OutgoingPost, on_progress: object
-	) -> None:
+	async def publish(self, chat_id: str, post: OutgoingPost, on_progress: object) -> None:
 		if not self.userbot_ok:
 			raise UserbotUnavailableError("Userbot не подключён — войдите в аккаунт.")
 		if post.media_path is not None and callable(on_progress):
@@ -59,10 +55,12 @@ class _FakeGateway:
 		return [post.thumb_path for _chat, post in self.published]
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
-		return [ScheduledMessage(
-			text="Отложенный текст",
-			scheduled_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
-		)]
+		return [
+			ScheduledMessage(
+				text="Отложенный текст",
+				scheduled_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+			)
+		]
 
 
 @pytest.fixture
@@ -74,9 +72,7 @@ async def db(tmp_path: Path) -> AsyncIterator[Database]:
 	await database.close()
 
 
-async def _add_channel(
-	db: Database, with_bot: bool = True, userbot_admin: bool = True
-) -> int:
+async def _add_channel(db: Database, with_bot: bool = True, userbot_admin: bool = True) -> int:
 	"""Создаёт канал (и бота при необходимости), возвращает id канала."""
 	async with db.session_factory() as session:
 		bot_id = None
@@ -86,7 +82,9 @@ async def _add_channel(
 			await session.flush()
 			bot_id = bot.id
 		channel = Channel(
-			title="Канал", tg_chat_id="-1001", bot_id=bot_id,
+			title="Канал",
+			tg_chat_id="-1001",
+			bot_id=bot_id,
 			userbot_admin=userbot_admin,
 		)
 		session.add(channel)
@@ -118,7 +116,9 @@ async def test_publish_media_with_progress(db: Database, tmp_path: Path) -> None
 	video.write_bytes(b"video")
 	received: list[float] = []
 	draft = PostDraft(
-		channel_id, text="подпись", media_path=str(video),
+		channel_id,
+		text="подпись",
+		media_path=str(video),
 		media_kind=MediaKind.VIDEO,
 	)
 	await service.publish(draft, on_progress=received.append)
@@ -138,14 +138,15 @@ async def test_publish_validations(db: Database, tmp_path: Path) -> None:
 	with pytest.raises(PostError, match="не указан тип"):
 		await service.publish(PostDraft(channel_id, media_path="x.bin"))
 	with pytest.raises(PostError, match="не найден"):
-		await service.publish(PostDraft(
-			channel_id, media_path=str(tmp_path / "нет.jpg"),
-			media_kind=MediaKind.PHOTO,
-		))
+		await service.publish(
+			PostDraft(
+				channel_id,
+				media_path=str(tmp_path / "нет.jpg"),
+				media_kind=MediaKind.PHOTO,
+			)
+		)
 	with pytest.raises(PostError, match="в будущем"):
-		await service.publish(PostDraft(
-			channel_id, text="x", when=datetime.now(UTC)
-		))
+		await service.publish(PostDraft(channel_id, text="x", when=datetime.now(UTC)))
 	assert gateway.published == []
 
 
@@ -155,24 +156,24 @@ async def test_video_thumbnail_from_neighbor_preview(
 	"""Миниатюра видео режется из кадра-превью конвейера (сосед .png)."""
 	sources: list[tuple[str, float]] = []
 
-	def _fake_thumb(
-		source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0
-	) -> None:
+	def _fake_thumb(source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0) -> None:
 		sources.append((source, timestamp))
 		Path(out).write_bytes(b"jpg")
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
 	video = tmp_path / "ролик.mp4"
 	video.write_bytes(b"video")
 	(tmp_path / "ролик.png").write_bytes(b"png")
-	await service.publish(PostDraft(
-		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-	))
+	await service.publish(
+		PostDraft(
+			channel_id,
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+		)
+	)
 	assert sources == [(str(tmp_path / "ролик.png"), 0.0)]
 	thumb = gateway.thumbs()[0]
 	assert thumb is not None and thumb.endswith(".jpg")
@@ -184,15 +185,11 @@ async def test_video_thumbnail_random_middle_without_preview(
 	"""Без превью-соседа миниатюра — случайный кадр из середины видео."""
 	from pxcontrol.engine.video.probe import VideoInfo
 
-	def _fake_thumb(
-		source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0
-	) -> None:
+	def _fake_thumb(source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0) -> None:
 		assert source.endswith(".mp4") and 25.0 <= timestamp <= 75.0
 		Path(out).write_bytes(b"jpg")
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb)
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.posts.probe_video",
 		lambda _p, _b: VideoInfo(1920, 1080, 100.0, 25.0, True),
@@ -202,9 +199,13 @@ async def test_video_thumbnail_random_middle_without_preview(
 	channel_id = await _add_channel(db)
 	video = tmp_path / "чужой.mp4"
 	video.write_bytes(b"video")
-	await service.publish(PostDraft(
-		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-	))
+	await service.publish(
+		PostDraft(
+			channel_id,
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+		)
+	)
 	assert gateway.thumbs()[0] is not None
 
 
@@ -212,6 +213,7 @@ async def test_video_thumbnail_failure_does_not_block_publish(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Сбой миниатюры не мешает публикации: уходит без неё."""
+
 	def _boom(*_args: object, **_kwargs: object) -> None:
 		raise RuntimeError("ffmpeg сломался")
 
@@ -222,9 +224,13 @@ async def test_video_thumbnail_failure_does_not_block_publish(
 	video = tmp_path / "ролик.mp4"
 	video.write_bytes(b"video")
 	(tmp_path / "ролик.png").write_bytes(b"png")
-	await service.publish(PostDraft(
-		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-	))
+	await service.publish(
+		PostDraft(
+			channel_id,
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+		)
+	)
 	assert len(gateway.published) == 1 and gateway.thumbs() == [None]
 
 
@@ -232,25 +238,26 @@ async def test_publish_renames_file_and_preview(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""rename_to переименовывает файл и кадр-превью, уходит новый путь."""
-	def _fake_thumb(
-		source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0
-	) -> None:
+
+	def _fake_thumb(source: str, out: str, _bin: str = "ffmpeg", timestamp: float = 0.0) -> None:
 		assert source.endswith("Новое имя.png")  # превью ищется по новому имени
 		Path(out).write_bytes(b"jpg")
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
 	video = tmp_path / "старое_test_20260714-000000.mp4"
 	video.write_bytes(b"video")
 	(tmp_path / "старое_test_20260714-000000.png").write_bytes(b"png")
-	await service.publish(PostDraft(
-		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-		rename_to="Новое имя.mp4",
-	))
+	await service.publish(
+		PostDraft(
+			channel_id,
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+			rename_to="Новое имя.mp4",
+		)
+	)
 	_chat, post = gateway.published[0]
 	assert post.media_path == str(tmp_path / "Новое имя.mp4")
 	assert (tmp_path / "Новое имя.mp4").is_file()
@@ -266,16 +273,24 @@ async def test_publish_rename_validations(db: Database, tmp_path: Path) -> None:
 	video = tmp_path / "в.mp4"
 	video.write_bytes(b"video")
 	with pytest.raises(PostError, match="не должно содержать путь"):
-		await service.publish(PostDraft(
-			channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-			rename_to="a/b.mp4",
-		))
+		await service.publish(
+			PostDraft(
+				channel_id,
+				media_path=str(video),
+				media_kind=MediaKind.VIDEO,
+				rename_to="a/b.mp4",
+			)
+		)
 	(tmp_path / "занято.mp4").write_bytes(b"x")
 	with pytest.raises(PostError, match="уже существует"):
-		await service.publish(PostDraft(
-			channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-			rename_to="занято.mp4",
-		))
+		await service.publish(
+			PostDraft(
+				channel_id,
+				media_path=str(video),
+				media_kind=MediaKind.VIDEO,
+				rename_to="занято.mp4",
+			)
+		)
 	assert gateway.published == []
 
 
@@ -291,9 +306,7 @@ def test_publish_capabilities() -> None:
 	assert not none.userbot and not none.bot
 
 
-async def test_publish_bot_fallback_text_and_media(
-	db: Database, tmp_path: Path
-) -> None:
+async def test_publish_bot_fallback_text_and_media(db: Database, tmp_path: Path) -> None:
 	"""Канал «только бот»: текст и медиа ≤50 МБ уходят через Bot API."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
@@ -302,13 +315,15 @@ async def test_publish_bot_fallback_text_and_media(
 	assert gateway.sent == [("123:AAA", "-1001", "через бота")]
 	photo = tmp_path / "фото.jpg"
 	photo.write_bytes(b"jpg")
-	await service.publish(PostDraft(
-		channel_id, text="подпись", media_path=str(photo),
-		media_kind=MediaKind.PHOTO,
-	))
-	assert gateway.media == [
-		("123:AAA", "-1001", "photo", str(photo), "подпись")
-	]
+	await service.publish(
+		PostDraft(
+			channel_id,
+			text="подпись",
+			media_path=str(photo),
+			media_kind=MediaKind.PHOTO,
+		)
+	)
+	assert gateway.media == [("123:AAA", "-1001", "photo", str(photo), "подпись")]
 	assert gateway.published == []  # userbot-путь не задействован
 
 
@@ -324,9 +339,13 @@ async def test_publish_bot_limits(db: Database, tmp_path: Path) -> None:
 	with big.open("wb") as handle:
 		handle.truncate(51 * 1024 * 1024)  # разрежённый файл, диск не страдает
 	with pytest.raises(PostError, match="50 МБ"):
-		await service.publish(PostDraft(
-			channel_id, media_path=str(big), media_kind=MediaKind.VIDEO,
-		))
+		await service.publish(
+			PostDraft(
+				channel_id,
+				media_path=str(big),
+				media_kind=MediaKind.VIDEO,
+			)
+		)
 	assert gateway.sent == [] and gateway.media == []
 
 
@@ -353,10 +372,14 @@ async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
 	service = PostsService(db, _FakeGateway())
 	channel_id = await _add_channel(db)
 	items = await service.list_scheduled()
-	assert items == [ScheduledPostDto(
-		channel_id, "Канал", "Отложенный текст",
-		datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
-	)]
+	assert items == [
+		ScheduledPostDto(
+			channel_id,
+			"Канал",
+			"Отложенный текст",
+			datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+		)
+	]
 
 
 async def test_list_scheduled_skips_disabled_channel(db: Database) -> None:
@@ -390,9 +413,14 @@ async def test_list_scheduled_isolates_channel_failure(db: Database) -> None:
 	service = PostsService(db, _FlakyGateway())
 	await _add_channel(db)  # tg_chat_id="-1001" — упадёт
 	async with db.session_factory() as session:
-		session.add(Channel(
-			title="Второй", tg_chat_id="-1002", bot_id=None, userbot_admin=True,
-		))
+		session.add(
+			Channel(
+				title="Второй",
+				tg_chat_id="-1002",
+				bot_id=None,
+				userbot_admin=True,
+			)
+		)
 		await session.commit()
 	items = await service.list_scheduled()
 	assert [item.channel_title for item in items] == ["Второй"]
@@ -423,7 +451,9 @@ async def test_publish_userbot_rejects_oversized_file(
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
 	draft = PostDraft(
-		channel_id, media_path=str(big), media_kind=MediaKind.DOCUMENT,
+		channel_id,
+		media_path=str(big),
+		media_kind=MediaKind.DOCUMENT,
 	)
 	with pytest.raises(PostError, match="лимит"):
 		await service.publish(draft)
@@ -452,9 +482,7 @@ async def test_published_video_moves_to_published_dir(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Видео из папки результатов переезжает в опубликованные (с превью)."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 	processed = tmp_path / "media" / "processed" / "суб"
 	processed.mkdir(parents=True)
 	video = processed / "ролик.mp4"
@@ -462,9 +490,13 @@ async def test_published_video_moves_to_published_dir(
 	(processed / "ролик.png").write_bytes(b"png")
 	service = PostsService(db, _FakeGateway())
 	channel_id = await _add_channel(db)
-	await service.publish(PostDraft(
-		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-	))
+	await service.publish(
+		PostDraft(
+			channel_id,
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+		)
+	)
 	published = tmp_path / "media" / "published" / "суб"
 	assert (published / "ролик.mp4").is_file()
 	assert (published / "ролик.png").is_file()
@@ -475,16 +507,18 @@ async def test_video_outside_processed_dir_stays(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Видео не из папки результатов после публикации остаётся на месте."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 	video = tmp_path / "чужое.mp4"
 	video.write_bytes(b"video")
 	service = PostsService(db, _FakeGateway())
 	channel_id = await _add_channel(db)
-	await service.publish(PostDraft(
-		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-	))
+	await service.publish(
+		PostDraft(
+			channel_id,
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+		)
+	)
 	assert video.is_file()
 
 
@@ -492,9 +526,7 @@ async def test_move_failure_does_not_break_publish(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Сбой переезда — предупреждение в лог, публикация считается успешной."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 
 	def _boom(*_args: object, **_kwargs: object) -> None:
 		raise OSError("диск переполнен")
@@ -507,7 +539,11 @@ async def test_move_failure_does_not_break_publish(
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	channel_id = await _add_channel(db)
-	await service.publish(PostDraft(
-		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-	))
+	await service.publish(
+		PostDraft(
+			channel_id,
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+		)
+	)
 	assert len(gateway.published) == 1  # пост ушёл, несмотря на сбой переезда

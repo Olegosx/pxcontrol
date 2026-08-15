@@ -32,16 +32,15 @@ def test_hashtag_normalization() -> None:
 
 def test_build_caption_full() -> None:
 	"""Название жирным, решётки/текст по полю, пустые строки — вон."""
-	text = build_caption("Lara Croft", [
-		CaptionLine("Year", hashtag=False, values=["2026"]),
-		CaptionLine("Genre", hashtag=True, values=["action", "sci-fi"]),
-		CaptionLine("Author", hashtag=True, values=["  "]),  # пусто — пропуск
-	])
-	assert text == (
-		"**Lara Croft**\n"
-		"Year: 2026\n"
-		"Genre: #Action, #SciFi"
+	text = build_caption(
+		"Lara Croft",
+		[
+			CaptionLine("Year", hashtag=False, values=["2026"]),
+			CaptionLine("Genre", hashtag=True, values=["action", "sci-fi"]),
+			CaptionLine("Author", hashtag=True, values=["  "]),  # пусто — пропуск
+		],
 	)
+	assert text == ("**Lara Croft**\nYear: 2026\nGenre: #Action, #SciFi")
 
 
 def test_build_caption_without_title() -> None:
@@ -52,9 +51,7 @@ def test_build_caption_without_title() -> None:
 
 def test_title_from_filename_strips_pipeline_suffix() -> None:
 	"""Суффикс конвейера _<пресет>_<штамп> отрезается, чужие имена — как есть."""
-	assert title_from_filename(
-		"/x/Lara Croft_test_20260713-223049.mp4"
-	) == "Lara Croft"
+	assert title_from_filename("/x/Lara Croft_test_20260713-223049.mp4") == "Lara Croft"
 	assert title_from_filename("/x/Просто видео.mp4") == "Просто видео"
 
 
@@ -91,9 +88,7 @@ async def _add_channel(db: Database, username: str | None = None) -> int:
 	"""Заводит канал; ID чата уникален — их бывает несколько в одном тесте."""
 	async with db.session_factory() as session:
 		count = len((await session.execute(select(Channel))).scalars().all())
-		channel = Channel(
-			title="Канал", tg_chat_id=f"-100{count + 1}", username=username
-		)
+		channel = Channel(title="Канал", tg_chat_id=f"-100{count + 1}", username=username)
 		session.add(channel)
 		await session.commit()
 		await session.refresh(channel)
@@ -132,9 +127,7 @@ async def test_template_roundtrip_and_shared_dictionary(db: Database) -> None:
 	assert film.last_used_at is not None
 
 
-async def test_render_filename(
-	db: Database, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_render_filename(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
 	"""Имя файла: плейсхолдеры, качество, канал, очистка символов."""
 	from pxcontrol.engine.video.probe import VideoInfo
 
@@ -147,12 +140,16 @@ async def test_render_filename(
 	author = await service.add_field(channel_id, "Author", hashtag=True, multiple=False)
 	genre = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
 	template = await service.save_template(
-		channel_id, "Фильм", [author.id, genre.id],
+		channel_id,
+		"Фильм",
+		[author.id, genre.id],
 		"{Author}, {video} ({Genre}) {quality} (@{channel})",
 	)
 	assert template.filename_pattern is not None
 	name = await service.render_filename(
-		template.id, channel_id, "Lara: Croft",
+		template.id,
+		channel_id,
+		"Lara: Croft",
 		{author.id: ["Best"], genre.id: ["action", "drama"]},
 		"/x/видео.mp4",
 	)
@@ -173,25 +170,30 @@ async def test_render_filename_fits_telegram_limit(
 	service = CaptionsService(db)
 	channel_id = await _add_channel(db, username="nature_docs")
 	tags = await service.add_field(channel_id, "Tags", hashtag=True, multiple=True)
-	template = await service.save_template(
-		channel_id, "Т", [tags.id], "{video},@{channel},{Tags}"
-	)
+	template = await service.save_template(channel_id, "Т", [tags.id], "{video},@{channel},{Tags}")
 	values = [
-		"4K", "8K", "Sunrise", "Mountain", "Twilight", "Sunsets",
-		"Wildlife", "Lake", "Meadows",
+		"4K",
+		"8K",
+		"Sunrise",
+		"Mountain",
+		"Twilight",
+		"Sunsets",
+		"Wildlife",
+		"Lake",
+		"Meadows",
 	]
 	name = await service.render_filename(
-		template.id, channel_id, "WinterMorningLights",
-		{tags.id: values}, "/x/v.mp4",
+		template.id,
+		channel_id,
+		"WinterMorningLights",
+		{tags.id: values},
+		"/x/v.mp4",
 	)
 	stem = name.removesuffix(".mp4")
 	assert len(stem) <= TELEGRAM_MAX_STEM_CHARS
 	# начало нетронуто; срез пришёлся на запятую после «Sunsets» —
 	# висячая запятая убрана, имя кончается законченным словом
-	assert stem == (
-		"WinterMorningLights,@nature_docs,"
-		"4K, 8K, Sunrise, Mountain, Twilight, Sunsets"
-	)
+	assert stem == ("WinterMorningLights,@nature_docs,4K, 8K, Sunrise, Mountain, Twilight, Sunsets")
 
 
 async def test_render_filename_cuts_long_title_at_word(
@@ -216,9 +218,7 @@ async def test_render_filename_cuts_long_title_at_word(
 	assert all(w in ("Длинное", "Слово") for w in stem.split())
 
 
-async def test_render_filename_edge_cases(
-	db: Database, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_render_filename_edge_cases(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
 	"""Не-видео — без качества; неизвестный плейсхолдер остаётся как есть."""
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.captions.probe_video",
@@ -236,9 +236,7 @@ async def test_render_filename_edge_cases(
 	assert name == "Имя {Нет} (2026).zip"
 	no_pattern = await service.save_template(channel_id, "Без", [field.id])
 	with pytest.raises(CaptionsError, match="не задан шаблон имени"):
-		await service.render_filename(
-			no_pattern.id, channel_id, "х", {}, "/x/ф.mp4"
-		)
+		await service.render_filename(no_pattern.id, channel_id, "х", {}, "/x/ф.mp4")
 
 
 async def test_dictionary_add_and_delete_values(db: Database) -> None:
@@ -246,9 +244,7 @@ async def test_dictionary_add_and_delete_values(db: Database) -> None:
 	service = CaptionsService(db)
 	channel_id = await _add_channel(db)
 	field = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
-	updated = await service.add_values(
-		field.id, ["action", " Action ", "", "drama"]
-	)
+	updated = await service.add_values(field.id, ["action", " Action ", "", "drama"])
 	assert updated.names() == ["action", "drama"]  # дубль и пустое — пропущены
 	action = next(item for item in updated.values if item.value == "action")
 	updated = await service.delete_value(action.id)
@@ -278,9 +274,7 @@ async def test_render_filename_respects_limits(
 	template = await service.save_template(channel_id, "Т", [field.id], "{video}")
 	# сплошная латиница без разделителей: границы слова нет — срез ровно
 	# по лимиту Telegram (длиннее сервер изменил бы имя сам)
-	name = await service.render_filename(
-		template.id, channel_id, "a" * 200, {}, "/x/ф.mp4"
-	)
+	name = await service.render_filename(template.id, channel_id, "a" * 200, {}, "/x/ф.mp4")
 	assert name == "a" * TELEGRAM_MAX_STEM_CHARS + ".mp4"
 	# эмодзи — 4 байта на символ: байтовый предел ФС строже символьного
 	long_name = await service.render_filename(
@@ -310,14 +304,10 @@ async def test_template_validation_and_delete(db: Database) -> None:
 # --- связанные словари (персонаж внутри тайтла) ------------------------------
 
 
-async def _linked_fields(
-	service: CaptionsService, channel_id: int
-) -> tuple[int, int]:
+async def _linked_fields(service: CaptionsService, channel_id: int) -> tuple[int, int]:
 	"""Готовит пару полей «Title» и зависимый от него «Character»."""
 	title = await service.add_field(channel_id, "Title", hashtag=True, multiple=False)
-	character = await service.add_field(
-		channel_id, "Character", hashtag=True, multiple=True
-	)
+	character = await service.add_field(channel_id, "Character", hashtag=True, multiple=True)
 	linked = await service.set_field_parent(character.id, title.id)
 	assert linked.parent_field_id == title.id
 	return title.id, character.id
@@ -328,15 +318,11 @@ async def test_usage_binds_new_values_to_selected_parent(db: Database) -> None:
 	service = CaptionsService(db)
 	channel_id = await _add_channel(db)
 	title_id, character_id = await _linked_fields(service, channel_id)
-	template = await service.save_template(
-		channel_id, "Фильм", [title_id, character_id]
-	)
+	template = await service.save_template(channel_id, "Фильм", [title_id, character_id])
 	await service.record_usage(
 		template.id, {title_id: ["TombRider"], character_id: ["Lara", "Zip"]}
 	)
-	await service.record_usage(
-		template.id, {title_id: ["Fallout"], character_id: ["Lara"]}
-	)
+	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Lara"]})
 	fields = {f.name: f for f in await service.list_fields(channel_id)}
 	titles = {item.id: item.value for item in fields["Title"].values}
 	bound = sorted(
@@ -345,9 +331,7 @@ async def test_usage_binds_new_values_to_selected_parent(db: Database) -> None:
 		if item.parent_id is not None
 	)
 	# тёзки из разных тайтлов — разные записи словаря (одна на свой тайтл)
-	assert bound == [
-		("Lara", "Fallout"), ("Lara", "TombRider"), ("Zip", "TombRider")
-	]
+	assert bound == [("Lara", "Fallout"), ("Lara", "TombRider"), ("Zip", "TombRider")]
 
 
 async def test_available_filters_by_parent(db: Database) -> None:
@@ -355,15 +339,9 @@ async def test_available_filters_by_parent(db: Database) -> None:
 	service = CaptionsService(db)
 	channel_id = await _add_channel(db)
 	title_id, character_id = await _linked_fields(service, channel_id)
-	template = await service.save_template(
-		channel_id, "Фильм", [title_id, character_id]
-	)
-	await service.record_usage(
-		template.id, {title_id: ["TombRider"], character_id: ["Lara"]}
-	)
-	await service.record_usage(
-		template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]}
-	)
+	template = await service.save_template(channel_id, "Фильм", [title_id, character_id])
+	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
+	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]})
 	# значение без привязки видно при любом выборе: иначе его не выбрать
 	await service.add_values(character_id, ["Ничей"])
 	fields = {f.name: f for f in await service.list_fields(channel_id)}
@@ -380,22 +358,14 @@ async def test_deleting_parent_value_removes_children(db: Database) -> None:
 	service = CaptionsService(db)
 	channel_id = await _add_channel(db)
 	title_id, character_id = await _linked_fields(service, channel_id)
-	template = await service.save_template(
-		channel_id, "Фильм", [title_id, character_id]
-	)
-	await service.record_usage(
-		template.id, {title_id: ["TombRider"], character_id: ["Lara"]}
-	)
-	await service.record_usage(
-		template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]}
-	)
+	template = await service.save_template(channel_id, "Фильм", [title_id, character_id])
+	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
+	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]})
 	fields = {f.name: f for f in await service.list_fields(channel_id)}
 	tomb = next(i for i in fields["Title"].values if i.value == "TombRider")
 	titles = await service.delete_value(tomb.id)
 	assert titles.names() == ["Fallout"]
-	character = next(
-		f for f in await service.list_fields(channel_id) if f.name == "Character"
-	)
+	character = next(f for f in await service.list_fields(channel_id) if f.name == "Character")
 	assert character.names() == ["Vault Boy"]
 
 
@@ -417,15 +387,9 @@ async def test_manual_binding_and_adoption(db: Database) -> None:
 
 	# значение без привязки, использованное вместе с тайтлом, усыновляется:
 	# новой записи не появляется, у прежней проставляется родитель
-	template = await service.save_template(
-		channel_id, "Фильм", [title_id, character_id]
-	)
-	await service.record_usage(
-		template.id, {title_id: ["TombRider"], character_id: ["Lara"]}
-	)
-	characters = next(
-		f for f in await service.list_fields(channel_id) if f.name == "Character"
-	)
+	template = await service.save_template(channel_id, "Фильм", [title_id, character_id])
+	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
+	characters = next(f for f in await service.list_fields(channel_id) if f.name == "Character")
 	assert characters.names() == ["Lara"]
 	assert characters.values[0].parent_id == tomb.id
 

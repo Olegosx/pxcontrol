@@ -44,9 +44,7 @@ class _FakeClient:
 	async def disconnect(self) -> None:
 		self.connected = False
 
-	async def send_message(
-		self, entity: Any, text: str, schedule: Any = None
-	) -> None:
+	async def send_message(self, entity: Any, text: str, schedule: Any = None) -> None:
 		self.sent.append((entity, text, schedule))
 
 	async def send_file(self, entity: Any, file: str, **kwargs: Any) -> None:
@@ -60,9 +58,11 @@ class _FakeClient:
 		return f"entity:{entity_id}"
 
 	async def __call__(self, request: Any) -> Any:
-		return SimpleNamespace(messages=[
-			SimpleNamespace(message="из телеграма", date=datetime(2026, 7, 13, tzinfo=UTC)),
-		])
+		return SimpleNamespace(
+			messages=[
+				SimpleNamespace(message="из телеграма", date=datetime(2026, 7, 13, tzinfo=UTC)),
+			]
+		)
 
 
 def _transport(client: _FakeClient) -> MtprotoTransport:
@@ -255,7 +255,9 @@ async def test_publish_media_maps_kind_to_hints() -> None:
 	await transport.publish(
 		"-1001234",
 		OutgoingPost(
-			text="подпись", media_path="/tmp/v.mp4", media_kind=MediaKind.VIDEO,
+			text="подпись",
+			media_path="/tmp/v.mp4",
+			media_kind=MediaKind.VIDEO,
 		),
 		on_progress=received.append,
 	)
@@ -273,26 +275,33 @@ async def test_publish_media_maps_kind_to_hints() -> None:
 def test_ensure_userbot_can_post() -> None:
 	"""Права userbot: админ с публикацией или владелец; иначе — ошибка."""
 	ok = SimpleNamespace(
-		is_admin=True, is_creator=False,
+		is_admin=True,
+		is_creator=False,
 		participant=SimpleNamespace(admin_rights=SimpleNamespace(post_messages=True)),
 	)
 	MtprotoTransport._ensure_userbot_can_post(ok)
 	creator = SimpleNamespace(
-		is_admin=True, is_creator=True,
+		is_admin=True,
+		is_creator=True,
 		participant=SimpleNamespace(admin_rights=None),
 	)
 	MtprotoTransport._ensure_userbot_can_post(creator)
 	with pytest.raises(UserbotUnavailableError, match="не администратор"):
-		MtprotoTransport._ensure_userbot_can_post(SimpleNamespace(
-			is_admin=False, is_creator=False, participant=SimpleNamespace(),
-		))
+		MtprotoTransport._ensure_userbot_can_post(
+			SimpleNamespace(
+				is_admin=False,
+				is_creator=False,
+				participant=SimpleNamespace(),
+			)
+		)
 	with pytest.raises(UserbotUnavailableError, match="нет права публиковать"):
-		MtprotoTransport._ensure_userbot_can_post(SimpleNamespace(
-			is_admin=True, is_creator=False,
-			participant=SimpleNamespace(
-				admin_rights=SimpleNamespace(post_messages=False)
-			),
-		))
+		MtprotoTransport._ensure_userbot_can_post(
+			SimpleNamespace(
+				is_admin=True,
+				is_creator=False,
+				participant=SimpleNamespace(admin_rights=SimpleNamespace(post_messages=False)),
+			)
+		)
 
 
 async def test_activate_userbot_applies_new_credentials() -> None:

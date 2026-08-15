@@ -55,6 +55,7 @@ def bind(action: Callable[[_T], None], item: _T) -> Callable[[], None]:
 	Обычная lambda в цикле захватывает переменную, а не значение, и все
 	обработчики получили бы последний элемент списка.
 	"""
+
 	def handler() -> None:
 		action(item)
 
@@ -158,9 +159,7 @@ def error_reporter(parent: QWidget) -> Callable[[str], None]:
 	return partial(show_error, parent)
 
 
-def pick_file(
-	parent: QWidget, caption: str, file_filter: str, start_dir: str = ""
-) -> str | None:
+def pick_file(parent: QWidget, caption: str, file_filter: str, start_dir: str = "") -> str | None:
 	"""Открывает диалог выбора файла; None — пользователь отменил.
 
 	``start_dir`` — стартовая папка диалога (пусто — на усмотрение Qt).
@@ -409,9 +408,7 @@ class WhenRow:
 			self._time.setText(valid[0])
 		else:
 			self._time.setCurrentIndex(-1)
-			self._time.setText(
-				QTime.currentTime().addSecs(3600).toString("HH:mm")
-			)
+			self._time.setText(QTime.currentTime().addSecs(3600).toString("HH:mm"))
 		self._adjust_date()
 
 	def _adjust_date(self) -> None:

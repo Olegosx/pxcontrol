@@ -9,6 +9,7 @@ Revision ID: d9f3a6e42b71
 Revises: c7d2f4a91b33
 Create Date: 2026-07-14
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -40,9 +41,7 @@ def upgrade() -> None:
 	op.create_table(
 		"caption_values",
 		sa.Column("id", sa.Integer(), primary_key=True),
-		sa.Column(
-			"field_id", sa.Integer(), sa.ForeignKey("caption_fields.id"), nullable=False
-		),
+		sa.Column("field_id", sa.Integer(), sa.ForeignKey("caption_fields.id"), nullable=False),
 		sa.Column("value", sa.String(length=128), nullable=False),
 		*_timestamps(),
 	)
@@ -58,12 +57,12 @@ def upgrade() -> None:
 		"caption_template_fields",
 		sa.Column("id", sa.Integer(), primary_key=True),
 		sa.Column(
-			"template_id", sa.Integer(),
-			sa.ForeignKey("caption_templates.id"), nullable=False,
+			"template_id",
+			sa.Integer(),
+			sa.ForeignKey("caption_templates.id"),
+			nullable=False,
 		),
-		sa.Column(
-			"field_id", sa.Integer(), sa.ForeignKey("caption_fields.id"), nullable=False
-		),
+		sa.Column("field_id", sa.Integer(), sa.ForeignKey("caption_fields.id"), nullable=False),
 		sa.Column("position", sa.Integer(), nullable=False),
 		sa.Column("enabled", sa.Boolean(), nullable=False),
 	)

@@ -99,8 +99,11 @@ class AccountsPage(ScrollArea):
 
 	def _reload_bots(self) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.list_bots(),
-			self, self._show_bots, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.list_bots(),
+			self,
+			self._show_bots,
+			self._show_error,
 		)
 
 	def _show_bots(self, bots: list[BotDto]) -> None:
@@ -128,8 +131,11 @@ class AccountsPage(ScrollArea):
 		"""Запрашивает события бота и показывает результат."""
 		InfoBar.info("Диагностика", "Читаю события бота…", parent=self)
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.bot_whereabouts(bot.id),
-			self, partial(self._show_diagnosis, bot), self._show_error,
+			self._worker,
+			self._worker.engine.accounts.bot_whereabouts(bot.id),
+			self,
+			partial(self._show_diagnosis, bot),
+			self._show_error,
 		)
 
 	def _show_diagnosis(self, bot: BotDto, lines: list[str]) -> None:
@@ -157,8 +163,11 @@ class AccountsPage(ScrollArea):
 			return
 		InfoBar.info("Проверка", "Проверяю токен через Telegram…", parent=self)
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.add_bot(label, token),
-			self, self._on_bot_added, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.add_bot(label, token),
+			self,
+			self._on_bot_added,
+			self._show_error,
 		)
 
 	def _on_bot_added(self, bot: BotDto) -> None:
@@ -169,16 +178,22 @@ class AccountsPage(ScrollArea):
 		if not confirm_delete(self, f"Удалить бота «{bot.label}»?"):
 			return
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.delete_bot(bot.id),
-			self, self._reload_bots, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.delete_bot(bot.id),
+			self,
+			self._reload_bots,
+			self._show_error,
 		)
 
 	# --- userbot (MTProto) ----------------------------------------------------
 
 	def _reload_accounts(self) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.list_tg_accounts(),
-			self, self._show_accounts, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.list_tg_accounts(),
+			self,
+			self._show_accounts,
+			self._show_error,
 		)
 
 	def _show_accounts(self, accounts: list[TgAccountDto]) -> None:
@@ -197,11 +212,11 @@ class AccountsPage(ScrollArea):
 			login_button = PushButton("Войти", self)
 			login_button.clicked.connect(bind(self._start_login, account))
 			trailing = login_button
-		subtitle = (
-			f"{account.phone or 'без телефона'} · api_id {account.api_id} · {status}"
-		)
+		subtitle = f"{account.phone or 'без телефона'} · api_id {account.api_id} · {status}"
 		return row_card(
-			self, account.label, subtitle,
+			self,
+			account.label,
+			subtitle,
 			trailing=trailing,
 			on_delete=bind(self._delete_account, account),
 		)
@@ -211,12 +226,16 @@ class AccountsPage(ScrollArea):
 	def _start_login(self, account: TgAccountDto) -> None:
 		"""Шаг 1: просим Telegram отправить код на телефон аккаунта."""
 		InfoBar.info(
-			"Вход", f"Отправляю код на {account.phone or 'номер аккаунта'}…",
+			"Вход",
+			f"Отправляю код на {account.phone or 'номер аккаунта'}…",
 			parent=self,
 		)
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.start_login(account.id),
-			self, bind(self._ask_code, account), self._show_error,
+			self._worker,
+			self._worker.engine.accounts.start_login(account.id),
+			self,
+			bind(self._ask_code, account),
+			self._show_error,
 		)
 
 	def _ask_code(self, account: TgAccountDto) -> None:
@@ -224,17 +243,18 @@ class AccountsPage(ScrollArea):
 		dialog = FormDialog(
 			f"Код отправлен ({account.phone})",
 			[("code", "Код из Telegram")],
-			self.window(), accept_text="Подтвердить",
+			self.window(),
+			accept_text="Подтвердить",
 		)
 		if not exec_dialog(dialog):
 			self._cancel_login(account)
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.accounts.confirm_login_code(
-				account.id, dialog.value("code")
-			),
-			self, partial(self._after_code, account), self._show_error,
+			self._worker.engine.accounts.confirm_login_code(account.id, dialog.value("code")),
+			self,
+			partial(self._after_code, account),
+			self._show_error,
 		)
 
 	def _after_code(self, account: TgAccountDto, done: object) -> None:
@@ -250,7 +270,9 @@ class AccountsPage(ScrollArea):
 		dialog = FormDialog(
 			"Двухфакторная защита",
 			[("password", "Пароль 2FA")],
-			self.window(), accept_text="Войти", password_fields=("password",),
+			self.window(),
+			accept_text="Войти",
+			password_fields=("password",),
 		)
 		if not exec_dialog(dialog):
 			self._cancel_login(account)
@@ -260,7 +282,9 @@ class AccountsPage(ScrollArea):
 			self._worker.engine.accounts.confirm_login_password(
 				account.id, dialog.value("password")
 			),
-			self, bind(self._after_password, account), self._show_error,
+			self,
+			bind(self._after_password, account),
+			self._show_error,
 		)
 
 	def _after_password(self, account: TgAccountDto) -> None:
@@ -271,14 +295,19 @@ class AccountsPage(ScrollArea):
 	def _cancel_login(self, account: TgAccountDto) -> None:
 		"""Пользователь закрыл диалог — прерываем незавершённый вход."""
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.cancel_login(account.id),
-			self, noop, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.cancel_login(account.id),
+			self,
+			noop,
+			self._show_error,
 		)
 
 	def _on_add_account(self) -> None:
 		fields = [
-			("label", "Название"), ("phone", "Телефон (справочно)"),
-			("api_id", "api_id с my.telegram.org"), ("api_hash", "api_hash"),
+			("label", "Название"),
+			("phone", "Телефон (справочно)"),
+			("api_id", "api_id с my.telegram.org"),
+			("api_hash", "api_hash"),
 		]
 		dialog = FormDialog("Новый userbot-аккаунт", fields, self.window())
 		if not exec_dialog(dialog):
@@ -300,16 +329,22 @@ class AccountsPage(ScrollArea):
 		if not confirm_delete(self, f"Удалить аккаунт «{account.label}»?"):
 			return
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.delete_tg_account(account.id),
-			self, self._reload_accounts, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.delete_tg_account(account.id),
+			self,
+			self._reload_accounts,
+			self._show_error,
 		)
 
 	# --- ключи ИИ --------------------------------------------------------------
 
 	def _reload_keys(self) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.list_ai_keys(),
-			self, self._show_keys, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.list_ai_keys(),
+			self,
+			self._show_keys,
+			self._show_error,
 		)
 
 	def _show_keys(self, keys: list[AiKeyDto]) -> None:
@@ -338,8 +373,11 @@ class AccountsPage(ScrollArea):
 			self._show_error("Заполните оба поля.")
 			return
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.add_ai_key(label, api_key),
-			self, self._on_key_added, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.add_ai_key(label, api_key),
+			self,
+			self._on_key_added,
+			self._show_error,
 		)
 
 	def _on_key_added(self, key: AiKeyDto) -> None:
@@ -350,6 +388,9 @@ class AccountsPage(ScrollArea):
 		if not confirm_delete(self, f"Удалить ключ «{key.label}»?"):
 			return
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.delete_ai_key(key.id),
-			self, self._reload_keys, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.delete_ai_key(key.id),
+			self,
+			self._reload_keys,
+			self._show_error,
 		)

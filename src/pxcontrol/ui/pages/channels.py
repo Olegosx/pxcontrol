@@ -72,14 +72,10 @@ class _ConnectDialog(MessageBoxBase):
 		self._hint = BodyLabel("", self)
 		self.viewLayout.addWidget(self._hint)
 		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
-		self._combo.set_items(
-			bots, label=lambda bot: f"{bot.label} (@{bot.username or '—'})"
-		)
+		self._combo.set_items(bots, label=lambda bot: f"{bot.label} (@{bot.username or '—'})")
 		self.viewLayout.addWidget(self._combo)
 		self._ref = LineEdit(self)
-		self._ref.setPlaceholderText(
-			"@имя, ссылка t.me/… или ID -100… (приватный канал)"
-		)
+		self._ref.setPlaceholderText("@имя, ссылка t.me/… или ID -100… (приватный канал)")
 		self._ref.setClearButtonEnabled(True)
 		self.viewLayout.addWidget(self._ref)
 		self.yesButton.setText("Подключить")
@@ -112,14 +108,14 @@ class _AssignBotDialog(MessageBoxBase):
 	def __init__(self, bots: list[BotDto], parent: QWidget) -> None:
 		super().__init__(parent)
 		self.viewLayout.addWidget(SubtitleLabel("Назначить бота", self))
-		self.viewLayout.addWidget(BodyLabel(
-			"Бот должен быть администратором канала\n"
-			"с правом публиковать сообщения.", self,
-		))
-		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
-		self._combo.set_items(
-			bots, label=lambda bot: f"{bot.label} (@{bot.username or '—'})"
+		self.viewLayout.addWidget(
+			BodyLabel(
+				"Бот должен быть администратором канала\nс правом публиковать сообщения.",
+				self,
+			)
 		)
+		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
+		self._combo.set_items(bots, label=lambda bot: f"{bot.label} (@{bot.username or '—'})")
 		self.viewLayout.addWidget(self._combo)
 		self.yesButton.setText("Назначить")
 		self.cancelButton.setText("Отмена")
@@ -148,9 +144,7 @@ class _ChannelPrefsDialog(MessageBoxBase):
 		self.viewLayout.addWidget(SubtitleLabel("Настройки канала", self))
 		self.viewLayout.addWidget(BodyLabel(f"«{channel_title}»", self))
 		self.viewLayout.addWidget(BodyLabel("Пресет видео по умолчанию:", self))
-		self._combo: DtoComboBox[PresetDto] = DtoComboBox(
-			self, placeholder="(не задан)"
-		)
+		self._combo: DtoComboBox[PresetDto] = DtoComboBox(self, placeholder="(не задан)")
 		self._combo.set_items(presets, label=lambda preset: preset.name)
 		if current_id is not None:
 			self._combo.select(lambda preset: preset.id == current_id)
@@ -226,8 +220,11 @@ class ChannelsPage(ScrollArea):
 
 	def _reload(self) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.channels.list_channels(),
-			self, self._show_channels, self._show_error,
+			self._worker,
+			self._worker.engine.channels.list_channels(),
+			self,
+			self._show_channels,
+			self._show_error,
 		)
 
 	def _show_channels(self, channels: list[ChannelDto]) -> None:
@@ -246,8 +243,7 @@ class ChannelsPage(ScrollArea):
 		title = SubtitleLabel("Пока нет подключённых каналов", box)
 		title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 		hint = BodyLabel(
-			"Нажмите «Подключить канал»: через userbot (аккаунт — админ) "
-			"или через бота.",
+			"Нажмите «Подключить канал»: через userbot (аккаунт — админ) или через бота.",
 			box,
 		)
 		hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -262,28 +258,20 @@ class ChannelsPage(ScrollArea):
 			ways.append(f"бот {channel.bot_label}")
 		if channel.userbot_admin:
 			ways.append("userbot")
-		subtitle = (
-			f"@{channel.username or '—'} · админ: {' + '.join(ways) or '—'}"
-		)
+		subtitle = f"@{channel.username or '—'} · админ: {' + '.join(ways) or '—'}"
 		buttons = QWidget(self)
 		row = QHBoxLayout(buttons)
 		row.setContentsMargins(0, 0, 0, 0)
 		enabled_switch = SwitchButton(buttons)
 		enabled_switch.setChecked(channel.enabled)
-		enabled_switch.setToolTip(
-			"Канал активен: участвует в публикации и опросе расписания"
-		)
-		enabled_switch.checkedChanged.connect(
-			partial(self._on_toggle_enabled, channel)
-		)
+		enabled_switch.setToolTip("Канал активен: участвует в публикации и опросе расписания")
+		enabled_switch.checkedChanged.connect(partial(self._on_toggle_enabled, channel))
 		row.addWidget(enabled_switch)
 		recheck = PushButton("Проверить доступы", buttons)
 		recheck.clicked.connect(bind(self._recheck_channel, channel))
 		row.addWidget(recheck)
 		prefs_action = PushButton("Настройки…", buttons)
-		prefs_action.setToolTip(
-			"Пресет видео по умолчанию и времена публикации"
-		)
+		prefs_action.setToolTip("Пресет видео по умолчанию и времена публикации")
 		prefs_action.clicked.connect(bind(self._on_open_prefs, channel))
 		row.addWidget(prefs_action)
 		if channel.bot_id is None:
@@ -294,7 +282,10 @@ class ChannelsPage(ScrollArea):
 			bot_action.clicked.connect(bind(self._on_unassign_bot, channel))
 		row.addWidget(bot_action)
 		return row_card(
-			self, channel.title, subtitle, trailing=buttons,
+			self,
+			channel.title,
+			subtitle,
+			trailing=buttons,
 			on_delete=bind(self._delete_channel, channel),
 		)
 
@@ -304,10 +295,10 @@ class ChannelsPage(ScrollArea):
 		"""Включает/выключает канал (публикация и расписание)."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.set_for(
-				CHANNEL_ENABLED, channel.id, checked
-			),
-			self, noop, self._on_toggle_failed,
+			self._worker.engine.settings.set_for(CHANNEL_ENABLED, channel.id, checked),
+			self,
+			noop,
+			self._on_toggle_failed,
 		)
 
 	def _on_toggle_failed(self, message: str) -> None:
@@ -318,18 +309,20 @@ class ChannelsPage(ScrollArea):
 	def _on_open_prefs(self, channel: ChannelDto) -> None:
 		"""Открывает настройки канала (цепочка: пресеты → пресет → времена)."""
 		run_in_engine(
-			self._worker, self._worker.engine.video.list_presets(),
-			self, partial(self._on_presets_loaded, channel), self._show_error,
+			self._worker,
+			self._worker.engine.video.list_presets(),
+			self,
+			partial(self._on_presets_loaded, channel),
+			self._show_error,
 		)
 
-	def _on_presets_loaded(
-		self, channel: ChannelDto, presets: list[PresetDto]
-	) -> None:
+	def _on_presets_loaded(self, channel: ChannelDto, presets: list[PresetDto]) -> None:
 		"""Пресеты получены — узнаём текущий выбор канала."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id),
-			self, partial(self._on_current_preset_loaded, channel, presets),
+			self,
+			partial(self._on_current_preset_loaded, channel, presets),
 			self._show_error,
 		)
 
@@ -340,7 +333,8 @@ class ChannelsPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get_for(PUBLISH_TIMES, channel.id),
-			self, partial(self._open_prefs_dialog, channel, presets, current_id),
+			self,
+			partial(self._open_prefs_dialog, channel, presets, current_id),
 			self._show_error,
 		)
 
@@ -352,9 +346,7 @@ class ChannelsPage(ScrollArea):
 		times: list[str],
 	) -> None:
 		"""Диалог настроек; сохранение — двумя настройками канала."""
-		dialog = _ChannelPrefsDialog(
-			channel.title, presets, current_id, times, self.window()
-		)
+		dialog = _ChannelPrefsDialog(channel.title, presets, current_id, times, self.window())
 		if not exec_dialog(dialog):
 			return
 		preset_id, times_value = dialog.preset_id(), dialog.times()
@@ -362,9 +354,7 @@ class ChannelsPage(ScrollArea):
 		# ошибка первой не даёт ложной плашки «сохранено»
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.set_for(
-				CHANNEL_DEFAULT_PRESET, channel.id, preset_id
-			),
+			self._worker.engine.settings.set_for(CHANNEL_DEFAULT_PRESET, channel.id, preset_id),
 			self,
 			partial(self._save_publish_times, channel, times_value),
 			self._show_error,
@@ -376,16 +366,14 @@ class ChannelsPage(ScrollArea):
 		"""Вторая запись настроек канала (после успешной первой)."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.set_for(
-				PUBLISH_TIMES, channel.id, times
-			),
-			self, partial(self._on_prefs_saved, channel), self._show_error,
+			self._worker.engine.settings.set_for(PUBLISH_TIMES, channel.id, times),
+			self,
+			partial(self._on_prefs_saved, channel),
+			self._show_error,
 		)
 
 	def _on_prefs_saved(self, channel: ChannelDto, _result: object = None) -> None:
-		InfoBar.success(
-			"Готово", f"Настройки канала «{channel.title}» сохранены.", parent=self
-		)
+		InfoBar.success("Готово", f"Настройки канала «{channel.title}» сохранены.", parent=self)
 
 	# --- доступы и бот -----------------------------------------------------------
 
@@ -395,7 +383,9 @@ class ChannelsPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.channels.recheck_channel(channel.id),
-			self, self._on_rechecked, self._show_error,
+			self,
+			self._on_rechecked,
+			self._show_error,
 		)
 
 	def _on_rechecked(self, access: ChannelAccess) -> None:
@@ -412,7 +402,9 @@ class ChannelsPage(ScrollArea):
 			InfoBar.success(access.channel.title, summary, parent=self)
 		else:
 			InfoBar.warning(
-				access.channel.title, summary, parent=self,
+				access.channel.title,
+				summary,
+				parent=self,
 				duration=TOAST_DURATION_MS,
 			)
 		self._reload()
@@ -420,8 +412,11 @@ class ChannelsPage(ScrollArea):
 	def _on_assign_bot(self, channel: ChannelDto) -> None:
 		"""Открывает выбор бота для назначения каналу."""
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.list_bots(),
-			self, partial(self._open_assign_dialog, channel), self._show_error,
+			self._worker,
+			self._worker.engine.accounts.list_bots(),
+			self,
+			partial(self._open_assign_dialog, channel),
+			self._show_error,
 		)
 
 	def _open_assign_dialog(self, channel: ChannelDto, bots: list[BotDto]) -> None:
@@ -439,19 +434,24 @@ class ChannelsPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.channels.assign_bot(channel.id, bot_id),
-			self, self._on_bot_changed, self._show_error,
+			self,
+			self._on_bot_changed,
+			self._show_error,
 		)
 
 	def _on_unassign_bot(self, channel: ChannelDto) -> None:
 		if not confirm_delete(
-			self, f"Отвязать бота от канала «{channel.title}»?",
+			self,
+			f"Отвязать бота от канала «{channel.title}»?",
 			accept_text="Отвязать",
 		):
 			return
 		run_in_engine(
 			self._worker,
 			self._worker.engine.channels.unassign_bot(channel.id),
-			self, self._on_bot_changed, self._show_error,
+			self,
+			self._on_bot_changed,
+			self._show_error,
 		)
 
 	def _on_bot_changed(self, channel: ChannelDto) -> None:
@@ -463,8 +463,11 @@ class ChannelsPage(ScrollArea):
 	def _on_connect(self) -> None:
 		"""Загружает список ботов и открывает диалог подключения."""
 		run_in_engine(
-			self._worker, self._worker.engine.accounts.list_bots(),
-			self, self._open_connect_dialog, self._show_error,
+			self._worker,
+			self._worker.engine.accounts.list_bots(),
+			self,
+			self._open_connect_dialog,
+			self._show_error,
 		)
 
 	def _open_connect_dialog(self, bots: list[BotDto]) -> None:
@@ -479,13 +482,9 @@ class ChannelsPage(ScrollArea):
 			if bot_id is None:
 				self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
 				return
-			coro = self._worker.engine.channels.add_channel(
-				bot_id, dialog.chat_ref()
-			)
+			coro = self._worker.engine.channels.add_channel(bot_id, dialog.chat_ref())
 		else:
-			coro = self._worker.engine.channels.add_channel_via_userbot(
-				dialog.chat_ref()
-			)
+			coro = self._worker.engine.channels.add_channel_via_userbot(dialog.chat_ref())
 		InfoBar.info("Проверка", "Проверяю канал и права…", parent=self)
 		run_in_engine(self._worker, coro, self, self._on_connected, self._show_error)
 
@@ -494,11 +493,12 @@ class ChannelsPage(ScrollArea):
 		self._reload()
 
 	def _delete_channel(self, channel: ChannelDto) -> None:
-		if not confirm_delete(
-			self, f"Удалить канал «{channel.title}» из приложения?"
-		):
+		if not confirm_delete(self, f"Удалить канал «{channel.title}» из приложения?"):
 			return
 		run_in_engine(
-			self._worker, self._worker.engine.channels.delete_channel(channel.id),
-			self, self._reload, self._show_error,
+			self._worker,
+			self._worker.engine.channels.delete_channel(channel.id),
+			self,
+			self._reload,
+			self._show_error,
 		)

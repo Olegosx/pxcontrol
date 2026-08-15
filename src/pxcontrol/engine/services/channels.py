@@ -83,14 +83,11 @@ class ChannelsService:
 		async with self._db.session_factory() as session:
 			rows = (
 				await session.execute(
-					select(Channel)
-					.options(selectinload(Channel.bot))
-					.order_by(Channel.id)
+					select(Channel).options(selectinload(Channel.bot)).order_by(Channel.id)
 				)
 			).scalars()
 			return [
-				self._dto(ch, enabled=enabled.get(ch.id, CHANNEL_ENABLED.default))
-				for ch in rows
+				self._dto(ch, enabled=enabled.get(ch.id, CHANNEL_ENABLED.default)) for ch in rows
 			]
 
 	async def add_channel(self, bot_id: int, chat_ref: str) -> ChannelDto:
@@ -109,19 +106,27 @@ class ChannelsService:
 		bot = await self._get_bot(bot_id)
 		logger.info(
 			"Подключаю канал: ввод %r, бот «%s» (@%s, id=%s).",
-			chat_ref, bot.label, bot.username, bot.id,
+			chat_ref,
+			bot.label,
+			bot.username,
+			bot.id,
 		)
 		info = await self._gateway.check_channel(bot.token, chat_ref)
 		# при подключении «не удалось проверить» считаем отсутствием прав:
 		# флаг поднимет перепроверка доступов, когда userbot появится
 		userbot_admin = await self._probe_userbot(info.chat_id) is True
 		channel = await self._store_channel(
-			title=info.title, tg_chat_id=info.chat_id, username=info.username,
-			bot_id=bot.id, userbot_admin=userbot_admin,
+			title=info.title,
+			tg_chat_id=info.chat_id,
+			username=info.username,
+			bot_id=bot.id,
+			userbot_admin=userbot_admin,
 		)
 		logger.info(
 			"Подключён канал «%s» (бот %s, userbot админ: %s).",
-			info.title, bot.label, userbot_admin,
+			info.title,
+			bot.label,
+			userbot_admin,
 		)
 		return self._dto(channel, bot_label=bot.label)
 
@@ -136,8 +141,11 @@ class ChannelsService:
 		logger.info("Подключаю канал через userbot: ввод %r.", chat_ref)
 		info = await self._gateway.check_channel_userbot(chat_ref)
 		channel = await self._store_channel(
-			title=info.title, tg_chat_id=info.chat_id, username=info.username,
-			bot_id=None, userbot_admin=True,
+			title=info.title,
+			tg_chat_id=info.chat_id,
+			username=info.username,
+			bot_id=None,
+			userbot_admin=True,
 		)
 		logger.info("Подключён канал «%s» (userbot).", info.title)
 		return self._dto(channel)
@@ -164,8 +172,13 @@ class ChannelsService:
 		return True
 
 	async def _store_channel(
-		self, *, title: str, tg_chat_id: str, username: str | None,
-		bot_id: int | None, userbot_admin: bool,
+		self,
+		*,
+		title: str,
+		tg_chat_id: str,
+		username: str | None,
+		bot_id: int | None,
+		userbot_admin: bool,
 	) -> Channel:
 		"""Сохраняет канал, отклоняя дубликат.
 
@@ -179,8 +192,11 @@ class ChannelsService:
 			if existing.scalar_one_or_none() is not None:
 				raise ChannelError(f"Канал «{title}» уже подключён.")
 			channel = Channel(
-				title=title, tg_chat_id=tg_chat_id, username=username,
-				bot_id=bot_id, userbot_admin=userbot_admin,
+				title=title,
+				tg_chat_id=tg_chat_id,
+				username=username,
+				bot_id=bot_id,
+				userbot_admin=userbot_admin,
 			)
 			session.add(channel)
 			await session.commit()
@@ -203,7 +219,8 @@ class ChannelsService:
 		async with self._db.session_factory() as session:
 			channel = (
 				await session.execute(
-					select(Channel).options(selectinload(Channel.bot))
+					select(Channel)
+					.options(selectinload(Channel.bot))
 					.where(Channel.id == channel_id)
 				)
 			).scalar_one_or_none()
@@ -223,7 +240,9 @@ class ChannelsService:
 			dto = self._dto(channel, bot_label=bot_label, enabled=enabled)
 		logger.info(
 			"Доступы канала «%s»: userbot=%s, бот=%s.",
-			dto.title, userbot_ok, bot_ok,
+			dto.title,
+			userbot_ok,
+			bot_ok,
 		)
 		return ChannelAccess(dto, userbot_ok, bot_ok)
 
@@ -299,9 +318,7 @@ class ChannelsService:
 		return bot
 
 	@staticmethod
-	def _dto(
-		channel: Channel, bot_label: str | None = None, enabled: bool = True
-	) -> ChannelDto:
+	def _dto(channel: Channel, bot_label: str | None = None, enabled: bool = True) -> ChannelDto:
 		"""Снимок канала; ``enabled`` — из настроек (у нового канала — True)."""
 		if bot_label is None and channel.bot_id is not None and channel.bot is not None:
 			bot_label = channel.bot.label

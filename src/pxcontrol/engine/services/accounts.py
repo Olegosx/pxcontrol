@@ -29,9 +29,7 @@ class AccountsError(EngineError):
 class _LoginFlow(Protocol):
 	"""Пошаговый вход userbot (для подмены в тестах)."""
 
-	async def start(
-		self, account_id: int, api_id: int, api_hash: str, phone: str
-	) -> None: ...
+	async def start(self, account_id: int, api_id: int, api_hash: str, phone: str) -> None: ...
 
 	async def confirm_code(self, account_id: int, code: str) -> str | None: ...
 
@@ -50,9 +48,7 @@ class _TelegramPort(Protocol):
 
 	async def bot_events(self, token: str) -> list[str]: ...
 
-	async def activate_userbot(
-		self, api_id: int, api_hash: str, session: str
-	) -> None: ...
+	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None: ...
 
 	async def deactivate_userbot(self) -> None: ...
 
@@ -189,17 +185,10 @@ class AccountsService:
 		у шлюза один на подключение, приписывать его всем вошедшим нельзя.
 		"""
 		async with self._db.session_factory() as session:
-			rows = list(
-				(await session.execute(
-					select(TgAccount).order_by(TgAccount.id)
-				)).scalars()
-			)
+			rows = list((await session.execute(select(TgAccount).order_by(TgAccount.id))).scalars())
 		active_id = next((a.id for a in rows if a.session is not None), None)
 		premium = self._gateway.userbot_premium()
-		return [
-			self._acc_dto(a, premium=premium and a.id == active_id)
-			for a in rows
-		]
+		return [self._acc_dto(a, premium=premium and a.id == active_id) for a in rows]
 
 	async def add_tg_account(
 		self, label: str, phone: str | None, api_id: int, api_hash: str
@@ -243,11 +232,15 @@ class AccountsService:
 		try:
 			async with self._db.session_factory() as session:
 				account = (
-					(await session.execute(
-						select(TgAccount)
-						.where(TgAccount.session.is_not(None))
-						.order_by(TgAccount.id)
-					)).scalars().first()
+					(
+						await session.execute(
+							select(TgAccount)
+							.where(TgAccount.session.is_not(None))
+							.order_by(TgAccount.id)
+						)
+					)
+					.scalars()
+					.first()
 				)
 		except SecretDecryptionError as exc:
 			# сменился ключ шифрования — не мешаем запуску приложения:
@@ -257,21 +250,21 @@ class AccountsService:
 		if account is None or account.session is None:
 			return
 		try:
-			await self._gateway.activate_userbot(
-				account.api_id, account.api_hash, account.session
-			)
+			await self._gateway.activate_userbot(account.api_id, account.api_hash, account.session)
 		except UserbotUnavailableError as exc:
-			logger.warning(
-				"Userbot «%s» не подключён: %s", account.label, exc
-			)
+			logger.warning("Userbot «%s» не подключён: %s", account.label, exc)
 			return
 		logger.info("Userbot «%s» подключён.", account.label)
 
 	@staticmethod
 	def _acc_dto(acc: TgAccount, premium: bool = False) -> TgAccountDto:
 		return TgAccountDto(
-			acc.id, acc.label, acc.phone, acc.api_id,
-			logged_in=acc.session is not None, premium=premium,
+			acc.id,
+			acc.label,
+			acc.phone,
+			acc.api_id,
+			logged_in=acc.session is not None,
+			premium=premium,
 		)
 
 	# --- вход userbot ---------------------------------------------------------
@@ -285,9 +278,7 @@ class AccountsService:
 		account = await self._get_account(account_id)
 		if not account.phone:
 			raise LoginError("У аккаунта не указан номер телефона.")
-		await self._gateway.login.start(
-			account.id, account.api_id, account.api_hash, account.phone
-		)
+		await self._gateway.login.start(account.id, account.api_id, account.api_hash, account.phone)
 
 	async def confirm_login_code(self, account_id: int, code: str) -> bool:
 		"""Подтверждает код. ``True`` — вход завершён; ``False`` — нужен 2FA.
@@ -307,9 +298,7 @@ class AccountsService:
 		Raises:
 			LoginError: Пароль неверный.
 		"""
-		session_string = await self._gateway.login.confirm_password(
-			account_id, password
-		)
+		session_string = await self._gateway.login.confirm_password(account_id, password)
 		await self._save_session(account_id, session_string)
 
 	async def cancel_login(self, account_id: int) -> None:
@@ -345,9 +334,7 @@ class AccountsService:
 	async def list_ai_keys(self) -> list[AiKeyDto]:
 		"""Возвращает все ключи ИИ."""
 		async with self._db.session_factory() as session:
-			rows = (
-				await session.execute(select(AiCredential).order_by(AiCredential.id))
-			).scalars()
+			rows = (await session.execute(select(AiCredential).order_by(AiCredential.id))).scalars()
 			return [self._key_dto(k) for k in rows]
 
 	async def add_ai_key(self, label: str, api_key: str) -> AiKeyDto:

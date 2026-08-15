@@ -85,9 +85,7 @@ class PublishCapabilities:
 	bot: bool
 
 
-def publish_capabilities(
-	bot_assigned: bool, userbot_admin: bool
-) -> PublishCapabilities:
+def publish_capabilities(bot_assigned: bool, userbot_admin: bool) -> PublishCapabilities:
 	"""Возможности публикации по способам администрирования канала.
 
 	Единственный источник правды для движка и интерфейса; приоритет
@@ -108,7 +106,7 @@ def text_preview(text: str, limit: int) -> str:
 	"""
 	if len(text) <= limit:
 		return text
-	return f"{text[:limit - 1]}…"
+	return f"{text[: limit - 1]}…"
 
 
 @dataclass(frozen=True)
@@ -161,7 +159,9 @@ class _PostPort(Protocol):
 	async def send_text(self, token: str, chat_id: str, text: str) -> int: ...
 
 	async def publish(
-		self, chat_id: str, post: OutgoingPost,
+		self,
+		chat_id: str,
+		post: OutgoingPost,
 		on_progress: ProgressCallback | None,
 	) -> None: ...
 
@@ -204,9 +204,7 @@ class PostsService:
 		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер пути (настройки)
 		self._settings = settings if settings is not None else SettingsService(db)
 
-	async def publish(
-		self, draft: PostDraft, on_progress: ProgressCallback | None = None
-	) -> None:
+	async def publish(self, draft: PostDraft, on_progress: ProgressCallback | None = None) -> None:
 		"""Публикует черновик: userbot в приоритете, бот — запасной путь.
 
 		Единый вход для всех типов контента. Транспорт выбирается по
@@ -226,8 +224,7 @@ class PostsService:
 			# правило системы, не интерфейса: любой будущий вход в публикацию
 			# (автопостинг из источников) не должен писать в выключенный канал
 			raise PostError(
-				f"Канал «{channel.title}» выключен — включите его "
-				"на странице «Каналы»."
+				f"Канал «{channel.title}» выключен — включите его на странице «Каналы»."
 			)
 		caps = publish_capabilities(channel.bot is not None, channel.userbot_admin)
 		media_path = draft.media_path
@@ -239,14 +236,14 @@ class PostsService:
 			await self._publish_bot(channel, draft, media_path)
 		else:
 			raise PostError(
-				"У канала нет способа публикации — проверьте доступы "
-				"на странице «Каналы»."
+				"У канала нет способа публикации — проверьте доступы на странице «Каналы»."
 			)
 		if draft.media_kind is MediaKind.VIDEO and media_path is not None:
 			await self._move_to_published(media_path)
 		logger.info(
 			"Пост (%s) → «%s» (%s, %s).",
-			draft.media_kind if draft.media_path else "текст", channel.title,
+			draft.media_kind if draft.media_path else "текст",
+			channel.title,
 			"userbot" if caps.userbot else "бот",
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
@@ -264,9 +261,7 @@ class PostsService:
 			PostError: Файл больше лимита Telegram (2 ГБ; 4 — с Premium).
 		"""
 		limit = userbot_max_file_bytes(self._gateway.userbot_premium())
-		if media_path is not None and (
-			Path(media_path).stat().st_size > limit
-		):
+		if media_path is not None and (Path(media_path).stat().st_size > limit):
 			raise PostError(
 				f"Файл больше {limit // 10**9} ГБ — лимит Telegram на файл "
 				"для этого аккаунта. Уменьшите файл (например, битрейтом "
@@ -275,12 +270,13 @@ class PostsService:
 		with tempfile.TemporaryDirectory() as tmp:
 			thumb: str | None = None
 			if draft.media_kind is MediaKind.VIDEO and media_path:
-				thumb = await asyncio.to_thread(
-					self._video_thumbnail, media_path, tmp
-				)
+				thumb = await asyncio.to_thread(self._video_thumbnail, media_path, tmp)
 			post = OutgoingPost(
-				text=draft.text, media_path=media_path,
-				media_kind=draft.media_kind, when=draft.when, thumb_path=thumb,
+				text=draft.text,
+				media_path=media_path,
+				media_kind=draft.media_kind,
+				when=draft.when,
+				thumb_path=thumb,
 			)
 			await self._gateway.publish(channel.tg_chat_id, post, on_progress)
 
@@ -300,9 +296,7 @@ class PostsService:
 		if channel.bot is None:  # publish() сюда без бота не приводит
 			raise PostError("У канала не назначен бот — переподключите канал.")
 		if media_path is None:
-			await self._gateway.send_text(
-				channel.bot.token, channel.tg_chat_id, draft.text
-			)
+			await self._gateway.send_text(channel.bot.token, channel.tg_chat_id, draft.text)
 			return
 		if Path(media_path).stat().st_size > BOT_MAX_FILE_BYTES:
 			raise PostError(
@@ -311,8 +305,11 @@ class PostsService:
 				"или уменьшите файл."
 			)
 		await self._gateway.send_media(
-			channel.bot.token, channel.tg_chat_id,
-			draft.media_kind, media_path, draft.text,
+			channel.bot.token,
+			channel.tg_chat_id,
+			draft.media_kind,
+			media_path,
+			draft.text,
 		)
 
 	async def _move_to_published(self, media_path: str) -> None:
@@ -340,8 +337,9 @@ class PostsService:
 			logger.info("Опубликованное видео перенесено: %s → %s", source, target)
 		except OSError:
 			logger.warning(
-				"Не удалось перенести опубликованное видео %s — файл остался "
-				"в папке результатов.", media_path, exc_info=True,
+				"Не удалось перенести опубликованное видео %s — файл остался в папке результатов.",
+				media_path,
+				exc_info=True,
 			)
 
 	@staticmethod
@@ -403,7 +401,8 @@ class PostsService:
 		except (OSError, RuntimeError, ValueError):
 			logger.warning(
 				"Миниатюра для %s не получилась — публикуем без неё.",
-				video_path, exc_info=True,
+				video_path,
+				exc_info=True,
 			)
 			return None
 		return thumb
@@ -456,11 +455,13 @@ class PostsService:
 		enabled = await self._settings.get_for_all(CHANNEL_ENABLED)
 		async with self._db.session_factory() as session:
 			channels = (
-				(await session.execute(
-					select(Channel)
-					.where(Channel.userbot_admin)
-					.order_by(Channel.id)
-				)).scalars().all()
+				(
+					await session.execute(
+						select(Channel).where(Channel.userbot_admin).order_by(Channel.id)
+					)
+				)
+				.scalars()
+				.all()
 			)
 		items: list[ScheduledPostDto] = []
 		for channel in channels:
@@ -471,9 +472,7 @@ class PostsService:
 			except UserbotNotConnectedError:
 				raise
 			except UserbotUnavailableError as exc:
-				logger.warning(
-					"Отложенные канала «%s» не прочитаны: %s", channel.title, exc
-				)
+				logger.warning("Отложенные канала «%s» не прочитаны: %s", channel.title, exc)
 				continue
 			for message in messages:
 				items.append(self._dto(channel, message))
@@ -499,9 +498,7 @@ class PostsService:
 		"""Готовит запись для интерфейса: канал, короткий текст, время."""
 		text = message.text or "(медиа без текста)"
 		preview = text_preview(text, _SCHEDULED_PREVIEW_CHARS)
-		return ScheduledPostDto(
-			channel.id, channel.title, preview, message.scheduled_at
-		)
+		return ScheduledPostDto(channel.id, channel.title, preview, message.scheduled_at)
 
 
 def _make_thumbnail(
@@ -523,9 +520,18 @@ def _make_thumbnail(
 	"""
 	box = _THUMB_BOX_PX
 	cmd = [
-		ffmpeg_bin, "-y", "-ss", f"{timestamp:.3f}", "-i", source_path,
-		"-frames:v", "1",
-		"-vf", f"scale={box}:{box}:force_original_aspect_ratio=decrease",
-		"-q:v", _THUMB_JPEG_QUALITY, output_jpg,
+		ffmpeg_bin,
+		"-y",
+		"-ss",
+		f"{timestamp:.3f}",
+		"-i",
+		source_path,
+		"-frames:v",
+		"1",
+		"-vf",
+		f"scale={box}:{box}:force_original_aspect_ratio=decrease",
+		"-q:v",
+		_THUMB_JPEG_QUALITY,
+		output_jpg,
 	]
 	run_tool(cmd, "миниатюра видео")

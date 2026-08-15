@@ -26,7 +26,7 @@ def normalize_chat_ref(chat_ref: str) -> str | int:
 	ref = chat_ref.strip()
 	for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
 		if ref.lower().startswith(prefix):
-			ref = ref[len(prefix):]
+			ref = ref[len(prefix) :]
 			break
 	ref = ref.strip("/")
 	if ref.startswith("+"):
@@ -38,9 +38,7 @@ def normalize_chat_ref(chat_ref: str) -> str | int:
 		internal = ref[2:].split("/", 1)[0]
 		if internal.isdigit():
 			return int(f"-100{internal}")
-		raise ChatRefError(
-			"Не удалось разобрать ссылку t.me/c/… — укажите ID канала (-100…)."
-		)
+		raise ChatRefError("Не удалось разобрать ссылку t.me/c/… — укажите ID канала (-100…).")
 	ref = ref.lstrip("@")
 	digits = ref.replace(" ", "")
 	if digits.lstrip("-").isdigit() and digits.lstrip("-"):

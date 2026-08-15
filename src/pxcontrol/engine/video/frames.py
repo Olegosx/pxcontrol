@@ -72,8 +72,17 @@ def extract_still(
 		RuntimeError: Если ffmpeg не смог извлечь кадр.
 	"""
 	cmd = [
-		ffmpeg_bin, "-y", "-ss", f"{timestamp:.3f}", "-i", input_path,
-		"-frames:v", "1", "-vf", _fit_pad_filter(width, height), output_path,
+		ffmpeg_bin,
+		"-y",
+		"-ss",
+		f"{timestamp:.3f}",
+		"-i",
+		input_path,
+		"-frames:v",
+		"1",
+		"-vf",
+		_fit_pad_filter(width, height),
+		output_path,
 	]
 	run_tool(cmd, f"извлечение кадра на {timestamp:.3f} с")
 
@@ -111,6 +120,4 @@ def prepare_still(
 		extract_still(image_path, 0.0, output_path, width, height, ffmpeg_bin)
 		return
 	timestamp = resolve_timestamp(source, info)
-	extract_still(
-		input_path, start_offset + timestamp, output_path, width, height, ffmpeg_bin
-	)
+	extract_still(input_path, start_offset + timestamp, output_path, width, height, ffmpeg_bin)

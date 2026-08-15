@@ -84,8 +84,11 @@ class PublishPage(ScrollArea):
 		self._queue_busy = False
 		self._build()
 		run_in_engine(
-			worker, worker.engine.settings.get(PUBLISH_LAST_CHANNEL_ID),
-			self, self._on_last_channel_loaded, noop,
+			worker,
+			worker.engine.settings.get(PUBLISH_LAST_CHANNEL_ID),
+			self,
+			self._on_last_channel_loaded,
+			noop,
 		)
 		# опрос очереди живёт всегда (не только при видимой странице):
 		# завершения снимаются с показа, а кэш занятости нужен при выходе
@@ -190,9 +193,7 @@ class PublishPage(ScrollArea):
 		super().showEvent(event)
 		self._reload_channels()
 
-	def prefill_media(
-		self, kind: MediaKind, path: str, channel_id: int | None = None
-	) -> None:
+	def prefill_media(self, kind: MediaKind, path: str, channel_id: int | None = None) -> None:
 		"""Подставляет вложение (переход с других страниц, например «Видео»).
 
 		``channel_id`` — предвыбор канала (например, выбранного на «Видео»);
@@ -207,8 +208,11 @@ class PublishPage(ScrollArea):
 
 	def _reload_channels(self) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.channels.list_channels(),
-			self, self._show_channels, self._show_error,
+			self._worker,
+			self._worker.engine.channels.list_channels(),
+			self,
+			self._show_channels,
+			self._show_error,
 		)
 
 	def _show_channels(self, channels: list[ChannelDto]) -> None:
@@ -255,20 +259,22 @@ class PublishPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get_for(PUBLISH_TIMES, channel.id),
-			self, self._when_row.set_times, noop,
+			self,
+			self._when_row.set_times,
+			noop,
 		)
-		caps = publish_capabilities(
-			channel.bot_id is not None, channel.userbot_admin
-		)
+		caps = publish_capabilities(channel.bot_id is not None, channel.userbot_admin)
 		if caps.userbot:
 			# лимит зависит от Premium userbot — узнаём у движка
 			self._caps_hint.setText(
-				"Публикация через userbot: все типы контента, "
-				"«сейчас» и отложенные."
+				"Публикация через userbot: все типы контента, «сейчас» и отложенные."
 			)
 			run_in_engine(
-				self._worker, self._worker.engine.posts.userbot_limit_gb(),
-				self, self._show_userbot_limit, noop,
+				self._worker,
+				self._worker.engine.posts.userbot_limit_gb(),
+				self,
+				self._show_userbot_limit,
+				noop,
 			)
 			self._when_row.set_schedule_allowed(True)
 		elif caps.bot:
@@ -276,13 +282,10 @@ class PublishPage(ScrollArea):
 				f"Публикация через бота: файлы до {BOT_MAX_FILE_BYTES // 2**20} "
 				"МБ, только «сейчас» (для отложенных нужен userbot-админ)."
 			)
-			self._when_row.set_schedule_allowed(
-				False, "Отложенные требуют userbot-админа в канале"
-			)
+			self._when_row.set_schedule_allowed(False, "Отложенные требуют userbot-админа в канале")
 		else:
 			self._caps_hint.setText(
-				"⚠ Нет способа публикации — проверьте доступы "
-				"на странице «Каналы»."
+				"⚠ Нет способа публикации — проверьте доступы на странице «Каналы»."
 			)
 			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
 
@@ -316,12 +319,17 @@ class PublishPage(ScrollArea):
 				run_in_engine(
 					self._worker,
 					self._worker.engine.video.processed_dir_for_channel(channel.id),
-					self, self._open_file_dialog, self._show_error,
+					self,
+					self._open_file_dialog,
+					self._show_error,
 				)
 			else:
 				run_in_engine(
-					self._worker, self._worker.engine.video.dirs_for(""),
-					self, self._open_file_dialog, self._show_error,
+					self._worker,
+					self._worker.engine.video.dirs_for(""),
+					self,
+					self._open_file_dialog,
+					self._show_error,
 				)
 			return
 		self._open_file_dialog("")
@@ -347,9 +355,7 @@ class PublishPage(ScrollArea):
 		"""Открывает настройку полей и шаблонов подписи канала."""
 		channel = self._current_channel()
 		if channel is not None:
-			exec_dialog(
-				FieldsDialog(self._worker, channel.id, channel.title, self.window())
-			)
+			exec_dialog(FieldsDialog(self._worker, channel.id, channel.title, self.window()))
 
 	def _on_compose_caption(self) -> None:
 		"""Загружает шаблоны канала и открывает диалог сборки."""
@@ -359,15 +365,15 @@ class PublishPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.list_templates(channel.id),
-			self, self._open_caption_dialog, self._show_error,
+			self,
+			self._open_caption_dialog,
+			self._show_error,
 		)
 
 	def _open_caption_dialog(self, templates: list[TemplateDto]) -> None:
 		"""Собирает подпись по шаблону и вставляет её в поле текста."""
 		if not templates or not all(t.fields for t in templates):
-			self._show_error(
-				"Сначала настройте поля и шаблон — кнопка «Поля подписи…»."
-			)
+			self._show_error("Сначала настройте поля и шаблон — кнопка «Поля подписи…».")
 			return
 		media = str(self._file_edit.text()).strip()
 		title = ""
@@ -379,10 +385,10 @@ class PublishPage(ScrollArea):
 		self._text.setPlainText(dialog.caption())
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.record_usage(
-				dialog.template_id(), dialog.used_values()
-			),
-			self, noop, self._show_error,
+			self._worker.engine.captions.record_usage(dialog.template_id(), dialog.used_values()),
+			self,
+			noop,
+			self._show_error,
 		)
 		self._suggest_rename(templates, dialog, media)
 
@@ -399,10 +405,15 @@ class PublishPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.render_filename(
-				template.id, channel.id, dialog.title(),
-				dialog.used_values(), media,
+				template.id,
+				channel.id,
+				dialog.title(),
+				dialog.used_values(),
+				media,
 			),
-			self, self._show_rename_suggestion, self._show_error,
+			self,
+			self._show_rename_suggestion,
+			self._show_error,
 		)
 
 	def _show_rename_suggestion(self, filename: str) -> None:
@@ -426,12 +437,16 @@ class PublishPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.publish_queue.enqueue(draft),
-			self, self._on_enqueued, self._show_error,
+			self,
+			self._on_enqueued,
+			self._show_error,
 		)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.set(PUBLISH_LAST_CHANNEL_ID, channel.id),
-			self, noop, noop,
+			self,
+			noop,
+			noop,
 		)
 
 	def _draft(self, channel_id: int) -> PostDraft:
@@ -470,8 +485,11 @@ class PublishPage(ScrollArea):
 		# ошибки опроса не показываем плашками: мост пишет их в лог,
 		# а раз в полсекунды спамить пользователя нечем и незачем
 		run_in_engine(
-			self._worker, self._worker.engine.publish_queue.state(),
-			self, self._show_queue, noop,
+			self._worker,
+			self._worker.engine.publish_queue.state(),
+			self,
+			self._show_queue,
+			noop,
 		)
 
 	def _show_queue(self, items: list[QueueItemDto]) -> None:
@@ -485,8 +503,7 @@ class PublishPage(ScrollArea):
 			else:
 				visible.append(item)
 		self._queue_busy = any(
-			item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
-			for item in visible
+			item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING) for item in visible
 		)
 		signature = tuple((i.id, i.status, i.error) for i in visible)
 		if signature != self._queue_signature:
@@ -505,7 +522,8 @@ class PublishPage(ScrollArea):
 		if notify:
 			InfoBar.success(
 				"Отложенная запись создана" if item.scheduled else "Опубликовано",
-				item.title, parent=self.window(),
+				item.title,
+				parent=self.window(),
 			)
 		else:
 			InfoBar.info("Отправка отменена", item.title, parent=self.window())
@@ -541,9 +559,7 @@ class PublishPage(ScrollArea):
 			action = PushButton("Отмена", trailing)
 			action.clicked.connect(bind(self._cancel_item, item.id))
 		row.addWidget(action)
-		return row_card(
-			self, item.title, self._queue_subtitle(item), trailing=trailing
-		)
+		return row_card(self, item.title, self._queue_subtitle(item), trailing=trailing)
 
 	@staticmethod
 	def _queue_subtitle(item: QueueItemDto) -> str:
@@ -567,8 +583,11 @@ class PublishPage(ScrollArea):
 	def _retry_item(self, item_id: int) -> None:
 		"""Просит движок вернуть элемент с ошибкой в очередь на повтор."""
 		run_in_engine(
-			self._worker, self._worker.engine.publish_queue.retry(item_id),
-			self, self._on_retried, self._show_error,
+			self._worker,
+			self._worker.engine.publish_queue.retry(item_id),
+			self,
+			self._on_retried,
+			self._show_error,
 		)
 
 	def _on_retried(self, _result: object = None) -> None:
@@ -578,13 +597,19 @@ class PublishPage(ScrollArea):
 	def _cancel_item(self, item_id: int) -> None:
 		"""Просит движок отменить элемент очереди."""
 		run_in_engine(
-			self._worker, self._worker.engine.publish_queue.cancel(item_id),
-			self, noop, self._show_error,
+			self._worker,
+			self._worker.engine.publish_queue.cancel(item_id),
+			self,
+			noop,
+			self._show_error,
 		)
 
 	def _dismiss(self, item_id: int) -> None:
 		"""Убирает завершённый элемент из состояния очереди."""
 		run_in_engine(
-			self._worker, self._worker.engine.publish_queue.dismiss(item_id),
-			self, noop, noop,
+			self._worker,
+			self._worker.engine.publish_queue.dismiss(item_id),
+			self,
+			noop,
+			noop,
 		)

@@ -23,9 +23,7 @@ class Base(DeclarativeBase):
 class TimestampMixin:
 	"""Общие поля времени создания и последнего изменения."""
 
-	created_at: Mapped[datetime] = mapped_column(
-		DateTime(timezone=True), server_default=func.now()
-	)
+	created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 	updated_at: Mapped[datetime] = mapped_column(
 		DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
 	)
@@ -184,9 +182,7 @@ class CaptionField(TimestampMixin, Base):
 	__tablename__ = "caption_fields"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	channel_id: Mapped[int] = mapped_column(
-		ForeignKey("channels.id", ondelete="CASCADE")
-	)
+	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
 	name: Mapped[str] = mapped_column(String(64))
 	hashtag: Mapped[bool] = mapped_column(Boolean, default=True)
 	multiple: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -198,7 +194,8 @@ class CaptionField(TimestampMixin, Base):
 	)
 
 	values: Mapped[list[CaptionValue]] = relationship(
-		back_populates="field", cascade="all, delete-orphan",
+		back_populates="field",
+		cascade="all, delete-orphan",
 		order_by="CaptionValue.value",
 	)
 
@@ -214,18 +211,14 @@ class CaptionValue(TimestampMixin, Base):
 	__tablename__ = "caption_values"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	field_id: Mapped[int] = mapped_column(
-		ForeignKey("caption_fields.id", ondelete="CASCADE")
-	)
+	field_id: Mapped[int] = mapped_column(ForeignKey("caption_fields.id", ondelete="CASCADE"))
 	value: Mapped[str] = mapped_column(String(128))
 	parent_value_id: Mapped[int | None] = mapped_column(
 		ForeignKey("caption_values.id", ondelete="CASCADE"), default=None
 	)
 
 	field: Mapped[CaptionField] = relationship(back_populates="values")
-	parent: Mapped[CaptionValue | None] = relationship(
-		remote_side="CaptionValue.id"
-	)
+	parent: Mapped[CaptionValue | None] = relationship(remote_side="CaptionValue.id")
 
 
 class CaptionTemplate(TimestampMixin, Base):
@@ -234,19 +227,16 @@ class CaptionTemplate(TimestampMixin, Base):
 	__tablename__ = "caption_templates"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	channel_id: Mapped[int] = mapped_column(
-		ForeignKey("channels.id", ondelete="CASCADE")
-	)
+	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
 	name: Mapped[str] = mapped_column(String(64))
 	# для предвыбора «последнего использованного» шаблона в диалоге
-	last_used_at: Mapped[datetime | None] = mapped_column(
-		DateTime(timezone=True), default=None
-	)
+	last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 	# шаблон имени файла при отправке: {video}, {ИмяПоля}, {quality}, {channel}
 	filename_pattern: Mapped[str | None] = mapped_column(String(255), default=None)
 
 	fields: Mapped[list[CaptionTemplateField]] = relationship(
-		back_populates="template", cascade="all, delete-orphan",
+		back_populates="template",
+		cascade="all, delete-orphan",
 		order_by="CaptionTemplateField.position",
 	)
 
@@ -257,12 +247,8 @@ class CaptionTemplateField(Base):
 	__tablename__ = "caption_template_fields"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	template_id: Mapped[int] = mapped_column(
-		ForeignKey("caption_templates.id", ondelete="CASCADE")
-	)
-	field_id: Mapped[int] = mapped_column(
-		ForeignKey("caption_fields.id", ondelete="CASCADE")
-	)
+	template_id: Mapped[int] = mapped_column(ForeignKey("caption_templates.id", ondelete="CASCADE"))
+	field_id: Mapped[int] = mapped_column(ForeignKey("caption_fields.id", ondelete="CASCADE"))
 	position: Mapped[int] = mapped_column(Integer, default=0)
 	enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 

@@ -21,6 +21,7 @@ Revision ID: a8e4c73b9d52
 Revises: c1a4b83f7e29
 Create Date: 2026-08-15
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -35,12 +36,16 @@ depends_on = None
 def _timestamps() -> list[sa.Column]:
 	return [
 		sa.Column(
-			"created_at", sa.DateTime(timezone=True),
-			server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False,
+			"created_at",
+			sa.DateTime(timezone=True),
+			server_default=sa.text("(CURRENT_TIMESTAMP)"),
+			nullable=False,
 		),
 		sa.Column(
-			"updated_at", sa.DateTime(timezone=True),
-			server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False,
+			"updated_at",
+			sa.DateTime(timezone=True),
+			server_default=sa.text("(CURRENT_TIMESTAMP)"),
+			nullable=False,
 		),
 	]
 
@@ -55,8 +60,10 @@ def _tables(*, with_parents: bool) -> dict[str, sa.Table]:
 	fields_columns = [
 		sa.Column("id", sa.Integer(), primary_key=True),
 		sa.Column(
-			"channel_id", sa.Integer(),
-			sa.ForeignKey("channels.id", ondelete="CASCADE"), nullable=False,
+			"channel_id",
+			sa.Integer(),
+			sa.ForeignKey("channels.id", ondelete="CASCADE"),
+			nullable=False,
 		),
 		sa.Column("name", sa.String(64), nullable=False),
 		sa.Column("hashtag", sa.Boolean(), nullable=False),
@@ -66,7 +73,8 @@ def _tables(*, with_parents: bool) -> dict[str, sa.Table]:
 	values_columns = [
 		sa.Column("id", sa.Integer(), primary_key=True),
 		sa.Column(
-			"field_id", sa.Integer(),
+			"field_id",
+			sa.Integer(),
 			sa.ForeignKey("caption_fields.id", ondelete="CASCADE"),
 			nullable=False,
 		),
@@ -74,16 +82,22 @@ def _tables(*, with_parents: bool) -> dict[str, sa.Table]:
 		*_timestamps(),
 	]
 	if with_parents:
-		fields_columns.append(sa.Column(
-			"parent_field_id", sa.Integer(),
-			sa.ForeignKey("caption_fields.id", ondelete="SET NULL"),
-			nullable=True,
-		))
-		values_columns.append(sa.Column(
-			"parent_value_id", sa.Integer(),
-			sa.ForeignKey("caption_values.id", ondelete="CASCADE"),
-			nullable=True,
-		))
+		fields_columns.append(
+			sa.Column(
+				"parent_field_id",
+				sa.Integer(),
+				sa.ForeignKey("caption_fields.id", ondelete="SET NULL"),
+				nullable=True,
+			)
+		)
+		values_columns.append(
+			sa.Column(
+				"parent_value_id",
+				sa.Integer(),
+				sa.ForeignKey("caption_values.id", ondelete="CASCADE"),
+				nullable=True,
+			)
+		)
 	return {
 		"caption_fields": sa.Table("caption_fields", meta, *fields_columns),
 		"caption_values": sa.Table("caption_values", meta, *values_columns),
@@ -92,17 +106,11 @@ def _tables(*, with_parents: bool) -> dict[str, sa.Table]:
 
 def upgrade() -> None:
 	target = _tables(with_parents=True)
-	op.add_column(
-		"caption_fields", sa.Column("parent_field_id", sa.Integer(), nullable=True)
-	)
-	op.add_column(
-		"caption_values", sa.Column("parent_value_id", sa.Integer(), nullable=True)
-	)
+	op.add_column("caption_fields", sa.Column("parent_field_id", sa.Integer(), nullable=True))
+	op.add_column("caption_values", sa.Column("parent_value_id", sa.Integer(), nullable=True))
 	# пересборка по целевому определению — внешние ключи появляются здесь
 	for name in ("caption_fields", "caption_values"):
-		with op.batch_alter_table(
-			name, copy_from=target[name], recreate="always"
-		):
+		with op.batch_alter_table(name, copy_from=target[name], recreate="always"):
 			pass
 
 
@@ -112,7 +120,5 @@ def downgrade() -> None:
 		("caption_values", "parent_value_id"),
 		("caption_fields", "parent_field_id"),
 	):
-		with op.batch_alter_table(
-			name, copy_from=target[name], recreate="always"
-		) as batch:
+		with op.batch_alter_table(name, copy_from=target[name], recreate="always") as batch:
 			batch.drop_column(column)

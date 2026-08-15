@@ -7,6 +7,7 @@ Revision ID: f4e8b3c92a17
 Revises: e9c2a71f4d36
 Create Date: 2026-07-15
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -21,9 +22,7 @@ depends_on = None
 def upgrade() -> None:
 	op.add_column(
 		"channels",
-		sa.Column(
-			"userbot_admin", sa.Boolean(), nullable=False, server_default="0"
-		),
+		sa.Column("userbot_admin", sa.Boolean(), nullable=False, server_default="0"),
 	)
 
 

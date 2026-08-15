@@ -107,7 +107,9 @@ class _FieldRow:
 		self.check.setChecked(tf.enabled)
 		if self.field.multiple:
 			grid.addWidget(
-				self.check, row, 0,
+				self.check,
+				row,
+				0,
 				Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
 			)
 			grid.addWidget(self._build_multi(dialog), row, 1)
@@ -211,18 +213,13 @@ class _FieldRow:
 		без привязки, а связь появится после отправки (``record_usage``).
 		"""
 		chosen = {value.lower() for value in self.values()}
-		return [
-			item.id for item in self.field.values
-			if item.value.lower() in chosen
-		]
+		return [item.id for item in self.field.values if item.value.lower() in chosen]
 
 
 class CaptionDialog(MessageBoxBase):
 	"""Сборка подписи: шаблон, название, поля со словарями."""
 
-	def __init__(
-		self, templates: list[TemplateDto], suggested_title: str, parent: QWidget
-	) -> None:
+	def __init__(self, templates: list[TemplateDto], suggested_title: str, parent: QWidget) -> None:
 		super().__init__(parent)
 		self._templates = templates
 		self._rows: list[_FieldRow] = []
@@ -260,8 +257,7 @@ class CaptionDialog(MessageBoxBase):
 	def _last_used_index(self) -> int:
 		"""Индекс последнего использованного шаблона (или первого)."""
 		stamps = [
-			(t.last_used_at, i) for i, t in enumerate(self._templates)
-			if t.last_used_at is not None
+			(t.last_used_at, i) for i, t in enumerate(self._templates) if t.last_used_at is not None
 		]
 		return max(stamps)[1] if stamps else 0
 
@@ -308,7 +304,8 @@ class CaptionDialog(MessageBoxBase):
 		"""Собранный текст подписи (только включённые поля)."""
 		lines = [
 			CaptionLine(row.field.name, row.field.hashtag, row.values())
-			for row in self._rows if row.check.isChecked()
+			for row in self._rows
+			if row.check.isChecked()
 		]
 		return build_caption(str(self._title.text()), lines)
 
@@ -352,11 +349,13 @@ class DictionaryDialog(MessageBoxBase):
 		self._show_error = error_reporter(self)
 		self.viewLayout.addWidget(SubtitleLabel(f"Словарь поля «{field.name}»", self))
 		if parent_field is not None:
-			self.viewLayout.addWidget(CaptionLabel(
-				f"Значения живут внутри поля «{parent_field.name}»: "
-				"выберите, к какому значению относится каждое.",
-				self,
-			))
+			self.viewLayout.addWidget(
+				CaptionLabel(
+					f"Значения живут внутри поля «{parent_field.name}»: "
+					"выберите, к какому значению относится каждое.",
+					self,
+				)
+			)
 		self._values_box = QVBoxLayout()
 		self.viewLayout.addLayout(self._values_box)
 		self._build_add_row()
@@ -388,15 +387,23 @@ class DictionaryDialog(MessageBoxBase):
 		self._field = field
 		clear_layout(self._values_box)
 		if not field.values:
-			self._values_box.addWidget(CaptionLabel(
-				"Словарь пуст — добавьте значения здесь или при сборке подписи.",
-				self,
-			))
+			self._values_box.addWidget(
+				CaptionLabel(
+					"Словарь пуст — добавьте значения здесь или при сборке подписи.",
+					self,
+				)
+			)
 		for item in field.values:
 			extras = [] if self._parent_field is None else [self._parent_combo(item)]
-			self._values_box.addWidget(_row_widget(
-				self, item.value, "", bind(self._on_delete_value, item), extras,
-			))
+			self._values_box.addWidget(
+				_row_widget(
+					self,
+					item.value,
+					"",
+					bind(self._on_delete_value, item),
+					extras,
+				)
+			)
 		self.widget.adjustSize()  # список меняется после показа окна
 
 	def _parent_combo(self, item: ValueDto) -> QWidget:
@@ -422,14 +429,14 @@ class DictionaryDialog(MessageBoxBase):
 			self._worker.engine.captions.assign_value_parent(
 				item.id, chosen.id if chosen is not None else None
 			),
-			self, self._on_changed, self._show_error,
+			self,
+			self._on_changed,
+			self._show_error,
 		)
 
 	def _on_add(self) -> None:
 		"""Добавляет значения из строки ввода (через запятую)."""
-		values = [
-			v.strip() for v in str(self._new_values.text()).split(",") if v.strip()
-		]
+		values = [v.strip() for v in str(self._new_values.text()).split(",") if v.strip()]
 		if not values:
 			return
 		chosen = self._new_parent.selected() if self._new_parent is not None else None
@@ -438,7 +445,9 @@ class DictionaryDialog(MessageBoxBase):
 			self._worker.engine.captions.add_values(
 				self._field.id, values, chosen.id if chosen is not None else None
 			),
-			self, self._on_changed, self._show_error,
+			self,
+			self._on_changed,
+			self._show_error,
 		)
 
 	def _on_delete_value(self, item: ValueDto) -> None:
@@ -452,7 +461,9 @@ class DictionaryDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.delete_value(item.id),
-			self, self._on_changed, self._show_error,
+			self,
+			self._on_changed,
+			self._show_error,
 		)
 
 	def _on_changed(self, field: FieldDto) -> None:
@@ -465,7 +476,10 @@ class FieldsDialog(MessageBoxBase):
 	"""Настройка канала: пул полей со словарями и шаблоны."""
 
 	def __init__(
-		self, worker: EngineWorker, channel_id: int, channel_title: str,
+		self,
+		worker: EngineWorker,
+		channel_id: int,
+		channel_title: str,
 		parent: QWidget,
 	) -> None:
 		super().__init__(parent)
@@ -475,9 +489,7 @@ class FieldsDialog(MessageBoxBase):
 		self._fields: list[FieldDto] = []
 		# шаблон, который сейчас правится (None — форма собирает новый)
 		self._editing: TemplateDto | None = None
-		self.viewLayout.addWidget(SubtitleLabel(
-			f"Подписи канала «{channel_title}»", self
-		))
+		self.viewLayout.addWidget(SubtitleLabel(f"Подписи канала «{channel_title}»", self))
 		self._build_fields_block()
 		self._build_templates_block()
 		self.yesButton.setText("Готово")
@@ -513,16 +525,18 @@ class FieldsDialog(MessageBoxBase):
 		self._fields = fields
 		clear_layout(self._fields_box)
 		for field in fields:
-			flags = ("#" if field.hashtag else "текст") + (
-				", несколько" if field.multiple else ""
-			)
+			flags = ("#" if field.hashtag else "текст") + (", несколько" if field.multiple else "")
 			dictionary = PushButton("Словарь…", self)
 			dictionary.clicked.connect(bind(self._open_dictionary, field))
-			self._fields_box.addWidget(_row_widget(
-				self, f"{field.name} ({flags})", f"словарь: {len(field.values)}",
-				bind(self._on_delete_field, field),
-				[self._parent_field_combo(field), dictionary],
-			))
+			self._fields_box.addWidget(
+				_row_widget(
+					self,
+					f"{field.name} ({flags})",
+					f"словарь: {len(field.values)}",
+					bind(self._on_delete_field, field),
+					[self._parent_field_combo(field), dictionary],
+				)
+			)
 		# перерисовка не сбрасывает правку: состав правящегося шаблона
 		# восстанавливается в списке (например, после добавления поля)
 		self._fill_template_list(self._editing)
@@ -557,18 +571,16 @@ class FieldsDialog(MessageBoxBase):
 			self._worker.engine.captions.set_field_parent(
 				field.id, chosen.id if chosen is not None else None
 			),
-			self, lambda *_a: self._reload(), self._show_error,
+			self,
+			lambda *_a: self._reload(),
+			self._show_error,
 		)
 
 	def _open_dictionary(self, field: FieldDto) -> None:
 		"""Открывает редактор словаря поля; после — обновляет счётчики."""
-		parent_field = next(
-			(f for f in self._fields if f.id == field.parent_field_id), None
-		)
+		parent_field = next((f for f in self._fields if f.id == field.parent_field_id), None)
 		dependents = [f.name for f in self._fields if f.parent_field_id == field.id]
-		exec_dialog(DictionaryDialog(
-			self._worker, field, self.window(), parent_field, dependents
-		))
+		exec_dialog(DictionaryDialog(self._worker, field, self.window(), parent_field, dependents))
 		self._reload()
 
 	def _update_pattern_hint(self, fields: list[FieldDto]) -> None:
@@ -584,10 +596,14 @@ class FieldsDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.add_field(
-				self._channel_id, str(self._field_name.text()),
-				self._field_hashtag.isChecked(), self._field_multiple.isChecked(),
+				self._channel_id,
+				str(self._field_name.text()),
+				self._field_hashtag.isChecked(),
+				self._field_multiple.isChecked(),
 			),
-			self, self._on_field_added, self._show_error,
+			self,
+			self._on_field_added,
+			self._show_error,
 		)
 
 	def _on_field_added(self, _field: FieldDto) -> None:
@@ -596,37 +612,35 @@ class FieldsDialog(MessageBoxBase):
 
 	def _on_delete_field(self, field: FieldDto) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.captions.delete_field(field.id),
-			self, lambda *_a: self._reload(), self._show_error,
+			self._worker,
+			self._worker.engine.captions.delete_field(field.id),
+			self,
+			lambda *_a: self._reload(),
+			self._show_error,
 		)
 
 	# --- шаблоны ----------------------------------------------------------------
 
 	def _build_templates_block(self) -> None:
 		"""Блок шаблонов: список, набор полей, шаблон имени файла, сохранение."""
-		self.viewLayout.addWidget(BodyLabel(
-			"Шаблоны (отметьте поля, порядок — перетаскиванием):", self
-		))
+		self.viewLayout.addWidget(
+			BodyLabel("Шаблоны (отметьте поля, порядок — перетаскиванием):", self)
+		)
 		self._templates_box = QVBoxLayout()
 		self.viewLayout.addLayout(self._templates_box)
 		self._template_list = QListWidget(self)
-		self._template_list.setDragDropMode(
-			QListWidget.DragDropMode.InternalMove
-		)
+		self._template_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
 		self._template_list.setMaximumHeight(140)
 		self.viewLayout.addWidget(self._template_list)
 		self._template_pattern = LineEdit(self)
 		self._template_pattern.setPlaceholderText(
-			"Шаблон имени файла (необязательно): "
-			"{Author}, {video} ({Genre}) {quality} (@{channel})"
+			"Шаблон имени файла (необязательно): {Author}, {video} ({Genre}) {quality} (@{channel})"
 		)
 		self.viewLayout.addWidget(self._template_pattern)
 		self._pattern_hint = CaptionLabel("", self)
 		self._pattern_hint.setWordWrap(True)
 		# подсказку можно выделять и копировать (плейсхолдеры — в шаблон)
-		self._pattern_hint.setTextInteractionFlags(
-			Qt.TextInteractionFlag.TextSelectableByMouse
-		)
+		self._pattern_hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 		self.viewLayout.addWidget(self._pattern_hint)
 		self._edit_hint = CaptionLabel("", self)
 		self._edit_hint.hide()
@@ -652,27 +666,21 @@ class FieldsDialog(MessageBoxBase):
 		None — все поля без отметок (сборка нового шаблона).
 		"""
 		self._template_list.clear()
-		template_ids = (
-			[tf.field.id for tf in template.fields] if template is not None else []
-		)
+		template_ids = [tf.field.id for tf in template.fields] if template is not None else []
 		ordered = sorted(
 			self._fields,
 			key=lambda field: (
-				template_ids.index(field.id)
-				if field.id in template_ids else len(template_ids)
+				template_ids.index(field.id) if field.id in template_ids else len(template_ids)
 			),
 		)
 		for field in ordered:
 			item = QListWidgetItem(field.name)
 			item.setData(Qt.ItemDataRole.UserRole, field.id)
 			item.setFlags(
-				item.flags()
-				| Qt.ItemFlag.ItemIsUserCheckable
-				| Qt.ItemFlag.ItemIsDragEnabled
+				item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled
 			)
 			item.setCheckState(
-				Qt.CheckState.Checked if field.id in template_ids
-				else Qt.CheckState.Unchecked
+				Qt.CheckState.Checked if field.id in template_ids else Qt.CheckState.Unchecked
 			)
 			self._template_list.addItem(item)
 
@@ -685,10 +693,15 @@ class FieldsDialog(MessageBoxBase):
 				hint += " · шаблон имени файла задан"
 			edit = PushButton("Изменить…", self)
 			edit.clicked.connect(bind(self._start_edit_template, template))
-			self._templates_box.addWidget(_row_widget(
-				self, template.name, hint,
-				bind(self._on_delete_template, template), [edit],
-			))
+			self._templates_box.addWidget(
+				_row_widget(
+					self,
+					template.name,
+					hint,
+					bind(self._on_delete_template, template),
+					[edit],
+				)
+			)
 		self.widget.adjustSize()  # данные пришли после показа окна
 
 	def _start_edit_template(self, template: TemplateDto) -> None:
@@ -729,12 +742,15 @@ class FieldsDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.save_template(
-				self._channel_id, str(self._template_name.text()),
+				self._channel_id,
+				str(self._template_name.text()),
 				self._checked_field_ids(),
 				str(self._template_pattern.text()).strip() or None,
 				template_id=self._editing.id if self._editing else None,
 			),
-			self, self._on_template_saved, self._show_error,
+			self,
+			self._on_template_saved,
+			self._show_error,
 		)
 
 	def _on_template_saved(self, _template: TemplateDto) -> None:
@@ -747,7 +763,9 @@ class FieldsDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.delete_template(template.id),
-			self, lambda *_a: self._reload(), self._show_error,
+			self,
+			lambda *_a: self._reload(),
+			self._show_error,
 		)
 
 	# --- загрузка -----------------------------------------------------------------
@@ -756,10 +774,14 @@ class FieldsDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.list_fields(self._channel_id),
-			self, self._show_fields, self._show_error,
+			self,
+			self._show_fields,
+			self._show_error,
 		)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.list_templates(self._channel_id),
-			self, self._show_templates, self._show_error,
+			self,
+			self._show_templates,
+			self._show_error,
 		)

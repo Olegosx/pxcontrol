@@ -91,23 +91,21 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		)
 	if isinstance(
 		exc,
-		errors.AuthKeyUnregisteredError | errors.SessionRevokedError
-		| errors.SessionExpiredError | errors.UserDeactivatedError,
+		errors.AuthKeyUnregisteredError
+		| errors.SessionRevokedError
+		| errors.SessionExpiredError
+		| errors.UserDeactivatedError,
 	):
 		return UserbotSessionExpiredError(
-			"Сессия userbot недействительна — войдите в аккаунт заново: "
-			"Настройки → Аккаунты."
+			"Сессия userbot недействительна — войдите в аккаунт заново: Настройки → Аккаунты."
 		)
 	if isinstance(exc, errors.FloodWaitError):
-		return UserbotUnavailableError(
-			f"Telegram просит подождать {exc.seconds} с."
-		)
+		return UserbotUnavailableError(f"Telegram просит подождать {exc.seconds} с.")
 	if isinstance(exc, ValueError):
 		# Telethon: «Could not find the input entity» — канал не в поле
 		# зрения аккаунта (числовые ID валидируются до этой точки).
 		return UserbotAccessError(
-			"Userbot не видит этот канал — убедитесь, что аккаунт добавлен "
-			"в канал администратором."
+			"Userbot не видит этот канал — убедитесь, что аккаунт добавлен в канал администратором."
 		)
 	if isinstance(exc, ConnectionError | OSError | TimeoutError):
 		return UserbotNotConnectedError(
@@ -218,14 +216,11 @@ class MtprotoTransport:
 			authorized = bool(await client.is_user_authorized())
 		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 			await _safe_disconnect(client)
-			raise UserbotNotConnectedError(
-				f"Не удалось подключить userbot: {exc}"
-			) from exc
+			raise UserbotNotConnectedError(f"Не удалось подключить userbot: {exc}") from exc
 		if not authorized:
 			await _safe_disconnect(client)
 			raise UserbotSessionExpiredError(
-				"Сессия userbot недействительна — войдите в аккаунт заново: "
-				"Настройки → Аккаунты."
+				"Сессия userbot недействительна — войдите в аккаунт заново: Настройки → Аккаунты."
 			)
 		self._client = client
 		self._premium = await _fetch_premium(client)
@@ -316,7 +311,9 @@ class MtprotoTransport:
 				await client.send_message(peer, post.text, schedule=post.when)
 			else:
 				await client.send_file(
-					peer, post.media_path, caption=post.text or None,
+					peer,
+					post.media_path,
+					caption=post.text or None,
 					schedule=post.when,
 					supports_streaming=post.media_kind is MediaKind.VIDEO,
 					force_document=post.media_kind is MediaKind.DOCUMENT,
@@ -324,7 +321,8 @@ class MtprotoTransport:
 					thumb=post.thumb_path,
 				)
 		logger.info(
-			"Пост отправлен в чат %s (%s, %s).", chat_id,
+			"Пост отправлен в чат %s (%s, %s).",
+			chat_id,
 			post.media_kind if post.media_path else "текст",
 			f"отложено на {post.when}" if post.when else "сразу",
 		)
@@ -368,9 +366,7 @@ class MtprotoTransport:
 			)
 		rights = getattr(perms.participant, "admin_rights", None)
 		if not perms.is_creator and not getattr(rights, "post_messages", False):
-			raise UserbotAccessError(
-				"У userbot нет права публиковать сообщения в канале."
-			)
+			raise UserbotAccessError("У userbot нет права публиковать сообщения в канале.")
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""
@@ -393,17 +389,13 @@ class MtprotoTransport:
 class MtprotoLoginManager:
 	"""Пошаговый вход userbot. Держит незавершённые входы по id аккаунта."""
 
-	def __init__(
-		self, client_factory: Callable[[int, str], Any] | None = None
-	) -> None:
+	def __init__(self, client_factory: Callable[[int, str], Any] | None = None) -> None:
 		self._client_factory = client_factory or (
 			lambda api_id, api_hash: _default_client(api_id, api_hash, None)
 		)
 		self._pending: dict[int, tuple[Any, str, str]] = {}
 
-	async def start(
-		self, account_id: int, api_id: int, api_hash: str, phone: str
-	) -> None:
+	async def start(self, account_id: int, api_id: int, api_hash: str, phone: str) -> None:
 		"""Подключается и просит Telegram отправить код на телефон.
 
 		Raises:

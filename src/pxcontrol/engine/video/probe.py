@@ -53,8 +53,7 @@ def trimmed_info(info: VideoInfo, trim_start: float, trim_end: float) -> VideoIn
 	duration = info.duration - trim_start - trim_end
 	if duration <= 0:
 		raise ValueError(
-			"Обрезка не оставляет от ролика ничего: отрезаемые края "
-			"больше его длительности."
+			"Обрезка не оставляет от ролика ничего: отрезаемые края больше его длительности."
 		)
 	return replace(info, duration=duration)
 
@@ -66,8 +65,14 @@ def _run_ffprobe(path: str, ffprobe_bin: str) -> dict[str, Any]:
 		RuntimeError: Если ffprobe завершился с ненулевым кодом.
 	"""
 	cmd = [
-		ffprobe_bin, "-v", "error", "-print_format", "json",
-		"-show_streams", "-show_format", path,
+		ffprobe_bin,
+		"-v",
+		"error",
+		"-print_format",
+		"json",
+		"-show_streams",
+		"-show_format",
+		path,
 	]
 	return dict(json.loads(run_tool(cmd, f"чтение метаданных '{path}'")))
 

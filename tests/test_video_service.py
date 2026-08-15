@@ -19,11 +19,22 @@ from pxcontrol.engine.services.video import PresetFields, VideoError, VideoServi
 from pxcontrol.engine.video import ProcessingOptions
 
 FIELDS = PresetFields(
-	name="Бренд", trim_start=3.5, trim_end=1.5, fade_in=0.5, fade_out=1.0,
-	watermark_path="/tmp/logo.png", wm_corner="br",
-	wm_opacity=0.8, wm_start_offset=2.0, wm_end_offset=15.0, wm_fade=1.5,
-	intro=True, intro_source="time:5.0", cover=True,
-	video_bitrate_kbps=2500, meta_comment="https://t.me/mych — мой канал",
+	name="Бренд",
+	trim_start=3.5,
+	trim_end=1.5,
+	fade_in=0.5,
+	fade_out=1.0,
+	watermark_path="/tmp/logo.png",
+	wm_corner="br",
+	wm_opacity=0.8,
+	wm_start_offset=2.0,
+	wm_end_offset=15.0,
+	wm_fade=1.5,
+	intro=True,
+	intro_source="time:5.0",
+	cover=True,
+	video_bitrate_kbps=2500,
+	meta_comment="https://t.me/mych — мой канал",
 )
 
 
@@ -66,9 +77,7 @@ async def test_preset_crud(db: Database) -> None:
 	assert fields.trim_start == 3.5 and fields.trim_end == 1.5
 	assert fields.fade_in == 0.5 and fields.fade_out == 1.0
 	assert fields.subdir == "Бренд"  # авто из имени при создании
-	updated = await service.save_preset(
-		PresetFields(name="Бренд-2", no_audio=True), preset.id
-	)
+	updated = await service.save_preset(PresetFields(name="Бренд-2", no_audio=True), preset.id)
 	assert updated.name == "Бренд-2"
 	await service.delete_preset(preset.id)
 	assert await service.list_presets() == []
@@ -104,14 +113,10 @@ async def test_prepare_uses_processed_dir_setting_and_subdir(
 	)
 	settings = SettingsService(db)
 	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "мои-результаты"))
-	service = VideoService(
-		db, "ffmpeg", settings=settings, processor=_FakeProcessor()
-	)
+	service = VideoService(db, "ffmpeg", settings=settings, processor=_FakeProcessor())
 	source = tmp_path / "src.mp4"
 	source.write_bytes(b"src")
-	output = await service.prepare(
-		str(source), PresetFields(name="Тест", subdir="паб")
-	)
+	output = await service.prepare(str(source), PresetFields(name="Тест", subdir="паб"))
 	assert Path(output).parent == tmp_path / "мои-результаты" / "паб"
 
 
@@ -119,9 +124,7 @@ async def test_dirs_for_and_processed_dir_for_channel(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""dirs_for создаёт папки; папка результатов канала — из его пресета."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 	settings = SettingsService(db)
 	service = VideoService(db, "ffmpeg", settings=settings, processor=_FakeProcessor())
 	dirs = await service.dirs_for("суб")
@@ -141,9 +144,7 @@ async def test_dirs_for_and_processed_dir_for_channel(
 	assert (await service.processed_dir_for_channel(channel.id)).endswith("/суб")
 
 
-async def test_list_processed_shows_whole_subdir(
-	db: Database, tmp_path: Path
-) -> None:
+async def test_list_processed_shows_whole_subdir(db: Database, tmp_path: Path) -> None:
 	"""Список — все видео подпапки (новые сверху), посторонние файлы — мимо."""
 	settings = SettingsService(db)
 	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "результаты"))
@@ -212,9 +213,7 @@ async def test_prepare_maps_fields_to_options(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Подготовка применяет переданные поля (пресет в БД не нужен)."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
 	)
@@ -245,9 +244,7 @@ async def test_prepare_reports_progress(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Колбэк прогресса пробрасывается до процессора и получает доли."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
 	)
@@ -255,9 +252,7 @@ async def test_prepare_reports_progress(
 	source.write_bytes(b"src")
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
 	received: list[float] = []
-	await service.prepare(
-		str(source), PresetFields(name="Простой"), on_progress=received.append
-	)
+	await service.prepare(str(source), PresetFields(name="Простой"), on_progress=received.append)
 	assert received == [0.5, 1.0]
 
 
@@ -265,9 +260,7 @@ async def test_prepare_intro_source_override(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Подмена источника кадра действует на один запуск."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
 	)
@@ -295,16 +288,18 @@ async def test_extract_random_frames(
 	)
 
 	def _fake_extract(
-		_src: str, timestamp: float, out: str, width: int, height: int,
+		_src: str,
+		timestamp: float,
+		out: str,
+		width: int,
+		height: int,
 		_bin: str = "ffmpeg",
 	) -> None:
 		assert (width, height) == (1920, 1080)  # финальный размер кадра
 		assert 5.0 <= timestamp <= 95.0
 		Path(out).write_bytes(b"png")
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.extract_still", _fake_extract
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.extract_still", _fake_extract)
 	source = tmp_path / "v.mp4"
 	source.write_bytes(b"v")
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
@@ -334,29 +329,27 @@ async def test_extract_random_frames_respects_trim(
 	extracted: list[float] = []
 
 	def _fake_extract(
-		_src: str, timestamp: float, out: str, _w: int, _h: int,
+		_src: str,
+		timestamp: float,
+		out: str,
+		_w: int,
+		_h: int,
 		_bin: str = "ffmpeg",
 	) -> None:
 		extracted.append(timestamp)
 		Path(out).write_bytes(b"png")
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.extract_still", _fake_extract
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.extract_still", _fake_extract)
 	source = tmp_path / "v.mp4"
 	source.write_bytes(b"v")
 	service = VideoService(db, "ffmpeg", processor=_FakeProcessor())
-	frames = await service.extract_random_frames(
-		str(source), 6, trim_start=20.0, trim_end=30.0
-	)
+	frames = await service.extract_random_frames(str(source), 6, trim_start=20.0, trim_end=30.0)
 	# рабочая версия — 50 с: подписи в её времени, извлечение — со сдвигом
 	for frame, raw in zip(frames, extracted, strict=True):
 		assert 2.5 <= frame.timestamp <= 47.5  # 5–95 % от 50 с
 		assert raw == pytest.approx(20.0 + frame.timestamp)
 	with pytest.raises(VideoError, match="не оставляет"):
-		await service.extract_random_frames(
-			str(source), 2, trim_start=70.0, trim_end=40.0
-		)
+		await service.extract_random_frames(str(source), 2, trim_start=70.0, trim_end=40.0)
 
 
 async def test_ffmpeg_provider_picks_up_changes(
@@ -367,9 +360,7 @@ async def test_ffmpeg_provider_picks_up_changes(
 	Так смена пути в настройках приложения подхватывается без
 	перезапуска (ADR-0013).
 	"""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
 	)
@@ -406,9 +397,7 @@ async def test_prepare_wraps_processor_errors(
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
 	)
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media"
-	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
 	source = tmp_path / "src.mp4"
 	source.write_bytes(b"src")
 
@@ -461,7 +450,9 @@ async def test_bitrate_advice_only_for_oversized(
 
 	premium = False
 	service = VideoService(
-		db, "ffmpeg", processor=_FakeProcessor(),
+		db,
+		"ffmpeg",
+		processor=_FakeProcessor(),
 		userbot_premium=lambda: premium,
 	)
 	# файл в лимите — совета нет; несуществующий путь — тоже

@@ -37,7 +37,9 @@ class _SlowGateway:
 		return False
 
 	async def publish(
-		self, chat_id: str, post: OutgoingPost,
+		self,
+		chat_id: str,
+		post: OutgoingPost,
 		on_progress: ProgressCallback | None = None,
 	) -> None:
 		if on_progress is not None:
@@ -185,10 +187,14 @@ async def test_dto_titles_and_flags(db: Database, tmp_path: Path) -> None:
 	channel_id = await _add_channel(db)
 	video = tmp_path / "ролик.mp4"
 	video.write_bytes(b"v")
-	await queue.enqueue(PostDraft(
-		channel_id, media_path=str(video), media_kind=MediaKind.VIDEO,
-		rename_to="Новое имя.mp4",
-	))
+	await queue.enqueue(
+		PostDraft(
+			channel_id,
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+			rename_to="Новое имя.mp4",
+		)
+	)
 	when = datetime.now(UTC) + timedelta(hours=1)
 	await queue.enqueue(PostDraft(channel_id, text="о" * 100, when=when))
 	first, second = await queue.state()
@@ -227,10 +233,14 @@ async def test_retry_validates_draft_again(db: Database, tmp_path: Path) -> None
 	channel_id = await _add_channel(db)
 	attachment = tmp_path / "вложение.pdf"
 	attachment.write_bytes(b"f")
-	item = await queue.enqueue(PostDraft(
-		channel_id, text="с файлом",
-		media_path=str(attachment), media_kind=MediaKind.DOCUMENT,
-	))
+	item = await queue.enqueue(
+		PostDraft(
+			channel_id,
+			text="с файлом",
+			media_path=str(attachment),
+			media_kind=MediaKind.DOCUMENT,
+		)
+	)
 	failed = await _wait_status(queue, item, QueueItemStatus.ERROR)
 	attachment.unlink()  # файл пропал между попытками
 	with pytest.raises(PostError, match="не найден"):
@@ -240,9 +250,7 @@ async def test_retry_validates_draft_again(db: Database, tmp_path: Path) -> None
 	assert still.error == failed.error  # прежний текст ошибки сохранён
 
 
-async def test_retry_after_rename_uses_new_name(
-	db: Database, tmp_path: Path
-) -> None:
+async def test_retry_after_rename_uses_new_name(db: Database, tmp_path: Path) -> None:
 	"""Файл, переименованный неудачной попыткой, при повторе уходит как есть."""
 	gateway = _SlowGateway()
 	gateway.release.set()
@@ -251,11 +259,15 @@ async def test_retry_after_rename_uses_new_name(
 	channel_id = await _add_channel(db)
 	attachment = tmp_path / "старое.pdf"
 	attachment.write_bytes(b"f")
-	item = await queue.enqueue(PostDraft(
-		channel_id, text="с файлом",
-		media_path=str(attachment), media_kind=MediaKind.DOCUMENT,
-		rename_to="новое.pdf",
-	))
+	item = await queue.enqueue(
+		PostDraft(
+			channel_id,
+			text="с файлом",
+			media_path=str(attachment),
+			media_kind=MediaKind.DOCUMENT,
+			rename_to="новое.pdf",
+		)
+	)
 	await _wait_status(queue, item, QueueItemStatus.ERROR)
 	assert (tmp_path / "новое.pdf").is_file()  # попытка успела переименовать
 	gateway.fail_texts = set()

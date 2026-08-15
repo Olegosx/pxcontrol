@@ -9,6 +9,7 @@ Revision ID: c8f1d29e4a35
 Revises: a5d8f31c9b27
 Create Date: 2026-07-16
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -33,9 +34,14 @@ def upgrade() -> None:
 
 def downgrade() -> None:
 	with op.batch_alter_table("channels") as batch:
-		batch.add_column(sa.Column(
-			"enabled", sa.Boolean(), nullable=False, server_default=sa.text("1"),
-		))
+		batch.add_column(
+			sa.Column(
+				"enabled",
+				sa.Boolean(),
+				nullable=False,
+				server_default=sa.text("1"),
+			)
+		)
 	op.execute(
 		"UPDATE channels SET enabled = 0 WHERE id IN "
 		"(SELECT channel_id FROM channel_settings "

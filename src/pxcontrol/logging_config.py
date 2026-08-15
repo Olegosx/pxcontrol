@@ -49,6 +49,8 @@ def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> Path:
 	root.addHandler(file_handler)
 	logging.getLogger(__name__).info(
 		"pXcontrol v%s: логирование настроено (уровень %s, файл %s).",
-		__version__, level.upper(), log_file,
+		__version__,
+		level.upper(),
+		log_file,
 	)
 	return log_file

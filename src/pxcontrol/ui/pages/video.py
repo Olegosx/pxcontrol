@@ -103,10 +103,13 @@ class VideoPage(ScrollArea):
 		self._build_preset_row(layout)
 		layout.addSpacing(8)
 		layout.addWidget(SubtitleLabel("Параметры обработки", self))
-		layout.addWidget(CaptionLabel(
-			"К видео применяется то, что на экране; пресет — только "
-			"загрузка и сохранение набора.", self,
-		))
+		layout.addWidget(
+			CaptionLabel(
+				"К видео применяется то, что на экране; пресет — только "
+				"загрузка и сохранение набора.",
+				self,
+			)
+		)
 		self._form = PresetForm(self)
 		layout.addWidget(self._form)
 		self._build_process_row(layout)
@@ -159,10 +162,10 @@ class VideoPage(ScrollArea):
 		fields = self._form.fields("")
 		run_in_engine(
 			self._worker,
-			self._worker.engine.video.bitrate_advice(
-				path, fields.trim_start, fields.trim_end
-			),
-			self, self._on_bitrate_advice, self._show_error,
+			self._worker.engine.video.bitrate_advice(path, fields.trim_start, fields.trim_end),
+			self,
+			self._on_bitrate_advice,
+			self._show_error,
 		)
 
 	def _on_bitrate_advice(self, advice: BitrateAdvice | None) -> None:
@@ -185,9 +188,7 @@ class VideoPage(ScrollArea):
 		"""Канал: выбор подставляет его пресет по умолчанию (настройка канала)."""
 		row = QHBoxLayout()
 		row.addWidget(BodyLabel("Канал:", self))
-		self._channel_combo: DtoComboBox[ChannelDto] = DtoComboBox(
-			self, placeholder="(не выбран)"
-		)
+		self._channel_combo: DtoComboBox[ChannelDto] = DtoComboBox(self, placeholder="(не выбран)")
 		self._channel_combo.setToolTip(
 			"Выбор канала загружает его пресет по умолчанию "
 			"(задаётся на странице «Каналы» → «Пресет…»)"
@@ -238,13 +239,14 @@ class VideoPage(ScrollArea):
 
 	def _reload_presets(self, select_name: str | None = None) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.video.list_presets(),
-			self, partial(self._show_presets, select_name), self._show_error,
+			self._worker,
+			self._worker.engine.video.list_presets(),
+			self,
+			partial(self._show_presets, select_name),
+			self._show_error,
 		)
 
-	def _show_presets(
-		self, select_name: str | None, presets: list[PresetDto]
-	) -> None:
+	def _show_presets(self, select_name: str | None, presets: list[PresetDto]) -> None:
 		"""Наполняет список пресетов (выбор сохраняется по id пресета)."""
 		self._preset_combo.set_items(
 			presets,
@@ -259,8 +261,11 @@ class VideoPage(ScrollArea):
 
 	def _reload_channels(self) -> None:
 		run_in_engine(
-			self._worker, self._worker.engine.channels.list_channels(),
-			self, self._show_channels, self._show_error,
+			self._worker,
+			self._worker.engine.channels.list_channels(),
+			self,
+			self._show_channels,
+			self._show_error,
 		)
 
 	def _show_channels(self, channels: list[ChannelDto]) -> None:
@@ -279,12 +284,12 @@ class VideoPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id),
-			self, partial(self._apply_channel_preset, channel), self._show_error,
+			self,
+			partial(self._apply_channel_preset, channel),
+			self._show_error,
 		)
 
-	def _apply_channel_preset(
-		self, channel: ChannelDto, preset_id: int | None
-	) -> None:
+	def _apply_channel_preset(self, channel: ChannelDto, preset_id: int | None) -> None:
 		"""Подставляет пресет канала; нет пресета — форма не трогается.
 
 		Выбор в списке вызывает ``_on_preset_selected`` — панель заполнится.
@@ -313,8 +318,11 @@ class VideoPage(ScrollArea):
 		if preset is None:
 			return
 		run_in_engine(
-			self._worker, self._worker.engine.video.get_preset_fields(preset.id),
-			self, self._form.fill, self._show_error,
+			self._worker,
+			self._worker.engine.video.get_preset_fields(preset.id),
+			self,
+			self._form.fill,
+			self._show_error,
 		)
 
 	def _on_save_preset(self) -> None:
@@ -324,16 +332,18 @@ class VideoPage(ScrollArea):
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.video.save_preset(
-				self._form.fields(preset.name), preset.id
-			),
-			self, self._on_preset_saved, self._show_error,
+			self._worker.engine.video.save_preset(self._form.fields(preset.name), preset.id),
+			self,
+			self._on_preset_saved,
+			self._show_error,
 		)
 
 	def _on_save_preset_as(self) -> None:
 		"""Сохраняет состояние панели новым пресетом (спрашивает имя)."""
 		dialog = FormDialog(
-			"Сохранить пресет", [("name", "Имя пресета…")], self.window(),
+			"Сохранить пресет",
+			[("name", "Имя пресета…")],
+			self.window(),
 			accept_text="Сохранить",
 		)
 		if not exec_dialog(dialog):
@@ -345,7 +355,9 @@ class VideoPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.save_preset(self._form.fields(name)),
-			self, self._on_preset_saved, self._show_error,
+			self,
+			self._on_preset_saved,
+			self._show_error,
 		)
 
 	def _on_preset_saved(self, preset: PresetDto) -> None:
@@ -359,8 +371,11 @@ class VideoPage(ScrollArea):
 		if not confirm_delete(self, f"Удалить пресет «{preset.name}»?"):
 			return
 		run_in_engine(
-			self._worker, self._worker.engine.video.delete_preset(preset.id),
-			self, lambda *_a: self._reload_presets(), self._show_error,
+			self._worker,
+			self._worker.engine.video.delete_preset(preset.id),
+			self,
+			lambda *_a: self._reload_presets(),
+			self._show_error,
 		)
 
 	# --- подготовка -----------------------------------------------------------------
@@ -369,14 +384,18 @@ class VideoPage(ScrollArea):
 		"""Диалог выбора исходника — в папке исходников подпапки пресета."""
 		subdir = str(self._form.fields("").subdir)
 		run_in_engine(
-			self._worker, self._worker.engine.video.dirs_for(subdir),
-			self, self._open_source_dialog, self._show_error,
+			self._worker,
+			self._worker.engine.video.dirs_for(subdir),
+			self,
+			self._open_source_dialog,
+			self._show_error,
 		)
 
 	def _open_source_dialog(self, dirs: VideoDirs) -> None:
 		"""Открывает диалог исходника в действующей папке исходников."""
 		path = pick_file(
-			self, "Исходное видео",
+			self,
+			"Исходное видео",
 			"Видео (*.mp4 *.mov *.mkv *.avi *.webm);;Все файлы (*)",
 			start_dir=dirs.source,
 		)
@@ -392,37 +411,38 @@ class VideoPage(ScrollArea):
 		preset = self._preset_combo.selected()
 		fields = self._form.fields(preset.name if preset else _MANUAL_NAME)
 		kind, _value = parse_intro_source(fields.intro_source)
-		needs_choice = kind is IntroSourceKind.RANDOM_CHOICE and (
-			fields.intro or fields.cover
-		)
+		needs_choice = kind is IntroSourceKind.RANDOM_CHOICE and (fields.intro or fields.cover)
 		if not needs_choice:
 			self._start_prepare(source, fields, None)
 			return
 		dialog = FramePickerDialog(
-			self._worker, source, self.window(),
-			trim_start=fields.trim_start, trim_end=fields.trim_end,
+			self._worker,
+			source,
+			self.window(),
+			trim_start=fields.trim_start,
+			trim_end=fields.trim_end,
 		)
 		accepted = exec_dialog(dialog)
 		chosen = dialog.chosen_path()
 		if not accepted or chosen is None:
 			return
-		self._start_prepare(
-			source, fields, build_intro_source(IntroSourceKind.IMAGE, chosen)
-		)
+		self._start_prepare(source, fields, build_intro_source(IntroSourceKind.IMAGE, chosen))
 
-	def _start_prepare(
-		self, source: str, fields: PresetFields, intro_source: str | None
-	) -> None:
+	def _start_prepare(self, source: str, fields: PresetFields, intro_source: str | None) -> None:
 		"""Запускает обработку (с подменой источника кадра или без)."""
 		self._process_button.setEnabled(False)
 		self._progress.begin("Кодирование", "Анализ файла и подготовка кадра заставки…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.prepare(
-				source, fields, intro_source=intro_source,
+				source,
+				fields,
+				intro_source=intro_source,
 				on_progress=self._progress.emit_progress,
 			),
-			self, self._on_processed, self._show_error,
+			self,
+			self._on_processed,
+			self._show_error,
 		)
 
 	def _on_processed(self, output_path: str) -> None:
@@ -430,7 +450,8 @@ class VideoPage(ScrollArea):
 		self._hide_progress()
 		# всплывашка не переносит строки — длинное имя укорачиваем
 		InfoBar.success(
-			"Готово", text_preview(Path(output_path).name, _TOAST_NAME_CHARS),
+			"Готово",
+			text_preview(Path(output_path).name, _TOAST_NAME_CHARS),
 			parent=self,
 		)
 		self._reload_processed()
@@ -442,7 +463,9 @@ class VideoPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.list_processed(self._form.fields("").subdir),
-			self, self._show_processed, self._show_error,
+			self,
+			self._show_processed,
+			self._show_error,
 		)
 
 	def _show_processed(self, listing: ProcessedListing) -> None:
@@ -450,10 +473,12 @@ class VideoPage(ScrollArea):
 		self._processed_hint.setText(f"Папка: {listing.directory}")
 		clear_layout(self._result_box)
 		if not listing.items:
-			self._result_box.addWidget(CaptionLabel(
-				"Готовых видео пока нет — обработайте исходник кнопкой выше.",
-				self,
-			))
+			self._result_box.addWidget(
+				CaptionLabel(
+					"Готовых видео пока нет — обработайте исходник кнопкой выше.",
+					self,
+				)
+			)
 			return
 		for item in listing.items:
 			self._result_box.addWidget(self._processed_card(item))
@@ -463,9 +488,7 @@ class VideoPage(ScrollArea):
 		open_btn = PushButton(FluentIcon.PLAY, "Открыть", self)
 		open_btn.clicked.connect(bind(self._open_path, item.path))
 		folder_btn = PushButton(FluentIcon.FOLDER, "Показать в папке", self)
-		folder_btn.clicked.connect(
-			bind(self._open_path, str(Path(item.path).parent))
-		)
+		folder_btn.clicked.connect(bind(self._open_path, str(Path(item.path).parent)))
 		publish_btn = PrimaryPushButton(FluentIcon.SEND, "Опубликовать…", self)
 		publish_btn.clicked.connect(bind(self._request_publish, item.path))
 		buttons = QWidget(self)
@@ -473,12 +496,12 @@ class VideoPage(ScrollArea):
 		buttons_layout.setContentsMargins(0, 0, 0, 0)
 		for button in (open_btn, folder_btn, publish_btn):
 			buttons_layout.addWidget(button)
-		subtitle = (
-			f"{human_size(item.size_bytes)} · "
-			f"{item.modified_at.strftime('%d.%m.%Y %H:%M')}"
-		)
+		subtitle = f"{human_size(item.size_bytes)} · {item.modified_at.strftime('%d.%m.%Y %H:%M')}"
 		card: QWidget = row_card(
-			self, item.name, subtitle, trailing=buttons,
+			self,
+			item.name,
+			subtitle,
+			trailing=buttons,
 			on_delete=bind(self._on_delete_processed, item),
 		)
 		return card
@@ -494,7 +517,9 @@ class VideoPage(ScrollArea):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.delete_processed(item.path),
-			self, lambda *_a: self._reload_processed(), self._show_error,
+			self,
+			lambda *_a: self._reload_processed(),
+			self._show_error,
 		)
 
 	def _request_publish(self, path: str) -> None:

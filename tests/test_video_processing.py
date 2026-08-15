@@ -19,9 +19,7 @@ from pxcontrol.engine.video.frames import resolve_timestamp
 from pxcontrol.engine.video.pipeline import ProcessingOptions
 from pxcontrol.engine.video.probe import VideoInfo, _parse_fps
 
-WM = WatermarkOptions(
-	corner="tr", margin=24, opacity=1.0, scale=0.15, start=None, end=None
-)
+WM = WatermarkOptions(corner="tr", margin=24, opacity=1.0, scale=0.15, start=None, end=None)
 INFO = VideoInfo(width=1920, height=1080, duration=100.0, fps=25.0, has_audio=True)
 
 
@@ -42,10 +40,18 @@ def _options(**overrides: object) -> ProcessingOptions:
 def _build(**kwargs: object) -> object:
 	"""Хелпер: вызывает build_filter_complex со значениями по умолчанию."""
 	defaults: dict[str, object] = {
-		"fps": "25.00000", "width": 1920, "height": 1080, "duration": 100.0,
-		"hold": 1.0, "xfade": 0.5, "still_index": None,
-		"wm": None, "wm_index": None, "has_audio": False,
-		"fade_in": 0.0, "fade_out": 0.0,
+		"fps": "25.00000",
+		"width": 1920,
+		"height": 1080,
+		"duration": 100.0,
+		"hold": 1.0,
+		"xfade": 0.5,
+		"still_index": None,
+		"wm": None,
+		"wm_index": None,
+		"has_audio": False,
+		"fade_in": 0.0,
+		"fade_out": 0.0,
 	}
 	defaults.update(kwargs)
 	return build_filter_complex(**defaults)  # type: ignore[arg-type]
@@ -70,9 +76,7 @@ def test_overlay_position_unknown_corner_raises() -> None:
 
 def test_enable_expr_applies_offset() -> None:
 	"""Границы окна показа сдвигаются на длительность заставки."""
-	wm = WatermarkOptions(
-		corner="tr", margin=24, opacity=1.0, scale=0.15, start=2.0, end=5.0
-	)
+	wm = WatermarkOptions(corner="tr", margin=24, opacity=1.0, scale=0.15, start=2.0, end=5.0)
 	assert _enable_expr(wm, offset=1.0) == ":enable='between(t,3.000,6.000)'"
 	assert _enable_expr(WM, offset=0.0) == ""
 
@@ -142,8 +146,7 @@ def test_fit_pad_filter_letterboxes() -> None:
 	from pxcontrol.engine.video.frames import _fit_pad_filter
 
 	assert _fit_pad_filter(608, 1080) == (
-		"scale=608:1080:force_original_aspect_ratio=decrease,"
-		"pad=608:1080:(ow-iw)/2:(oh-ih)/2"
+		"scale=608:1080:force_original_aspect_ratio=decrease,pad=608:1080:(ow-iw)/2:(oh-ih)/2"
 	)
 
 
@@ -171,9 +174,7 @@ def test_watermark_window_offsets_to_absolute() -> None:
 	"""Отступы от краёв превращаются в абсолютное окно показа."""
 	from pxcontrol.engine.video.pipeline import _watermark_options
 
-	opts = _options(
-		watermark="/x/wm.png", wm_start_offset=3.0, wm_end_offset=10.0
-	)
+	opts = _options(watermark="/x/wm.png", wm_start_offset=3.0, wm_end_offset=10.0)
 	wm = _watermark_options(opts, INFO)  # длительность 100 с
 	assert wm.start == 3.0 and wm.end == 90.0
 	plain = _watermark_options(_options(watermark="/x/wm.png"), INFO)
@@ -194,8 +195,13 @@ def test_watermark_zero_offsets_mean_no_limit() -> None:
 def test_watermark_fade_adds_loop_and_fades() -> None:
 	"""Плавность: картинка зацикливается, fade по альфе на краях окна."""
 	wm = WatermarkOptions(
-		corner="tr", margin=24, opacity=0.8, scale=0.15,
-		start=2.0, end=5.0, fade=1.0,
+		corner="tr",
+		margin=24,
+		opacity=0.8,
+		scale=0.15,
+		start=2.0,
+		end=5.0,
+		fade=1.0,
 	)
 	graph = _build(wm=wm, wm_index=1)
 	assert "loop=loop=-1:size=1,fps=25.00000" in graph.filter_complex
@@ -222,14 +228,18 @@ def test_watermark_fade_must_fit_window() -> None:
 
 	opts = _options(
 		watermark="/x/wm.png",
-		wm_start_offset=45.0, wm_end_offset=45.0, wm_fade=6.0,  # окно 10 с < 12 с
+		wm_start_offset=45.0,
+		wm_end_offset=45.0,
+		wm_fade=6.0,  # окно 10 с < 12 с
 	)
 	with pytest.raises(ValueError, match="Плавность"):
 		_watermark_options(opts, INFO)
 	ok = _watermark_options(
 		_options(
 			watermark="/x/wm.png",
-			wm_start_offset=45.0, wm_end_offset=45.0, wm_fade=5.0,
+			wm_start_offset=45.0,
+			wm_end_offset=45.0,
+			wm_fade=5.0,
 		),
 		INFO,
 	)
@@ -242,7 +252,8 @@ def test_watermark_window_degenerate_raises() -> None:
 
 	opts = _options(
 		watermark="/x/wm.png",
-		wm_start_offset=60.0, wm_end_offset=50.0,  # 60 ≥ 100−50
+		wm_start_offset=60.0,
+		wm_end_offset=50.0,  # 60 ≥ 100−50
 	)
 	with pytest.raises(ValueError, match="не помещаются"):
 		_watermark_options(opts, INFO)
@@ -266,9 +277,7 @@ def test_fade_edges_video_and_audio() -> None:
 
 def test_fade_in_audio_starts_after_intro() -> None:
 	"""С заставкой звук сдвинут на hold — afade начинается вместе со звуком."""
-	graph = _build(
-		still_index=1, hold=1.0, fade_in=0.5, fade_out=0.0, has_audio=True
-	)
+	graph = _build(still_index=1, hold=1.0, fade_in=0.5, fade_out=0.0, has_audio=True)
 	assert "adelay=1000:all=1" in graph.filter_complex
 	# картинка появляется из чёрного с нуля (накрывает заставку)…
 	assert "fade=t=in:st=0:d=0.500" in graph.filter_complex
@@ -289,7 +298,8 @@ def test_fades_must_fit_duration(monkeypatch: pytest.MonkeyPatch) -> None:
 
 	launched: list[str] = []
 	monkeypatch.setattr(
-		pipeline, "run_streaming",
+		pipeline,
+		"run_streaming",
 		lambda cmd, what, total, cb: launched.append(what),
 	)
 	opts = _options(fade_in=60.0, fade_out=60.0)  # 120 с > 100 с
@@ -307,9 +317,7 @@ def test_trim_adds_input_seek_args() -> None:
 	from pxcontrol.engine.video.probe import trimmed_info
 
 	work = trimmed_info(INFO, 3.5, 1.5)  # 100 − 3.5 − 1.5 = 95
-	inputs, _wm, _still = _build_inputs(
-		_options(trim_start=3.5, trim_end=1.5), work, None
-	)
+	inputs, _wm, _still = _build_inputs(_options(trim_start=3.5, trim_end=1.5), work, None)
 	assert inputs[:5] == ["-ss", "3.500", "-t", "95.000", "-i"]
 	plain, _wm, _still = _build_inputs(_options(), INFO, None)
 	assert plain[:2] == ["-i", "a"]
@@ -339,23 +347,25 @@ def test_watermark_window_counts_from_trimmed() -> None:
 	work = trimmed_info(INFO, 10.0, 10.0)  # рабочая версия — 80 с
 	wm = _watermark_options(
 		_options(
-			watermark="/x/wm.png", trim_start=10.0, trim_end=10.0,
-			wm_start_offset=5.0, wm_end_offset=5.0,
+			watermark="/x/wm.png",
+			trim_start=10.0,
+			trim_end=10.0,
+			wm_start_offset=5.0,
+			wm_end_offset=5.0,
 		),
 		work,
 	)
 	assert wm.start == 5.0 and wm.end == 75.0  # 80 − 5, не 100 − 5
 
 
-def test_prepare_still_shifts_by_trim(
-	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_prepare_still_shifts_by_trim(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 	"""Кадр заставки: момент — от обрезанной версии, извлечение — из исходника."""
 	from pxcontrol.engine.video import frames
 
 	captured: list[float] = []
 	monkeypatch.setattr(
-		frames, "extract_still",
+		frames,
+		"extract_still",
 		lambda _src, ts, _out, _w, _h, _bin: captured.append(ts),
 	)
 	frames.prepare_still("in.mp4", "time:5", INFO, "out.png", start_offset=3.5)
@@ -364,9 +374,7 @@ def test_prepare_still_shifts_by_trim(
 	# своя картинка от обрезки не зависит (файл должен существовать)
 	image = tmp_path / "кадр.png"
 	image.write_bytes(b"png")
-	frames.prepare_still(
-		"in.mp4", f"image:{image}", INFO, "out.png", start_offset=3.5
-	)
+	frames.prepare_still("in.mp4", f"image:{image}", INFO, "out.png", start_offset=3.5)
 	assert captured == [0.0]
 
 
@@ -378,14 +386,26 @@ def test_assemble_command_meta_comment() -> None:
 	from pxcontrol.engine.video.pipeline import _assemble_command
 
 	with_meta = _assemble_command(
-		"ffmpeg", ["-i", "a.mp4"], "graph", "[v]", None, ["-crf", "20"],
-		"https://t.me/mych — канал", "out.mp4",
+		"ffmpeg",
+		["-i", "a.mp4"],
+		"graph",
+		"[v]",
+		None,
+		["-crf", "20"],
+		"https://t.me/mych — канал",
+		"out.mp4",
 	)
 	assert "-metadata" in with_meta
 	assert "comment=https://t.me/mych — канал" in with_meta
 	without = _assemble_command(
-		"ffmpeg", ["-i", "a.mp4"], "graph", "[v]", None, ["-crf", "20"],
-		None, "out.mp4",
+		"ffmpeg",
+		["-i", "a.mp4"],
+		"graph",
+		"[v]",
+		None,
+		["-crf", "20"],
+		None,
+		"out.mp4",
 	)
 	assert "-metadata" not in without
 
@@ -395,9 +415,7 @@ def test_attach_cover_moves_moov_to_front(monkeypatch: pytest.MonkeyPatch) -> No
 	from pxcontrol.engine.video import pipeline
 
 	captured: list[str] = []
-	monkeypatch.setattr(
-		pipeline, "run_tool", lambda cmd, what: captured.extend(cmd)
-	)
+	monkeypatch.setattr(pipeline, "run_tool", lambda cmd, what: captured.extend(cmd))
 	pipeline._attach_cover("ffmpeg", "main.mp4", "cover.png", "out.mp4")
 	assert "-movflags" in captured
 	assert captured[captured.index("-movflags") + 1] == "+faststart"
@@ -429,10 +447,14 @@ def test_error_summary_keeps_only_tail() -> None:
 	"""В текст ошибки попадает хвост журнала ffmpeg, а не весь дамп."""
 	from pxcontrol.engine.video.ffmpeg import _error_summary
 
-	dump = "\n".join([f"болтовня {i}" for i in range(50)] + [
-		"", "  Error opening input file /tmp/нет.png.  ",
-		"Error opening input files: No such file or directory",
-	])
+	dump = "\n".join(
+		[f"болтовня {i}" for i in range(50)]
+		+ [
+			"",
+			"  Error opening input file /tmp/нет.png.  ",
+			"Error opening input files: No such file or directory",
+		]
+	)
 	summary = _error_summary(dump)
 	assert "No such file or directory" in summary
 	assert "болтовня 5" not in summary  # начало дампа отрезано
@@ -453,9 +475,7 @@ def test_missing_intro_image_fails_before_ffmpeg(tmp_path: Path) -> None:
 	from pxcontrol.engine.video.frames import prepare_still
 
 	with pytest.raises(ValueError, match="Картинка для заставки не найдена"):
-		prepare_still(
-			"input.mp4", f"image:{tmp_path / 'нет.png'}", INFO, "out.png"
-		)
+		prepare_still("input.mp4", f"image:{tmp_path / 'нет.png'}", INFO, "out.png")
 
 
 def test_run_streaming_survives_chatty_stderr(tmp_path: Path) -> None:
@@ -466,12 +486,15 @@ def test_run_streaming_survives_chatty_stderr(tmp_path: Path) -> None:
 	"""
 	from pxcontrol.engine.video.ffmpeg import run_streaming
 
-	cmd = _fake_ffmpeg(tmp_path, (
-		"import sys\n"
-		"sys.stderr.write('предупреждение фильтра\\n' * 20000)\n"  # ~800 КБ
-		"sys.stderr.flush()\n"
-		"sys.stdout.write('out_time_us=1000000\\nout_time_us=2000000\\n')\n"
-	))
+	cmd = _fake_ffmpeg(
+		tmp_path,
+		(
+			"import sys\n"
+			"sys.stderr.write('предупреждение фильтра\\n' * 20000)\n"  # ~800 КБ
+			"sys.stderr.flush()\n"
+			"sys.stdout.write('out_time_us=1000000\\nout_time_us=2000000\\n')\n"
+		),
+	)
 	received: list[float] = []
 	run_streaming(cmd, "тест", total_seconds=2.0, on_progress=received.append)
 	assert received == [pytest.approx(0.5), pytest.approx(1.0)]
@@ -481,11 +504,10 @@ def test_run_streaming_reports_stderr_on_failure(tmp_path: Path) -> None:
 	"""Ненулевой код возврата — RuntimeError с текстом stderr."""
 	from pxcontrol.engine.video.ffmpeg import run_streaming
 
-	cmd = _fake_ffmpeg(tmp_path, (
-		"import sys\n"
-		"sys.stderr.write('битый вход: поток не распознан\\n')\n"
-		"sys.exit(1)\n"
-	))
+	cmd = _fake_ffmpeg(
+		tmp_path,
+		("import sys\nsys.stderr.write('битый вход: поток не распознан\\n')\nsys.exit(1)\n"),
+	)
 	with pytest.raises(RuntimeError, match="битый вход"):
 		run_streaming(cmd, "тест", total_seconds=1.0, on_progress=None)
 
@@ -520,16 +542,14 @@ def test_video_quality_args_modes() -> None:
 
 	def _info(kbps: int | None) -> VideoInfo:
 		return VideoInfo(
-			width=1920, height=1080, duration=10.0, fps=25.0,
-			has_audio=True, bitrate_kbps=kbps,
+			width=1920,
+			height=1080,
+			duration=10.0,
+			fps=25.0,
+			has_audio=True,
+			bitrate_kbps=kbps,
 		)
 
-	assert _video_quality_args(
-		_options(video_bitrate_kbps=3000), _info(1500)
-	) == ["-b:v", "3000k"]
-	assert _video_quality_args(
-		_options(video_bitrate_kbps=None), _info(1500)
-	) == ["-b:v", "1500k"]
-	assert _video_quality_args(
-		_options(video_bitrate_kbps=None), _info(None)
-	) == ["-crf", "20"]
+	assert _video_quality_args(_options(video_bitrate_kbps=3000), _info(1500)) == ["-b:v", "3000k"]
+	assert _video_quality_args(_options(video_bitrate_kbps=None), _info(1500)) == ["-b:v", "1500k"]
+	assert _video_quality_args(_options(video_bitrate_kbps=None), _info(None)) == ["-crf", "20"]

@@ -36,7 +36,4 @@ def user_message(exc: BaseException) -> str:
 	if len(first_line) > _DETAIL_CHARS:
 		first_line = f"{first_line[:_DETAIL_CHARS]}…"
 	detail = f": {first_line}" if first_line else ""
-	return (
-		f"Внутренняя ошибка ({type(exc).__name__}{detail}) — "
-		"подробности в логе приложения."
-	)
+	return f"Внутренняя ошибка ({type(exc).__name__}{detail}) — подробности в логе приложения."

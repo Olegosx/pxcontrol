@@ -33,8 +33,10 @@ from pxcontrol.ui.pages.common import pick_file
 
 #: Углы вотермарка: подпись → код (коды понимает движок, filtergraph).
 _CORNERS = [
-	("Правый верхний", "tr"), ("Левый верхний", "tl"),
-	("Правый нижний", "br"), ("Левый нижний", "bl"),
+	("Правый верхний", "tr"),
+	("Левый верхний", "tl"),
+	("Правый нижний", "br"),
+	("Левый нижний", "bl"),
 ]
 #: Источники кадра заставки: подпись → вид (протокол — в сервисе видео).
 _INTRO_SOURCES = [
@@ -86,17 +88,11 @@ class PresetForm(QWidget):
 		"""Раздел «Обрезка»: отрезаемые края; остальное считается от результата."""
 		card, box = self._card("Обрезка")
 		row = QHBoxLayout()
-		self._trim_start = self._dspin(
-			card, "0 — не резать", 0.0, 36000.0, 0.0, 0.1
-		)
+		self._trim_start = self._dspin(card, "0 — не резать", 0.0, 36000.0, 0.0, 0.1)
 		self._labeled(row, "Отрезать в начале, с:", self._trim_start)
-		self._trim_end = self._dspin(
-			card, "0 — не резать", 0.0, 36000.0, 0.0, 0.1
-		)
+		self._trim_end = self._dspin(card, "0 — не резать", 0.0, 36000.0, 0.0, 0.1)
 		self._labeled(row, "Отрезать в конце, с:", self._trim_end)
-		row.addWidget(CaptionLabel(
-			"остальные параметры — от обрезанной версии", card
-		))
+		row.addWidget(CaptionLabel("остальные параметры — от обрезанной версии", card))
 		row.addStretch()
 		box.addLayout(row)
 		return card
@@ -107,25 +103,19 @@ class PresetForm(QWidget):
 		row = QHBoxLayout()
 		self._fade_in_check = CheckBox("В начале, с:", card)
 		row.addWidget(self._fade_in_check)
-		self._fade_in = self._dspin(
-			card, "длительность появления из чёрного", 0.1, 30.0, 2.0, 0.1
-		)
+		self._fade_in = self._dspin(card, "длительность появления из чёрного", 0.1, 30.0, 2.0, 0.1)
 		self._fade_in.setEnabled(False)
 		self._fade_in_check.toggled.connect(self._fade_in.setEnabled)
 		row.addWidget(self._fade_in)
 		row.addSpacing(16)
 		self._fade_out_check = CheckBox("В конце, с:", card)
 		row.addWidget(self._fade_out_check)
-		self._fade_out = self._dspin(
-			card, "длительность ухода в чёрное", 0.1, 30.0, 2.0, 0.1
-		)
+		self._fade_out = self._dspin(card, "длительность ухода в чёрное", 0.1, 30.0, 2.0, 0.1)
 		self._fade_out.setEnabled(False)
 		self._fade_out_check.toggled.connect(self._fade_out.setEnabled)
 		row.addWidget(self._fade_out)
 		row.addSpacing(16)
-		row.addWidget(CaptionLabel(
-			"появление из чёрного / уход в чёрное; видео и звук", card
-		))
+		row.addWidget(CaptionLabel("появление из чёрного / уход в чёрное; видео и звук", card))
 		row.addStretch()
 		box.addLayout(row)
 		return card
@@ -309,12 +299,10 @@ class PresetForm(QWidget):
 			trim_start=round(float(self._trim_start.value()), 3),
 			trim_end=round(float(self._trim_end.value()), 3),
 			fade_in=(
-				round(float(self._fade_in.value()), 3)
-				if self._fade_in_check.isChecked() else 0.0
+				round(float(self._fade_in.value()), 3) if self._fade_in_check.isChecked() else 0.0
 			),
 			fade_out=(
-				round(float(self._fade_out.value()), 3)
-				if self._fade_out_check.isChecked() else 0.0
+				round(float(self._fade_out.value()), 3) if self._fade_out_check.isChecked() else 0.0
 			),
 			watermark_path=str(self._wm_path.text()).strip() or None,
 			wm_corner=_CORNERS[int(self._corner.currentIndex())][1],

@@ -17,6 +17,7 @@ Revision ID: c1a4b83f7e29
 Revises: d4a7c92f1b58
 Create Date: 2026-07-17
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -34,12 +35,16 @@ _CAPTION_TABLES = ("caption_fields", "caption_values", "caption_templates")
 def _timestamps(*, nullable: bool) -> list[sa.Column]:
 	return [
 		sa.Column(
-			"created_at", sa.DateTime(timezone=True),
-			server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=nullable,
+			"created_at",
+			sa.DateTime(timezone=True),
+			server_default=sa.text("(CURRENT_TIMESTAMP)"),
+			nullable=nullable,
 		),
 		sa.Column(
-			"updated_at", sa.DateTime(timezone=True),
-			server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=nullable,
+			"updated_at",
+			sa.DateTime(timezone=True),
+			server_default=sa.text("(CURRENT_TIMESTAMP)"),
+			nullable=nullable,
 		),
 	]
 
@@ -56,22 +61,24 @@ def _tables(*, strict: bool) -> dict[str, sa.Table]:
 		return sa.ForeignKey(target, ondelete=action if strict else None)
 
 	channels = sa.Table(
-		"channels", meta,
+		"channels",
+		meta,
 		sa.Column("id", sa.Integer(), primary_key=True),
 		sa.Column("title", sa.String(255), nullable=False),
 		sa.Column("tg_chat_id", sa.String(64), nullable=False, unique=True),
 		sa.Column("username", sa.String(255), nullable=True),
 		sa.Column("bot_id", sa.Integer(), fk("bots.id", "SET NULL"), nullable=True),
 		*_timestamps(nullable=False),
-		sa.Column(
-			"userbot_admin", sa.Boolean(), server_default="0", nullable=False
-		),
+		sa.Column("userbot_admin", sa.Boolean(), server_default="0", nullable=False),
 	)
 	caption_fields = sa.Table(
-		"caption_fields", meta,
+		"caption_fields",
+		meta,
 		sa.Column("id", sa.Integer(), primary_key=True),
 		sa.Column(
-			"channel_id", sa.Integer(), fk("channels.id", "CASCADE"),
+			"channel_id",
+			sa.Integer(),
+			fk("channels.id", "CASCADE"),
 			nullable=False,
 		),
 		sa.Column("name", sa.String(64), nullable=False),
@@ -80,20 +87,26 @@ def _tables(*, strict: bool) -> dict[str, sa.Table]:
 		*_timestamps(nullable=not strict),
 	)
 	caption_values = sa.Table(
-		"caption_values", meta,
+		"caption_values",
+		meta,
 		sa.Column("id", sa.Integer(), primary_key=True),
 		sa.Column(
-			"field_id", sa.Integer(), fk("caption_fields.id", "CASCADE"),
+			"field_id",
+			sa.Integer(),
+			fk("caption_fields.id", "CASCADE"),
 			nullable=False,
 		),
 		sa.Column("value", sa.String(128), nullable=False),
 		*_timestamps(nullable=not strict),
 	)
 	caption_templates = sa.Table(
-		"caption_templates", meta,
+		"caption_templates",
+		meta,
 		sa.Column("id", sa.Integer(), primary_key=True),
 		sa.Column(
-			"channel_id", sa.Integer(), fk("channels.id", "CASCADE"),
+			"channel_id",
+			sa.Integer(),
+			fk("channels.id", "CASCADE"),
 			nullable=False,
 		),
 		sa.Column("name", sa.String(64), nullable=False),
@@ -102,14 +115,19 @@ def _tables(*, strict: bool) -> dict[str, sa.Table]:
 		sa.Column("filename_pattern", sa.String(255), nullable=True),
 	)
 	caption_template_fields = sa.Table(
-		"caption_template_fields", meta,
+		"caption_template_fields",
+		meta,
 		sa.Column("id", sa.Integer(), primary_key=True),
 		sa.Column(
-			"template_id", sa.Integer(), fk("caption_templates.id", "CASCADE"),
+			"template_id",
+			sa.Integer(),
+			fk("caption_templates.id", "CASCADE"),
 			nullable=False,
 		),
 		sa.Column(
-			"field_id", sa.Integer(), fk("caption_fields.id", "CASCADE"),
+			"field_id",
+			sa.Integer(),
+			fk("caption_fields.id", "CASCADE"),
 			nullable=False,
 		),
 		sa.Column("position", sa.Integer(), nullable=False),
@@ -135,38 +153,40 @@ def _rebuild(*, strict: bool) -> None:
 def upgrade() -> None:
 	bind = op.get_bind()
 	# сироты времён «ключи не проверялись»: сперва родители, потом дети
-	bind.execute(sa.text(
-		"UPDATE channels SET bot_id = NULL WHERE bot_id IS NOT NULL "
-		"AND bot_id NOT IN (SELECT id FROM bots)"
-	))
-	bind.execute(sa.text(
-		"DELETE FROM channel_settings "
-		"WHERE channel_id NOT IN (SELECT id FROM channels)"
-	))
-	bind.execute(sa.text(
-		"DELETE FROM caption_templates "
-		"WHERE channel_id NOT IN (SELECT id FROM channels)"
-	))
-	bind.execute(sa.text(
-		"DELETE FROM caption_fields "
-		"WHERE channel_id NOT IN (SELECT id FROM channels)"
-	))
-	bind.execute(sa.text(
-		"DELETE FROM caption_values "
-		"WHERE field_id NOT IN (SELECT id FROM caption_fields)"
-	))
-	bind.execute(sa.text(
-		"DELETE FROM caption_template_fields "
-		"WHERE template_id NOT IN (SELECT id FROM caption_templates) "
-		"OR field_id NOT IN (SELECT id FROM caption_fields)"
-	))
+	bind.execute(
+		sa.text(
+			"UPDATE channels SET bot_id = NULL WHERE bot_id IS NOT NULL "
+			"AND bot_id NOT IN (SELECT id FROM bots)"
+		)
+	)
+	bind.execute(
+		sa.text("DELETE FROM channel_settings WHERE channel_id NOT IN (SELECT id FROM channels)")
+	)
+	bind.execute(
+		sa.text("DELETE FROM caption_templates WHERE channel_id NOT IN (SELECT id FROM channels)")
+	)
+	bind.execute(
+		sa.text("DELETE FROM caption_fields WHERE channel_id NOT IN (SELECT id FROM channels)")
+	)
+	bind.execute(
+		sa.text("DELETE FROM caption_values WHERE field_id NOT IN (SELECT id FROM caption_fields)")
+	)
+	bind.execute(
+		sa.text(
+			"DELETE FROM caption_template_fields "
+			"WHERE template_id NOT IN (SELECT id FROM caption_templates) "
+			"OR field_id NOT IN (SELECT id FROM caption_fields)"
+		)
+	)
 	# NULL в таймстемпах (записи мимо ORM) — заполнить перед NOT NULL
 	for table in _CAPTION_TABLES:
 		for column in ("created_at", "updated_at"):
-			bind.execute(sa.text(
-				f"UPDATE {table} SET {column} = CURRENT_TIMESTAMP "  # noqa: S608 — имена из констант
-				f"WHERE {column} IS NULL"
-			))
+			bind.execute(
+				sa.text(
+					f"UPDATE {table} SET {column} = CURRENT_TIMESTAMP "  # noqa: S608 — имена из констант
+					f"WHERE {column} IS NULL"
+				)
+			)
 	_rebuild(strict=True)
 
 

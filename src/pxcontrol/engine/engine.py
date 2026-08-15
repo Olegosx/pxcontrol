@@ -35,12 +35,12 @@ class Engine:
 		self.channels = ChannelsService(self.db, self.gateway, self.settings)
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
-		self.posts = PostsService(
-			self.db, self.gateway, self._ffmpeg_path, self.settings
-		)
+		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)
 		self.publish_queue = PublishQueue(self.posts)
 		self.video = VideoService(
-			self.db, self._ffmpeg_path, self.settings,
+			self.db,
+			self._ffmpeg_path,
+			self.settings,
 			userbot_premium=self.gateway.userbot_premium,
 		)
 		self.captions = CaptionsService(self.db, self._ffmpeg_path)
@@ -71,4 +71,3 @@ class Engine:
 		await self.gateway.stop()
 		await self.db.close()
 		logger.info("Движок остановлен.")
-
