@@ -42,6 +42,7 @@ from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatu
 from pxcontrol.engine.services.settings import PUBLISH_LAST_CHANNEL_ID, PUBLISH_TIMES
 from pxcontrol.engine.services.video import ReadyVideo, VideoDirs
 from pxcontrol.engine.telegram.types import MediaKind
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
@@ -215,7 +216,7 @@ class PublishPage(ScrollArea):
 		row.addStretch()
 		layout.addLayout(row)
 		self._queue_box = QVBoxLayout()
-		self._queue_box.setSpacing(8)
+		self._queue_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._queue_box)
 
 	# --- поведение -----------------------------------------------------------------

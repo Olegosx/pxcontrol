@@ -20,6 +20,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import AiKeyDto, BotDto, TgAccountDto
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	FormDialog,
@@ -52,7 +53,7 @@ class _Section(QWidget):
 		header.addWidget(add_button)
 		layout.addLayout(header)
 		self._rows = QVBoxLayout()
-		self._rows.setSpacing(8)
+		self._rows.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._rows)
 
 	def set_rows(self, rows: list[QWidget], empty_hint: str) -> None:
@@ -80,7 +81,7 @@ class AccountsPage(ScrollArea):
 
 	def _build(self) -> None:
 		"""Собирает три группы в прокручиваемом контейнере."""
-		layout = page_layout(self, spacing=24)
+		layout = page_layout(self, spacing=density.spacing().wide_spacing)
 		self._bots = _Section("Боты", self._on_add_bot, self)
 		self._accounts = _Section("Userbot (MTProto)", self._on_add_account, self)
 		self._keys = _Section("Ключи ИИ", self._on_add_key, self)

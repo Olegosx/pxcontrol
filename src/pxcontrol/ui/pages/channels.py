@@ -33,6 +33,7 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 )
 from pxcontrol.engine.services.video import PresetDto
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	TOAST_DURATION_MS,
@@ -233,7 +234,7 @@ class ChannelsPage(ScrollArea):
 		header.addWidget(connect_button)
 		layout.addLayout(header)
 		self._list = QVBoxLayout()
-		self._list.setSpacing(8)
+		self._list.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._list)
 		layout.addStretch()
 

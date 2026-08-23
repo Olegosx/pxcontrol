@@ -35,6 +35,7 @@ from pxcontrol.engine.services.video import (
 	build_intro_source,
 	parse_intro_source,
 )
+from pxcontrol.ui import density
 from pxcontrol.ui.pages.common import INPUT_DEBOUNCE_MS, debounced, pick_file
 
 #: Углы вотермарка: подпись → код (коды понимает движок, filtergraph).
@@ -108,8 +109,8 @@ class CollapsibleCard(CardWidget):
 		self._body = QWidget(self)
 		#: Компоновка тела — раздел добавляет сюда своё содержимое.
 		self.body = QVBoxLayout(self._body)
-		self.body.setContentsMargins(16, 0, 16, 12)
-		self.body.setSpacing(10)
+		self.body.setContentsMargins(*density.spacing().card_body_margins)
+		self.body.setSpacing(density.spacing().card_body_spacing)
 		outer.addWidget(self._body)
 		self._body.hide()
 
@@ -155,7 +156,7 @@ class PresetForm(QWidget):
 		self._suggest_guard = False  # различает программную запись и ручную правку
 		self._layout = QVBoxLayout(self)
 		self._layout.setContentsMargins(0, 0, 0, 0)
-		self._layout.setSpacing(12)
+		self._layout.setSpacing(density.spacing().row_spacing)
 		self._layout.addWidget(self._trim_card())
 		self._layout.addWidget(self._fade_card())
 		self._layout.addWidget(self._watermark_card())

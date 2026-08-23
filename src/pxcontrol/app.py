@@ -69,19 +69,44 @@ def _run_qt(worker: EngineWorker) -> int:
 	"""Создаёт Qt-приложение, показывает окно и крутит цикл событий."""
 	from PySide6.QtWidgets import QApplication  # ленивый импорт интерфейса
 
-	from pxcontrol.engine.services.settings import THEME_DARK
+	from pxcontrol.engine.services.settings import (
+		THEME_DARK,
+		UI_COMPACT_SPACING,
+		UI_CONTROL_HEIGHT,
+		UI_FONT_SIZE,
+	)
+	from pxcontrol.ui import density
 	from pxcontrol.ui.main_window import MainWindow
 	from pxcontrol.ui.theme import apply_theme
 
+	async def read_appearance() -> tuple[bool, bool, int, int]:
+		"""Тема и плотность одним заходом в цикл движка."""
+		settings = worker.engine.settings
+		return (
+			await settings.get(THEME_DARK),
+			await settings.get(UI_COMPACT_SPACING),
+			await settings.get(UI_CONTROL_HEIGHT),
+			await settings.get(UI_FONT_SIZE),
+		)
+
 	app = QApplication.instance() or QApplication([])
-	# сохранённая тема — до создания окна (движок уже готов, ожидание — мс);
-	# сбой чтения не валит запуск — откат к тёмной теме (умолчание ключа)
+	# сохранённое оформление — до создания окна (движок уже готов,
+	# ожидание — мс): тема красит виджеты на лету, а плотность (отступы,
+	# высота полей, шрифт) применима только до их создания. Сбой чтения
+	# не валит запуск — откат к умолчаниям ключей.
 	try:
-		dark = bool(worker.submit(worker.engine.settings.get(THEME_DARK)).result(timeout=5))
-	except Exception:  # noqa: BLE001 — тема не стоит отказа в запуске
-		logger.warning("Не удалось прочитать тему — использую умолчание.", exc_info=True)
+		dark, compact, control_height, font_size = worker.submit(read_appearance()).result(
+			timeout=5
+		)
+	except Exception:  # noqa: BLE001 — оформление не стоит отказа в запуске
+		logger.warning("Не удалось прочитать оформление — использую умолчания.", exc_info=True)
 		dark = THEME_DARK.default
+		compact = UI_COMPACT_SPACING.default
+		control_height = UI_CONTROL_HEIGHT.default
+		font_size = UI_FONT_SIZE.default
 	apply_theme(dark=dark)
+	density.init(compact, control_height, font_size)
+	density.apply_widget_metrics()
 	window = MainWindow(worker)
 	window.show()
 	logger.info("Интерфейс запущен.")

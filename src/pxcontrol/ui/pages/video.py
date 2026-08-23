@@ -55,6 +55,7 @@ from pxcontrol.engine.services.video_queue import (
 	VideoItemDto,
 	VideoItemStatus,
 )
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	INPUT_DEBOUNCE_MS,
@@ -153,7 +154,7 @@ class VideoPage(ScrollArea):
 		self._queue_summary.hide()
 		layout.addWidget(self._queue_summary)
 		self._queue_box = QVBoxLayout()
-		self._queue_box.setSpacing(8)
+		self._queue_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._queue_box)
 
 	def _build_processed_block(self, layout: QVBoxLayout) -> None:

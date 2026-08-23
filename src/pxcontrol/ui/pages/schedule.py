@@ -27,6 +27,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.posts import ScheduledPostDto
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import clear_layout, error_reporter, format_local, page_layout
 
@@ -78,10 +79,10 @@ class SchedulePage(ScrollArea):
 		)
 		layout.addWidget(hint)
 		self._filter_box = QHBoxLayout()
-		self._filter_box.setSpacing(12)
+		self._filter_box.setSpacing(density.spacing().row_spacing)
 		layout.addLayout(self._filter_box)
 		self._list = QVBoxLayout()
-		self._list.setSpacing(8)
+		self._list.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._list)
 		layout.addStretch()
 
@@ -166,7 +167,7 @@ class SchedulePage(ScrollArea):
 		"""
 		card = CardWidget(self)
 		box = QVBoxLayout(card)
-		box.setContentsMargins(16, 10, 16, 10)
+		box.setContentsMargins(*density.spacing().card_margins)
 		box.setSpacing(2)
 		when = StrongBodyLabel(format_local(item.scheduled_at), card)
 		when.setTextColor(themeColor(), themeColor())

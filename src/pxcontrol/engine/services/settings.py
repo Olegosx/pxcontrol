@@ -98,6 +98,22 @@ VIDEO_PUBLISHED_DIR: SettingKey[str] = SettingKey("video_published_dir", Setting
 #: Канал активен: участвует в публикации и опросе расписания.
 CHANNEL_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.CHANNEL, True, bool)
 
+#: Компактные отступы интерфейса. Читается один раз при запуске:
+#: вёрстка строится при старте, смена действует после перезапуска.
+UI_COMPACT_SPACING: SettingKey[bool] = SettingKey(
+	"ui_compact_spacing", SettingScope.APP, False, bool
+)
+
+#: Высота полей ввода и числовых регуляторов, пикс (штатная — 33).
+#: Тоже применяется при запуске; диапазон ограничивает интерфейс,
+#: движок дополнительно зажимает значение при чтении (ui/density.py).
+UI_CONTROL_HEIGHT: SettingKey[int] = SettingKey("ui_control_height", SettingScope.APP, 33, int)
+
+#: Базовый размер шрифта, пикс (штатный — 14); остальные размеры
+#: (мелкий 12, подзаголовки 20) масштабируются пропорционально.
+#: Применяется при запуске.
+UI_FONT_SIZE: SettingKey[int] = SettingKey("ui_font_size", SettingScope.APP, 14, int)
+
 
 class SettingsService:
 	"""Чтение и запись настроек приложения и каналов.

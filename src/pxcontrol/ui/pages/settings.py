@@ -1,12 +1,15 @@
 """Страница «Настройки»: категории слева, правка выбранной — справа.
 
-Категории: «Общие» (тема оформления, путь к ffmpeg), «Папки»
+Категории: «Общие» (оформление: тема, компактные отступы, высота
+полей, шрифт; путь к ffmpeg), «Папки»
 (базовые папки видео: исходники / результаты / опубликованные)
 и «Аккаунты» (боты, userbot, ключи ИИ — встроенная
 :class:`AccountsPage`).
 
 Значения общих настроек живут в ``app_settings`` (ADR-0013)
-и переживают перезапуск; тема применяется на лету.
+и переживают перезапуск; тема применяется на лету, плотность
+(отступы, высота полей, шрифт) — при следующем запуске: вёрстка
+строится один раз при старте (см. ui/density.py).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from qfluentwidgets import (
 	LineEdit,
 	ListWidget,
 	PushButton,
+	SpinBox,
 	SubtitleLabel,
 	SwitchButton,
 )
@@ -27,14 +31,25 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.settings import (
 	FFMPEG_PATH,
 	THEME_DARK,
+	UI_COMPACT_SPACING,
+	UI_CONTROL_HEIGHT,
+	UI_FONT_SIZE,
 	VIDEO_PROCESSED_DIR,
 	VIDEO_PUBLISHED_DIR,
 	VIDEO_SOURCE_DIR,
 	SettingKey,
 )
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.accounts import AccountsPage
-from pxcontrol.ui.pages.common import bind, error_reporter, noop, pick_dir
+from pxcontrol.ui.pages.common import (
+	INPUT_DEBOUNCE_MS,
+	bind,
+	debounced,
+	error_reporter,
+	noop,
+	pick_dir,
+)
 from pxcontrol.ui.theme import apply_theme
 
 #: Ширина списка категорий слева.
@@ -48,8 +63,9 @@ class SettingsPage(QWidget):
 		super().__init__(parent)
 		self.setObjectName("settings")
 		layout = QHBoxLayout(self)
-		layout.setContentsMargins(28, 24, 0, 0)
-		layout.setSpacing(16)
+		margins = density.spacing().page_margins
+		layout.setContentsMargins(margins[0], margins[1], 0, 0)
+		layout.setSpacing(density.spacing().block_spacing)
 		self._categories = ListWidget(self)
 		self._categories.setFixedWidth(_CATEGORIES_WIDTH)
 		self._stack = QStackedWidget(self)
@@ -81,8 +97,9 @@ class _GeneralSettings(QWidget):
 	def _build(self) -> None:
 		"""Собирает блоки «Оформление» и «Обработка видео»."""
 		layout = QVBoxLayout(self)
-		layout.setContentsMargins(0, 0, 28, 24)
-		layout.setSpacing(12)
+		margins = density.spacing().page_margins
+		layout.setContentsMargins(0, 0, margins[2], margins[3])
+		layout.setSpacing(density.spacing().row_spacing)
 		layout.addWidget(SubtitleLabel("Оформление", self))
 		theme_row = QHBoxLayout()
 		theme_row.addWidget(BodyLabel("Тёмная тема", self))
@@ -92,6 +109,39 @@ class _GeneralSettings(QWidget):
 		theme_row.addStretch()
 		theme_row.addWidget(self._theme_switch)
 		layout.addLayout(theme_row)
+		compact_row = QHBoxLayout()
+		compact_row.addWidget(BodyLabel("Компактные отступы", self))
+		self._compact_switch = SwitchButton(self)
+		self._compact_switch.checkedChanged.connect(self._on_compact_toggled)
+		compact_row.addStretch()
+		compact_row.addWidget(self._compact_switch)
+		layout.addLayout(compact_row)
+		size_row = QHBoxLayout()
+		size_row.addWidget(BodyLabel("Высота полей ввода, пикс:", self))
+		self._height_spin = SpinBox(self)
+		self._height_spin.setRange(*density.CONTROL_HEIGHT_RANGE)
+		self._height_spin.setValue(density.STOCK_CONTROL_HEIGHT)
+		# пауза после правки: стрелки регулятора кликают сериями
+		self._height_spin.valueChanged.connect(
+			debounced(self, INPUT_DEBOUNCE_MS, self._save_height)
+		)
+		size_row.addWidget(self._height_spin)
+		size_row.addSpacing(16)
+		size_row.addWidget(BodyLabel("Размер шрифта, пикс:", self))
+		self._font_spin = SpinBox(self)
+		self._font_spin.setRange(*density.FONT_SIZE_RANGE)
+		self._font_spin.setValue(density.STOCK_FONT_SIZE)
+		self._font_spin.valueChanged.connect(debounced(self, INPUT_DEBOUNCE_MS, self._save_font))
+		size_row.addWidget(self._font_spin)
+		size_row.addStretch()
+		layout.addLayout(size_row)
+		layout.addWidget(
+			CaptionLabel(
+				"Отступы, высота полей и шрифт применяются после перезапуска "
+				"приложения; тема — сразу.",
+				self,
+			)
+		)
 		layout.addSpacing(12)
 		layout.addWidget(SubtitleLabel("Обработка видео", self))
 		ffmpeg_row = QHBoxLayout()
@@ -128,6 +178,27 @@ class _GeneralSettings(QWidget):
 			self._ffmpeg_edit.setText,
 			noop,
 		)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get(UI_COMPACT_SPACING),
+			self,
+			self._show_compact,
+			noop,
+		)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get(UI_CONTROL_HEIGHT),
+			self,
+			self._show_height,
+			noop,
+		)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get(UI_FONT_SIZE),
+			self,
+			self._show_font,
+			noop,
+		)
 
 	def _show_theme(self, dark: bool) -> None:
 		"""Ставит переключатель без срабатывания сохранения."""
@@ -141,6 +212,57 @@ class _GeneralSettings(QWidget):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.set(THEME_DARK, dark),
+			self,
+			noop,
+			self._show_error,
+		)
+
+	def _show_compact(self, compact: bool) -> None:
+		"""Ставит переключатель отступов без срабатывания сохранения."""
+		self._compact_switch.blockSignals(True)
+		self._compact_switch.setChecked(compact)
+		self._compact_switch.blockSignals(False)
+
+	def _show_height(self, value: int) -> None:
+		"""Показывает сохранённую высоту полей без срабатывания сохранения."""
+		self._show_spin(self._height_spin, value)
+
+	def _show_font(self, value: int) -> None:
+		"""Показывает сохранённый размер шрифта без срабатывания сохранения."""
+		self._show_spin(self._font_spin, value)
+
+	@staticmethod
+	def _show_spin(spin: SpinBox, value: int) -> None:
+		"""Ставит значение регулятора без срабатывания сохранения."""
+		spin.blockSignals(True)
+		spin.setValue(value)
+		spin.blockSignals(False)
+
+	def _on_compact_toggled(self, compact: bool) -> None:
+		"""Сохраняет выбор отступов (подействует после перезапуска)."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set(UI_COMPACT_SPACING, compact),
+			self,
+			noop,
+			self._show_error,
+		)
+
+	def _save_height(self) -> None:
+		"""Сохраняет высоту полей ввода (подействует после перезапуска)."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set(UI_CONTROL_HEIGHT, int(self._height_spin.value())),
+			self,
+			noop,
+			self._show_error,
+		)
+
+	def _save_font(self) -> None:
+		"""Сохраняет размер шрифта (подействует после перезапуска)."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set(UI_FONT_SIZE, int(self._font_spin.value())),
 			self,
 			noop,
 			self._show_error,
@@ -193,8 +315,9 @@ class _FoldersSettings(QWidget):
 	def _build(self) -> None:
 		"""Три строки «подпись + путь + Обзор…» и одна кнопка сохранения."""
 		layout = QVBoxLayout(self)
-		layout.setContentsMargins(0, 0, 28, 24)
-		layout.setSpacing(12)
+		margins = density.spacing().page_margins
+		layout.setContentsMargins(0, 0, margins[2], margins[3])
+		layout.setSpacing(density.spacing().row_spacing)
 		layout.addWidget(SubtitleLabel("Папки видео", self))
 		for label, key, default_hint in _VIDEO_FOLDERS:
 			row = QHBoxLayout()

@@ -36,13 +36,12 @@ from qfluentwidgets import (
 	TransparentToolButton,
 )
 
+from pxcontrol.ui import density
+
 _T = TypeVar("_T")
 
 #: Длительность всплывающих плашек с ошибками/предупреждениями (мс).
 TOAST_DURATION_MS = 6000
-
-#: Отступы содержимого страницы от краёв окна (слева, сверху, справа, снизу).
-PAGE_MARGINS = (28, 24, 28, 24)
 
 #: Пауза после последнего нажатия клавиши до реакции на ввод (мс):
 #: достаточно, чтобы не дёргать движок/диск на каждый символ, и незаметно
@@ -100,21 +99,22 @@ def bind(action: Callable[[_T], None], item: _T) -> Callable[[], None]:
 	return handler
 
 
-def page_layout(page: ScrollArea, spacing: int = 16) -> QVBoxLayout:
+def page_layout(page: ScrollArea, spacing: int | None = None) -> QVBoxLayout:
 	"""Каркас прокручиваемой страницы: контейнер с едиными отступами.
 
 	Одна сборка вместо одинаковых семи строк на каждой странице:
-	контейнер, отступы :data:`PAGE_MARGINS`, интервал между блоками,
-	растяжение по ширине и прозрачный фон (после ``setWidget`` —
-	иначе фон контейнера не перекрашивается).
+	контейнер, поля страницы и интервал блоков из :mod:`density`
+	(None — обычный интервал блоков), растяжение по ширине
+	и прозрачный фон (после ``setWidget`` — иначе фон контейнера
+	не перекрашивается).
 
 	Returns:
 		Компоновка контейнера — страница добавляет в неё содержимое.
 	"""
 	container = QWidget(page)
 	layout = QVBoxLayout(container)
-	layout.setContentsMargins(*PAGE_MARGINS)
-	layout.setSpacing(spacing)
+	layout.setContentsMargins(*density.spacing().page_margins)
+	layout.setSpacing(spacing if spacing is not None else density.spacing().block_spacing)
 	page.setWidget(container)
 	page.setWidgetResizable(True)
 	page.enableTransparentBackground()
@@ -225,7 +225,7 @@ def row_card(
 	"""
 	card = CardWidget(parent)
 	layout = QHBoxLayout(card)
-	layout.setContentsMargins(16, 10, 10, 10)
+	layout.setContentsMargins(*density.spacing().card_margins)
 	column = QVBoxLayout()
 	column.setSpacing(2)
 	# перенос строк: длинный текст (имя файла и т.п.) не должен
