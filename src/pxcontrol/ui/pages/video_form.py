@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from collections.abc import Callable
+from pathlib import Path
+
+from PySide6.QtCore import QSize, Qt, Signal, SignalInstance
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
@@ -48,6 +51,11 @@ _INTRO_SOURCES = [
 	("Момент времени (сек)", IntroSourceKind.TIME),
 	("Своя картинка (PNG)", IntroSourceKind.IMAGE),
 ]
+
+
+def _fmt_num(value: float) -> str:
+	"""Число для сводки: без хвостовых нулей, запятая по-русски."""
+	return f"{value:g}".replace(".", ",")
 
 
 class _CardHeader(QWidget):
@@ -89,6 +97,12 @@ class CollapsibleCard(CardWidget):
 		head_row.setSpacing(8)
 		head_row.addWidget(self._chevron)
 		head_row.addWidget(StrongBodyLabel(title, header))
+		self._summary_text = ""
+		self._summary = CaptionLabel("", header)
+		self._summary.setTextColor("#5f5f5f", "#9c9c9c")
+		# сводка занимает остаток шапки и обрезается, а не распирает форму
+		self._summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		head_row.addWidget(self._summary, stretch=1)
 		head_row.addStretch()
 		outer.addWidget(header)
 		self._body = QWidget(self)
@@ -108,6 +122,20 @@ class CollapsibleCard(CardWidget):
 		self._body.setVisible(expanded)
 		icon = FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED
 		self._chevron.setIcon(icon)
+		self._refresh_summary()
+
+	def set_summary(self, text: str) -> None:
+		"""Сводка значений для шапки; видна только у свёрнутой карточки.
+
+		У развёрнутой сводка дублировала бы поля прямо под шапкой —
+		поэтому прячется.
+		"""
+		self._summary_text = text
+		self._refresh_summary()
+
+	def _refresh_summary(self) -> None:
+		self._summary.setText(self._summary_text)
+		self._summary.setVisible(bool(self._summary_text) and not self._body.isVisible())
 
 
 class PresetForm(QWidget):
@@ -142,6 +170,22 @@ class PresetForm(QWidget):
 		card = CollapsibleCard(title, self)
 		return card, card.body
 
+	def _bind_summary(
+		self, card: CollapsibleCard, make: Callable[[], str], *signals: SignalInstance
+	) -> None:
+		"""Сводка карточки: пересчёт по сигналам полей и сразу при сборке.
+
+		Загрузка пресета (``fill``) отдельного пересчёта не требует:
+		она пишет в виджеты, а те излучают перечисленные сигналы сами.
+		"""
+
+		def refresh(*_args: object) -> None:
+			card.set_summary(make())
+
+		for signal in signals:
+			signal.connect(refresh)
+		refresh()
+
 	@staticmethod
 	def _labeled(row: QHBoxLayout, text: str, widget: QWidget) -> None:
 		"""Пара «подпись: контрол» в строке (с отступом после)."""
@@ -160,6 +204,9 @@ class PresetForm(QWidget):
 		row.addWidget(CaptionLabel("остальные параметры — от обрезанной версии", card))
 		row.addStretch()
 		box.addLayout(row)
+		self._bind_summary(
+			card, self._trim_summary, self._trim_start.valueChanged, self._trim_end.valueChanged
+		)
 		return card
 
 	def _fade_card(self) -> CardWidget:
@@ -183,6 +230,14 @@ class PresetForm(QWidget):
 		row.addWidget(CaptionLabel("появление из чёрного / уход в чёрное; видео и звук", card))
 		row.addStretch()
 		box.addLayout(row)
+		self._bind_summary(
+			card,
+			self._fade_summary,
+			self._fade_in_check.toggled,
+			self._fade_out_check.toggled,
+			self._fade_in.valueChanged,
+			self._fade_out.valueChanged,
+		)
 		return card
 
 	def _watermark_card(self) -> CardWidget:
@@ -211,6 +266,15 @@ class PresetForm(QWidget):
 		look.addStretch()
 		box.addLayout(look)
 		box.addLayout(self._watermark_window_row(card))
+		self._bind_summary(
+			card,
+			self._watermark_summary,
+			self._wm_path.textChanged,
+			self._corner.currentIndexChanged,
+			self._wm_start.valueChanged,
+			self._wm_end.valueChanged,
+			self._wm_fade.valueChanged,
+		)
 		return card
 
 	def _watermark_window_row(self, card: CardWidget) -> QHBoxLayout:
@@ -249,6 +313,13 @@ class PresetForm(QWidget):
 		box.addLayout(src_row)
 		self._intro.checkedChanged.connect(self._toggle_intro_controls)
 		self._toggle_intro_controls(False)
+		self._bind_summary(
+			card,
+			self._intro_summary,
+			self._intro.checkedChanged,
+			self._intro_kind.currentIndexChanged,
+			self._hold.valueChanged,
+		)
 		return card
 
 	def _toggle_intro_controls(self, enabled: bool) -> None:
@@ -296,6 +367,14 @@ class PresetForm(QWidget):
 		)
 		subdir_row.addWidget(self._subdir, stretch=1)
 		box.addLayout(subdir_row)
+		self._bind_summary(
+			card,
+			self._output_summary,
+			self._bitrate.valueChanged,
+			self._cover.checkedChanged,
+			self._no_audio.checkedChanged,
+			self._subdir.textChanged,
+		)
 		return card
 
 	def _spin(self, card: QWidget, tip: str, lo: int, hi: int, val: int) -> SpinBox:
@@ -322,6 +401,59 @@ class PresetForm(QWidget):
 		path = pick_file(self, "Файл вотермарка", "Изображения (*.png)")
 		if path:
 			self._wm_path.setText(path)
+
+	# --- сводки для шапок карточек ----------------------------------------------
+
+	def _trim_summary(self) -> str:
+		"""«Обрезка»: отрезаемые края или «выкл»."""
+		parts: list[str] = []
+		if float(self._trim_start.value()) > 0:
+			parts.append(f"в начале {_fmt_num(float(self._trim_start.value()))} с")
+		if float(self._trim_end.value()) > 0:
+			parts.append(f"в конце {_fmt_num(float(self._trim_end.value()))} с")
+		return ", ".join(parts) or "выкл"
+
+	def _fade_summary(self) -> str:
+		"""«Затухание»: включённые края с длительностью или «выкл»."""
+		parts: list[str] = []
+		if self._fade_in_check.isChecked():
+			parts.append(f"в начале {_fmt_num(float(self._fade_in.value()))} с")
+		if self._fade_out_check.isChecked():
+			parts.append(f"в конце {_fmt_num(float(self._fade_out.value()))} с")
+		return ", ".join(parts) or "выкл"
+
+	def _watermark_summary(self) -> str:
+		"""«Вотермарк»: имя файла, угол и особенности показа — или «выкл»."""
+		path = str(self._wm_path.text()).strip()
+		if not path:
+			return "выкл"
+		corner = _CORNERS[int(self._corner.currentIndex())][0].lower()
+		parts = [Path(path).name, corner]
+		if float(self._wm_start.value()) > 0 or float(self._wm_end.value()) > 0:
+			parts.append("окно показа")
+		if float(self._wm_fade.value()) > 0:
+			parts.append("плавно")
+		return ", ".join(parts)
+
+	def _intro_summary(self) -> str:
+		"""«Кадр для превью»: источник кадра и длительность — или «выкл»."""
+		if not self._intro.isChecked():
+			return "выкл"
+		source = _INTRO_SOURCES[int(self._intro_kind.currentIndex())][0].lower()
+		return f"{source}, держать {_fmt_num(float(self._hold.value()))} с"
+
+	def _output_summary(self) -> str:
+		"""«Вывод»: битрейт и включённые особенности (всегда непустая)."""
+		mbps = float(self._bitrate.value())
+		parts = [f"{_fmt_num(mbps)} Мбит/с" if mbps > 0 else "битрейт исходника"]
+		if self._cover.isChecked():
+			parts.append("обложка")
+		if self._no_audio.isChecked():
+			parts.append("без звука")
+		subdir = str(self._subdir.text()).strip()
+		if subdir:
+			parts.append(f"подпапка «{subdir}»")
+		return ", ".join(parts)
 
 	# --- значения ---------------------------------------------------------------
 
