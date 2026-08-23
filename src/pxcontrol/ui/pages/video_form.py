@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
@@ -16,11 +17,13 @@ from qfluentwidgets import (
 	CheckBox,
 	ComboBox,
 	DoubleSpinBox,
+	FluentIcon,
 	LineEdit,
 	PushButton,
 	SpinBox,
 	StrongBodyLabel,
 	SwitchButton,
+	TransparentToolButton,
 )
 
 from pxcontrol.engine.services.video import (
@@ -45,6 +48,66 @@ _INTRO_SOURCES = [
 	("Момент времени (сек)", IntroSourceKind.TIME),
 	("Своя картинка (PNG)", IntroSourceKind.IMAGE),
 ]
+
+
+class _CardHeader(QWidget):
+	"""Шапка сворачиваемой карточки: ловит клик по всей своей площади."""
+
+	clicked = Signal()
+
+	def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
+		"""Левый клик в любом месте шапки — сигнал о сворачивании."""
+		if event.button() == Qt.MouseButton.LeftButton:
+			self.clicked.emit()
+		super().mouseReleaseEvent(event)
+
+
+class CollapsibleCard(CardWidget):
+	"""Карточка-раздел, сворачиваемая кликом по шапке.
+
+	Разделы параметров свёрнуты по умолчанию: форма занимает несколько
+	строк вместо целого экрана (параметры обычно приходят из пресета
+	и правятся редко). Свёрнутость — только про показ: виджеты скрытого
+	тела сохраняют значения, и :meth:`PresetForm.fields` читает их
+	как обычно.
+	"""
+
+	def __init__(self, title: str, parent: QWidget) -> None:
+		super().__init__(parent)
+		outer = QVBoxLayout(self)
+		outer.setContentsMargins(0, 0, 0, 0)
+		outer.setSpacing(0)
+		self._chevron = TransparentToolButton(FluentIcon.CHEVRON_RIGHT_MED, self)
+		self._chevron.setFixedSize(24, 24)
+		self._chevron.setIconSize(QSize(12, 12))
+		self._chevron.clicked.connect(self.toggle)
+		header = _CardHeader(self)
+		header.setCursor(Qt.CursorShape.PointingHandCursor)
+		header.clicked.connect(self.toggle)
+		head_row = QHBoxLayout(header)
+		head_row.setContentsMargins(12, 8, 16, 8)
+		head_row.setSpacing(8)
+		head_row.addWidget(self._chevron)
+		head_row.addWidget(StrongBodyLabel(title, header))
+		head_row.addStretch()
+		outer.addWidget(header)
+		self._body = QWidget(self)
+		#: Компоновка тела — раздел добавляет сюда своё содержимое.
+		self.body = QVBoxLayout(self._body)
+		self.body.setContentsMargins(16, 0, 16, 12)
+		self.body.setSpacing(10)
+		outer.addWidget(self._body)
+		self._body.hide()
+
+	def toggle(self) -> None:
+		"""Разворачивает свёрнутое и наоборот (клик по шапке или стрелке)."""
+		self.set_expanded(not self._body.isVisible())
+
+	def set_expanded(self, expanded: bool) -> None:
+		"""Показывает или прячет тело; стрелка отражает состояние."""
+		self._body.setVisible(expanded)
+		icon = FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED
+		self._chevron.setIcon(icon)
 
 
 class PresetForm(QWidget):
@@ -74,14 +137,10 @@ class PresetForm(QWidget):
 
 	# --- сборка ----------------------------------------------------------------
 
-	def _card(self, title: str) -> tuple[CardWidget, QVBoxLayout]:
-		"""Карточка-раздел с подзаголовком."""
-		card = CardWidget(self)
-		box = QVBoxLayout(card)
-		box.setContentsMargins(16, 12, 16, 12)
-		box.setSpacing(10)
-		box.addWidget(StrongBodyLabel(title, card))
-		return card, box
+	def _card(self, title: str) -> tuple[CollapsibleCard, QVBoxLayout]:
+		"""Сворачиваемая карточка-раздел; тело — компоновка содержимого."""
+		card = CollapsibleCard(title, self)
+		return card, card.body
 
 	@staticmethod
 	def _labeled(row: QHBoxLayout, text: str, widget: QWidget) -> None:
