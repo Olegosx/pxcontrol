@@ -1,14 +1,16 @@
-"""Страница «Видео»: панель параметров обработки и очередь подготовки.
+"""Страница «Видео»: список файлов с параметрами и очередь подготовки.
 
-Параметры живут прямо на странице: «Обработать» применяет то, что на
-экране, ничего не сохраняя. Пресет — «загрузчик»: выбор в списке
-заполняет панель (:mod:`video_form`), сохранение — только по явным
-кнопкам. Обработка — и одиночная, и пакетная («Обработать папку…»,
-диалог :mod:`video_batch`) — идёт через очередь движка (ADR-0014):
-кнопки ставят элементы в хвост, карточки очереди видны на странице.
-Результат — файл в папке результатов; кнопка «Опубликовать…» передаёт
-его странице «Публикация» (контракт — путь к файлу). Выбор кадра
-заставки — отдельный диалог (:mod:`frame_picker`).
+Источник — две равнозначные кнопки: «Добавить файл…» (каждый выбор
+добавляет карточку в список) и «Добавить папку…» (диалог сканирования
+:mod:`video_batch`; отмеченные становятся карточками пакета). У каждого
+файла — своя карточка параметров, заполненная из карточки-шаблона
+«Файл не выбран» в момент добавления; шаблон правится всегда и служит
+пресетам («загрузчик»: выбор пресета заполняет шаблон, сохранение —
+по явным кнопкам). «Обработать» ставит весь список в очередь движка
+(ADR-0014) — каждый файл со своими параметрами; карточки очереди видны
+на странице. Результат — файл в папке результатов; кнопка
+«Опубликовать…» передаёт его странице «Публикация» (контракт — путь
+к файлу). Выбор кадра заставки — отдельный диалог (:mod:`frame_picker`).
 """
 
 from __future__ import annotations
@@ -26,13 +28,12 @@ from qfluentwidgets import (
 	CardWidget,
 	FluentIcon,
 	InfoBar,
-	LineEdit,
 	PrimaryPushButton,
 	ProgressBar,
 	PushButton,
 	ScrollArea,
 	SubtitleLabel,
-	ToolButton,
+	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -58,13 +59,11 @@ from pxcontrol.engine.services.video_queue import (
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	INPUT_DEBOUNCE_MS,
 	DtoComboBox,
 	FormDialog,
 	bind,
 	clear_layout,
 	confirm_delete,
-	debounced,
 	exec_dialog,
 	format_local,
 	human_size,
@@ -77,7 +76,7 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.frame_picker import FramePickerDialog
 from pxcontrol.ui.pages.video_batch import BatchScanDialog
-from pxcontrol.ui.pages.video_form import PresetForm
+from pxcontrol.ui.pages.video_form import CollapsibleCard, PresetForm
 
 #: Имя «пресета» в имени файла результата, когда пресет не выбран.
 _MANUAL_NAME = "ручные"
@@ -87,6 +86,59 @@ _QUEUE_POLL_MS = 500
 
 #: Сколько ждать копирования выбранного кадра в папку очереди (сек).
 _STASH_TIMEOUT_S = 10.0
+
+
+class _AbortRun(Exception):  # noqa: N818 — служебный сигнал, не ошибка
+	"""Служебный сигнал прохода выбора кадров: отменить постановку целиком."""
+
+
+class _FileEntry:
+	"""Карточка файла в списке подготовки: шапка + свои параметры.
+
+	Шапка — имя и размер файла, пометки (пакет, авто-битрейт) и кнопки
+	«посмотреть» / «убрать из списка»; тело — собственная панель
+	параметров (:class:`PresetForm`), заполненная из шаблона в момент
+	добавления и правимая независимо.
+	"""
+
+	def __init__(
+		self,
+		page: VideoPage,
+		path: str,
+		size_bytes: int,
+		batch: str,
+		preset_name: str,
+	) -> None:
+		self.path = path
+		self.batch = batch  # подпапка пакета («» — одиночное добавление)
+		self.preset_name = preset_name  # имя параметров на момент добавления
+		self.advice_note = ""  # пометка авто-битрейта (после совета движка)
+		trailing = QWidget()
+		buttons = QHBoxLayout(trailing)
+		buttons.setContentsMargins(0, 0, 0, 0)
+		buttons.setSpacing(4)
+		play = TransparentToolButton(FluentIcon.PLAY, trailing)
+		play.setToolTip("Посмотреть файл (системный плеер)")
+		play.clicked.connect(bind(page._open_path, path))  # noqa: SLF001 — внутренний класс страницы
+		buttons.addWidget(play)
+		remove = TransparentToolButton(FluentIcon.DELETE, trailing)
+		remove.setToolTip("Убрать из списка (файл на диске не трогается)")
+		remove.clicked.connect(bind(page._remove_entry, self))  # noqa: SLF001
+		buttons.addWidget(remove)
+		title = f"{Path(path).name} — {human_size(size_bytes)}"
+		self.card = CollapsibleCard(title, page, trailing=trailing)
+		self.form = PresetForm(page)
+		self.card.body.addWidget(self.form)
+		self.refresh_summary()
+
+	def refresh_summary(self) -> None:
+		"""Сводка шапки: пакет и пометка авто-битрейта (видна у свёрнутой)."""
+		parts = []
+		if self.batch:
+			parts.append(f"пакет «{self.batch}»")
+		if self.advice_note:
+			parts.append(self.advice_note)
+		self.card.set_summary(" · ".join(parts))
 
 
 class VideoPage(ScrollArea):
@@ -105,6 +157,7 @@ class VideoPage(ScrollArea):
 		self._queue_busy = False
 		self._handled_ids: set[int] = set()  # завершённые, уже учтённые
 		self._session_done = 0  # готовых с последней итоговой плашки
+		self._entries: list[_FileEntry] = []  # карточки файлов к обработке
 		self._build()
 		self._reload_presets()
 		# опрос очереди живёт всегда (не только при видимой странице):
@@ -133,20 +186,36 @@ class VideoPage(ScrollArea):
 		self._build_channel_row(layout)
 		self._build_preset_row(layout)
 		layout.addSpacing(8)
-		layout.addWidget(SubtitleLabel("Параметры обработки", self))
+		layout.addWidget(SubtitleLabel("Файлы и параметры обработки", self))
 		layout.addWidget(
 			CaptionLabel(
-				"К видео применяется то, что на экране; пресет — только "
-				"загрузка и сохранение набора.",
+				"«Файл не выбран» — шаблон: его параметры получают добавляемые "
+				"файлы, пресеты загружаются и сохраняются из него. Параметры "
+				"каждого файла правятся в его карточке.",
 				self,
 			)
 		)
-		self._form = PresetForm(self)
-		layout.addWidget(self._form)
+		self._build_template_card(layout)
+		self._files_box = QVBoxLayout()
+		self._files_box.setSpacing(density.spacing().list_spacing)
+		layout.addLayout(self._files_box)
 		self._build_process_row(layout)
 		self._build_queue_block(layout)
 		self._build_processed_block(layout)
 		layout.addStretch()
+
+	def _build_template_card(self, layout: QVBoxLayout) -> None:
+		"""Карточка-шаблон «Файл не выбран»: параметры без файла.
+
+		Живёт всегда (первой): без неё нельзя было бы править и сохранять
+		пресеты, пока файлы не добавлены, а с файлами она задаёт параметры
+		новых добавлений.
+		"""
+		self._template_card = CollapsibleCard("Файл не выбран", self)
+		self._template_card.set_summary("шаблон параметров для добавляемых файлов")
+		self._form = PresetForm(self)
+		self._template_card.body.addWidget(self._form)
+		layout.addWidget(self._template_card)
 
 	def _build_queue_block(self, layout: QVBoxLayout) -> None:
 		"""Панель очереди обработки: итоговая строка и карточки элементов."""
@@ -170,81 +239,25 @@ class VideoPage(ScrollArea):
 		self._form.subdir_changed.connect(self._reload_processed)
 
 	def _build_source_row(self, layout: QVBoxLayout) -> None:
-		"""Строка исходника: файл ИЛИ папка — выбор источника в одном месте.
+		"""Источник: две равнозначные кнопки — файл или папка.
 
-		«Обзор…» и просмотр — про одиночный файл; «Обработать папку…» —
-		альтернативный источник (пакет): рядом, потому что это выбор
-		«что обрабатываем», а не действие запуска.
+		Каждый выбранный файл добавляется карточкой в список (не заменяет
+		прежний); папка добавляет пачку через диалог сканирования.
 		"""
 		src_row = QHBoxLayout()
-		self._source = LineEdit(self)
-		self._source.setPlaceholderText("Исходный видеофайл…")
-		# после паузы ввода: промежуточная строка, совпавшая с файлом,
-		# запускала бы ffprobe (рекомендация битрейта) на каждый символ
-		self._source.textChanged.connect(
-			debounced(self, INPUT_DEBOUNCE_MS, self._on_source_changed)
+		add_file = PushButton(FluentIcon.VIDEO, "Добавить файл…", self)
+		add_file.setToolTip("Выбрать видеофайл — он добавится карточкой в список ниже")
+		add_file.clicked.connect(self._add_file)
+		src_row.addWidget(add_file)
+		add_folder = PushButton(FluentIcon.FOLDER, "Добавить папку…", self)
+		add_folder.setToolTip(
+			"Рекурсивно найти видео в папке и добавить выбранные в список "
+			"(результаты пакета — в его подпапке)"
 		)
-		browse = PushButton("Обзор…", self)
-		browse.clicked.connect(self._pick_source)
-		self._play_button = ToolButton(FluentIcon.PLAY, self)
-		self._play_button.setToolTip("Посмотреть выбранный файл (системный плеер)")
-		self._play_button.setEnabled(False)  # активируется выбором файла
-		self._play_button.clicked.connect(self._play_source)
-		batch_button = PushButton(FluentIcon.FOLDER, "Обработать папку…", self)
-		batch_button.setToolTip(
-			"Вместо одного файла: рекурсивно найти видео в папке и обработать "
-			"выбранные текущими параметрами (пакет — в свою подпапку результатов)"
-		)
-		batch_button.clicked.connect(self._on_batch)
-		src_row.addWidget(self._source)
-		src_row.addWidget(browse)
-		src_row.addWidget(self._play_button)
-		src_row.addWidget(batch_button)
+		add_folder.clicked.connect(self._add_folder)
+		src_row.addWidget(add_folder)
+		src_row.addStretch()
 		layout.addLayout(src_row)
-
-	def _on_source_changed(self) -> None:
-		"""Реакция на выбор исходника: просмотр и рекомендация битрейта.
-
-		Просмотр доступен, только когда путь указывает на существующий
-		файл. Для файла больше лимита Telegram движок считает
-		рекомендуемый битрейт (размер итога — лимит минус 1 %).
-		Вызывается после паузы ввода (см. подключение сигнала).
-		"""
-		path = str(self._source.text()).strip()
-		is_file = Path(path).is_file()
-		self._play_button.setEnabled(is_file)
-		if not is_file:
-			return
-		fields = self._form.fields("")
-		run_in_engine(
-			self._worker,
-			self._worker.engine.video.bitrate_advice(path, fields.trim_start, fields.trim_end),
-			self,
-			self._on_bitrate_advice,
-			self._show_error,
-		)
-
-	def _on_bitrate_advice(self, advice: BitrateAdvice | None) -> None:
-		"""Подставляет рекомендованный битрейт или снимает ненужный.
-
-		None — файл в лимите (или не читается): прежняя автоподстановка
-		сбрасывается в «0», иначе рекомендация от предыдущего файла
-		молча ушла бы в кодирование нового.
-		"""
-		if advice is None:
-			self._form.clear_suggested_bitrate()
-			return
-		if self._form.suggest_bitrate(advice.mbps):
-			InfoBar.info(
-				"Исходник больше лимита Telegram",
-				f"Лимит {advice.limit_gb} ГБ — в «Качество» подставлено "
-				f"{advice.mbps:g} Мбит/с (итог: лимит минус 1 %).",
-				parent=self,  # сообщение относится к странице, как остальные её плашки
-			)
-
-	def _play_source(self) -> None:
-		"""Открывает исходник системным плеером (встроенного пока нет)."""
-		self._open_path(str(self._source.text()).strip())
 
 	def _build_channel_row(self, layout: QVBoxLayout) -> None:
 		"""Канал: выбор подставляет его пресет по умолчанию (настройка канала)."""
@@ -434,21 +447,26 @@ class VideoPage(ScrollArea):
 			self._show_error,
 		)
 
-	# --- подготовка -----------------------------------------------------------------
+	# --- список файлов и постановка в очередь ---------------------------------------
 
-	def _pick_source(self) -> None:
-		"""Диалог выбора исходника — в папке исходников подпапки пресета."""
+	def _template_fields(self) -> PresetFields:
+		"""Параметры шаблона; имя — от выбранного пресета или «ручные»."""
+		preset = self._preset_combo.selected()
+		return self._form.fields(preset.name if preset else _MANUAL_NAME)
+
+	def _add_file(self) -> None:
+		"""«Добавить файл…»: диалог — в папке исходников подпапки шаблона."""
 		subdir = str(self._form.fields("").subdir)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.dirs_for(subdir),
 			self,
-			self._open_source_dialog,
+			self._pick_file_source,
 			self._show_error,
 		)
 
-	def _open_source_dialog(self, dirs: VideoDirs) -> None:
-		"""Открывает диалог исходника в действующей папке исходников."""
+	def _pick_file_source(self, dirs: VideoDirs) -> None:
+		"""Выбор одиночного файла — он добавляется карточкой в список."""
 		path = pick_file(
 			self,
 			"Исходное видео",
@@ -456,37 +474,21 @@ class VideoPage(ScrollArea):
 			start_dir=dirs.source,
 		)
 		if path:
-			self._source.setText(path)
+			self._add_entry(path, batch="")
 
-	def _fields(self) -> PresetFields:
-		"""Параметры с экрана; имя — от выбранного пресета или «ручные»."""
-		preset = self._preset_combo.selected()
-		return self._form.fields(preset.name if preset else _MANUAL_NAME)
-
-	def _on_process(self) -> None:
-		"""Ставит выбранный исходник в очередь обработки."""
-		source = str(self._source.text()).strip()
-		if not source:
-			self._show_error("Выберите исходный видеофайл.")
-			return
-		fields = self._fields()
-		requests = self._requests_with_frames([source], fields)
-		if requests:
-			self._enqueue(requests, fields, "")
-
-	def _on_batch(self) -> None:
-		"""Пакетная обработка: выбор папки → сканирование → очередь."""
+	def _add_folder(self) -> None:
+		"""«Добавить папку…»: сканирование и выбор — как пакет ADR-0014."""
 		subdir = str(self._form.fields("").subdir)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.dirs_for(subdir),
 			self,
-			self._pick_batch_root,
+			self._pick_folder_source,
 			self._show_error,
 		)
 
-	def _pick_batch_root(self, dirs: VideoDirs) -> None:
-		"""Открывает выбор папки пакета (по умолчанию — папка исходников)."""
+	def _pick_folder_source(self, dirs: VideoDirs) -> None:
+		"""Выбор папки; отмеченные в диалоге файлы добавляются карточками."""
 		root = pick_dir(self, "Папка с исходниками", start_dir=dirs.source)
 		if not root:
 			return
@@ -496,64 +498,156 @@ class VideoPage(ScrollArea):
 		files = dialog.selected()
 		if not files:
 			return
-		fields = self._fields()
-		requests = self._requests_with_frames([video.path for video in files], fields)
-		if not requests:
-			return
-		# подпапка пакета: штамп запуска + имя папки-источника (узнаваемость);
+		# подпапка пакета: штамп + имя папки-источника (узнаваемость);
 		# внутри подпапки пресета, спецсимволы вычистит движок
-		batch_subdir = f"{datetime.now():%Y%m%d-%H%M%S}_{Path(root).name}"
-		self._enqueue(requests, fields, batch_subdir)
+		batch = f"{datetime.now():%Y%m%d-%H%M%S}_{Path(root).name}"
+		added = 0
+		for video in files:
+			if self._add_entry(video.path, batch=batch, size_bytes=video.size_bytes):
+				added += 1
+		if added:
+			InfoBar.success("Файлы добавлены", f"В списке новых: {added}", parent=self)
 
-	def _requests_with_frames(
-		self, paths: list[str], fields: PresetFields
-	) -> list[ProcessingRequest] | None:
-		"""Собирает заявки; для «случайных кадров на выбор» — проход по файлам.
+	def _add_entry(self, path: str, batch: str, size_bytes: int | None = None) -> bool:
+		"""Добавляет файл карточкой; параметры — снимок шаблона.
+
+		Returns:
+			True — карточка добавлена; False — файл уже в списке
+			или не читается.
+		"""
+		if any(entry.path == path for entry in self._entries):
+			InfoBar.info("Уже в списке", Path(path).name, parent=self)
+			return False
+		if size_bytes is None:
+			try:
+				size_bytes = Path(path).stat().st_size
+			except OSError:
+				self._show_error(f"Файл не читается: {path}")
+				return False
+		preset = self._preset_combo.selected()
+		entry = _FileEntry(
+			self,
+			path,
+			size_bytes,
+			batch,
+			preset.name if preset else _MANUAL_NAME,
+		)
+		entry.form.fill(self._template_fields())
+		self._entries.append(entry)
+		self._files_box.addWidget(entry.card)
+		# рекомендация битрейта — в параметры именно этой карточки
+		fields = entry.form.fields("")
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.bitrate_advice(path, fields.trim_start, fields.trim_end),
+			self,
+			partial(self._on_entry_advice, entry),
+			noop,  # совет вспомогательный: сбой не мешает добавлению
+		)
+		return True
+
+	def _on_entry_advice(self, entry: _FileEntry, advice: BitrateAdvice | None) -> None:
+		"""Совет битрейта пришёл — подставляем в параметры карточки файла."""
+		if advice is None or entry not in self._entries:
+			return  # файл в лимите или карточку уже убрали
+		if entry.form.suggest_bitrate(advice.mbps):
+			entry.advice_note = (
+				f"больше лимита {advice.limit_gb} ГБ — качество {advice.mbps:g} Мбит/с"
+			)
+			entry.refresh_summary()
+
+	def _remove_entry(self, entry: _FileEntry) -> None:
+		"""Убирает карточку файла из списка (сам файл не трогается)."""
+		if entry in self._entries:
+			self._entries.remove(entry)
+			entry.card.deleteLater()
+
+	def _clear_entries(self) -> None:
+		"""Опустошает список карточек (после успешной постановки)."""
+		for entry in self._entries:
+			entry.card.deleteLater()
+		self._entries = []
+
+	def _on_process(self) -> None:
+		"""Ставит все файлы списка в очередь — каждый со своими параметрами."""
+		if not self._entries:
+			self._show_error("Добавьте файл или папку — список пуст.")
+			return
+		requests = self._collect_requests()
+		if requests:
+			run_in_engine(
+				self._worker,
+				self._worker.engine.video_queue.enqueue_many(requests),
+				self,
+				partial(self._on_enqueued, len(requests)),
+				self._show_error,
+			)
+
+	def _collect_requests(self) -> list[ProcessingRequest] | None:
+		"""Заявки по карточкам; «случайные кадры на выбор» — проход по файлам.
 
 		Интерактивный источник кадра несовместим с фоновой очередью,
 		поэтому кадры выбираются заранее: диалог по разу на файл, выбранный
 		кадр копируется в папку очереди (следующая партия кандидатов стёрла
-		бы его). Отмена выбора: для одиночного файла — отмена запуска, для
-		пакета — предложение исключить файл (остальные не теряются).
+		бы его). Отмена выбора: для единственного файла — отмена запуска,
+		иначе — предложение исключить файл (остальные не теряются).
 
 		Returns:
 			Заявки на обработку; None или пустой список — запуск отменён.
 		"""
-		kind, _value = parse_intro_source(fields.intro_source)
-		if not (kind is IntroSourceKind.RANDOM_CHOICE and (fields.intro or fields.cover)):
-			return [ProcessingRequest(path) for path in paths]
-		single = len(paths) == 1
+		single = len(self._entries) == 1
 		requests: list[ProcessingRequest] = []
-		for path in paths:
-			while True:
-				dialog = FramePickerDialog(
-					self._worker,
-					path,
-					self.window(),
-					trim_start=fields.trim_start,
-					trim_end=fields.trim_end,
-					file_label=None if single else Path(path).name,
-				)
-				accepted = exec_dialog(dialog)
-				chosen = dialog.chosen_path()
-				if accepted and chosen is not None:
-					stashed = self._stash_frame(chosen)
-					if stashed is None:
-						return None  # ошибка уже показана
-					requests.append(
-						ProcessingRequest(path, build_intro_source(IntroSourceKind.IMAGE, stashed))
-					)
-					break
-				if single:
-					return None
-				if confirm_delete(
-					self,
-					f"Кадр для «{Path(path).name}» не выбран. Исключить файл из пакета?",
-					accept_text="Исключить",
-				):
-					break  # файл пропущен, заявка не создаётся
-				# «Отмена» в подтверждении — вернуться к выбору кадра
+		for entry in self._entries:
+			fields = entry.form.fields(entry.preset_name)
+			kind, _value = parse_intro_source(fields.intro_source)
+			if not (kind is IntroSourceKind.RANDOM_CHOICE and (fields.intro or fields.cover)):
+				requests.append(ProcessingRequest(entry.path, fields, batch_subdir=entry.batch))
+				continue
+			try:
+				intro = self._pick_frame_for(entry, fields, single)
+			except _AbortRun:
+				return None
+			if intro is None:
+				continue  # файл исключён из постановки
+			requests.append(
+				ProcessingRequest(entry.path, fields, intro_source=intro, batch_subdir=entry.batch)
+			)
 		return requests
+
+	def _pick_frame_for(self, entry: _FileEntry, fields: PresetFields, single: bool) -> str | None:
+		"""Выбор кадра заставки для одного файла (до постановки).
+
+		Returns:
+			Строка «image:путь» с копией кадра; None — файл исключён.
+
+		Raises:
+			_AbortRun: Пользователь отменил постановку целиком.
+		"""
+		while True:
+			dialog = FramePickerDialog(
+				self._worker,
+				entry.path,
+				self.window(),
+				trim_start=fields.trim_start,
+				trim_end=fields.trim_end,
+				file_label=None if single else Path(entry.path).name,
+			)
+			accepted = exec_dialog(dialog)
+			chosen = dialog.chosen_path()
+			if accepted and chosen is not None:
+				stashed = self._stash_frame(chosen)
+				if stashed is None:
+					raise _AbortRun  # ошибка уже показана
+				return build_intro_source(IntroSourceKind.IMAGE, stashed)
+			if single:
+				raise _AbortRun
+			if confirm_delete(
+				self,
+				f"Кадр для «{Path(entry.path).name}» не выбран. Исключить файл из постановки?",
+				accept_text="Исключить",
+			):
+				return None
+			# «Отмена» в подтверждении — вернуться к выбору кадра
 
 	def _stash_frame(self, chosen: str) -> str | None:
 		"""Копирует выбранный кадр в папку очереди (синхронно, с таймаутом).
@@ -570,20 +664,9 @@ class VideoPage(ScrollArea):
 			self._show_error(user_message(exc))
 			return None
 
-	def _enqueue(
-		self, requests: list[ProcessingRequest], fields: PresetFields, batch_subdir: str
-	) -> None:
-		"""Ставит заявки в очередь обработки движка."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.video_queue.enqueue_many(requests, fields, batch_subdir),
-			self,
-			partial(self._on_enqueued, len(requests)),
-			self._show_error,
-		)
-
 	def _on_enqueued(self, count: int, _ids: list[int]) -> None:
-		"""Заявки приняты — панель очереди обновляется сразу, не по таймеру."""
+		"""Заявки приняты — список пустеет, панель очереди обновляется сразу."""
+		self._clear_entries()
 		if count > 1:
 			InfoBar.success("Пакет в очереди", f"Файлов: {count}", parent=self)
 		self._poll_queue()

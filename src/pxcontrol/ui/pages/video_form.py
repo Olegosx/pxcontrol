@@ -81,7 +81,10 @@ class CollapsibleCard(CardWidget):
 	как обычно.
 	"""
 
-	def __init__(self, title: str, parent: QWidget) -> None:
+	def __init__(self, title: str, parent: QWidget, trailing: QWidget | None = None) -> None:
+		"""``trailing`` — виджет с кнопками в правом краю шапки (например,
+		просмотр и удаление у карточки файла): клики по кнопкам остаются
+		кнопкам и карточку не сворачивают (Qt не передаёт их шапке)."""
 		super().__init__(parent)
 		outer = QVBoxLayout(self)
 		outer.setContentsMargins(0, 0, 0, 0)
@@ -105,6 +108,9 @@ class CollapsibleCard(CardWidget):
 		self._summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 		head_row.addWidget(self._summary, stretch=1)
 		head_row.addStretch()
+		if trailing is not None:
+			trailing.setParent(header)
+			head_row.addWidget(trailing)
 		outer.addWidget(header)
 		self._body = QWidget(self)
 		#: Компоновка тела — раздел добавляет сюда своё содержимое.

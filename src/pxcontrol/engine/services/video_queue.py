@@ -71,14 +71,21 @@ class VideoItemStatus(StrEnum):
 class ProcessingRequest:
 	"""Заявка на обработку одного файла (постановка в очередь).
 
+	Заявка самодостаточна: несёт свои параметры обработки — у каждого
+	файла списка на странице «Видео» они свои (дополнение к ADR-0014).
+
 	Attributes:
 		source_path: путь к исходнику.
+		fields: параметры обработки этого файла.
 		intro_source: персональный источник кадра заставки («image:путь»
 			после выбора кадра пользователем); None — как в параметрах.
+		batch_subdir: подпапка пакета в результатах («» — без неё).
 	"""
 
 	source_path: str
+	fields: PresetFields
 	intro_source: str | None = None
+	batch_subdir: str = ""
 
 
 @dataclass(frozen=True)
@@ -109,17 +116,9 @@ class VideoItemDto:
 class _Item:
 	"""Внутреннее состояние элемента очереди (изменяемое)."""
 
-	def __init__(
-		self,
-		item_id: int,
-		request: ProcessingRequest,
-		fields: PresetFields,
-		batch_subdir: str,
-	) -> None:
+	def __init__(self, item_id: int, request: ProcessingRequest) -> None:
 		self.id = item_id
 		self.request = request
-		self.fields = fields
-		self.batch_subdir = batch_subdir
 		self.status = VideoItemStatus.PENDING
 		self.progress = 0.0
 		self.error: str | None = None
@@ -132,7 +131,7 @@ class _Item:
 		return VideoItemDto(
 			id=self.id,
 			title=Path(self.request.source_path).name,
-			batch=self.batch_subdir,
+			batch=self.request.batch_subdir,
 			status=self.status,
 			progress=self.progress,
 			error=self.error,
@@ -159,12 +158,7 @@ class ProcessingQueue:
 		self._frames_dir: str | None = None  # выбранные кадры заставки пакета
 		self._next_frame = 1
 
-	async def enqueue(
-		self,
-		request: ProcessingRequest,
-		fields: PresetFields,
-		batch_subdir: str = "",
-	) -> int:
+	async def enqueue(self, request: ProcessingRequest) -> int:
 		"""Ставит один файл в очередь; проверки — сразу.
 
 		Returns:
@@ -173,19 +167,15 @@ class ProcessingQueue:
 		Raises:
 			VideoError: Файл или ffmpeg не найдены.
 		"""
-		return (await self.enqueue_many([request], fields, batch_subdir))[0]
+		return (await self.enqueue_many([request]))[0]
 
-	async def enqueue_many(
-		self,
-		requests: list[ProcessingRequest],
-		fields: PresetFields,
-		batch_subdir: str = "",
-	) -> list[int]:
+	async def enqueue_many(self, requests: list[ProcessingRequest]) -> list[int]:
 		"""Ставит пакет файлов в очередь; проверки — до постановки.
 
 		Постановка атомарна: сначала проверяются все файлы, потом
 		добавляются все элементы — битый путь в середине списка
-		не оставляет пакет поставленным наполовину.
+		не оставляет пакет поставленным наполовину. Параметры обработки
+		у каждой заявки свои (:class:`ProcessingRequest`).
 
 		Returns:
 			Идентификаторы элементов в порядке заявок.
@@ -199,17 +189,18 @@ class ProcessingQueue:
 			self._video.ensure_ready(request.source_path)
 		ids: list[int] = []
 		for request in requests:
-			item = _Item(self._next_id, request, fields, batch_subdir)
+			item = _Item(self._next_id, request)
 			self._next_id += 1
 			self._items.append(item)
 			ids.append(item.id)
+			logger.info(
+				"Обработка: «%s» в очереди (id=%s, параметры «%s», пакет «%s»).",
+				Path(request.source_path).name,
+				item.id,
+				request.fields.name,
+				request.batch_subdir or "—",
+			)
 		self._ensure_worker()
-		logger.info(
-			"Обработка: %s файл(ов) в очереди (пакет «%s», параметры «%s»).",
-			len(requests),
-			batch_subdir or "—",
-			fields.name,
-		)
 		return ids
 
 	async def stash_frame(self, path: str) -> str:
@@ -347,7 +338,7 @@ class ProcessingQueue:
 				fields,
 				intro_source=item.request.intro_source,
 				on_progress=_on_progress,
-				extra_subdir=item.batch_subdir,
+				extra_subdir=item.request.batch_subdir,
 			)
 		except ProcessingCancelled:
 			item.status = VideoItemStatus.CANCELLED
@@ -378,7 +369,7 @@ class ProcessingQueue:
 		Raises:
 			VideoError: Видео не влезает в лимит даже минимальным битрейтом.
 		"""
-		fields = item.fields
+		fields = item.request.fields
 		advice = await self._video.bitrate_advice(
 			item.request.source_path, fields.trim_start, fields.trim_end
 		)
