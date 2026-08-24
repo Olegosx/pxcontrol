@@ -120,9 +120,6 @@ class _FileEntry:
 		buttons = QHBoxLayout(trailing)
 		buttons.setContentsMargins(0, 0, 0, 0)
 		buttons.setSpacing(4)
-		self.check = CheckBox("", trailing)
-		self.check.setToolTip("Отправить файл на обработку («Обработать» берёт отмеченные)")
-		buttons.addWidget(self.check)
 		play = TransparentToolButton(FluentIcon.PLAY, trailing)
 		play.setToolTip("Посмотреть файл (системный плеер)")
 		play.clicked.connect(bind(page._open_path, path))  # noqa: SLF001 — внутренний класс страницы
@@ -131,8 +128,11 @@ class _FileEntry:
 		remove.setToolTip("Убрать из списка (файл на диске не трогается)")
 		remove.clicked.connect(bind(page._remove_entry, self))  # noqa: SLF001
 		buttons.addWidget(remove)
+		# чекбокс выбора — слева, перед названием (клик не сворачивает карточку)
+		self.check = CheckBox("", page)
+		self.check.setToolTip("Отправить файл на обработку («Обработать» берёт отмеченные)")
 		title = f"{Path(path).name} — {human_size(size_bytes)}"
-		self.card = CollapsibleCard(title, page, trailing=trailing)
+		self.card = CollapsibleCard(title, page, trailing=trailing, leading=self.check)
 		self.form = PresetForm(page)
 		self.card.body.addWidget(self.form)
 		self.refresh_summary()

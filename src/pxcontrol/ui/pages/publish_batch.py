@@ -8,23 +8,29 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 
+from PySide6.QtCore import QDate, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
+	CalendarPicker,
 	CaptionLabel,
 	CardWidget,
 	CheckBox,
 	ComboBox,
+	FluentIcon,
 	LineEdit,
 	MessageBoxBase,
 	PushButton,
 	ScrollArea,
 	SpinBox,
+	StrongBodyLabel,
 	SubtitleLabel,
 	TextEdit,
+	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -79,7 +85,11 @@ def _parse_when(text: str) -> datetime | None:
 
 
 class _BatchRow:
-	"""Строка черновика: файл и его правимые параметры поста."""
+	"""Строка черновика: файл и его правимые параметры поста.
+
+	Шапка: чекбокс выбора перед названием, справа — кнопки «посмотреть»
+	(системный плеер) и «убрать из пакета».
+	"""
 
 	def __init__(
 		self,
@@ -93,14 +103,28 @@ class _BatchRow:
 		box = QVBoxLayout(self.card)
 		box.setContentsMargins(12, 8, 12, 8)
 		box.setSpacing(6)
-		label = f"{video.name} — {human_size(video.size_bytes)}"
-		if oversized:
-			label += " · ⚠ больше лимита канала"
-		self.check = CheckBox(label, self.card)
+		head = QHBoxLayout()
+		self.check = CheckBox("", self.card)
+		self.check.setToolTip("Отправить пост в очередь («В очередь» берёт отмеченные)")
 		# файл больше лимита канал не примет — галочка снята, но выбор
 		# осознанно вернуть можно (например, для проверки ошибки)
 		self.check.setChecked(not oversized)
-		box.addWidget(self.check)
+		head.addWidget(self.check)
+		label = f"{video.name} — {human_size(video.size_bytes)}"
+		if oversized:
+			label += " · ⚠ больше лимита канала"
+		title = StrongBodyLabel(label, self.card)
+		title.setWordWrap(True)
+		head.addWidget(title, stretch=1)
+		play = TransparentToolButton(FluentIcon.PLAY, self.card)
+		play.setToolTip("Посмотреть файл (системный плеер)")
+		play.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(video.path)))
+		head.addWidget(play)
+		remove = TransparentToolButton(FluentIcon.DELETE, self.card)
+		remove.setToolTip("Убрать из пакета (файл на диске не трогается)")
+		remove.clicked.connect(lambda: dialog._remove_row(self))  # noqa: SLF001 — класс диалога
+		head.addWidget(remove)
+		box.addLayout(head)
 		self.caption = TextEdit(self.card)
 		self.caption.setPlaceholderText("Подпись к видео (необязательно)…")
 		self.caption.setPlainText(caption)
@@ -134,17 +158,21 @@ class PublishBatchDialog(MessageBoxBase):
 		channel_times: list[str] | None = None,
 		limit_bytes: int | None = None,
 		schedule_allowed: bool = True,
+		busy: list[datetime] | None = None,
 	) -> None:
 		"""``caption_lines`` — строки общего шаблона подписи (None — без
 		подписей); ``filename_template_id`` — шаблон имени файла для
 		переименования (None — не предлагать); ``limit_bytes`` — лимит
 		файла выбранного канала (пометка и снятая галочка у больших);
-		``schedule_allowed`` — доступна ли отложка (у бот-канала — нет)."""
+		``schedule_allowed`` — доступна ли отложка (у бот-канала — нет);
+		``busy`` — занятые моменты существующих отложек канала (местное
+		наивное время) — раскладка их пропускает."""
 		super().__init__(parent)
 		self._worker = worker
 		self._channel = channel
 		self._channel_times = list(channel_times or [])
 		self._schedule_allowed = schedule_allowed
+		self._busy = list(busy or [])
 		self._rows: list[_BatchRow] = []
 		self.viewLayout.addWidget(SubtitleLabel(f"Пакет в «{channel.title}»", self))
 		folder = CaptionLabel(f"Папка: {root}", self)
@@ -221,6 +249,9 @@ class PublishBatchDialog(MessageBoxBase):
 			self._strategy.addItem(label)
 		self._strategy.currentIndexChanged.connect(self._on_strategy_changed)
 		row.addWidget(self._strategy)
+		self._date_label = BodyLabel("с даты:", self)
+		self._date = CalendarPicker(self)
+		self._date.setDate(QDate.currentDate())
 		self._at_label = BodyLabel("в", self)
 		self._at = LineEdit(self)
 		self._at.setPlaceholderText("ЧЧ:ММ")
@@ -238,6 +269,8 @@ class PublishBatchDialog(MessageBoxBase):
 		self._start.setFixedWidth(220)
 		self._start.setText((datetime.now() + timedelta(hours=1)).strftime(_WHEN_FORMAT))
 		for widget in (
+			self._date_label,
+			self._date,
 			self._days_label,
 			self._days,
 			self._at_label,
@@ -348,6 +381,11 @@ class PublishBatchDialog(MessageBoxBase):
 		_label, kind, n_days = _STRATEGIES[index]
 		daily = kind is PlanKind.DAILY
 		hourly = kind is PlanKind.EVERY_HOURS
+		# дата начала — у стратегий по дням (у «каждые N часов» есть
+		# полный стартовый момент, у «сейчас» дата не нужна)
+		dated = daily or kind is PlanKind.CHANNEL_TIMES
+		self._date_label.setVisible(dated)
+		self._date.setVisible(dated)
 		self._at_label.setVisible(daily)
 		self._at.setVisible(daily)
 		self._days_label.setVisible(daily and n_days)
@@ -356,6 +394,11 @@ class PublishBatchDialog(MessageBoxBase):
 		self._hours.setVisible(hourly)
 		self._start_label.setVisible(hourly)
 		self._start.setVisible(hourly)
+
+	def _start_date(self) -> date:
+		"""Дата начала раскладки из календаря (для стратегий по дням)."""
+		picked = self._date.getDate()
+		return date(picked.year(), picked.month(), picked.day())
 
 	def _plan(self) -> SchedulePlan:
 		"""Собирает параметры раскладки из строки стратегии.
@@ -369,13 +412,18 @@ class PublishBatchDialog(MessageBoxBase):
 				kind,
 				at=parse_hhmm(str(self._at.text())),
 				every_days=int(self._days.value()) if n_days else 1,
+				start_date=self._start_date(),
 			)
 		if kind is PlanKind.EVERY_HOURS:
 			start = _parse_when(str(self._start.text()))
 			if start is None:
 				raise ValueError("Укажите стартовый момент раскладки.")
 			return SchedulePlan(kind, every_hours=int(self._hours.value()), start=start)
-		return SchedulePlan(kind, channel_times=tuple(self._channel_times))
+		return SchedulePlan(
+			kind,
+			channel_times=tuple(self._channel_times),
+			start_date=self._start_date(),
+		)
 
 	def _apply_plan(self) -> None:
 		"""Заполняет время отмеченных строк по стратегии (правится дальше)."""
@@ -384,7 +432,7 @@ class PublishBatchDialog(MessageBoxBase):
 			show_error(self, "Отметьте хотя бы один файл.")
 			return
 		try:
-			moments = plan_times(self._plan(), len(checked), datetime.now())
+			moments = plan_times(self._plan(), len(checked), datetime.now(), busy=self._busy)
 		except (PlanError, ValueError) as exc:
 			show_error(self, str(exc))
 			return
@@ -405,6 +453,7 @@ class PublishBatchDialog(MessageBoxBase):
 				SchedulePlan(PlanKind.CHANNEL_TIMES, channel_times=tuple(self._channel_times)),
 				len(self._checked()),
 				datetime.now(),
+				busy=self._busy,
 			)
 		except PlanError:
 			return  # времён у канала нет — все строки «сейчас»
@@ -412,6 +461,13 @@ class PublishBatchDialog(MessageBoxBase):
 			row.when.setText("" if moment is None else moment.strftime(_WHEN_FORMAT))
 
 	# --- выбор -----------------------------------------------------------------
+
+	def _remove_row(self, row: _BatchRow) -> None:
+		"""Убирает строку из пакета (сам файл на диске не трогается)."""
+		if row in self._rows:
+			self._rows.remove(row)
+			row.card.deleteLater()
+			self._update_summary()
 
 	def _checked(self) -> list[_BatchRow]:
 		"""Отмеченные строки (в порядке списка)."""

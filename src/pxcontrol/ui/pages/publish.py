@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -85,6 +86,7 @@ class _BatchSetup:
 	filename_template_id: int | None = None
 	used_values: dict[int, list[str]] = field(default_factory=dict)
 	times: list[str] = field(default_factory=list)
+	busy: list[datetime] = field(default_factory=list)  # отложки канала (UTC)
 
 
 #: Сегменты типов контента: подпись → тип → фильтр диалога выбора файла.
@@ -621,8 +623,36 @@ class PublishPage(ScrollArea):
 		)
 
 	def _batch_times_loaded(self, setup: _BatchSetup, times: list[str]) -> None:
-		"""Времена канала получены — осталась граница размера файла."""
+		"""Времена канала получены — читаем существующие отложки.
+
+		Раскладка пропускает занятые слоты, поэтому диалогу нужны
+		времена уже созданных в Telegram отложенных записей канала.
+		"""
 		setup.times = times
+		run_in_engine(
+			self._worker,
+			self._worker.engine.posts.scheduled_times(setup.channel.id),
+			self,
+			partial(self._batch_scheduled_loaded, setup),
+			partial(self._batch_scheduled_failed, setup),
+		)
+
+	def _batch_scheduled_failed(self, setup: _BatchSetup, message: str) -> None:
+		"""Отложки не прочитались — пакет продолжается без их учёта.
+
+		Проверка занятых слотов вспомогательная: отказ userbot не должен
+		блокировать пакет, но о слепой раскладке честно предупреждаем.
+		"""
+		InfoBar.warning(
+			"Отложки не прочитаны",
+			f"Раскладка не учтёт существующие отложки: {message}",
+			parent=self,
+		)
+		self._batch_scheduled_loaded(setup, [])
+
+	def _batch_scheduled_loaded(self, setup: _BatchSetup, scheduled: list[datetime]) -> None:
+		"""Отложки получены — осталась граница размера файла."""
+		setup.busy = scheduled
 		caps = publish_capabilities(setup.channel.bot_id is not None, setup.channel.userbot_admin)
 		if caps.userbot:
 			run_in_engine(
@@ -652,6 +682,9 @@ class PublishPage(ScrollArea):
 			channel_times=setup.times,
 			limit_bytes=limit_bytes,
 			schedule_allowed=schedule_allowed,
+			# отложки приходят из Telegram в UTC, раскладка живёт
+			# в местном наивном времени — как ввод пользователя
+			busy=[moment.astimezone().replace(tzinfo=None) for moment in setup.busy],
 		)
 		if not exec_dialog(dialog):
 			return

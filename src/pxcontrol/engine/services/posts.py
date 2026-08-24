@@ -502,6 +502,24 @@ class PostsService:
 		items.sort(key=lambda item: item.scheduled_at)
 		return items
 
+	async def scheduled_times(self, channel_id: int) -> list[datetime]:
+		"""Моменты существующих отложек канала (для раскладки пакета).
+
+		Пакетная отправка (ADR-0015) пропускает занятые слоты — сюда
+		отдаются времена уже созданных в Telegram отложенных записей.
+		Канал без userbot-админа отложек иметь не может — пустой список.
+
+		Raises:
+			PostError: Канал не найден.
+			UserbotUnavailableError: Отложки прочитать не удалось —
+				вызывающая сторона решает, продолжать ли без них.
+		"""
+		channel = await self._get_channel(channel_id)
+		if not channel.userbot_admin:
+			return []
+		messages = await self._gateway.get_scheduled(channel.tg_chat_id)
+		return [message.scheduled_at for message in messages]
+
 	async def _get_channel(self, channel_id: int) -> Channel:
 		"""Возвращает канал с ботом или объясняет, что канал не найден."""
 		async with self._db.session_factory() as session:

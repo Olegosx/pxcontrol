@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -114,3 +114,42 @@ def test_channel_times_requires_valid_times() -> None:
 	broken = SchedulePlan(PlanKind.CHANNEL_TIMES, channel_times=("мусор",))
 	with pytest.raises(PlanError, match="стандартных времён"):
 		plan_times(broken, 1, NOW)
+
+
+def test_start_date_for_daily_and_channel_times() -> None:
+	"""Будущая дата начала соблюдается; прошедшая равнозначна сегодняшней."""
+	future = SchedulePlan(PlanKind.DAILY, at=(9, 0), start_date=date(2026, 8, 20))
+	assert plan_times(future, 2, NOW) == [
+		datetime(2026, 8, 20, 9, 0),
+		datetime(2026, 8, 21, 9, 0),
+	]
+	past = SchedulePlan(PlanKind.DAILY, at=(18, 0), start_date=date(2026, 8, 1))
+	assert plan_times(past, 1, NOW)[0] == datetime(2026, 8, 15, 18, 0)
+	times = SchedulePlan(
+		PlanKind.CHANNEL_TIMES, channel_times=("12:00",), start_date=date(2026, 8, 18)
+	)
+	assert plan_times(times, 2, NOW) == [
+		datetime(2026, 8, 18, 12, 0),
+		datetime(2026, 8, 19, 12, 0),
+	]
+
+
+def test_busy_slots_are_skipped() -> None:
+	"""Занятый слот (совпадение по минуте) пропускается — пост идёт дальше."""
+	daily = SchedulePlan(PlanKind.DAILY, at=(12, 0))
+	busy = [datetime(2026, 8, 16, 12, 0, 30)]  # секунды не важны
+	assert plan_times(daily, 2, NOW, busy=busy) == [
+		datetime(2026, 8, 15, 12, 0),
+		datetime(2026, 8, 17, 12, 0),
+	]
+	times = SchedulePlan(PlanKind.CHANNEL_TIMES, channel_times=("12:00", "18:00"))
+	assert plan_times(times, 2, NOW, busy=[datetime(2026, 8, 15, 18, 0)]) == [
+		datetime(2026, 8, 15, 12, 0),
+		datetime(2026, 8, 16, 12, 0),
+	]
+	hourly = SchedulePlan(PlanKind.EVERY_HOURS, start=datetime(2026, 8, 15, 11, 0), every_hours=1)
+	assert plan_times(hourly, 3, NOW, busy=[datetime(2026, 8, 15, 12, 0)]) == [
+		datetime(2026, 8, 15, 11, 0),
+		datetime(2026, 8, 15, 13, 0),
+		datetime(2026, 8, 15, 14, 0),
+	]

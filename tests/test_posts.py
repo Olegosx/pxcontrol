@@ -566,3 +566,17 @@ def test_validate_draft_checks_rename_early(tmp_path: Path) -> None:
 		)
 		with pytest.raises(PostError):
 			PostsService.validate_draft(draft)
+
+
+async def test_scheduled_times_for_batch_planning(db: Database) -> None:
+	"""Времена отложек канала — для пропуска занятых слотов (ADR-0015)."""
+	service = PostsService(db, _FakeGateway())
+	channel_id = await _add_channel(db)
+	assert await service.scheduled_times(channel_id) == [datetime(2026, 7, 13, 12, 0, tzinfo=UTC)]
+	# канал без userbot-админа отложек иметь не может — пустой список
+	async with db.session_factory() as session:
+		other = Channel(title="Бот-канал", tg_chat_id="-1002", userbot_admin=False)
+		session.add(other)
+		await session.commit()
+		await session.refresh(other)
+	assert await service.scheduled_times(other.id) == []
