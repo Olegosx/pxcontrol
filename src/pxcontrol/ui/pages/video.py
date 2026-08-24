@@ -4,10 +4,11 @@
 добавляет карточку в список) и «Добавить папку…» (диалог сканирования
 :mod:`video_batch`; отмеченные становятся карточками пакета). У каждого
 файла — своя карточка параметров, заполненная из карточки-шаблона
-«Файл не выбран» в момент добавления; шаблон правится всегда и служит
-пресетам («загрузчик»: выбор пресета заполняет шаблон, сохранение —
-по явным кнопкам). «Обработать» ставит весь список в очередь движка
-(ADR-0014) — каждый файл со своими параметрами; карточки очереди видны
+«[Параметры пресета]» (под строкой пресета) в момент добавления;
+шаблон правится всегда и служит пресетам («загрузчик»: выбор пресета
+заполняет шаблон, сохранение — по явным кнопкам). «Обработать» ставит
+в очередь движка (ADR-0014) файлы, отмеченные чекбоксами в шапках
+карточек, — каждый со своими параметрами; карточки очереди видны
 на странице. Результат — файл в папке результатов; кнопка
 «Опубликовать…» передаёт его странице «Публикация» (контракт — путь
 к файлу). Выбор кадра заставки — отдельный диалог (:mod:`frame_picker`).
@@ -26,6 +27,7 @@ from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
 	CardWidget,
+	CheckBox,
 	FluentIcon,
 	InfoBar,
 	PrimaryPushButton,
@@ -95,10 +97,11 @@ class _AbortRun(Exception):  # noqa: N818 — служебный сигнал, �
 class _FileEntry:
 	"""Карточка файла в списке подготовки: шапка + свои параметры.
 
-	Шапка — имя и размер файла, пометки (пакет, авто-битрейт) и кнопки
-	«посмотреть» / «убрать из списка»; тело — собственная панель
-	параметров (:class:`PresetForm`), заполненная из шаблона в момент
-	добавления и правимая независимо.
+	Шапка — имя и размер файла, пометки (пакет, авто-битрейт), чекбокс
+	«обрабатывать» (по умолчанию выключен: на обработку уходят только
+	отмеченные) и кнопки «посмотреть» / «убрать из списка»; тело —
+	собственная панель параметров (:class:`PresetForm`), заполненная
+	из шаблона в момент добавления и правимая независимо.
 	"""
 
 	def __init__(
@@ -117,6 +120,9 @@ class _FileEntry:
 		buttons = QHBoxLayout(trailing)
 		buttons.setContentsMargins(0, 0, 0, 0)
 		buttons.setSpacing(4)
+		self.check = CheckBox("", trailing)
+		self.check.setToolTip("Отправить файл на обработку («Обработать» берёт отмеченные)")
+		buttons.addWidget(self.check)
 		play = TransparentToolButton(FluentIcon.PLAY, trailing)
 		play.setToolTip("Посмотреть файл (системный плеер)")
 		play.clicked.connect(bind(page._open_path, path))  # noqa: SLF001 — внутренний класс страницы
@@ -185,17 +191,11 @@ class VideoPage(ScrollArea):
 		self._build_source_row(layout)
 		self._build_channel_row(layout)
 		self._build_preset_row(layout)
+		self._build_template_card(layout)
 		layout.addSpacing(8)
 		layout.addWidget(SubtitleLabel("Файлы и параметры обработки", self))
-		layout.addWidget(
-			CaptionLabel(
-				"«Файл не выбран» — шаблон: его параметры получают добавляемые "
-				"файлы, пресеты загружаются и сохраняются из него. Параметры "
-				"каждого файла правятся в его карточке.",
-				self,
-			)
-		)
-		self._build_template_card(layout)
+		self._empty_hint = CaptionLabel("Файлы не выбраны", self)
+		layout.addWidget(self._empty_hint)
 		self._files_box = QVBoxLayout()
 		self._files_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._files_box)
@@ -205,17 +205,20 @@ class VideoPage(ScrollArea):
 		layout.addStretch()
 
 	def _build_template_card(self, layout: QVBoxLayout) -> None:
-		"""Карточка-шаблон «Файл не выбран»: параметры без файла.
+		"""Карточка-шаблон «[Параметры пресета]» — сразу под строкой пресета.
 
-		Живёт всегда (первой): без неё нельзя было бы править и сохранять
-		пресеты, пока файлы не добавлены, а с файлами она задаёт параметры
-		новых добавлений.
+		Параметры без файла: правятся и сохраняются в пресеты всегда,
+		а добавляемые файлы получают их снимок в свои карточки.
 		"""
-		self._template_card = CollapsibleCard("Файл не выбран", self)
-		self._template_card.set_summary("шаблон параметров для добавляемых файлов")
+		self._template_card = CollapsibleCard("[Параметры пресета]", self)
+		self._template_card.set_summary("шаблон: эти параметры получат добавляемые файлы")
 		self._form = PresetForm(self)
 		self._template_card.body.addWidget(self._form)
 		layout.addWidget(self._template_card)
+
+	def _update_empty_hint(self) -> None:
+		"""Заглушка «Файлы не выбраны» видна только при пустом списке."""
+		self._empty_hint.setVisible(not self._entries)
 
 	def _build_queue_block(self, layout: QVBoxLayout) -> None:
 		"""Панель очереди обработки: итоговая строка и карточки элементов."""
@@ -535,6 +538,7 @@ class VideoPage(ScrollArea):
 		entry.form.fill(self._template_fields())
 		self._entries.append(entry)
 		self._files_box.addWidget(entry.card)
+		self._update_empty_hint()
 		# рекомендация битрейта — в параметры именно этой карточки
 		fields = entry.form.fields("")
 		run_in_engine(
@@ -558,33 +562,43 @@ class VideoPage(ScrollArea):
 
 	def _remove_entry(self, entry: _FileEntry) -> None:
 		"""Убирает карточку файла из списка (сам файл не трогается)."""
-		if entry in self._entries:
-			self._entries.remove(entry)
-			entry.card.deleteLater()
+		self._remove_entries([entry])
 
-	def _clear_entries(self) -> None:
-		"""Опустошает список карточек (после успешной постановки)."""
-		for entry in self._entries:
-			entry.card.deleteLater()
-		self._entries = []
+	def _remove_entries(self, entries: list[_FileEntry]) -> None:
+		"""Убирает перечисленные карточки (после постановки или корзинкой)."""
+		for entry in entries:
+			if entry in self._entries:
+				self._entries.remove(entry)
+				entry.card.deleteLater()
+		self._update_empty_hint()
 
 	def _on_process(self) -> None:
-		"""Ставит все файлы списка в очередь — каждый со своими параметрами."""
+		"""Ставит отмеченные файлы в очередь — каждый со своими параметрами."""
 		if not self._entries:
 			self._show_error("Добавьте файл или папку — список пуст.")
 			return
-		requests = self._collect_requests()
-		if requests:
-			run_in_engine(
-				self._worker,
-				self._worker.engine.video_queue.enqueue_many(requests),
-				self,
-				partial(self._on_enqueued, len(requests)),
-				self._show_error,
-			)
+		selected = [entry for entry in self._entries if entry.check.isChecked()]
+		if not selected:
+			self._show_error("Отметьте чекбоксами файлы, которые обрабатывать.")
+			return
+		collected = self._collect_requests(selected)
+		if collected is None:
+			return
+		requests, submitted = collected
+		if not requests:
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video_queue.enqueue_many(requests),
+			self,
+			partial(self._on_enqueued, submitted),
+			self._show_error,
+		)
 
-	def _collect_requests(self) -> list[ProcessingRequest] | None:
-		"""Заявки по карточкам; «случайные кадры на выбор» — проход по файлам.
+	def _collect_requests(
+		self, entries: list[_FileEntry]
+	) -> tuple[list[ProcessingRequest], list[_FileEntry]] | None:
+		"""Заявки по отмеченным карточкам; «кадры на выбор» — проход по файлам.
 
 		Интерактивный источник кадра несовместим с фоновой очередью,
 		поэтому кадры выбираются заранее: диалог по разу на файл, выбранный
@@ -593,26 +607,30 @@ class VideoPage(ScrollArea):
 		иначе — предложение исключить файл (остальные не теряются).
 
 		Returns:
-			Заявки на обработку; None или пустой список — запуск отменён.
+			Пара (заявки, их карточки) — карточки убираются после успешной
+			постановки; None — запуск отменён целиком.
 		"""
-		single = len(self._entries) == 1
+		single = len(entries) == 1
 		requests: list[ProcessingRequest] = []
-		for entry in self._entries:
+		submitted: list[_FileEntry] = []
+		for entry in entries:
 			fields = entry.form.fields(entry.preset_name)
 			kind, _value = parse_intro_source(fields.intro_source)
 			if not (kind is IntroSourceKind.RANDOM_CHOICE and (fields.intro or fields.cover)):
 				requests.append(ProcessingRequest(entry.path, fields, batch_subdir=entry.batch))
+				submitted.append(entry)
 				continue
 			try:
 				intro = self._pick_frame_for(entry, fields, single)
 			except _AbortRun:
 				return None
 			if intro is None:
-				continue  # файл исключён из постановки
+				continue  # файл исключён из постановки — карточка остаётся
 			requests.append(
 				ProcessingRequest(entry.path, fields, intro_source=intro, batch_subdir=entry.batch)
 			)
-		return requests
+			submitted.append(entry)
+		return requests, submitted
 
 	def _pick_frame_for(self, entry: _FileEntry, fields: PresetFields, single: bool) -> str | None:
 		"""Выбор кадра заставки для одного файла (до постановки).
@@ -664,11 +682,15 @@ class VideoPage(ScrollArea):
 			self._show_error(user_message(exc))
 			return None
 
-	def _on_enqueued(self, count: int, _ids: list[int]) -> None:
-		"""Заявки приняты — список пустеет, панель очереди обновляется сразу."""
-		self._clear_entries()
-		if count > 1:
-			InfoBar.success("Пакет в очереди", f"Файлов: {count}", parent=self)
+	def _on_enqueued(self, submitted: list[_FileEntry], _ids: list[int]) -> None:
+		"""Заявки приняты — поставленные карточки уходят из списка.
+
+		Неотмеченные (и исключённые при выборе кадров) остаются —
+		их можно доправить и поставить следующим заходом.
+		"""
+		self._remove_entries(submitted)
+		if len(submitted) > 1:
+			InfoBar.success("Пакет в очереди", f"Файлов: {len(submitted)}", parent=self)
 		self._poll_queue()
 
 	# --- панель очереди обработки -------------------------------------------------
