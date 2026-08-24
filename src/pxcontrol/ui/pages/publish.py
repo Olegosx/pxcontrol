@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QShowEvent
@@ -63,6 +65,8 @@ from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
 
 #: Период опроса состояния очереди отправки (мс).
 _QUEUE_POLL_MS = 500
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -505,8 +509,11 @@ class PublishPage(ScrollArea):
 	def _pick_batch_dir(self, channel: ChannelDto, start_dir: str) -> None:
 		"""Выбор готовой папки (по умолчанию — папка результатов канала)."""
 		root = pick_dir(self, "Готовая папка с видео", start_dir=start_dir)
-		if not root:
-			return
+		if root:
+			self._scan_batch_root(channel, root)
+
+	def _scan_batch_root(self, channel: ChannelDto, root: str) -> None:
+		"""Сканирует готовую папку и продолжает цепочку пакета."""
 		setup = _BatchSetup(channel, root)
 		run_in_engine(
 			self._worker,
@@ -515,6 +522,54 @@ class PublishPage(ScrollArea):
 			partial(self._on_batch_scanned, setup),
 			self._show_error,
 		)
+
+	def start_batch_with_folder(self, root: str, channel_id: int) -> None:
+		"""Пакет из папки, выбранной на другой странице («Видео»).
+
+		Вход с чужой страницы: канал приходит её id (0 — не выбран)
+		и предвыбирается в списке каналов этой страницы.
+		"""
+		channel = self._batch_channel(channel_id)
+		if channel is not None:
+			self._scan_batch_root(channel, root)
+
+	def start_batch_with_files(self, paths: list[str], channel_id: int) -> None:
+		"""Пакет из готового списка файлов (выбор на странице «Видео»).
+
+		Папка не сканируется — файлы уже выбраны; размеры читаются здесь
+		(нужны пометкам «больше лимита»), исчезнувшие файлы пропускаются.
+		"""
+		channel = self._batch_channel(channel_id)
+		if channel is None:
+			return
+		files: list[ReadyVideo] = []
+		for path in paths:
+			try:
+				size = Path(path).stat().st_size
+			except OSError:
+				logger.warning("Пакет публикации: файл %s исчез — пропущен.", path)
+				continue
+			files.append(ReadyVideo(Path(path).name, path, size))
+		if not files:
+			self._show_error("Файлы не найдены на диске — публиковать нечего.")
+			return
+		root = str(Path(files[0].path).parent)
+		self._on_batch_scanned(_BatchSetup(channel, root), files)
+
+	def _batch_channel(self, channel_id: int) -> ChannelDto | None:
+		"""Канал пакета по id с другой страницы (с предвыбором в списке).
+
+		Список каналов мог ещё не загрузиться (первое открытие страницы) —
+		тогда честная подсказка вместо молчаливого сбоя.
+		"""
+		if channel_id:
+			self._channel_combo.select(lambda channel: channel.id == channel_id)
+		channel = self._channel_or_none()
+		if channel is None:
+			self._show_error(
+				"Канал не выбран (или список каналов ещё загружается) — выберите канал и повторите."
+			)
+		return channel
 
 	def _on_batch_scanned(self, setup: _BatchSetup, files: list[ReadyVideo]) -> None:
 		"""Файлы найдены — общий шаблон подписи (если шаблоны настроены)."""

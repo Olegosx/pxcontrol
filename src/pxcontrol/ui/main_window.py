@@ -58,6 +58,8 @@ class MainWindow(FluentWindow):
 		self._publish_page = PublishPage(self._worker, self)
 		self.addSubInterface(self._publish_page, FluentIcon.SEND, "Публикация")
 		self._video_page.publish_requested.connect(self._open_publish_with_video)
+		self._video_page.publish_files_requested.connect(self._open_publish_batch_files)
+		self._video_page.publish_folder_requested.connect(self._open_publish_batch_folder)
 		self.addSubInterface(SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание")
 		# категории настроек (Общие, Аккаунты) — внутри самой страницы
 		self.addSubInterface(
@@ -71,6 +73,16 @@ class MainWindow(FluentWindow):
 		"""Переходит на «Публикацию» с видеофайлом и каналом со страницы «Видео»."""
 		self._publish_page.prefill_media(MediaKind.VIDEO, path, channel_id=channel_id or None)
 		self.switchTo(self._publish_page)
+
+	def _open_publish_batch_files(self, paths: list[str], channel_id: int) -> None:
+		"""Пакет из готовых видео, выбранных на «Видео» (ADR-0015)."""
+		self.switchTo(self._publish_page)
+		self._publish_page.start_batch_with_files(list(paths), channel_id)
+
+	def _open_publish_batch_folder(self, root: str, channel_id: int) -> None:
+		"""Пакет из папки готовых видео, выбранной на «Видео» (ADR-0015)."""
+		self.switchTo(self._publish_page)
+		self._publish_page.start_batch_with_folder(root, channel_id)
 
 	def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — API Qt
 		"""Подтверждает выход, если очереди отправки или обработки не пусты.

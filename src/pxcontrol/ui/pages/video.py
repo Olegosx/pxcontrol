@@ -154,6 +154,14 @@ class VideoPage(ScrollArea):
 	#: (0 — канал не выбран). Ловит главное окно → «Публикация».
 	publish_requested = Signal(str, int)
 
+	#: Просьба опубликовать несколько готовых файлов пакетом (ADR-0015):
+	#: список путей и id канала. Ловит главное окно → пакет на «Публикации».
+	publish_files_requested = Signal(list, int)
+
+	#: Просьба опубликовать папку готовых видео пакетом: путь к папке
+	#: и id канала. Ловит главное окно → пакет на «Публикации».
+	publish_folder_requested = Signal(str, int)
+
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
 		self.setObjectName("video")
@@ -164,6 +172,8 @@ class VideoPage(ScrollArea):
 		self._handled_ids: set[int] = set()  # завершённые, уже учтённые
 		self._session_done = 0  # готовых с последней итоговой плашки
 		self._entries: list[_FileEntry] = []  # карточки файлов к обработке
+		self._processed_checks: list[tuple[CheckBox, ProcessedVideo]] = []
+		self._processed_dir = ""  # папка текущего списка готовых видео
 		self._build()
 		self._reload_presets()
 		# опрос очереди живёт всегда (не только при видимой странице):
@@ -237,9 +247,33 @@ class VideoPage(ScrollArea):
 		self._processed_hint.setWordWrap(True)
 		layout.addWidget(self._processed_hint)
 		self._result_box = QVBoxLayout()
+		self._result_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._result_box)
+		self._build_processed_actions(layout)
 		# список идёт за подпапкой: она задаёт папку, куда уйдёт результат
 		self._form.subdir_changed.connect(self._reload_processed)
+
+	def _build_processed_actions(self, layout: QVBoxLayout) -> None:
+		"""Кнопки массовой публикации под списком готовых видео."""
+		row = QHBoxLayout()
+		self._publish_all_button = PushButton(FluentIcon.SEND, "Опубликовать все", self)
+		self._publish_all_button.setToolTip("Все видео списка — пакетом на «Публикацию»")
+		self._publish_all_button.clicked.connect(self._publish_all_processed)
+		row.addWidget(self._publish_all_button)
+		self._publish_checked_button = PushButton("Опубликовать отмеченные", self)
+		self._publish_checked_button.setToolTip(
+			"Видео, отмеченные чекбоксами, — пакетом на «Публикацию»"
+		)
+		self._publish_checked_button.clicked.connect(self._publish_checked_processed)
+		row.addWidget(self._publish_checked_button)
+		publish_folder = PushButton("Опубликовать папку…", self)
+		publish_folder.setToolTip(
+			"Выбрать подпапку в обработанных и отправить её пакетом на «Публикацию»"
+		)
+		publish_folder.clicked.connect(self._publish_processed_folder)
+		row.addWidget(publish_folder)
+		row.addStretch()
+		layout.addLayout(row)
 
 	def _build_source_row(self, layout: QVBoxLayout) -> None:
 		"""Источник: две равнозначные кнопки — файл или папка.
@@ -891,8 +925,13 @@ class VideoPage(ScrollArea):
 	def _show_processed(self, listing: ProcessedListing) -> None:
 		"""Показывает готовые видео карточками (новые — сверху)."""
 		self._processed_hint.setText(f"Папка: {listing.directory}")
+		self._processed_dir = listing.directory  # старт диалога «Опубликовать папку…»
+		self._processed_checks = []
 		clear_layout(self._result_box)
-		if not listing.items:
+		has_items = bool(listing.items)
+		self._publish_all_button.setEnabled(has_items)
+		self._publish_checked_button.setEnabled(has_items)
+		if not has_items:
 			self._result_box.addWidget(
 				CaptionLabel(
 					"Готовых видео пока нет — обработайте исходник кнопкой выше.",
@@ -916,6 +955,11 @@ class VideoPage(ScrollArea):
 		buttons_layout.setContentsMargins(0, 0, 0, 0)
 		for button in (open_btn, folder_btn, publish_btn):
 			buttons_layout.addWidget(button)
+		# чекбокс — перед корзинкой (row_card добавляет её после trailing)
+		check = CheckBox("", buttons)
+		check.setToolTip("Отметить для «Опубликовать отмеченные»")
+		buttons_layout.addWidget(check)
+		self._processed_checks.append((check, item))
 		subtitle = f"{human_size(item.size_bytes)} · {format_local(item.modified_at)}"
 		card: QWidget = row_card(
 			self,
@@ -925,6 +969,46 @@ class VideoPage(ScrollArea):
 			on_delete=bind(self._on_delete_processed, item),
 		)
 		return card
+
+	# --- массовая публикация готовых видео (ADR-0015) -------------------------------
+
+	def _publish_channel(self) -> ChannelDto | None:
+		"""Канал для пакета публикации (с подсказкой, если не выбран)."""
+		channel = self._channel_combo.selected()
+		if channel is None:
+			self._show_error("Выберите канал (список над пресетом) — пакет публикуется в него.")
+		return channel
+
+	def _publish_all_processed(self) -> None:
+		"""Все видео списка — пакетом на «Публикацию»."""
+		self._emit_publish_files([item for _check, item in self._processed_checks])
+
+	def _publish_checked_processed(self) -> None:
+		"""Отмеченные чекбоксами видео — пакетом на «Публикацию»."""
+		picked = [item for check, item in self._processed_checks if check.isChecked()]
+		if not picked:
+			self._show_error("Отметьте чекбоксами готовые видео для публикации.")
+			return
+		self._emit_publish_files(picked)
+
+	def _emit_publish_files(self, items: list[ProcessedVideo]) -> None:
+		"""Передаёт файлы пакетом на «Публикацию» (через главное окно)."""
+		if not items:
+			self._show_error("Готовых видео нет — публиковать нечего.")
+			return
+		channel = self._publish_channel()
+		if channel is None:
+			return
+		self.publish_files_requested.emit([item.path for item in items], channel.id)
+
+	def _publish_processed_folder(self) -> None:
+		"""Выбор подпапки в обработанных — вся она пакетом на «Публикацию»."""
+		channel = self._publish_channel()
+		if channel is None:
+			return
+		root = pick_dir(self, "Папка готовых видео", start_dir=self._processed_dir)
+		if root:
+			self.publish_folder_requested.emit(root, channel.id)
 
 	def _on_delete_processed(self, item: ProcessedVideo) -> None:
 		"""Удаляет готовое видео с диска (вместе с кадром-превью)."""
