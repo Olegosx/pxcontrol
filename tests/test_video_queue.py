@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -23,26 +22,12 @@ from pxcontrol.engine.services.video_queue import (
 	VideoItemStatus,
 )
 from pxcontrol.engine.video import ProcessingOptions
+from tests.conftest import FakeProcessor
 
 FIELDS = PresetFields(name="Тест", subdir="паб")
 
 
-class _FakeProcessor:
-	"""Подмена process(): фиксирует параметры, создаёт файл результата."""
-
-	def __init__(self) -> None:
-		self.calls: list[ProcessingOptions] = []
-
-	def __call__(self, options: ProcessingOptions, on_progress: object = None) -> None:
-		self.calls.append(options)
-		if callable(on_progress):
-			on_progress(0.5)
-			on_progress(1.0)
-		Path(options.output).parent.mkdir(parents=True, exist_ok=True)
-		Path(options.output).write_bytes(b"video")
-
-
-class _GatedProcessor(_FakeProcessor):
+class _GatedProcessor(FakeProcessor):
 	"""Процессор, ждущий отмашки: пока событие не взведено — «кодирует».
 
 	Колбэк прогресса зовётся в цикле ожидания — отмена (исключение
@@ -60,15 +45,6 @@ class _GatedProcessor(_FakeProcessor):
 			if callable(on_progress):
 				on_progress(0.1)
 		super().__call__(options, on_progress)
-
-
-@pytest.fixture
-async def db(tmp_path: Path) -> AsyncIterator[Database]:
-	"""Временная БД с применёнными миграциями."""
-	database = Database(f"sqlite+aiosqlite:///{tmp_path / 'queue.db'}")
-	await database.init()
-	yield database
-	await database.close()
 
 
 @pytest.fixture
@@ -107,7 +83,7 @@ async def test_enqueue_many_processes_in_order(db: Database, env: Path, tmp_path
 	"""Пакет обрабатывается последовательно, результаты — в подпапке пакета."""
 	second = tmp_path / "второй.mp4"
 	second.write_bytes(b"src2")
-	processor = _FakeProcessor()
+	processor = FakeProcessor()
 	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=processor))
 	ids = await queue.enqueue_many(
 		[
@@ -133,7 +109,7 @@ async def test_per_request_fields_are_independent(db: Database, env: Path, tmp_p
 	"""У каждой заявки свои параметры: обрезка и подпапка не смешиваются."""
 	second = tmp_path / "второй.mp4"
 	second.write_bytes(b"src2")
-	processor = _FakeProcessor()
+	processor = FakeProcessor()
 	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=processor))
 	await queue.enqueue_many(
 		[
@@ -151,7 +127,7 @@ async def test_per_request_fields_are_independent(db: Database, env: Path, tmp_p
 
 async def test_single_enqueue_without_batch_subdir(db: Database, env: Path, tmp_path: Path) -> None:
 	"""Одиночная обработка кладёт результат прямо в подпапку пресета."""
-	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=_FakeProcessor()))
+	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=FakeProcessor()))
 	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
 	await _wait_status(queue, item_id, VideoItemStatus.DONE)
 	item = (await queue.state())[0]
@@ -161,7 +137,7 @@ async def test_single_enqueue_without_batch_subdir(db: Database, env: Path, tmp_
 
 async def test_enqueue_many_validates_before_adding(db: Database, env: Path) -> None:
 	"""Битый путь в середине пакета — отказ целиком, очередь пуста."""
-	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=_FakeProcessor()))
+	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=FakeProcessor()))
 	with pytest.raises(VideoError, match="Файл не найден"):
 		await queue.enqueue_many(
 			[
@@ -180,7 +156,7 @@ async def test_error_is_isolated_and_retriable(db: Database, env: Path, tmp_path
 	second.write_bytes(b"src2")
 	fail_once = {"active": True}
 
-	class _Flaky(_FakeProcessor):
+	class _Flaky(FakeProcessor):
 		def __call__(self, options: ProcessingOptions, on_progress: object = None) -> None:
 			if "исходник" in options.input and fail_once["active"]:
 				fail_once["active"] = False
@@ -250,7 +226,7 @@ async def test_auto_bitrate_substitution(
 	db: Database, env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Исходник больше лимита: рекомендация подставляется, пометка видна."""
-	processor = _FakeProcessor()
+	processor = FakeProcessor()
 	service = VideoService(db, "ffmpeg", processor=processor)
 
 	async def _advice(_path: str, _ts: float = 0.0, _te: float = 0.0) -> BitrateAdvice:
@@ -269,7 +245,7 @@ async def test_auto_bitrate_keeps_lower_manual_value(
 	db: Database, env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Заданный вручную битрейт ниже рекомендации не повышается."""
-	processor = _FakeProcessor()
+	processor = FakeProcessor()
 	service = VideoService(db, "ffmpeg", processor=processor)
 
 	async def _advice(_path: str, _ts: float = 0.0, _te: float = 0.0) -> BitrateAdvice:
@@ -286,7 +262,7 @@ async def test_auto_bitrate_keeps_lower_manual_value(
 
 async def test_intro_source_override_reaches_processor(db: Database, env: Path) -> None:
 	"""Персональный кадр заставки элемента доходит до обработки."""
-	processor = _FakeProcessor()
+	processor = FakeProcessor()
 	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=processor))
 	fields = PresetFields(name="Тест", subdir="паб", intro=True, intro_source="random-choice")
 	item_id = await queue.enqueue(
@@ -300,7 +276,7 @@ async def test_stash_frame_lifecycle(db: Database, env: Path, tmp_path: Path) ->
 	"""Копия кадра переживает смену партии и удаляется после обработки."""
 	frame = tmp_path / "кадр.png"
 	frame.write_bytes(b"png")
-	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=_FakeProcessor()))
+	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=FakeProcessor()))
 	stashed = await queue.stash_frame(str(frame))
 	assert Path(stashed).is_file() and stashed != str(frame)
 	fields = PresetFields(name="Тест", subdir="паб", intro=True)

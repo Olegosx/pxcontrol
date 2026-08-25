@@ -4,12 +4,14 @@
 1. Загрузка настроек (``.env`` → :class:`Settings`).
 2. Настройка логирования.
 3. Старт движка в фоновом потоке (:class:`EngineWorker`):
-   инициализация БД → подключение userbot → запуск шлюза Telegram.
+   инициализация БД → прогрев настроек → активация userbot
+   по сохранённой сессии (неудача подключения не мешает запуску).
 4. Создание Qt-приложения и главного окна.
 5. Запуск цикла событий Qt.
 
 Порядок остановки (обратный) выполняется при закрытии окна:
-шлюз Telegram → база данных → остановка потока движка.
+очереди отправки и обработки → шлюз Telegram → база данных →
+остановка потока движка.
 """
 
 from __future__ import annotations
@@ -106,7 +108,12 @@ def _run_qt(worker: EngineWorker) -> int:
 		font_size = UI_FONT_SIZE.default
 	apply_theme(dark=dark)
 	density.init(compact, control_height, font_size)
-	density.apply_widget_metrics()
+	try:
+		density.apply_widget_metrics()
+	except Exception:  # noqa: BLE001 — оформление не стоит отказа в запуске
+		# метод правит внутренности QFluentWidgets: несовместимое обновление
+		# библиотеки не должно ронять приложение — остаются штатные размеры
+		logger.warning("Не удалось применить плотность интерфейса.", exc_info=True)
 	window = MainWindow(worker)
 	window.show()
 	logger.info("Интерфейс запущен.")

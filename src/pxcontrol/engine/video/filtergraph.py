@@ -213,7 +213,10 @@ def _audio_chains(
 	if fade_out > 0:
 		filters.append(f"afade=t=out:st={duration - fade_out:.3f}:d={fade_out:.3f}")
 	if not filters:
-		return [], "0:a"
+		# первый звуковой поток, как и в ветке с фильтрами: метка [0:a]
+		# в графе берёт первый подходящий, а -map 0:a взял бы ВСЕ дорожки —
+		# файл с двумя озвучками вёл бы себя по-разному с заставкой и без
+		return [], "0:a:0"
 	return [f"[0:a]{','.join(filters)}[aout]"], "[aout]"
 
 

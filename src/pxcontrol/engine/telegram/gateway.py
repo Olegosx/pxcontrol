@@ -38,10 +38,6 @@ class TelegramGateway:
 		self.mtproto = MtprotoTransport()
 		self.login = MtprotoLoginManager()
 
-	async def start(self) -> None:
-		"""Подключает userbot (если настроен). Bot API соединений не держит."""
-		await self.mtproto.start()
-
 	async def stop(self) -> None:
 		"""Останавливает подключения (включая незавершённые входы)."""
 		await self.login.cancel_all()

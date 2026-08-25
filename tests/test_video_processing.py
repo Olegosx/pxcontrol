@@ -118,7 +118,9 @@ def test_audio_delayed_with_intro() -> None:
 	assert "adelay=1000:all=1" in with_intro.filter_complex
 	assert with_intro.audio_label == "[aout]"
 	plain = _build(has_audio=True)
-	assert plain.audio_label == "0:a"
+	# первый поток явно (0:a:0): -map 0:a брал бы все дорожки — поведение
+	# расходилось бы с фильтрованной веткой ([0:a] берёт первый поток)
+	assert plain.audio_label == "0:a:0"
 
 
 def test_main_chain_uses_explicit_size() -> None:
@@ -289,7 +291,7 @@ def test_no_fade_keeps_labels() -> None:
 	"""Нулевое затухание не добавляет фильтров и не меняет метки."""
 	graph = _build(has_audio=True)
 	assert "fade=" not in graph.filter_complex
-	assert graph.video_label == "[main]" and graph.audio_label == "0:a"
+	assert graph.video_label == "[main]" and graph.audio_label == "0:a:0"
 
 
 def test_fades_must_fit_duration(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,13 +417,50 @@ def test_attach_cover_moves_moov_to_front(monkeypatch: pytest.MonkeyPatch) -> No
 	from pxcontrol.engine.video import pipeline
 
 	captured: list[str] = []
-	monkeypatch.setattr(pipeline, "run_tool", lambda cmd, what: captured.extend(cmd))
+	monkeypatch.setattr(pipeline, "run_tool", lambda cmd, what, timeout=None: captured.extend(cmd))
 	pipeline._attach_cover("ffmpeg", "main.mp4", "cover.png", "out.mp4")
 	assert "-movflags" in captured
 	assert captured[captured.index("-movflags") + 1] == "+faststart"
 
 
 # --- разбор прогресса ffmpeg -----------------------------------------------------
+
+
+def test_stream_progress_polls_callback_on_silence() -> None:
+	"""Молчащий ffmpeg не блокирует отмену: колбэк зовётся и без прогресса.
+
+	Регрессия: раньше отмена проверялась только при поступлении строки
+	прогресса — зависший процесс было не отменить (и выход из приложения
+	ждал бы его вечно).
+	"""
+	import os
+
+	from pxcontrol.engine.video.ffmpeg import _stream_progress
+
+	read_fd, write_fd = os.pipe()
+	stdout = os.fdopen(read_fd, "r")
+
+	class _HungProc:
+		"""Подставной процесс: жив, ничего не пишет."""
+
+		def poll(self) -> None:
+			return None
+
+	calls: list[float] = []
+
+	def cancel(progress: float) -> None:
+		calls.append(progress)
+		raise RuntimeError("отмена")
+
+	try:
+		with pytest.raises(RuntimeError, match="отмена"):
+			_stream_progress(_HungProc(), stdout, cancel, 10.0)  # type: ignore[arg-type]
+	finally:
+		# сначала пишущий конец: читающий поток-насос получает конец файла
+		# и отпускает внутренний замок файла — иначе close() зависнет
+		os.close(write_fd)
+		stdout.close()
+	assert calls == [0.0]
 
 
 def test_progress_seconds() -> None:

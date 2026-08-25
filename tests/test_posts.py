@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -61,15 +60,6 @@ class _FakeGateway:
 				scheduled_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
 			)
 		]
-
-
-@pytest.fixture
-async def db(tmp_path: Path) -> AsyncIterator[Database]:
-	"""Временная БД с применёнными миграциями."""
-	database = Database(f"sqlite+aiosqlite:///{tmp_path / 'posts.db'}")
-	await database.init()
-	yield database
-	await database.close()
 
 
 async def _add_channel(db: Database, with_bot: bool = True, userbot_admin: bool = True) -> int:

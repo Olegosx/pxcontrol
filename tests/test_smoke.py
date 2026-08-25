@@ -36,3 +36,50 @@ def test_engine_starts_and_stops(tmp_path: Path, monkeypatch) -> None:
 	get_settings.cache_clear()
 	run_headless(seconds=0.0)
 	get_settings.cache_clear()
+
+
+class _DeadClient:
+	"""Подставной клиент Telethon: сети нет, подключение не удаётся."""
+
+	async def connect(self) -> None:
+		raise ConnectionError("нет сети")
+
+	async def disconnect(self) -> None:
+		return None
+
+
+class _RevokedClient:
+	"""Подставной клиент Telethon: сессия отозвана Telegram."""
+
+	async def connect(self) -> None:
+		return None
+
+	async def is_user_authorized(self) -> bool:
+		return False
+
+	async def disconnect(self) -> None:
+		return None
+
+
+async def test_start_survives_unreachable_userbot(tmp_path: Path) -> None:
+	"""Регрессия: userbot настроен, но недоступен — старт движка не падает.
+
+	Активация по сохранённой сессии сама ловит недоступность; повторного
+	подключения в ``Engine.start`` быть не должно — оно роняло приложение
+	при старте без сети, а при отозванной сессии блокировало запуск
+	насовсем (войти заново через «Настройки» было бы уже негде).
+	"""
+	from pxcontrol.engine.db.models import TgAccount
+	from pxcontrol.engine.engine import Engine
+	from pxcontrol.engine.telegram.mtproto import MtprotoTransport
+
+	url = f"sqlite+aiosqlite:///{tmp_path / 'start.db'}"
+	engine = Engine(Settings(_env_file=None, database_url=url))
+	await engine.db.init()
+	async with engine.db.session_factory() as session:
+		session.add(TgAccount(label="ub", api_id=1, api_hash="h", session="s"))
+		await session.commit()
+	for client in (_DeadClient(), _RevokedClient()):
+		engine.gateway.mtproto = MtprotoTransport(client_factory=lambda a, b, c, _c=client: _c)
+		await engine.start()  # не должно бросить исключение
+	await engine.stop()

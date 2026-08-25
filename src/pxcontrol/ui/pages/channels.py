@@ -36,8 +36,8 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	TOAST_DURATION_MS,
 	DtoComboBox,
+	ErrorLabel,
 	bind,
 	bot_caption,
 	clear_layout,
@@ -48,6 +48,7 @@ from pxcontrol.ui.pages.common import (
 	page_layout,
 	parse_hhmm,
 	row_card,
+	show_warning,
 )
 
 
@@ -82,9 +83,7 @@ class _ConnectDialog(MessageBoxBase):
 		self._ref.setPlaceholderText("@имя, ссылка t.me/… или ID -100… (приватный канал)")
 		self._ref.setClearButtonEnabled(True)
 		self.viewLayout.addWidget(self._ref)
-		self._error = CaptionLabel("", self)
-		self._error.setTextColor("#c42b1c", "#ff99a4")
-		self._error.hide()
+		self._error = ErrorLabel(self)
 		self.viewLayout.addWidget(self._error)
 		self.yesButton.setText("Подключить")
 		self.cancelButton.setText("Отмена")
@@ -95,15 +94,10 @@ class _ConnectDialog(MessageBoxBase):
 		"""Крючок MessageBoxBase: при ошибке диалог не закрывается —
 		введённая ссылка не пропадает."""
 		if not self.chat_ref():
-			message = "Укажите @имя, ссылку или ID канала."
-		elif self.way() == "bot" and self.bot_id() is None:
-			message = "Сначала добавьте бота: Настройки → Аккаунты."
-		else:
-			self._error.hide()
-			return True
-		self._error.setText(message)
-		self._error.show()
-		return False
+			return self._error.fail("Укажите @имя, ссылку или ID канала.")
+		if self.way() == "bot" and self.bot_id() is None:
+			return self._error.fail("Сначала добавьте бота: Настройки → Аккаунты.")
+		return self._error.succeed()
 
 	def _on_way_changed(self, index: int) -> None:
 		"""Показывает выбор бота только для бот-способа."""
@@ -414,12 +408,7 @@ class ChannelsPage(ScrollArea):
 		if access.userbot_ok and access.bot_ok is not False:
 			InfoBar.success(access.channel.title, summary, parent=self)
 		else:
-			InfoBar.warning(
-				access.channel.title,
-				summary,
-				parent=self,
-				duration=TOAST_DURATION_MS,
-			)
+			show_warning(self, access.channel.title, summary)
 		self._reload()
 
 	def _on_assign_bot(self, channel: ChannelDto) -> None:

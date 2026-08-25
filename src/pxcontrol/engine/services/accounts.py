@@ -252,6 +252,7 @@ class AccountsService:
 			logger.warning("Userbot не активирован: %s", exc)
 			return
 		if account is None or account.session is None:
+			logger.info("Аккаунт MTProto не настроен — userbot отключён.")
 			return
 		try:
 			await self._gateway.activate_userbot(account.api_id, account.api_hash, account.session)

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from pathlib import Path
-
 import pytest
 from sqlalchemy import select
 
@@ -73,15 +70,6 @@ def test_sanitize_filename_limits_bytes_not_chars() -> None:
 
 
 # --- сервис -------------------------------------------------------------------
-
-
-@pytest.fixture
-async def db(tmp_path: Path) -> AsyncIterator[Database]:
-	"""Временная БД с применёнными миграциями."""
-	database = Database(f"sqlite+aiosqlite:///{tmp_path / 'captions.db'}")
-	await database.init()
-	yield database
-	await database.close()
 
 
 async def _add_channel(db: Database, username: str | None = None) -> int:

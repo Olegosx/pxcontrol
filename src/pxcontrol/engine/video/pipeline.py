@@ -100,6 +100,8 @@ def _watermark_options(opts: ProcessingOptions, info: VideoInfo) -> WatermarkOpt
 	"""
 	start = opts.wm_start_offset if opts.wm_start_offset else None
 	end = info.duration - opts.wm_end_offset if opts.wm_end_offset else None
+	# без вотермарка отступы безвредны — валидировать нечего (контракт
+	# закреплён тестом test_watermark_window_degenerate_raises)
 	if opts.watermark and (start is not None or end is not None):
 		window = (end if end is not None else info.duration) - (start or 0.0)
 		if window <= 0:
@@ -270,7 +272,9 @@ def _attach_cover(ffmpeg_bin: str, video_path: str, cover_path: str, output: str
 		"mp4",
 		output,
 	]
-	run_tool(cmd, "вшивание обложки")
+	# ремукс без перекодирования — минуты даже для файлов в гигабайты;
+	# щедрый предел ловит только по-настоящему зависший процесс
+	run_tool(cmd, "вшивание обложки", timeout=1800.0)
 
 
 def _save_preview(opts: ProcessingOptions, info: VideoInfo, still_path: str | None) -> None:

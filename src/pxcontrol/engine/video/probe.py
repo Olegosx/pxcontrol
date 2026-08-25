@@ -80,7 +80,9 @@ def _run_ffprobe(path: str, ffprobe_bin: str) -> dict[str, Any]:
 		"-show_format",
 		path,
 	]
-	return dict(json.loads(run_tool(cmd, f"чтение метаданных '{path}'")))
+	# чтение метаданных — секунды даже для больших файлов; предел ловит
+	# зависший ffprobe (файл на отвалившемся сетевом диске)
+	return dict(json.loads(run_tool(cmd, f"чтение метаданных '{path}'", timeout=60.0)))
 
 
 def _parse_fps(rate: str) -> float:
@@ -170,7 +172,12 @@ def probe_video(path: str, ffprobe_bin: str = "ffprobe") -> VideoInfo:
 		duration = 0.0
 	if duration <= 0:
 		raise RuntimeError(f"Не удалось определить длительность для '{path}'")
-	width, height = int(video["width"]), int(video["height"])
+	# размеры — оборонительно, как fps и длительность: битый контейнер
+	# без полей давал бы голый KeyError вместо обещанного RuntimeError
+	try:
+		width, height = int(video["width"]), int(video["height"])
+	except (KeyError, TypeError, ValueError) as exc:
+		raise RuntimeError(f"Не удалось определить размеры кадра для '{path}'") from exc
 	# флаг поворота: ffprobe отдаёт размеры хранимого кадра, а ffmpeg
 	# при декодировании сам поворачивает изображение — расчёты (вписывание
 	# в FullHD, вотермарк, кадры) должны идти от повёрнутых размеров,

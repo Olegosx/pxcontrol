@@ -196,6 +196,10 @@ class CaptionField(TimestampMixin, Base):
 	values: Mapped[list[CaptionValue]] = relationship(
 		back_populates="field",
 		cascade="all, delete-orphan",
+		# удаление каскадом делает сама БД (ondelete=CASCADE, проверка
+		# ключей включена) — без passive_deletes ORM грузил бы весь словарь
+		# и удалял его построчно
+		passive_deletes=True,
 		order_by="CaptionValue.value",
 	)
 
@@ -237,6 +241,8 @@ class CaptionTemplate(TimestampMixin, Base):
 	fields: Mapped[list[CaptionTemplateField]] = relationship(
 		back_populates="template",
 		cascade="all, delete-orphan",
+		# каскад удаления — на стороне БД (см. CaptionField.values)
+		passive_deletes=True,
 		order_by="CaptionTemplateField.position",
 	)
 

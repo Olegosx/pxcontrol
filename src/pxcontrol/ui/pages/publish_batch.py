@@ -11,8 +11,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 
-from PySide6.QtCore import QDate, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QDate
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
@@ -25,7 +24,6 @@ from qfluentwidgets import (
 	LineEdit,
 	MessageBoxBase,
 	PushButton,
-	ScrollArea,
 	SpinBox,
 	StrongBodyLabel,
 	SubtitleLabel,
@@ -46,7 +44,16 @@ from pxcontrol.engine.services.publish_plan import (
 from pxcontrol.engine.services.video import ReadyVideo
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import human_size, noop, parse_hhmm, show_error
+from pxcontrol.ui.pages.common import (
+	ErrorLabel,
+	SelectionRow,
+	fixed_list_area,
+	human_size,
+	noop,
+	open_in_system,
+	parse_hhmm,
+	show_error,
+)
 
 #: Формат времени публикации в строке черновика (местное время).
 _WHEN_FORMAT = "%d.%m.%Y %H:%M"
@@ -118,7 +125,7 @@ class _BatchRow:
 		head.addWidget(title, stretch=1)
 		play = TransparentToolButton(FluentIcon.PLAY, self.card)
 		play.setToolTip("Посмотреть файл (системный плеер)")
-		play.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(video.path)))
+		play.clicked.connect(lambda: open_in_system(video.path))
 		head.addWidget(play)
 		remove = TransparentToolButton(FluentIcon.DELETE, self.card)
 		remove.setToolTip("Убрать из пакета (файл на диске не трогается)")
@@ -181,9 +188,7 @@ class PublishBatchDialog(MessageBoxBase):
 		self._build_strategy_row()
 		self._build_rows(files, caption_lines, limit_bytes)
 		self._build_selection_row()
-		self._error = CaptionLabel("", self)
-		self._error.setTextColor("#c42b1c", "#ff99a4")
-		self._error.hide()
+		self._error = ErrorLabel(self)
 		self.viewLayout.addWidget(self._error)
 		self.yesButton.setText("В очередь")
 		self.cancelButton.setText("Отмена")
@@ -218,25 +223,18 @@ class PublishBatchDialog(MessageBoxBase):
 		"""Крючок MessageBoxBase: False не даёт диалогу закрыться."""
 		checked = self._checked()
 		if not checked:
-			return self._fail("Отметьте хотя бы один файл.")
+			return self._error.fail("Отметьте хотя бы один файл.")
 		for row in checked:
 			try:
 				when = _parse_when(str(row.when.text()))
 			except ValueError as exc:
-				return self._fail(f"{row.video.name}: {exc}")
+				return self._error.fail(f"{row.video.name}: {exc}")
 			if when is not None and not self._schedule_allowed:
-				return self._fail(
+				return self._error.fail(
 					f"{row.video.name}: отложенная публикация недоступна — "
 					"у канала нет userbot-админа, только «сейчас»."
 				)
-		self._error.hide()
-		return True
-
-	def _fail(self, message: str) -> bool:
-		"""Показывает ошибку валидации под списком; диалог не закрывается."""
-		self._error.setText(message)
-		self._error.show()
-		return False
+		return self._error.succeed()
 
 	# --- сборка ----------------------------------------------------------------
 
@@ -311,11 +309,7 @@ class PublishBatchDialog(MessageBoxBase):
 		limit_bytes: int | None,
 	) -> None:
 		"""Строки черновиков в прокручиваемом списке."""
-		area = ScrollArea(self)
-		container = QWidget(area)
-		box = QVBoxLayout(container)
-		box.setContentsMargins(0, 0, 0, 0)
-		box.setSpacing(8)
+		area, box = fixed_list_area(self, _LIST_HEIGHT, spacing=8)
 		for video in files:
 			caption = (
 				build_caption(title_from_filename(video.path), caption_lines)
@@ -328,24 +322,12 @@ class PublishBatchDialog(MessageBoxBase):
 			box.addWidget(row.card)
 			self._rows.append(row)
 		box.addStretch()
-		area.setWidget(container)
-		area.setWidgetResizable(True)
-		area.enableTransparentBackground()
-		area.setFixedHeight(_LIST_HEIGHT)
 		self.viewLayout.addWidget(area)
 
 	def _build_selection_row(self) -> None:
 		"""Кнопки выбора и итог по отмеченному."""
-		row = QHBoxLayout()
-		select_all = PushButton("Выбрать все", self)
-		select_all.clicked.connect(lambda: self._set_all(True))
-		row.addWidget(select_all)
-		clear_all = PushButton("Снять все", self)
-		clear_all.clicked.connect(lambda: self._set_all(False))
-		row.addWidget(clear_all)
-		self._summary = CaptionLabel("", self)
-		row.addWidget(self._summary, stretch=1)
-		self.viewLayout.addLayout(row)
+		self._selection = SelectionRow(self, self._set_all)
+		self.viewLayout.addLayout(self._selection.layout)
 
 	def _request_renames(self, template_id: int | None, used_values: dict[int, list[str]]) -> None:
 		"""Просит движок предложить имена файлов по шаблону имени.
@@ -480,4 +462,4 @@ class PublishBatchDialog(MessageBoxBase):
 	def _update_summary(self, *_args: object) -> None:
 		picked = self._checked()
 		total = sum(row.video.size_bytes for row in picked)
-		self._summary.setText(f"Отмечено {len(picked)} из {len(self._rows)} · {human_size(total)}")
+		self._selection.set_summary(len(picked), len(self._rows), total)

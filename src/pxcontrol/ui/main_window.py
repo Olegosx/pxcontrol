@@ -44,11 +44,12 @@ class MainWindow(FluentWindow):
 			saved = self._worker.submit(self._worker.engine.settings.get(WINDOW_GEOMETRY)).result(
 				timeout=5
 			)
+			# применение — тоже под защитой: битое значение из БД (не-ASCII,
+			# мусор вместо base64) не должно валить создание окна
+			if saved:
+				self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii")))
 		except Exception:  # noqa: BLE001 — геометрия не стоит отказа в запуске
 			logger.warning("Не удалось прочитать состояние окна.", exc_info=True)
-			return
-		if saved:
-			self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii")))
 
 	def _build_navigation(self) -> None:
 		"""Наполняет боковую навигацию разделами приложения."""

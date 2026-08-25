@@ -38,10 +38,18 @@ def resolve_timestamp(source: str, info: VideoInfo) -> float:
 		# случайный из 5–95 %: этим режимом сервис набирает кадры-кандидаты,
 		# он же — запасное поведение без человека (автоматика)
 		return random.uniform(info.duration * CHOICE_FROM, info.duration * CHOICE_TO)
+	# число разбирается с доменным текстом: сырое «could not convert…»
+	# выбивалось бы из стиля модуля (каждая ошибка названа по-русски)
 	if source.startswith("time:"):
-		return float(source.split(":", 1)[1])
+		try:
+			return float(source.split(":", 1)[1])
+		except ValueError as exc:
+			raise ValueError(f"Момент кадра не число: {source}") from exc
 	if source.startswith("frame:"):
-		return int(source.split(":", 1)[1]) / info.fps
+		try:
+			return int(source.split(":", 1)[1]) / info.fps
+		except ValueError as exc:
+			raise ValueError(f"Номер кадра не целое число: {source}") from exc
 	raise ValueError(f"Неизвестный источник кадра: {source}")
 
 
@@ -84,7 +92,8 @@ def extract_still(
 		_fit_pad_filter(width, height),
 		output_path,
 	]
-	run_tool(cmd, f"извлечение кадра на {timestamp:.3f} с")
+	# один кадр — секунды; предел ловит зависший ffmpeg (недоступный диск)
+	run_tool(cmd, f"извлечение кадра на {timestamp:.3f} с", timeout=120.0)
 
 
 def prepare_still(

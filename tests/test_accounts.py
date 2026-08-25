@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from pathlib import Path
-
 import pytest
 
 from pxcontrol.engine.db.database import Database
@@ -66,15 +63,6 @@ class _FakeGateway:
 
 	async def bot_events(self, token: str) -> list[str]:
 		return ["01.07 12:00 — «Канал» (channel, id=-1001): статус бота «administrator»"]
-
-
-@pytest.fixture
-async def db(tmp_path: Path) -> AsyncIterator[Database]:
-	"""Временная БД с применёнными миграциями."""
-	database = Database(f"sqlite+aiosqlite:///{tmp_path / 'accounts.db'}")
-	await database.init()
-	yield database
-	await database.close()
 
 
 async def test_bot_lifecycle(db: Database) -> None:
@@ -215,3 +203,29 @@ async def test_premium_follows_activated_account(db: Database) -> None:
 	await service.activate_stored_userbot()  # как при перезапуске приложения
 	flags = {a.id: a.premium for a in await service.list_tg_accounts()}
 	assert flags == {first.id: True, second.id: False}  # правило «первый с сессией»
+
+
+async def test_activate_stored_userbot_survives_wrong_secret_key(db: Database) -> None:
+	"""Смена ключа шифрования не мешает запуску (обещание data-model.md).
+
+	Сессия в БД зашифрована старым ключом: активация userbot при старте
+	ловит ошибку расшифровки и выходит с предупреждением в лог —
+	приложение работает дальше, ту же ошибку пользователь увидит
+	на странице аккаунтов.
+	"""
+	import keyring
+
+	from pxcontrol.engine.db.models import TgAccount
+	from pxcontrol.engine.security.secrets import get_secret_store
+	from tests.conftest import MemoryKeyring
+
+	async with db.session_factory() as session:
+		session.add(TgAccount(label="ub", api_id=1, api_hash="h", session="s"))
+		await session.commit()
+	# «перезапуск» с другим ключом: старое хранилище (и его ключ) исчезло
+	keyring.set_keyring(MemoryKeyring())
+	get_secret_store.cache_clear()
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	await service.activate_stored_userbot()  # не должно бросить исключение
+	assert gateway.activated is None  # userbot не активирован, но и не упали

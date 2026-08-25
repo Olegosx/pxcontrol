@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import logging
+import queue
 import subprocess
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import IO
 
 logger = logging.getLogger(__name__)
 
@@ -65,21 +67,35 @@ def ffmpeg_source(source: FfmpegSource) -> Callable[[], str]:
 	return source if callable(source) else (lambda: source)
 
 
-def run_tool(cmd: list[str], what: str) -> str:
+def run_tool(cmd: list[str], what: str, timeout: float | None = None) -> str:
 	"""Запускает ffmpeg/ffprobe и возвращает stdout.
 
 	Args:
 		cmd: полная команда (первый элемент — путь к бинарю).
 		what: короткое человекочитаемое имя операции для лога и ошибки.
+		timeout: предел ожидания в секундах (None — без предела). Шаги
+			без прогресса и отмены обязаны его задавать: зависший процесс
+			(файл на отвалившемся сетевом диске) иначе заблокировал бы
+			обработчик очереди навсегда.
 
 	Raises:
-		RuntimeError: Инструмент завершился с ненулевым кодом.
+		RuntimeError: Инструмент завершился с ненулевым кодом или не успел
+			за ``timeout`` (процесс убит).
 	"""
 	tool = Path(cmd[0]).name
 	logger.debug("%s (%s): %s", tool, what, " ".join(cmd))
 	# кодировка явная: ffmpeg пишет журнал в UTF-8 (пути с кириллицей —
 	# норма проекта), а локаль системы бывает иной (Windows: cp1251)
-	result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+	try:
+		result = subprocess.run(
+			cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
+		)
+	except subprocess.TimeoutExpired as exc:
+		logger.error("%s (%s) не завершился за %.0f с — процесс убит.", tool, what, exc.timeout)
+		raise RuntimeError(
+			f"{tool} ({what}) не ответил за {exc.timeout:.0f} с — процесс "
+			"остановлен (файл или диск недоступен)."
+		) from exc
 	if result.returncode != 0:
 		logger.error(
 			"%s (%s) завершился с ошибкой, полный вывод:\n%s",
@@ -104,6 +120,11 @@ def run_streaming(
 	конечен (~64 КБ), и болтливый ffmpeg (покадровые предупреждения
 	фильтров), заполнив его, замер бы на записи — а мы вечно ждали бы
 	строк прогресса из stdout (взаимная блокировка).
+
+	Отмена: исключение из ``on_progress`` убивает процесс (контракт
+	очереди обработки). Колбэк вызывается и при молчании ffmpeg
+	(раз в ``_CANCEL_POLL_SECONDS`` с последней долей) — иначе зависший
+	процесс, переставший писать прогресс, было бы не отменить.
 
 	Raises:
 		RuntimeError: Если ffmpeg завершился с ненулевым кодом.
@@ -133,10 +154,7 @@ def run_streaming(
 		)
 		reader.start()
 		try:
-			for line in proc.stdout:
-				seconds = _progress_seconds(line)
-				if seconds is not None and on_progress is not None and total_seconds > 0:
-					on_progress(min(seconds / total_seconds, 1.0))
+			_stream_progress(proc, proc.stdout, on_progress, total_seconds)
 		except BaseException:
 			proc.kill()
 			raise
@@ -151,6 +169,50 @@ def run_streaming(
 		)
 		summary = _error_summary(stderr) or "журнал ffmpeg недоступен"
 		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {summary}")
+
+
+#: Период «пустого» вызова колбэка прогресса при молчании ffmpeg (секунды).
+_CANCEL_POLL_SECONDS = 1.0
+
+
+def _stream_progress(
+	proc: subprocess.Popen[str],
+	stdout: IO[str],
+	on_progress: ProgressCallback | None,
+	total_seconds: float,
+) -> None:
+	"""Транслирует прогресс ffmpeg, не завися от его разговорчивости.
+
+	Строки читает отдельный поток через очередь: основной цикл
+	просыпается не реже раза в ``_CANCEL_POLL_SECONDS`` и повторяет
+	колбэку последнюю долю — давая ему шанс отменить зависший процесс.
+	"""
+	lines: queue.Queue[str | None] = queue.Queue()
+
+	def _pump() -> None:
+		try:
+			for line in stdout:
+				lines.put(line)
+		finally:
+			lines.put(None)  # конец потока (или канал закрыт после kill)
+
+	threading.Thread(target=_pump, name="ffmpeg-progress", daemon=True).start()
+	progress = 0.0
+	while True:
+		try:
+			line = lines.get(timeout=_CANCEL_POLL_SECONDS)
+		except queue.Empty:
+			if proc.poll() is not None:
+				return
+			if on_progress is not None:
+				on_progress(progress)
+			continue
+		if line is None:
+			return
+		seconds = _progress_seconds(line)
+		if seconds is not None and on_progress is not None and total_seconds > 0:
+			progress = min(seconds / total_seconds, 1.0)
+			on_progress(progress)
 
 
 def _progress_seconds(line: str) -> float | None:

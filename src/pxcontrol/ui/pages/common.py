@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
-from PySide6.QtCore import QDate, QObject, QTime, QTimer, Signal
+from PySide6.QtCore import QDate, QObject, QTime, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
@@ -29,6 +30,7 @@ from qfluentwidgets import (
 	MessageBox,
 	MessageBoxBase,
 	ProgressBar,
+	PushButton,
 	ScrollArea,
 	StrongBodyLabel,
 	SubtitleLabel,
@@ -36,7 +38,9 @@ from qfluentwidgets import (
 	TransparentToolButton,
 )
 
+from pxcontrol.engine import EngineWorker
 from pxcontrol.ui import density
+from pxcontrol.ui.async_bridge import run_in_engine
 
 _T = TypeVar("_T")
 
@@ -159,6 +163,21 @@ def human_size(size_bytes: int) -> str:
 	return f"{text.replace('.', ',')} {units[unit]}"
 
 
+def format_duration(seconds: float) -> str:
+	"""Длительность для списков и подписей: «12:34» или «1:23:45»."""
+	total = int(seconds)
+	hours, rest = divmod(total, 3600)
+	minutes, secs = divmod(rest, 60)
+	if hours:
+		return f"{hours}:{minutes:02d}:{secs:02d}"
+	return f"{minutes}:{secs:02d}"
+
+
+def open_in_system(path: str) -> None:
+	"""Открывает файл или папку системным приложением (плеер, проводник)."""
+	QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
 def exec_dialog(dialog: QDialog) -> bool:
 	"""Показывает модальный диалог и удаляет его после закрытия.
 
@@ -186,6 +205,16 @@ def confirm_delete(parent: QWidget, text: str, accept_text: str = "Удалит�
 def show_error(parent: QWidget, message: str) -> None:
 	"""Показывает ошибку всплывающей плашкой."""
 	InfoBar.error("Ошибка", message, parent=parent, duration=TOAST_DURATION_MS)
+
+
+def show_warning(parent: QWidget, title: str, message: str) -> None:
+	"""Показывает предупреждение всплывающей плашкой.
+
+	Единая точка правила «предупреждения видны столько же, сколько
+	ошибки»: у ``InfoBar.warning`` умолчание — 1 секунда, за которую
+	пользователь плашку не успевает заметить.
+	"""
+	InfoBar.warning(title, message, parent=parent, duration=TOAST_DURATION_MS)
 
 
 def error_reporter(parent: QWidget) -> Callable[[str], None]:
@@ -329,50 +358,259 @@ class DtoComboBox(ComboBox, Generic[_T]):
 		return 1 if self._placeholder is not None else 0
 
 
-class ProgressPanel(QWidget):
-	"""Полоса прогресса с подписью и мостом из потока движка.
+#: Период опроса состояния очередей движка (мс). Опрос вместо событий —
+#: осознанный дизайн ADR-0012: интерфейс читает снимок состояния.
+QUEUE_POLL_MS = 500
 
-	``emit_progress`` передаётся колбэком в движок: сигнал Qt доставляет
-	долю готовности (0.0..1.0) в поток интерфейса. Используется страницей
-	«Видео» (кодирование); «Публикация» показывает прогресс иначе —
-	опросом состояния очереди отправки (ADR-0012).
+
+class QueuePanel:
+	"""Панель очереди движка: опрос, карточки, прогресс, действия.
+
+	Общий каркас панелей «Публикации» (очередь отправки, ADR-0012)
+	и «Видео» (очередь обработки, ADR-0014): таймер опроса, снятие
+	завершённых с показа, пересборка карточек только при смене состава
+	и точечное обновление прогресса без пересборки. Опрос живёт всегда,
+	не только при видимой странице: завершения снимаются с показа,
+	а кэш занятости нужен окну для подтверждения выхода.
+
+	Контракт сервиса очереди (оба сервиса движка ему следуют): корутины
+	``state()``, ``cancel(id)``, ``retry(id)``, ``dismiss(id)``; элементы
+	с полями ``id``, ``status`` (перечисление со значениями
+	PENDING/DONE/ERROR/CANCELLED + активное и методом ``finished()``),
+	``progress``, ``title``, ``error``.
 	"""
 
-	_progressed = Signal(float)
+	def __init__(
+		self,
+		worker: EngineWorker,
+		page: QWidget,
+		box: QVBoxLayout,
+		*,
+		service: Callable[[], Any],
+		subtitle: Callable[[Any], str],
+		on_finished: Callable[[Any, bool], None] | None = None,
+		on_refreshed: Callable[[list[Any]], None] | None = None,
+		on_drained: Callable[[list[Any]], None] | None = None,
+	) -> None:
+		"""Args:
+		worker: мост к движку.
+		page: страница-владелец (родитель карточек, таймера, плашек ошибок).
+		box: компоновка, в которую панель складывает карточки.
+		service: провайдер сервиса очереди (``lambda: worker.engine.…``).
+		subtitle: подпись карточки для элемента.
+		on_finished: разовая реакция на завершённый элемент
+			(``True`` — готово, ``False`` — отменено) до снятия с показа.
+		on_refreshed: вызывается после каждого обновления с видимыми
+			элементами (сводка очереди на странице «Видео»).
+		on_drained: вызывается с видимым остатком, когда занятость
+			кончилась (итоговая плашка вместо плашки на каждый файл).
+		"""
+		self._worker = worker
+		self._page = page
+		self._box = box
+		self._service = service
+		self._subtitle = subtitle
+		self._on_finished = on_finished
+		self._on_refreshed = on_refreshed
+		self._on_drained = on_drained
+		self._show_error = error_reporter(page)
+		self._signature: tuple[tuple[Any, ...], ...] = ()
+		self._bars: dict[int, ProgressBar] = {}
+		self._handled: set[int] = set()  # завершённые, уже учтённые
+		self._busy = False
+		timer = QTimer(page)
+		timer.setInterval(QUEUE_POLL_MS)
+		timer.timeout.connect(self.poll)
+		timer.start()
+
+	def busy(self) -> bool:
+		"""Есть ли незавершённое в очереди (для подтверждения выхода)."""
+		return self._busy
+
+	def poll(self) -> None:
+		"""Запрашивает состояние очереди (по таймеру и после постановки)."""
+		# ошибки опроса не показываем плашками: мост пишет их в лог,
+		# а раз в полсекунды спамить пользователя нечем и незачем
+		run_in_engine(self._worker, self._service().state(), self._page, self._show, noop)
+
+	def dismiss(self, item_id: int) -> None:
+		"""Убирает завершённый элемент из состояния очереди."""
+		run_in_engine(
+			self._worker,
+			self._service().dismiss(item_id),
+			self._page,
+			lambda *_a: self.poll(),
+			noop,
+		)
+
+	# --- внутреннее ---------------------------------------------------------
+
+	def _show(self, items: list[Any]) -> None:
+		"""Обновляет панель; завершённые получают реакцию и снимаются с показа."""
+		visible: list[Any] = []
+		for item in items:
+			if item.status.name in ("DONE", "CANCELLED"):
+				self._finish(item, done=item.status.name == "DONE")
+			else:
+				visible.append(item)
+		# id, исчезнувшие из состояния движка (после dismiss), больше
+		# не встретятся — набор «уже учтённых» не растёт бесконечно
+		self._handled &= {item.id for item in items}
+		busy = any(not item.status.finished() for item in visible)
+		if self._busy and not busy and self._on_drained is not None:
+			self._on_drained(visible)
+		self._busy = busy
+		signature = tuple((i.id, i.status, i.error, getattr(i, "note", None)) for i in visible)
+		if signature != self._signature:
+			self._signature = signature
+			self._rebuild(visible)
+		for item in visible:  # прогресс — без пересборки карточек
+			bar = self._bars.get(item.id)
+			if bar is not None:
+				bar.setValue(int(item.progress * 100))
+		if self._on_refreshed is not None:
+			self._on_refreshed(visible)
+
+	def _finish(self, item: Any, done: bool) -> None:
+		"""Разовая реакция на завершённый элемент и снятие его с показа.
+
+		Снятие асинхронное, до него элемент успевает попасть в опрос ещё
+		раз-другой — набор «уже учтённых» защищает от повторной реакции.
+		"""
+		if item.id in self._handled:
+			return
+		self._handled.add(item.id)
+		if self._on_finished is not None:
+			self._on_finished(item, done)
+		self.dismiss(item.id)
+
+	def _rebuild(self, items: list[Any]) -> None:
+		"""Перестраивает карточки (только при смене состава/статусов)."""
+		clear_layout(self._box)
+		self._bars = {}
+		for item in items:
+			self._box.addWidget(self._row(item))
+
+	def _row(self, item: Any) -> CardWidget:
+		"""Карточка элемента: прогресс у активного, «Отмена» у живого,
+		«Повторить» и «Убрать» у ошибки."""
+		trailing = QWidget(self._page)
+		row = QHBoxLayout(trailing)
+		row.setContentsMargins(0, 0, 0, 0)
+		if not item.status.finished() and item.status.name != "PENDING":  # активный
+			bar = ProgressBar(trailing)
+			bar.setRange(0, 100)
+			bar.setValue(int(item.progress * 100))
+			bar.setFixedWidth(160)
+			row.addWidget(bar)
+			self._bars[item.id] = bar
+		if item.status.name == "ERROR":
+			retry = PushButton("Повторить", trailing)
+			retry.clicked.connect(bind(self._retry, item.id))
+			row.addWidget(retry)
+			action = PushButton("Убрать", trailing)
+			action.clicked.connect(bind(self.dismiss, item.id))
+		else:
+			action = PushButton("Отмена", trailing)
+			action.clicked.connect(bind(self._cancel, item.id))
+		row.addWidget(action)
+		return row_card(self._page, item.title, self._subtitle(item), trailing=trailing)
+
+	def _retry(self, item_id: int) -> None:
+		"""Просит движок вернуть элемент с ошибкой в очередь на повтор."""
+		run_in_engine(
+			self._worker,
+			self._service().retry(item_id),
+			self._page,
+			lambda *_a: self.poll(),  # карточка обновляется сразу, не по таймеру
+			self._show_error,
+		)
+
+	def _cancel(self, item_id: int) -> None:
+		"""Просит движок отменить элемент очереди."""
+		run_in_engine(
+			self._worker,
+			self._service().cancel(item_id),
+			self._page,
+			noop,
+			self._show_error,
+		)
+
+
+class ErrorLabel(CaptionLabel):
+	"""Красная подпись ошибки валидации диалога (единые цвета обеих тем).
+
+	Скрыта, пока ошибки нет; :meth:`fail` показывает текст и возвращает
+	False — крючок ``validate`` диалога завершается одной строкой.
+	Единая точка цветов вместо повторённых магических значений.
+	"""
 
 	def __init__(self, parent: QWidget) -> None:
-		super().__init__(parent)
-		layout = QVBoxLayout(self)
-		layout.setContentsMargins(0, 0, 0, 0)
-		self._bar = ProgressBar(self)
-		self._bar.setRange(0, 100)
-		self._label = CaptionLabel("", self)
-		layout.addWidget(self._bar)
-		layout.addWidget(self._label)
-		self._prefix = ""
-		self._progressed.connect(self._on_progress)
+		super().__init__("", parent)
+		self.setTextColor("#c42b1c", "#ff99a4")
 		self.hide()
 
-	@property
-	def emit_progress(self) -> Callable[[float], None]:
-		"""Колбэк для движка (безопасен к вызову из другого потока)."""
-		return self._progressed.emit
-
-	def begin(self, prefix: str, note: str = "") -> None:
-		"""Показывает панель: префикс для процентов и стартовая подпись."""
-		self._prefix = prefix
-		self._bar.setValue(0)
-		self._label.setText(note or f"{prefix}…")
+	def fail(self, message: str) -> bool:
+		"""Показывает ошибку; False не даёт диалогу закрыться."""
+		self.setText(message)
 		self.show()
+		return False
 
-	def finish(self) -> None:
-		"""Прячет панель."""
+	def succeed(self) -> bool:
+		"""Прячет ошибку; True позволяет диалогу закрыться."""
 		self.hide()
+		return True
 
-	def _on_progress(self, fraction: float) -> None:
-		percent = int(fraction * 100)
-		self._bar.setValue(percent)
-		self._label.setText(f"{self._prefix}: {percent}%")
+
+class SelectionRow:
+	"""Строка выбора пакетного диалога: «Выбрать все»/«Снять все» и итог.
+
+	Общий блок диалогов пакетов (сканирование папки и отправка):
+	``layout`` добавляется в компоновку диалога, итог обновляется
+	через :meth:`set_summary`.
+	"""
+
+	def __init__(self, parent: QWidget, set_all: Callable[[bool], None]) -> None:
+		self.layout = QHBoxLayout()
+		self._select_all = PushButton("Выбрать все", parent)
+		self._select_all.clicked.connect(lambda: set_all(True))
+		self.layout.addWidget(self._select_all)
+		self._clear_all = PushButton("Снять все", parent)
+		self._clear_all.clicked.connect(lambda: set_all(False))
+		self.layout.addWidget(self._clear_all)
+		self._summary = CaptionLabel("", parent)
+		self.layout.addWidget(self._summary, stretch=1)
+
+	def set_enabled(self, enabled: bool) -> None:
+		"""Доступность кнопок (пока список пуст — выключены)."""
+		self._select_all.setEnabled(enabled)
+		self._clear_all.setEnabled(enabled)
+
+	def set_summary(self, picked: int, total: int, picked_bytes: int) -> None:
+		"""Итог по отмеченному: «Отмечено N из M · размер»."""
+		self._summary.setText(f"Отмечено {picked} из {total} · {human_size(picked_bytes)}")
+
+
+def fixed_list_area(parent: QWidget, height: int, spacing: int) -> tuple[ScrollArea, QVBoxLayout]:
+	"""Прокручиваемый список фиксированной высоты для диалога.
+
+	Прокрутка живёт внутри области — длинный список не раздувает диалог.
+
+	Returns:
+		Область (её добавляет в диалог вызывающий) и компоновка
+		контейнера — в неё складываются строки; распорку в конец,
+		если нужна, добавляет вызывающий.
+	"""
+	area = ScrollArea(parent)
+	container = QWidget(area)
+	box = QVBoxLayout(container)
+	box.setContentsMargins(0, 0, 0, 0)
+	box.setSpacing(spacing)
+	area.setWidget(container)
+	area.setWidgetResizable(True)
+	area.enableTransparentBackground()
+	area.setFixedHeight(height)
+	return area, box
 
 
 def parse_hhmm(text: str) -> tuple[int, int]:
@@ -504,9 +742,7 @@ class FormDialog(MessageBoxBase):
 		self.viewLayout.addWidget(SubtitleLabel(title, self))
 		self._edits: dict[str, LineEdit] = {}
 		self._validator = validator
-		self._error = CaptionLabel("", self)
-		self._error.setTextColor("#c42b1c", "#ff99a4")
-		self._error.hide()
+		self._error = ErrorLabel(self)
 		for key, placeholder in fields:
 			edit = LineEdit(self)
 			edit.setPlaceholderText(placeholder)
@@ -530,11 +766,8 @@ class FormDialog(MessageBoxBase):
 			return True
 		message = self._validator({key: self.value(key) for key in self._edits})
 		if message is None:
-			self._error.hide()
-			return True
-		self._error.setText(message)
-		self._error.show()
-		return False
+			return self._error.succeed()
+		return self._error.fail(message)
 
 
 def require_filled(

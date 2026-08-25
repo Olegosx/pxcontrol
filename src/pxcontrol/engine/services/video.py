@@ -14,9 +14,11 @@ import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete, select
 
@@ -218,14 +220,14 @@ class IntroSourceKind(StrEnum):
 
 
 #: Виды источника кадра без значения (поле «секунды/путь» не нужно).
-INTRO_KINDS_WITHOUT_VALUE = frozenset(
+_INTRO_KINDS_WITHOUT_VALUE = frozenset(
 	{IntroSourceKind.RANDOM_MIDDLE, IntroSourceKind.RANDOM_CHOICE}
 )
 
 
 def build_intro_source(kind: IntroSourceKind, value: str = "") -> str:
 	"""Собирает строку ``intro_source`` («вид» или «вид:значение»)."""
-	if kind in INTRO_KINDS_WITHOUT_VALUE:
+	if kind in _INTRO_KINDS_WITHOUT_VALUE:
 		return str(kind)
 	return f"{kind}:{value.strip()}"
 
@@ -343,6 +345,34 @@ class PresetFields:
 	subdir: str = ""  # подпапка внутри базовых папок видео (пусто — без неё)
 
 
+def batch_subdir_name(root: str, now: datetime | None = None) -> str:
+	"""Имя подпапки пакета обработки: «штамп_имя-папки-источника».
+
+	Правило раскладки результатов пакета на диске (ADR-0014, п. 4) —
+	контракт движка, а не интерфейса: штамп даёт уникальность
+	и хронологическую сортировку, имя папки-источника — узнаваемость.
+	Спецсимволы вычищает движок при применении (``sanitize_subdir``).
+	"""
+	stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+	return f"{stamp}_{Path(root).name}"
+
+
+def _preset_field_names() -> list[str]:
+	"""Имена полей пресета — контракт «PresetFields зеркалит video_presets».
+
+	Единая точка соответствия для обоих направлений (сохранение и чтение):
+	новое поле достаточно добавить в dataclass и в модель — маппинг
+	подхватит его сам, без правки в двух местах разными способами.
+	"""
+	return [field.name for field in dataclass_fields(PresetFields)]
+
+
+def _preset_values(fields: PresetFields) -> dict[str, Any]:
+	"""Значения полей пресета для записи в ORM (парный — чтение в
+	:meth:`VideoService.get_preset_fields`)."""
+	return {name: getattr(fields, name) for name in _preset_field_names()}
+
+
 class VideoService:
 	"""Пресеты обработки и запуск подготовки видео."""
 
@@ -412,7 +442,7 @@ class VideoService:
 		Raises:
 			VideoError: Пресет для обновления не найден.
 		"""
-		values = dict(vars(fields))
+		values = _preset_values(fields)
 		if preset_id is None and not values["subdir"]:
 			# авто-умолчание при создании: подпапка из имени пресета
 			values["subdir"] = sanitize_subdir(fields.name)
@@ -444,30 +474,7 @@ class VideoService:
 			preset = await session.get(VideoPreset, preset_id)
 		if preset is None:
 			raise VideoError("Пресет не найден — обновите список.")
-		return PresetFields(
-			name=preset.name,
-			trim_start=preset.trim_start,
-			trim_end=preset.trim_end,
-			fade_in=preset.fade_in,
-			fade_out=preset.fade_out,
-			watermark_path=preset.watermark_path,
-			wm_corner=preset.wm_corner,
-			wm_margin=preset.wm_margin,
-			wm_opacity=preset.wm_opacity,
-			wm_scale=preset.wm_scale,
-			wm_start_offset=preset.wm_start_offset,
-			wm_end_offset=preset.wm_end_offset,
-			wm_fade=preset.wm_fade,
-			intro=preset.intro,
-			intro_source=preset.intro_source,
-			intro_hold=preset.intro_hold,
-			xfade=preset.xfade,
-			cover=preset.cover,
-			no_audio=preset.no_audio,
-			video_bitrate_kbps=preset.video_bitrate_kbps,
-			meta_comment=preset.meta_comment,
-			subdir=preset.subdir,
-		)
+		return PresetFields(**{name: getattr(preset, name) for name in _preset_field_names()})
 
 	# --- папки видео -----------------------------------------------------------
 
@@ -581,6 +588,32 @@ class VideoService:
 			found.append(ReadyVideo(path.relative_to(directory).as_posix(), str(path), size))
 		return found
 
+	async def ready_from_paths(self, paths: list[str]) -> list[ReadyVideo]:
+		"""Готовые видео из явного списка путей (выбор на странице «Видео»).
+
+		Парный вход к :meth:`scan_ready` — источник пакета публикации
+		держит движок (ADR-0015), интерфейс передаёт только пути. Папка
+		не сканируется, размеры читаются здесь; исчезнувшие файлы
+		пропускаются с предупреждением в лог. Порядок — по имени файла,
+		как при обработке: список «Готовых видео» показывает новые сверху,
+		и без сортировки раскладка отдала бы ранние слоты последним
+		обработанным.
+		"""
+
+		def build() -> list[ReadyVideo]:
+			files: list[ReadyVideo] = []
+			for path in paths:
+				try:
+					size = Path(path).stat().st_size
+				except OSError:
+					logger.warning("Пакет публикации: файл %s исчез — пропущен.", path)
+					continue
+				files.append(ReadyVideo(Path(path).name, path, size))
+			files.sort(key=lambda video: video.name.casefold())
+			return files
+
+		return await asyncio.to_thread(build)
+
 	def _scan_sources(self, directory: Path, on_progress: ScanProgress | None) -> list[FoundVideo]:
 		"""Блокирующий обход папки и пробы файлов (выполняется в потоке)."""
 		excluded = [
@@ -668,10 +701,13 @@ class VideoService:
 		Целостность настройки-ссылки держит сервис (ADR-0013, вариант «а»):
 		внешнего ключа у строки настройки нет, поэтому ссылки чистятся здесь.
 		"""
+		# порядок важен: сначала снять ссылки, потом удалить пресет — сбой
+		# между шагами оставит пресет без ссылок (безвредно), а не ссылки
+		# каналов на несуществующий пресет
+		await self._settings.drop_channel_value(CHANNEL_DEFAULT_PRESET, preset_id)
 		async with self._db.session_factory() as session:
 			await session.execute(delete(VideoPreset).where(VideoPreset.id == preset_id))
 			await session.commit()
-		await self._settings.drop_channel_value(CHANNEL_DEFAULT_PRESET, preset_id)
 
 	# --- подготовка ----------------------------------------------------------
 
@@ -704,7 +740,9 @@ class VideoService:
 		logger.info("Обработка видео: %s (параметры «%s»)…", source.name, fields.name)
 		try:
 			await asyncio.to_thread(self._processor, options, on_progress)
-		except (RuntimeError, ValueError) as exc:
+		except (RuntimeError, ValueError, OSError) as exc:
+			# OSError — диск полон, права, сетевой диск: доменный текст
+			# вместо «внутренней ошибки» в карточке очереди
 			raise VideoError(f"Обработка не удалась: {exc}") from exc
 		logger.info("Видео готово: %s", options.output)
 		return options.output

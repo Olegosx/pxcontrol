@@ -34,7 +34,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.video import FrameCandidate
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import show_error
+from pxcontrol.ui.pages.common import format_duration, show_error
 
 #: Колонок в плитке выбора кадра заставки.
 _FRAME_GRID_COLUMNS = 3
@@ -181,8 +181,7 @@ class FramePickerDialog(MessageBoxBase):
 		button.doubleClicked.connect(partial(self._on_double_clicked, frame.path))
 		self._group.addButton(button)
 		column.addWidget(button)
-		minutes, seconds = divmod(int(frame.timestamp), 60)
-		caption = CaptionLabel(f"{minutes}:{seconds:02d}", tile)
+		caption = CaptionLabel(format_duration(frame.timestamp), tile)
 		caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 		column.addWidget(caption)
 		return tile

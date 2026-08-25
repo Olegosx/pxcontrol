@@ -14,18 +14,15 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	CaptionLabel,
-	CardWidget,
 	CheckBox,
 	FluentIcon,
 	InfoBar,
 	LineEdit,
 	PrimaryPushButton,
-	ProgressBar,
 	PushButton,
 	ScrollArea,
 	SegmentedWidget,
@@ -50,9 +47,8 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
+	QueuePanel,
 	WhenRow,
-	bind,
-	clear_layout,
 	error_reporter,
 	exec_dialog,
 	format_local,
@@ -60,12 +56,9 @@ from pxcontrol.ui.pages.common import (
 	page_layout,
 	pick_dir,
 	pick_file,
-	row_card,
+	show_warning,
 )
 from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
-
-#: Период опроса состояния очереди отправки (мс).
-_QUEUE_POLL_MS = 500
 
 logger = logging.getLogger(__name__)
 
@@ -110,10 +103,6 @@ class PublishPage(ScrollArea):
 		# канал прошлой публикации: предвыбор после загрузки списка
 		self._restore_channel_id: int | None = None
 		self._kind = MediaKind.NONE
-		self._queue_signature: tuple[tuple[int, QueueItemStatus, str | None], ...] = ()
-		self._queue_bars: dict[int, ProgressBar] = {}
-		self._handled_ids: set[int] = set()  # завершённые, уже показанные плашкой
-		self._queue_busy = False
 		self._build()
 		run_in_engine(
 			worker,
@@ -122,12 +111,6 @@ class PublishPage(ScrollArea):
 			self._on_last_channel_loaded,
 			noop,
 		)
-		# опрос очереди живёт всегда (не только при видимой странице):
-		# завершения снимаются с показа, а кэш занятости нужен при выходе
-		self._queue_timer = QTimer(self)
-		self._queue_timer.setInterval(_QUEUE_POLL_MS)
-		self._queue_timer.timeout.connect(self._poll_queue)
-		self._queue_timer.start()
 
 	# --- сборка страницы ---------------------------------------------------------
 
@@ -221,9 +204,17 @@ class PublishPage(ScrollArea):
 		row.addWidget(batch_button)
 		row.addStretch()
 		layout.addLayout(row)
-		self._queue_box = QVBoxLayout()
-		self._queue_box.setSpacing(density.spacing().list_spacing)
-		layout.addLayout(self._queue_box)
+		queue_box = QVBoxLayout()
+		queue_box.setSpacing(density.spacing().list_spacing)
+		layout.addLayout(queue_box)
+		self._queue = QueuePanel(
+			self._worker,
+			self,
+			queue_box,
+			service=lambda: self._worker.engine.publish_queue,
+			subtitle=self._queue_subtitle,
+			on_finished=self._on_queue_finished,
+		)
 
 	# --- поведение -----------------------------------------------------------------
 
@@ -267,8 +258,12 @@ class PublishPage(ScrollArea):
 			key=lambda channel: channel.id,
 		)
 		# успешное восстановление само запускает обработчик смены (сигнал
-		# select); явный вызов нужен только когда восстанавливать нечего
+		# select); явный вызов нужен только когда восстанавливать нечего.
+		# Неудача на свежем списке означает устаревший id (канал выключен
+		# или удалён) — забываем его, иначе предвыбор «выстрелил» бы позже,
+		# при следующей загрузке списка, внезапной сменой канала
 		if not self._apply_channel_restore():
+			self._restore_channel_id = None
 			self._on_channel_changed()
 
 	def _on_last_channel_loaded(self, channel_id: int | None) -> None:
@@ -450,14 +445,18 @@ class PublishPage(ScrollArea):
 		if not exec_dialog(dialog):
 			return
 		self._text.setPlainText(dialog.caption())
+		self._record_template_usage(dialog.template_id(), dialog.used_values())
+		self._suggest_rename(templates, dialog, media)
+
+	def _record_template_usage(self, template_id: int, used_values: dict[int, list[str]]) -> None:
+		"""Запоминает использованные значения шаблона (для предвыбора)."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.record_usage(dialog.template_id(), dialog.used_values()),
+			self._worker.engine.captions.record_usage(template_id, used_values),
 			self,
 			noop,
 			self._show_error,
 		)
-		self._suggest_rename(templates, dialog, media)
 
 	def _suggest_rename(
 		self, templates: list[TemplateDto], dialog: CaptionDialog, media: str
@@ -538,38 +537,43 @@ class PublishPage(ScrollArea):
 	def start_batch_with_files(self, paths: list[str], channel_id: int) -> None:
 		"""Пакет из готового списка файлов (выбор на странице «Видео»).
 
-		Папка не сканируется — файлы уже выбраны; размеры читаются здесь
-		(нужны пометкам «больше лимита»), исчезнувшие файлы пропускаются.
+		Сборку списка (размеры, пропуск исчезнувших, порядок) делает
+		движок — источник пакета держит он (ADR-0015), страница только
+		показывает результат.
 		"""
 		channel = self._batch_channel(channel_id)
 		if channel is None:
 			return
-		files: list[ReadyVideo] = []
-		for path in paths:
-			try:
-				size = Path(path).stat().st_size
-			except OSError:
-				logger.warning("Пакет публикации: файл %s исчез — пропущен.", path)
-				continue
-			files.append(ReadyVideo(Path(path).name, path, size))
+		run_in_engine(
+			self._worker,
+			self._worker.engine.video.ready_from_paths(paths),
+			self,
+			partial(self._on_batch_files_ready, channel),
+			self._show_error,
+		)
+
+	def _on_batch_files_ready(self, channel: ChannelDto, files: list[ReadyVideo]) -> None:
+		"""Список собран движком — дальше обычная цепочка пакета."""
 		if not files:
 			self._show_error("Файлы не найдены на диске — публиковать нечего.")
 			return
-		# порядок пакета — по имени файла, как при обработке: список
-		# «Готовых видео» показывает новые сверху, и без сортировки
-		# раскладка отдала бы ранние слоты последним обработанным
-		files.sort(key=lambda video: video.name.casefold())
 		root = str(Path(files[0].path).parent)
 		self._on_batch_scanned(_BatchSetup(channel, root), files)
 
 	def _batch_channel(self, channel_id: int) -> ChannelDto | None:
 		"""Канал пакета по id с другой страницы (с предвыбором в списке).
 
-		Список каналов мог ещё не загрузиться (первое открытие страницы) —
-		тогда честная подсказка вместо молчаливого сбоя.
+		Страница «Видео» показывает все каналы, а этот список — только
+		включённые: неудачный предвыбор означает, что канал недоступен
+		для публикации, и пакет отменяется. Иначе выбор молча остался бы
+		на прежнем канале и пакет ушёл бы не туда.
 		"""
-		if channel_id:
-			self._channel_combo.select(lambda channel: channel.id == channel_id)
+		if channel_id and not self._channel_combo.select(lambda channel: channel.id == channel_id):
+			self._show_error(
+				"Канал недоступен для публикации (выключен или список каналов "
+				"ещё загружается) — проверьте настройки канала и повторите."
+			)
+			return None
 		channel = self._channel_or_none()
 		if channel is None:
 			self._show_error(
@@ -611,13 +615,7 @@ class PublishPage(ScrollArea):
 				template = next(t for t in usable if t.id == dialog.template_id())
 				if template.filename_pattern:
 					setup.filename_template_id = template.id
-				run_in_engine(
-					self._worker,
-					self._worker.engine.captions.record_usage(template.id, setup.used_values),
-					self,
-					noop,
-					self._show_error,
-				)
+				self._record_template_usage(template.id, setup.used_values)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get_for(PUBLISH_TIMES, setup.channel.id),
@@ -647,10 +645,10 @@ class PublishPage(ScrollArea):
 		Проверка занятых слотов вспомогательная: отказ userbot не должен
 		блокировать пакет, но о слепой раскладке честно предупреждаем.
 		"""
-		InfoBar.warning(
+		show_warning(
+			self,
 			"Отложки не прочитаны",
 			f"Раскладка не учтёт существующие отложки: {message}",
-			parent=self,
 		)
 		self._batch_scheduled_loaded(setup, [])
 
@@ -710,7 +708,7 @@ class PublishPage(ScrollArea):
 	def _on_batch_enqueued(self, count: int, _ids: list[int]) -> None:
 		"""Пакет принят в очередь — карточки видны сразу, не по таймеру."""
 		InfoBar.success("Пакет в очереди", f"Постов: {count}", parent=self)
-		self._poll_queue()
+		self._queue.poll()
 
 	# --- отправка через очередь ---------------------------------------------------
 
@@ -721,7 +719,7 @@ class PublishPage(ScrollArea):
 			return
 		try:
 			draft = self._draft(channel.id)
-		except ValueError as exc:  # время публикации не «ЧЧ:ММ»
+		except ValueError as exc:  # поля формы не согласованы (файл, время)
 			self._show_error(str(exc))
 			return
 		run_in_engine(
@@ -740,14 +738,25 @@ class PublishPage(ScrollArea):
 		)
 
 	def _draft(self, channel_id: int) -> PostDraft:
-		"""Собирает черновик публикации из полей формы."""
+		"""Собирает черновик публикации из полей формы.
+
+		Raises:
+			ValueError: Поля формы не согласованы: выбран тип с вложением,
+				а файл не указан, либо время публикации не «ЧЧ:ММ».
+		"""
 		media = str(self._file_edit.text()).strip() or None
 		is_text = self._kind is MediaKind.NONE
+		if not is_text and media is None:
+			label = next(name for name, kind, _f in _KINDS if kind is self._kind)
+			raise ValueError(
+				f"Выбран тип «{label}», а файл не указан — "
+				"выберите файл или переключитесь на «Текст»."
+			)
 		return PostDraft(
 			channel_id=channel_id,
 			text=str(self._text.toPlainText()).strip(),
 			media_path=None if is_text else media,
-			media_kind=MediaKind.NONE if is_text or media is None else self._kind,
+			media_kind=MediaKind.NONE if is_text else self._kind,
 			when=self._when_row.when(),
 			rename_to=self._rename_to(),
 		)
@@ -762,57 +771,21 @@ class PublishPage(ScrollArea):
 		"""Черновик принят в очередь — чистим форму под следующий пост."""
 		self._text.clear()
 		self._file_edit.clear()
-		self._poll_queue()  # панель очереди обновляется сразу, не по таймеру
+		self._queue.poll()  # панель очереди обновляется сразу, не по таймеру
 
 	# --- панель очереди -------------------------------------------------------------
 
 	def queue_busy(self) -> bool:
 		"""Есть ли неотправленное в очереди (для подтверждения выхода)."""
-		return self._queue_busy
+		return self._queue.busy()
 
-	def _poll_queue(self) -> None:
-		"""Запрашивает состояние очереди (по таймеру и после постановки)."""
-		# ошибки опроса не показываем плашками: мост пишет их в лог,
-		# а раз в полсекунды спамить пользователя нечем и незачем
-		run_in_engine(
-			self._worker,
-			self._worker.engine.publish_queue.state(),
-			self,
-			self._show_queue,
-			noop,
-		)
+	def _on_queue_finished(self, item: QueueItemDto, done: bool) -> None:
+		"""Итоговая плашка завершённого элемента.
 
-	def _show_queue(self, items: list[QueueItemDto]) -> None:
-		"""Обновляет панель очереди; завершённые — плашка и снятие с показа."""
-		visible: list[QueueItemDto] = []
-		for item in items:
-			if item.status is QueueItemStatus.DONE:
-				self._finish_item(item, notify=True)
-			elif item.status is QueueItemStatus.CANCELLED:
-				self._finish_item(item, notify=False)
-			else:
-				visible.append(item)
-		self._queue_busy = any(
-			item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING) for item in visible
-		)
-		# id, исчезнувшие из состояния движка (после dismiss), больше
-		# не встретятся — набор «уже показанных» не растёт бесконечно
-		self._handled_ids &= {item.id for item in items}
-		signature = tuple((i.id, i.status, i.error) for i in visible)
-		if signature != self._queue_signature:
-			self._queue_signature = signature
-			self._rebuild_queue(visible)
-		for item in visible:  # прогресс — без пересборки карточек
-			bar = self._queue_bars.get(item.id)
-			if bar is not None:
-				bar.setValue(int(item.progress * 100))
-
-	def _finish_item(self, item: QueueItemDto, notify: bool) -> None:
-		"""Показывает итог завершённого элемента и снимает его с показа."""
-		if item.id in self._handled_ids:
-			return  # уже показали; ждём, пока движок уберёт из состояния
-		self._handled_ids.add(item.id)
-		if notify:
+		Родитель — окно: опрос живёт всегда, и завершение может прийти
+		при скрытой странице — плашка на ней погасла бы незамеченной.
+		"""
+		if done:
 			InfoBar.success(
 				"Отложенная запись создана" if item.scheduled else "Опубликовано",
 				item.title,
@@ -820,39 +793,6 @@ class PublishPage(ScrollArea):
 			)
 		else:
 			InfoBar.info("Отправка отменена", item.title, parent=self.window())
-		self._dismiss(item.id)
-
-	def _rebuild_queue(self, items: list[QueueItemDto]) -> None:
-		"""Перестраивает карточки очереди (только при смене состава/статусов)."""
-		clear_layout(self._queue_box)
-		self._queue_bars = {}
-		for item in items:
-			self._queue_box.addWidget(self._queue_row(item))
-
-	def _queue_row(self, item: QueueItemDto) -> CardWidget:
-		"""Карточка элемента очереди: статус, прогресс и действия
-		(«Отмена» у живого; «Повторить» и «Убрать» у ошибки)."""
-		trailing = QWidget(self)
-		row = QHBoxLayout(trailing)
-		row.setContentsMargins(0, 0, 0, 0)
-		if item.status is QueueItemStatus.SENDING:
-			bar = ProgressBar(trailing)
-			bar.setRange(0, 100)
-			bar.setValue(int(item.progress * 100))
-			bar.setFixedWidth(160)
-			row.addWidget(bar)
-			self._queue_bars[item.id] = bar
-		if item.status is QueueItemStatus.ERROR:
-			retry = PushButton("Повторить", trailing)
-			retry.clicked.connect(bind(self._retry_item, item.id))
-			row.addWidget(retry)
-			action = PushButton("Убрать", trailing)
-			action.clicked.connect(bind(self._dismiss, item.id))
-		else:
-			action = PushButton("Отмена", trailing)
-			action.clicked.connect(bind(self._cancel_item, item.id))
-		row.addWidget(action)
-		return row_card(self, item.title, self._queue_subtitle(item), trailing=trailing)
 
 	@staticmethod
 	def _queue_subtitle(item: QueueItemDto) -> str:
@@ -869,37 +809,3 @@ class PublishPage(ScrollArea):
 		else:
 			status = "в очереди"
 		return f"{item.channel_title} · публикация: {when_text} · {status}"
-
-	def _retry_item(self, item_id: int) -> None:
-		"""Просит движок вернуть элемент с ошибкой в очередь на повтор."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.publish_queue.retry(item_id),
-			self,
-			self._on_retried,
-			self._show_error,
-		)
-
-	def _on_retried(self, _result: object = None) -> None:
-		"""Повтор принят — карточка обновляется сразу, не по таймеру."""
-		self._poll_queue()
-
-	def _cancel_item(self, item_id: int) -> None:
-		"""Просит движок отменить элемент очереди."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.publish_queue.cancel(item_id),
-			self,
-			noop,
-			self._show_error,
-		)
-
-	def _dismiss(self, item_id: int) -> None:
-		"""Убирает завершённый элемент из состояния очереди."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.publish_queue.dismiss(item_id),
-			self,
-			noop,
-			noop,
-		)

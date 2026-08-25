@@ -237,7 +237,16 @@ class ChannelsService:
 		if bot_token is not None:
 			bot_ok = await self._probe_bot(bot_token, tg_chat_id)
 		async with self._db.session_factory() as session:
-			channel = await session.get(Channel, channel_id)
+			# bot подгружается сразу: _dto ниже работает на отсоединённом
+			# объекте, и ленивое обращение к каналу, которому бота назначили
+			# между чтениями, упало бы MissingGreenlet вместо внятной ошибки
+			channel = (
+				await session.execute(
+					select(Channel)
+					.options(selectinload(Channel.bot))
+					.where(Channel.id == channel_id)
+				)
+			).scalar_one_or_none()
 			if channel is None:
 				raise ChannelError("Канал не найден — обновите список.")
 			if userbot_ok is not None:

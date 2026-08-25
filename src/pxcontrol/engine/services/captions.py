@@ -517,7 +517,8 @@ class CaptionsService:
 		отправке ({video}, {ИмяПоля}, {quality}, {channel}).
 
 		Raises:
-			CaptionsError: Пустое имя, пустой состав или шаблон не найден.
+			CaptionsError: Пустое имя, пустой состав, чужое поле
+				или шаблон не найден.
 		"""
 		name = name.strip()
 		if not name:
@@ -525,6 +526,21 @@ class CaptionsService:
 		if not field_ids:
 			raise CaptionsError("Выберите хотя бы одно поле для шаблона.")
 		async with self._db.session_factory() as session:
+			# состав — только из полей этого канала: внешний ключ гарантирует
+			# лишь существование поля, и промах вызывающего пришил бы шаблону
+			# поле чужого канала
+			owned = set(
+				(
+					await session.execute(
+						select(CaptionField.id).where(
+							CaptionField.channel_id == channel_id,
+							CaptionField.id.in_(field_ids),
+						)
+					)
+				).scalars()
+			)
+			if any(field_id not in owned for field_id in field_ids):
+				raise CaptionsError("В составе шаблона поле другого канала — обновите список.")
 			template = await self._get_or_create_template(session, channel_id, name, template_id)
 			template.filename_pattern = (filename_pattern or "").strip() or None
 			saved_id = template.id

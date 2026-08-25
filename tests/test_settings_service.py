@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from pathlib import Path
-
 import pytest
 
 from pxcontrol.engine.db.database import Database
@@ -22,15 +19,6 @@ from pxcontrol.engine.services.settings import (
 	SettingsError,
 	SettingsService,
 )
-
-
-@pytest.fixture
-async def db(tmp_path: Path) -> AsyncIterator[Database]:
-	"""Временная БД с применёнными миграциями."""
-	database = Database(f"sqlite+aiosqlite:///{tmp_path / 'settings.db'}")
-	await database.init()
-	yield database
-	await database.close()
 
 
 async def _add_channel(db: Database, tg_chat_id: str = "-1001") -> int:

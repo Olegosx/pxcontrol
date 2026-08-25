@@ -29,10 +29,13 @@ def normalize_chat_ref(chat_ref: str) -> str | int:
 			ref = ref[len(prefix) :]
 			break
 	ref = ref.strip("/")
-	if ref.startswith("+"):
+	# оба формата инвайт-ссылок: новый t.me/+… и старый t.me/joinchat/…
+	# (без этой ветки старый формат превратился бы в кривое @имя и ушёл
+	# бы в API, а пользователь получил бы общее «канал не найден»)
+	if ref.startswith("+") or ref.lower().startswith("joinchat/"):
 		raise ChatRefError(
-			"Инвайт-ссылка (t.me/+…) не подходит — укажите @имя канала "
-			"или его ID (начинается с -100)."
+			"Инвайт-ссылка (t.me/+… или t.me/joinchat/…) не подходит — "
+			"укажите @имя канала или его ID (начинается с -100)."
 		)
 	if ref.lower().startswith("c/"):
 		internal = ref[2:].split("/", 1)[0]

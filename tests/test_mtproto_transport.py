@@ -384,6 +384,13 @@ def test_translate_error_confirmed_refusals() -> None:
 		assert isinstance(_translate_error(exc), UserbotAccessError)
 	# сетевой сбой — по-прежнему временная недоступность
 	assert not isinstance(_translate_error(ConnectionError("x")), UserbotAccessError)
+	# ValueError про entity — «канал не виден», прочие ValueError — нет:
+	# ложный совет «добавьте аккаунт в канал» хуже честного общего текста
+	assert isinstance(
+		_translate_error(ValueError("Could not find the input entity for PeerUser")),
+		UserbotAccessError,
+	)
+	assert not isinstance(_translate_error(ValueError("bad argument")), UserbotAccessError)
 
 
 async def test_bot_errors_translate_flood_and_server_failures() -> None:

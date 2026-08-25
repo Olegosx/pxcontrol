@@ -43,8 +43,11 @@ class EngineWorker:
 		"""Тело потока: создаёт цикл, стартует движок, крутит цикл."""
 		self._loop = asyncio.new_event_loop()
 		asyncio.set_event_loop(self._loop)
-		self._engine = Engine(self._settings)
 		try:
+			# конструктор тоже под защитой: его сбой (например, битый адрес
+			# БД в .env) иначе оставил бы start() ждать _ready вечно —
+			# приложение зависло бы молча, без окна и без ошибки
+			self._engine = Engine(self._settings)
 			self._loop.run_until_complete(self._engine.start())
 		except BaseException as exc:  # noqa: BLE001 — ошибку пробрасываем в start()
 			self._error = exc
@@ -54,6 +57,7 @@ class EngineWorker:
 		self._ready.set()
 		self._loop.run_forever()
 		try:
+			self._cancel_pending(self._loop)
 			self._loop.run_until_complete(self._engine.stop())
 		except Exception:  # noqa: BLE001 — завершение не должно ронять поток
 			# ошибка остановки (сеть у Telethon, диск у БД) — в лог; цикл
@@ -61,6 +65,21 @@ class EngineWorker:
 			logger.exception("Ошибка при остановке движка.")
 		finally:
 			self._loop.close()
+
+	@staticmethod
+	def _cancel_pending(loop: asyncio.AbstractEventLoop) -> None:
+		"""Отменяет задачи, не успевшие завершиться к остановке цикла.
+
+		Очереди гасят своих воркеров сами (:meth:`Engine.stop`), но задачи,
+		поставленные из интерфейса через :meth:`submit` в момент закрытия,
+		остались бы висеть: asyncio написал бы «Task was destroyed but it
+		is pending», а их блоки ``finally`` не выполнились бы.
+		"""
+		pending = asyncio.all_tasks(loop)
+		for task in pending:
+			task.cancel()
+		if pending:
+			loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
 
 	@property
 	def engine(self) -> Engine:

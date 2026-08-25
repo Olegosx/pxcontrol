@@ -14,6 +14,7 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -224,17 +225,16 @@ class PostsService:
 				f"Канал «{channel.title}» выключен — включите его на странице «Каналы»."
 			)
 		caps = publish_capabilities(channel.bot is not None, channel.userbot_admin)
+		self._check_transport(caps, draft)
+		# переименование — после всех проверок, способных отклонить черновик:
+		# отклонённая публикация не должна оставлять файл переименованным
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
 			media_path = self._apply_rename(media_path, draft.rename_to)
 		if caps.userbot:
 			await self._publish_userbot(channel, draft, media_path, on_progress)
-		elif caps.bot:
-			await self._publish_bot(channel, draft, media_path)
 		else:
-			raise PostError(
-				"У канала нет способа публикации — проверьте доступы на странице «Каналы»."
-			)
+			await self._publish_bot(channel, draft, media_path)
 		if draft.media_kind is MediaKind.VIDEO and media_path is not None:
 			await self._move_to_published(media_path)
 		logger.info(
@@ -245,6 +245,55 @@ class PostsService:
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
 
+	def _check_transport(self, caps: PublishCapabilities, draft: PostDraft) -> None:
+		"""Проверки транспорта, способные отклонить черновик.
+
+		Выполняются до побочных эффектов публикации (переименование файла):
+		отклонённый черновик не должен менять ничего на диске.
+
+		Raises:
+			PostError: Нет способа публикации, отложенный пост через бота
+				или файл больше лимита выбранного транспорта.
+		"""
+		if not caps.userbot and not caps.bot:
+			raise PostError(
+				"У канала нет способа публикации — проверьте доступы на странице «Каналы»."
+			)
+		media_path = draft.media_path
+		if caps.userbot:
+			limit = userbot_max_file_bytes(self._gateway.userbot_premium())
+			if media_path is not None and self._file_size(media_path) > limit:
+				raise PostError(
+					f"Файл больше {limit // 10**9} ГБ — лимит Telegram на файл "
+					"для этого аккаунта. Уменьшите файл (например, битрейтом "
+					"на странице «Видео»)."
+				)
+			return
+		if draft.when is not None:
+			raise PostError(
+				"Отложенные посты требуют userbot-админа в канале — "
+				"через бота доступно только «сейчас»."
+			)
+		if media_path is not None and self._file_size(media_path) > BOT_MAX_FILE_BYTES:
+			raise PostError(
+				f"Файл больше {BOT_MAX_FILE_BYTES // 2**20} МБ — лимит "
+				"отправки ботом. Добавьте userbot администратором канала "
+				"или уменьшите файл."
+			)
+
+	@staticmethod
+	def _file_size(media_path: str) -> int:
+		"""Размер файла для проверки лимитов транспорта.
+
+		Raises:
+			PostError: Файл исчез или недоступен (сетевой диск, права) —
+				доменный текст вместо сырой «внутренней ошибки» в очереди.
+		"""
+		try:
+			return Path(media_path).stat().st_size
+		except OSError as exc:
+			raise PostError(f"Файл недоступен: {exc.strerror or exc} — {media_path}") from exc
+
 	async def _publish_userbot(
 		self,
 		channel: Channel,
@@ -254,16 +303,8 @@ class PostsService:
 	) -> None:
 		"""Полный путь через userbot (MTProto): всё, включая отложенные.
 
-		Raises:
-			PostError: Файл больше лимита Telegram (2 ГБ; 4 — с Premium).
+		Лимит размера файла проверен раньше (:meth:`_check_transport`).
 		"""
-		limit = userbot_max_file_bytes(self._gateway.userbot_premium())
-		if media_path is not None and (Path(media_path).stat().st_size > limit):
-			raise PostError(
-				f"Файл больше {limit // 10**9} ГБ — лимит Telegram на файл "
-				"для этого аккаунта. Уменьшите файл (например, битрейтом "
-				"на странице «Видео»)."
-			)
 		with tempfile.TemporaryDirectory() as tmp:
 			thumb: str | None = None
 			if draft.media_kind is MediaKind.VIDEO and media_path:
@@ -282,25 +323,14 @@ class PostsService:
 	) -> None:
 		"""Запасной путь через бота: текст и медиа до 50 МБ, только «сейчас».
 
-		Raises:
-			PostError: Отложенный пост или файл больше лимита Bot API.
+		Отложенность и лимит размера проверены раньше
+		(:meth:`_check_transport`).
 		"""
-		if draft.when is not None:
-			raise PostError(
-				"Отложенные посты требуют userbot-админа в канале — "
-				"через бота доступно только «сейчас»."
-			)
 		if channel.bot is None:  # publish() сюда без бота не приводит
 			raise PostError("У канала не назначен бот — переподключите канал.")
 		if media_path is None:
 			await self._gateway.send_text(channel.bot.token, channel.tg_chat_id, draft.text)
 			return
-		if Path(media_path).stat().st_size > BOT_MAX_FILE_BYTES:
-			raise PostError(
-				f"Файл больше {BOT_MAX_FILE_BYTES // 2**20} МБ — лимит "
-				"отправки ботом. Добавьте userbot администратором канала "
-				"или уменьшите файл."
-			)
 		await self._gateway.send_media(
 			channel.bot.token,
 			channel.tg_chat_id,
@@ -371,12 +401,23 @@ class PostsService:
 			raise PostError(f"Файл «{rename_to}» уже существует — смените имя.")
 		try:
 			source.rename(target)
-			preview = source.with_suffix(".png")
-			if preview.is_file():
-				preview.rename(target.with_suffix(".png"))
 		except OSError as exc:
 			raise PostError(
 				f"Не удалось переименовать файл в «{rename_to}»: {exc.strerror or exc}"
+			) from exc
+		preview = source.with_suffix(".png")
+		try:
+			if preview.is_file():
+				preview.rename(target.with_suffix(".png"))
+		except OSError as exc:
+			# пара «файл + превью» переименовывается атомарно: без отката
+			# превью осталось бы под старым стемом и потерялось бы при
+			# переносе в «опубликованные» (поиск соседа идёт по новому)
+			with suppress(OSError):
+				target.rename(source)
+			raise PostError(
+				f"Не удалось переименовать превью файла «{rename_to}» — "
+				f"переименование отменено: {exc.strerror or exc}"
 			) from exc
 		logger.info("Файл переименован: %s → %s", source.name, target.name)
 		return str(target)
@@ -575,4 +616,5 @@ def _make_thumbnail(
 		_THUMB_JPEG_QUALITY,
 		output_jpg,
 	]
-	run_tool(cmd, "миниатюра видео")
+	# один кадр — секунды; предел ловит зависший ffmpeg (недоступный диск)
+	run_tool(cmd, "миниатюра видео", timeout=120.0)

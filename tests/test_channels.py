@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -46,15 +44,6 @@ class _FakeGateway:
 				"администратором с правом публиковать."
 			)
 		return ChannelInfo("-1001234", "Тестовый канал", "testchan")
-
-
-@pytest.fixture
-async def db(tmp_path: Path) -> AsyncIterator[Database]:
-	"""Временная БД с применёнными миграциями."""
-	database = Database(f"sqlite+aiosqlite:///{tmp_path / 'channels.db'}")
-	await database.init()
-	yield database
-	await database.close()
 
 
 async def _make_bot(db: Database) -> int:
@@ -218,6 +207,8 @@ def test_normalize_chat_ref_hardened() -> None:
 	assert normalize_chat_ref("t.me/c/2233445566") == -1002233445566
 	with pytest.raises(ChatRefError, match="Инвайт"):
 		normalize_chat_ref("https://t.me/+AbCdEfGh123")
+	with pytest.raises(ChatRefError, match="Инвайт"):
+		normalize_chat_ref("https://t.me/joinchat/AbCdEfGh123")  # старый формат
 	with pytest.raises(ChatRefError, match="t.me/c"):
 		normalize_chat_ref("t.me/c/abc/5")
 	with pytest.raises(ChatRefError, match="Укажите"):
@@ -270,14 +261,17 @@ def test_ensure_bot_can_post() -> None:
 
 
 def test_bot_caption_markup_to_html() -> None:
-	"""Разметка поля текста (``**жирный**``) доносится бот-путём как HTML.
+	"""Разметка поля текста доносится бот-путём как HTML.
 
-	Bot API без parse_mode показал бы подписчикам буквальные звёздочки;
-	спецсимволы HTML в значениях полей экранируются.
+	Bot API без parse_mode показал бы подписчикам буквальную разметку;
+	спецсимволы HTML в значениях полей экранируются. Подмножество —
+	как у Telethon (основной путь): жирный, курсив, зачёркнутый, код.
 	"""
 	from pxcontrol.engine.telegram.bot_api import to_html
 
 	assert to_html("**Название**\nГод: 2026") == "<b>Название</b>\nГод: 2026"
 	assert to_html("**Re: Zero <2 сезон> & ещё**") == "<b>Re: Zero &lt;2 сезон&gt; &amp; ещё</b>"
+	assert to_html("__курсив__ и ~~зачёркнутый~~") == "<i>курсив</i> и <s>зачёркнутый</s>"
+	assert to_html("код: `x = 1`") == "код: <code>x = 1</code>"
 	assert to_html("без разметки") == "без разметки"
 	assert to_html("непарные 2**3") == "непарные 2**3"

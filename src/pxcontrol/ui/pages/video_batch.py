@@ -9,34 +9,28 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QWidget
 from qfluentwidgets import (
 	CaptionLabel,
 	CheckBox,
 	IndeterminateProgressRing,
 	MessageBoxBase,
-	PushButton,
-	ScrollArea,
 	SubtitleLabel,
 )
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.video import FoundVideo
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import human_size, show_error
+from pxcontrol.ui.pages.common import (
+	SelectionRow,
+	fixed_list_area,
+	format_duration,
+	human_size,
+	show_error,
+)
 
 #: Высота списка найденных файлов (прокрутка внутри, а не рост диалога).
 _LIST_HEIGHT = 320
-
-
-def format_duration(seconds: float) -> str:
-	"""Длительность для списка: «12:34» или «1:23:45»."""
-	total = int(seconds)
-	hours, rest = divmod(total, 3600)
-	minutes, secs = divmod(rest, 60)
-	if hours:
-		return f"{hours}:{minutes:02d}:{secs:02d}"
-	return f"{minutes}:{secs:02d}"
 
 
 class BatchScanDialog(MessageBoxBase):
@@ -82,32 +76,15 @@ class BatchScanDialog(MessageBoxBase):
 
 	def _build_list_area(self) -> None:
 		"""Прокручиваемый список найденных файлов (заполняется после скана)."""
-		area = ScrollArea(self)
-		container = QWidget(area)
-		self._list_box = QVBoxLayout(container)
-		self._list_box.setContentsMargins(0, 0, 0, 0)
-		self._list_box.setSpacing(4)
+		area, self._list_box = fixed_list_area(self, _LIST_HEIGHT, spacing=4)
 		self._list_box.addStretch()
-		area.setWidget(container)
-		area.setWidgetResizable(True)
-		area.enableTransparentBackground()
-		area.setFixedHeight(_LIST_HEIGHT)
 		self.viewLayout.addWidget(area)
 
 	def _build_selection_row(self) -> None:
 		"""Кнопки «Выбрать все»/«Снять все» и итог по отмеченному."""
-		row = QHBoxLayout()
-		self._select_all = PushButton("Выбрать все", self)
-		self._select_all.clicked.connect(lambda: self._set_all(True))
-		self._select_all.setEnabled(False)
-		row.addWidget(self._select_all)
-		self._clear_all = PushButton("Снять все", self)
-		self._clear_all.clicked.connect(lambda: self._set_all(False))
-		self._clear_all.setEnabled(False)
-		row.addWidget(self._clear_all)
-		self._summary = CaptionLabel("", self)
-		row.addWidget(self._summary, stretch=1)
-		self.viewLayout.addLayout(row)
+		self._selection = SelectionRow(self, self._set_all)
+		self._selection.set_enabled(False)  # до окончания сканирования
+		self.viewLayout.addLayout(self._selection.layout)
 
 	# --- сканирование ----------------------------------------------------------
 
@@ -133,8 +110,7 @@ class BatchScanDialog(MessageBoxBase):
 			# перед распоркой в конце списка
 			self._list_box.insertWidget(self._list_box.count() - 1, check)
 			self._rows.append((check, video))
-		self._select_all.setEnabled(True)
-		self._clear_all.setEnabled(True)
+		self._selection.set_enabled(True)
 		self._update_summary()
 
 	@staticmethod
@@ -160,7 +136,5 @@ class BatchScanDialog(MessageBoxBase):
 		"""Итог по отмеченному; кнопка «Обработать» — только при выборе."""
 		picked = self.selected()
 		total_bytes = sum(video.size_bytes for video in picked)
-		self._summary.setText(
-			f"Отмечено {len(picked)} из {len(self._rows)} · {human_size(total_bytes)}"
-		)
+		self._selection.set_summary(len(picked), len(self._rows), total_bytes)
 		self.yesButton.setEnabled(bool(picked))

@@ -229,7 +229,12 @@ class PublishQueue:
 		return any(not item.status.finished() for item in self._items)
 
 	async def shutdown(self) -> None:
-		"""Останавливает воркер очереди (при остановке движка)."""
+		"""Останавливает воркер очереди (при остановке движка).
+
+		Статусы элементов не дочищаются намеренно: состояние живёт только
+		в памяти и умирает вместе с процессом, а отмена задачи обрывает
+		активную отправку (недосланное Telegram не публикует).
+		"""
 		if self._worker is not None:
 			self._worker.cancel()
 			with suppress(asyncio.CancelledError):

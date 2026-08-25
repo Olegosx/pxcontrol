@@ -12,7 +12,10 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+	from aiogram import Bot
 
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.refs import normalize_chat_ref
@@ -74,22 +77,51 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 		raise ChannelCheckError(f"Telegram отклонил операцию: {exc}") from exc
 
 
-#: Пара ``**…**`` — жирный в разметке, принятой полем текста поста (Telethon).
-_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+#: Разметка поля текста поста (её разбирает Telethon) → HTML-теги Bot API.
+_MARKUP: list[tuple[re.Pattern[str], str]] = [
+	(re.compile(r"\*\*(.+?)\*\*", re.DOTALL), r"<b>\1</b>"),
+	(re.compile(r"__(.+?)__", re.DOTALL), r"<i>\1</i>"),
+	(re.compile(r"~~(.+?)~~", re.DOTALL), r"<s>\1</s>"),
+	(re.compile(r"`(.+?)`", re.DOTALL), r"<code>\1</code>"),
+]
 
 
 def to_html(text: str) -> str:
 	"""Переводит текст поста из разметки поля ввода в HTML для Bot API.
 
 	Поле текста поста живёт в разметке, которую Telethon (основной путь,
-	ADR-0011) разбирает сам: ``**жирный**``. Bot API без ``parse_mode``
+	ADR-0011) разбирает сам: ``**жирный**``, ``__курсив__``,
+	``~~зачёркнутый~~``, `` `код` ``. Bot API без ``parse_mode``
 	не разбирает ничего, а его Markdown-режимы с двойными звёздочками
 	несовместимы — единственный совместимый режим ``HTML``. Экранируем
-	служебные символы HTML и переводим пары звёздочек в ``<b>…</b>`` —
-	бот-канал выглядит так же, как userbot-канал.
+	служебные символы HTML и переводим пары в теги — бот-канал выглядит
+	так же, как userbot-канал. Ссылки ``[текст](url)`` намеренно
+	не переводятся (редки в подписях; кривой URL сломал бы весь пост).
 	"""
 	escaped = html.escape(text, quote=False)
-	return _BOLD.sub(r"<b>\1</b>", escaped)
+	for pattern, replacement in _MARKUP:
+		escaped = pattern.sub(replacement, escaped)
+	return escaped
+
+
+def _make_bot(token: str) -> Bot:
+	"""Создаёт клиента Bot API с доменной ошибкой на битом токене.
+
+	aiogram проверяет формат токена прямо в конструкторе ``Bot``. Токен
+	операционных вызовов приходит из БД: повреждённая запись (например,
+	после смены ключа шифрования) без перевода уходила бы в интерфейс
+	сырой «внутренней ошибкой» вместо понятного текста.
+
+	Raises:
+		InvalidBotTokenError: Строка не похожа на токен бота.
+	"""
+	from aiogram import Bot
+	from aiogram.utils.token import TokenValidationError
+
+	try:
+		return Bot(token)
+	except TokenValidationError as exc:
+		raise InvalidBotTokenError("Строка не похожа на токен бота.") from exc
 
 
 def _chat_id(chat_id: str) -> int:
@@ -132,13 +164,13 @@ async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, capti
 		ID сообщения в Telegram.
 
 	Raises:
+		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		ChannelCheckError: Telegram отклонил отправку (нет прав, размер и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	from aiogram import Bot
 	from aiogram.types import FSInputFile
 
-	bot = Bot(token)
+	bot = _make_bot(token)
 	file = FSInputFile(path)
 	text = to_html(caption) if caption else None
 	mode = "HTML"
@@ -172,12 +204,11 @@ async def send_text(token: str, chat_id: str, text: str) -> int:
 		ID сообщения в Telegram.
 
 	Raises:
+		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		ChannelCheckError: Telegram отклонил отправку (нет прав и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	from aiogram import Bot
-
-	bot = Bot(token)
+	bot = _make_bot(token)
 	try:
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			message = await bot.send_message(_chat_id(chat_id), to_html(text), parse_mode="HTML")
@@ -215,13 +246,16 @@ async def get_bot_events(token: str) -> list[str]:
 
 	Telegram хранит события 24 часа. По ним видно, в какие каналы/группы
 	бота добавляли и с какими правами — диагностика «бот не тот / не там».
+	Возвращаются первые ~100 необработанных событий (лимит одного запроса
+	getUpdates): пагинация подтверждала бы (удаляла) прочитанное, а
+	диагностика события не трогает — у активного бота свежие добавления
+	могут не попасть в выдачу.
 
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен.
 		ChannelCheckError: Telegram отклонил запрос (вебхук, параллельный опрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	from aiogram import Bot
 	from aiogram.exceptions import (
 		TelegramBadRequest,
 		TelegramConflictError,
@@ -229,8 +263,9 @@ async def get_bot_events(token: str) -> list[str]:
 		TelegramUnauthorizedError,
 	)
 
-	bot = Bot(token)
+	bot = _make_bot(token)
 	try:
+		# timeout=1 — короткий long-poll: диагностике нужен снимок, не ожидание
 		updates = await bot.get_updates(timeout=1)
 	except TelegramUnauthorizedError as exc:
 		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
@@ -252,14 +287,13 @@ async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
 
 	Raises:
 		ChatRefError: Введённую ссылку/имя не удалось разобрать.
+		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		ChannelCheckError: Канал не найден / бот не добавлен / нет прав.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	from aiogram import Bot
-
 	ref = normalize_chat_ref(chat_ref)
 	logger.info("Проверка канала: ввод %r распознан как %r.", chat_ref, ref)
-	bot = Bot(token)
+	bot = _make_bot(token)
 	try:
 		async with _bot_errors(
 			"Бот не добавлен в канал — добавьте его администратором.",
@@ -282,14 +316,9 @@ async def check_token(token: str) -> str:
 		InvalidBotTokenError: Токен неверного формата или отклонён Telegram.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	from aiogram import Bot
 	from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
-	from aiogram.utils.token import TokenValidationError
 
-	try:
-		bot = Bot(token)
-	except TokenValidationError as exc:
-		raise InvalidBotTokenError("Строка не похожа на токен бота.") from exc
+	bot = _make_bot(token)
 	try:
 		me = await bot.get_me()
 		return me.username or me.first_name

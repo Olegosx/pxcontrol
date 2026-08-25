@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -48,15 +47,6 @@ class _SlowGateway:
 		if post.text in self.fail_texts:
 			raise PostError("Telegram отклонил отправку.")
 		self.published.append(post)
-
-
-@pytest.fixture
-async def db(tmp_path: Path) -> AsyncIterator[Database]:
-	"""Временная БД с применёнными миграциями."""
-	database = Database(f"sqlite+aiosqlite:///{tmp_path / 'queue.db'}")
-	await database.init()
-	yield database
-	await database.close()
 
 
 async def _add_channel(db: Database) -> int:

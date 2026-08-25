@@ -118,9 +118,14 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 	if isinstance(exc, ValueError):
 		# Telethon: «Could not find the input entity» — канал не в поле
 		# зрения аккаунта (числовые ID валидируются до этой точки).
-		return UserbotAccessError(
-			"Userbot не видит этот канал — убедитесь, что аккаунт добавлен в канал администратором."
-		)
+		# Прочие ValueError Telethon (битый аргумент, неразобранное имя) —
+		# не про доступ: общий текст вместо ложного совета про права.
+		if "entity" in str(exc).lower():
+			return UserbotAccessError(
+				"Userbot не видит этот канал — убедитесь, что аккаунт "
+				"добавлен в канал администратором."
+			)
+		return UserbotUnavailableError(f"Telegram отклонил операцию: {exc}")
 	if isinstance(exc, ConnectionError | OSError | TimeoutError):
 		return UserbotNotConnectedError(
 			"Нет связи с Telegram — проверьте сеть и попробуйте ещё раз."
@@ -235,7 +240,12 @@ class MtprotoTransport:
 				authorized = bool(await client.is_user_authorized())
 			except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 				await _safe_disconnect(client)
-				raise UserbotNotConnectedError(f"Не удалось подключить userbot: {exc}") from exc
+				# текст без сырого исключения (контракт EngineError: сообщение
+				# показывается пользователю как есть); причина — в __cause__
+				raise UserbotNotConnectedError(
+					"Не удалось подключить userbot — нет связи с Telegram. "
+					"Проверьте сеть и попробуйте ещё раз."
+				) from exc
 			if not authorized:
 				await _safe_disconnect(client)
 				raise UserbotSessionExpiredError(
@@ -250,11 +260,19 @@ class MtprotoTransport:
 			)
 
 	async def stop(self) -> None:
-		"""Отключает клиента MTProto."""
-		if self._client is not None:
-			await _safe_disconnect(self._client)
-			self._client = None
-		self._premium = False
+		"""Отключает клиента MTProto.
+
+		Замок общий с подключением: остановка во время идущего
+		переподключения иначе оставила бы подключённого клиента-сироту
+		(переподключение вернуло бы клиента, которого уже никто
+		не хранит), а остановка во время ``start()`` молча «проглотилась»
+		бы — старт доподключил бы клиента после неё.
+		"""
+		async with self._reconnect_lock:
+			if self._client is not None:
+				await _safe_disconnect(self._client)
+				self._client = None
+			self._premium = False
 
 	def _require_client(self) -> Any:
 		"""Возвращает клиента (возможно, без соединения) или объясняет, чего не хватает."""
