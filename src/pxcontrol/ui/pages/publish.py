@@ -555,6 +555,10 @@ class PublishPage(ScrollArea):
 		if not files:
 			self._show_error("Файлы не найдены на диске — публиковать нечего.")
 			return
+		# порядок пакета — по имени файла, как при обработке: список
+		# «Готовых видео» показывает новые сверху, и без сортировки
+		# раскладка отдала бы ранние слоты последним обработанным
+		files.sort(key=lambda video: video.name.casefold())
 		root = str(Path(files[0].path).parent)
 		self._on_batch_scanned(_BatchSetup(channel, root), files)
 
