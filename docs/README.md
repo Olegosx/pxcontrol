@@ -66,7 +66,7 @@
 | Документ | Назначение | Статус |
 |---|---|---|
 | [setup.md](08-development/setup.md) | Настройка окружения разработчика | 🟢 |
-| [testing.md](08-development/testing.md) | Подход к тестированию | 🟡 |
+| [testing.md](08-development/testing.md) | Подход к тестированию | 🟢 |
 | [coding-standards.md](08-development/coding-standards.md) | Стандарты кода | 🟡 |
 
 ## 09. Планы
