@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
@@ -220,15 +221,7 @@ class ChannelsService:
 		# открытая транзакция чтения на время походов в Telegram держала бы
 		# SQLite занятым для параллельных задач движка
 		async with self._db.session_factory() as session:
-			channel = (
-				await session.execute(
-					select(Channel)
-					.options(selectinload(Channel.bot))
-					.where(Channel.id == channel_id)
-				)
-			).scalar_one_or_none()
-			if channel is None:
-				raise ChannelError("Канал не найден — обновите список.")
+			channel = await self._channel_in_session(session, channel_id, with_bot=True)
 			tg_chat_id = channel.tg_chat_id
 			bot_label = channel.bot.label if channel.bot is not None else None
 			bot_token = channel.bot.token if channel.bot is not None else None
@@ -237,18 +230,7 @@ class ChannelsService:
 		if bot_token is not None:
 			bot_ok = await self._probe_bot(bot_token, tg_chat_id)
 		async with self._db.session_factory() as session:
-			# bot подгружается сразу: _dto ниже работает на отсоединённом
-			# объекте, и ленивое обращение к каналу, которому бота назначили
-			# между чтениями, упало бы MissingGreenlet вместо внятной ошибки
-			channel = (
-				await session.execute(
-					select(Channel)
-					.options(selectinload(Channel.bot))
-					.where(Channel.id == channel_id)
-				)
-			).scalar_one_or_none()
-			if channel is None:
-				raise ChannelError("Канал не найден — обновите список.")
+			channel = await self._channel_in_session(session, channel_id, with_bot=True)
 			if userbot_ok is not None:
 				channel.userbot_admin = userbot_ok
 				await session.commit()
@@ -271,15 +253,11 @@ class ChannelsService:
 		"""
 		bot = await self._get_bot(bot_id)
 		async with self._db.session_factory() as session:
-			channel = await session.get(Channel, channel_id)
-			if channel is None:
-				raise ChannelError("Канал не найден — обновите список.")
+			channel = await self._channel_in_session(session, channel_id)
 			chat_id = channel.tg_chat_id
 		await self._gateway.check_channel(bot.token, chat_id)
 		async with self._db.session_factory() as session:
-			channel = await session.get(Channel, channel_id)
-			if channel is None:
-				raise ChannelError("Канал не найден — обновите список.")
+			channel = await self._channel_in_session(session, channel_id)
 			channel.bot_id = bot.id
 			await session.commit()
 			await session.refresh(channel)
@@ -295,9 +273,7 @@ class ChannelsService:
 			ChannelError: Канал не найден.
 		"""
 		async with self._db.session_factory() as session:
-			channel = await session.get(Channel, channel_id)
-			if channel is None:
-				raise ChannelError("Канал не найден — обновите список.")
+			channel = await self._channel_in_session(session, channel_id)
 			channel.bot_id = None
 			await session.commit()
 			await session.refresh(channel)
@@ -324,6 +300,30 @@ class ChannelsService:
 		async with self._db.session_factory() as session:
 			await session.execute(delete(Channel).where(Channel.id == channel_id))
 			await session.commit()
+
+	@staticmethod
+	async def _channel_in_session(
+		session: AsyncSession, channel_id: int, *, with_bot: bool = False
+	) -> Channel:
+		"""Канал по id в переданной сессии — или «не найден» понятным текстом.
+
+		``with_bot=True`` подгружает бота сразу: ``_dto`` работает
+		на отсоединённом объекте, и ленивое обращение упало бы
+		``MissingGreenlet`` вместо внятной ошибки.
+		"""
+		if with_bot:
+			channel = (
+				await session.execute(
+					select(Channel)
+					.options(selectinload(Channel.bot))
+					.where(Channel.id == channel_id)
+				)
+			).scalar_one_or_none()
+		else:
+			channel = await session.get(Channel, channel_id)
+		if channel is None:
+			raise ChannelError("Канал не найден — обновите список.")
+		return channel
 
 	async def _get_bot(self, bot_id: int) -> Bot:
 		"""Возвращает бота или объясняет, что он не найден."""

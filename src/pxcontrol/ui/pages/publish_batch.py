@@ -20,7 +20,6 @@ from qfluentwidgets import (
 	CardWidget,
 	CheckBox,
 	ComboBox,
-	FluentIcon,
 	LineEdit,
 	MessageBoxBase,
 	PushButton,
@@ -28,7 +27,6 @@ from qfluentwidgets import (
 	StrongBodyLabel,
 	SubtitleLabel,
 	TextEdit,
-	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -47,10 +45,10 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	ErrorLabel,
 	SelectionRow,
+	file_action_buttons,
 	fixed_list_area,
 	human_size,
 	noop,
-	open_in_system,
 	parse_hhmm,
 	show_error,
 )
@@ -123,14 +121,14 @@ class _BatchRow:
 		title = StrongBodyLabel(label, self.card)
 		title.setWordWrap(True)
 		head.addWidget(title, stretch=1)
-		play = TransparentToolButton(FluentIcon.PLAY, self.card)
-		play.setToolTip("Посмотреть файл (системный плеер)")
-		play.clicked.connect(lambda: open_in_system(video.path))
-		head.addWidget(play)
-		remove = TransparentToolButton(FluentIcon.DELETE, self.card)
-		remove.setToolTip("Убрать из пакета (файл на диске не трогается)")
-		remove.clicked.connect(lambda: dialog._remove_row(self))  # noqa: SLF001 — класс диалога
-		head.addWidget(remove)
+		head.addWidget(
+			file_action_buttons(
+				self.card,
+				video.path,
+				lambda: dialog._remove_row(self),  # noqa: SLF001 — класс диалога
+				remove_tip="Убрать из пакета (файл на диске не трогается)",
+			)
+		)
 		box.addLayout(head)
 		self.caption = TextEdit(self.card)
 		self.caption.setPlaceholderText("Подпись к видео (необязательно)…")

@@ -15,6 +15,7 @@ from pxcontrol.ui.pages.publish_queue_view import QueueFilter, QueueSort, apply_
 def _item(
 	item_id: int,
 	channel: str = "Канал",
+	channel_id: int = 1,
 	when_minutes: int | None = 60,
 	status: QueueItemStatus = QueueItemStatus.WAITING,
 ) -> QueueItemDto:
@@ -22,6 +23,7 @@ def _item(
 	return QueueItemDto(
 		id=item_id,
 		title=f"пост {item_id}",
+		channel_id=channel_id,
 		channel_title=channel,
 		when=when,
 		status=status,
@@ -62,10 +64,10 @@ def test_sort_by_channel_then_date() -> None:
 def test_status_and_channel_filters() -> None:
 	"""Фильтры: по статусу («к отправке» включает отправляющийся) и каналу."""
 	items = [
-		_item(1, channel="А", status=QueueItemStatus.WAITING),
-		_item(2, channel="А", status=QueueItemStatus.PENDING),
-		_item(3, channel="Б", status=QueueItemStatus.SENDING),
-		_item(4, channel="Б", status=QueueItemStatus.ERROR),
+		_item(1, channel="А", channel_id=1, status=QueueItemStatus.WAITING),
+		_item(2, channel="А", channel_id=1, status=QueueItemStatus.PENDING),
+		_item(3, channel="Б", channel_id=2, status=QueueItemStatus.SENDING),
+		_item(4, channel="Б", channel_id=2, status=QueueItemStatus.ERROR),
 	]
 	sendable = apply_view(items, QueueSort.ENQUEUED, QueueFilter.SENDABLE, None)
 	assert [item.id for item in sendable] == [2, 3]
@@ -73,7 +75,7 @@ def test_status_and_channel_filters() -> None:
 	assert [item.id for item in waiting] == [1]
 	errors = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ERRORS, None)
 	assert [item.id for item in errors] == [4]
-	channel_b = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, "Б")
+	channel_b = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, 2)
 	assert [item.id for item in channel_b] == [3, 4]
-	both = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ERRORS, "А")
+	both = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ERRORS, 1)
 	assert both == []

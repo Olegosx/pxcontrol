@@ -31,6 +31,7 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.settings import (
 	FFMPEG_PATH,
 	QUEUE_SLOT_POLL_MINUTES,
+	QUEUE_SLOT_POLL_RANGE,
 	THEME_DARK,
 	UI_COMPACT_SPACING,
 	UI_CONTROL_HEIGHT,
@@ -41,6 +42,7 @@ from pxcontrol.engine.services.settings import (
 	VIDEO_SOURCE_DIR,
 	SettingKey,
 )
+from pxcontrol.engine.services.video import VIDEO_DIR_DEFAULTS
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.accounts import AccountsPage
@@ -169,7 +171,7 @@ class _GeneralSettings(QWidget):
 		poll_row = QHBoxLayout()
 		poll_row.addWidget(BodyLabel("Проверка слотов отложек, минут:", self))
 		self._poll_spin = SpinBox(self)
-		self._poll_spin.setRange(1, 120)
+		self._poll_spin.setRange(*QUEUE_SLOT_POLL_RANGE)
 		self._poll_spin.setValue(QUEUE_SLOT_POLL_MINUTES.default)
 		self._poll_spin.valueChanged.connect(debounced(self, INPUT_DEBOUNCE_MS, self._save_poll))
 		poll_row.addWidget(self._poll_spin)
@@ -332,12 +334,13 @@ class _GeneralSettings(QWidget):
 		)
 
 
-#: Папки видео: подпись, ключ настройки, стандартное имя в папке приложения.
-_VIDEO_FOLDERS: list[tuple[str, SettingKey[str], str]] = [
-	("Исходники видео:", VIDEO_SOURCE_DIR, "media/source"),
-	("Результаты обработки:", VIDEO_PROCESSED_DIR, "media/processed"),
-	("Очередь отправки:", VIDEO_QUEUED_DIR, "media/queued"),
-	("Опубликованные:", VIDEO_PUBLISHED_DIR, "media/published"),
+#: Папки видео: подпись и ключ настройки; стандартное имя подсказки
+#: берётся из движка (``VIDEO_DIR_DEFAULTS``) — имена не разъезжаются.
+_VIDEO_FOLDERS: list[tuple[str, SettingKey[str]]] = [
+	("Исходники видео:", VIDEO_SOURCE_DIR),
+	("Результаты обработки:", VIDEO_PROCESSED_DIR),
+	("Очередь отправки:", VIDEO_QUEUED_DIR),
+	("Опубликованные:", VIDEO_PUBLISHED_DIR),
 ]
 
 
@@ -365,11 +368,11 @@ class _FoldersSettings(QWidget):
 		layout.setContentsMargins(0, 0, margins[2], margins[3])
 		layout.setSpacing(density.spacing().row_spacing)
 		layout.addWidget(SubtitleLabel("Папки видео", self))
-		for label, key, default_hint in _VIDEO_FOLDERS:
+		for label, key in _VIDEO_FOLDERS:
 			row = QHBoxLayout()
 			row.addWidget(BodyLabel(label, self))
 			edit = LineEdit(self)
-			edit.setPlaceholderText(f"пусто — {default_hint} в папке приложения…")
+			edit.setPlaceholderText(f"пусто — media/{VIDEO_DIR_DEFAULTS[key]} в папке приложения…")
 			edit.setClearButtonEnabled(True)
 			row.addWidget(edit, stretch=1)
 			browse = PushButton("Обзор…", self)
@@ -396,7 +399,7 @@ class _FoldersSettings(QWidget):
 
 	def _load(self) -> None:
 		"""Подтягивает сохранённые пути из движка."""
-		for _label, key, _hint in _VIDEO_FOLDERS:
+		for _label, key in _VIDEO_FOLDERS:
 			run_in_engine(
 				self._worker,
 				self._worker.engine.settings.get(key),
@@ -418,10 +421,7 @@ class _FoldersSettings(QWidget):
 		Одна операция — одна транзакция (set_many): успех сообщается
 		по факту записи, а не до неё (образец честной плашки — channels).
 		"""
-		items = [
-			(key, str(self._edits[key.name].text()).strip())
-			for _label, key, _hint in _VIDEO_FOLDERS
-		]
+		items = [(key, str(self._edits[key.name].text()).strip()) for _label, key in _VIDEO_FOLDERS]
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.set_many(items),

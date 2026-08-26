@@ -35,6 +35,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import (
+	FILENAME_PLACEHOLDERS,
 	CaptionLine,
 	FieldDto,
 	TemplateDto,
@@ -592,12 +593,15 @@ class FieldsDialog(MessageBoxBase):
 		self._reload()
 
 	def _update_pattern_hint(self, fields: list[FieldDto]) -> None:
-		"""Подсказка плейсхолдеров имени файла — с актуальными полями канала."""
+		"""Подсказка плейсхолдеров имени файла — с актуальными полями канала.
+
+		Встроенные плейсхолдеры перечисляет движок
+		(``FILENAME_PLACEHOLDERS``) — новый попадает в подсказку сам.
+		"""
 		tokens = ", ".join("{" + f.name + "}" for f in fields) or "добавьте поля выше"
+		builtin = ", ".join(f"{token} — {caption}" for token, caption in FILENAME_PLACEHOLDERS)
 		self._pattern_hint.setText(
-			"Плейсхолдеры имени файла: {video} — название видео, "
-			"{quality} — качество видео, {channel} — @имя канала; "
-			"поля со значениями через запятую: " + tokens
+			f"Плейсхолдеры имени файла: {builtin}; поля со значениями через запятую: {tokens}"
 		)
 
 	def _on_add_field(self) -> None:

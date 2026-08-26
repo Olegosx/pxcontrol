@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from pxcontrol.engine.errors import EngineError
-from pxcontrol.engine.telegram.refs import normalize_chat_ref
+from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.types import (
 	ChannelInfo,
 	MediaKind,
@@ -96,10 +96,7 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 	from telethon import errors
 
 	if isinstance(exc, errors.ChatAdminRequiredError):
-		return UserbotAccessError(
-			"Userbot не администратор канала — добавьте аккаунт userbot "
-			"администратором с правом публиковать."
-		)
+		return UserbotAccessError(_NOT_ADMIN_TEXT)
 	if isinstance(
 		exc,
 		errors.UserNotParticipantError
@@ -119,9 +116,7 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		| errors.SessionExpiredError
 		| errors.UserDeactivatedError,
 	):
-		return UserbotSessionExpiredError(
-			"Сессия userbot недействительна — войдите в аккаунт заново: Настройки → Аккаунты."
-		)
+		return UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
 	if isinstance(exc, errors.FloodWaitError):
 		return UserbotUnavailableError(f"Telegram просит подождать {exc.seconds} с.")
 	if isinstance(exc, errors.ScheduleTooMuchError):
@@ -162,19 +157,21 @@ async def _mtproto_errors() -> AsyncIterator[None]:
 		raise _translate_error(exc) from exc
 
 
-def _peer_id(chat_id: str) -> int:
-	"""Числовой ID канала из строки БД (контракт ``ChannelInfo.chat_id``).
+#: Единые тексты повторяющихся исходов. Три места «сессии» (перевод
+#: исключения и две проверки is_user_authorized) и два места
+#: «не администратор» не сводимы к одному raise, но текст у них обязан
+#: быть общим — врозь формулировки уже начинали расходиться.
+_SESSION_EXPIRED_TEXT = (
+	"Сессия userbot недействительна — войдите в аккаунт заново: Настройки → Аккаунты."
+)
+_NOT_ADMIN_TEXT = (
+	"Userbot не администратор канала — добавьте аккаунт администратором с правом публиковать."
+)
 
-	Raises:
-		UserbotUnavailableError: В БД оказался нечисловой ID.
-	"""
-	try:
-		return int(chat_id)
-	except ValueError as exc:
-		raise UserbotUnavailableError(
-			f"Некорректный ID канала в базе: {chat_id!r} — переподключите "
-			"канал на странице «Каналы»."
-		) from exc
+
+def _peer_id(chat_id: str) -> int:
+	"""Числовой ID из строки БД (:func:`refs.numeric_chat_id` с нашим классом)."""
+	return numeric_chat_id(chat_id, UserbotUnavailableError)
 
 
 async def _fetch_premium(client: Any) -> bool:
@@ -262,10 +259,7 @@ class MtprotoTransport:
 				) from exc
 			if not authorized:
 				await _safe_disconnect(client)
-				raise UserbotSessionExpiredError(
-					"Сессия userbot недействительна — войдите в аккаунт заново: "
-					"Настройки → Аккаунты."
-				)
+				raise UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
 			self._client = client
 			self._premium = await _fetch_premium(client)
 			logger.info(
@@ -332,10 +326,7 @@ class MtprotoTransport:
 					"Проверьте сеть и повторите операцию."
 				) from exc
 			if not authorized:
-				raise UserbotSessionExpiredError(
-					"Сессия userbot недействительна — войдите в аккаунт "
-					"заново: Настройки → Аккаунты."
-				)
+				raise UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
 			# подписка могла кончиться/появиться за время простоя
 			self._premium = await _fetch_premium(client)
 			logger.info("MTProto клиент переподключён.")
@@ -418,10 +409,7 @@ class MtprotoTransport:
 				основание для сервисов менять хранимый флаг прав).
 		"""
 		if not perms.is_admin:
-			raise UserbotAccessError(
-				"Userbot не администратор канала — добавьте аккаунт "
-				"администратором с правом публиковать."
-			)
+			raise UserbotAccessError(_NOT_ADMIN_TEXT)
 		rights = getattr(perms.participant, "admin_rights", None)
 		if not perms.is_creator and not getattr(rights, "post_messages", False):
 			raise UserbotAccessError("У userbot нет права публиковать сообщения в канале.")

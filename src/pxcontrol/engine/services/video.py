@@ -25,6 +25,7 @@ from sqlalchemy import delete, select
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import VideoPreset
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.services.captions import FORBIDDEN_NAME_CHARS
 from pxcontrol.engine.services.settings import (
 	CHANNEL_DEFAULT_PRESET,
 	VIDEO_PROCESSED_DIR,
@@ -115,9 +116,21 @@ class FrameCandidate:
 	path: str
 
 
-#: Расширения видеофайлов в списке результатов (те же, что в диалоге
-#: выбора исходника). Прочее (превью .png, черновики) списку не место.
+#: Расширения видеофайлов: по ним работают сканирования папок
+#: (``scan_sources``/``scan_ready``) и фильтры файловых диалогов
+#: (:func:`video_dialog_filter`). Прочее (превью .png, черновики) — мимо.
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".mkv", ".avi", ".webm"})
+
+
+def video_dialog_filter() -> str:
+	"""Фильтр файлового диалога «Видео (…)», собранный из ``VIDEO_SUFFIXES``.
+
+	Единая точка для диалогов выбора видео («Видео», «Публикация»):
+	новое расширение движка попадает в фильтры само, без ручной
+	синхронизации строк.
+	"""
+	patterns = " ".join(f"*{suffix}" for suffix in sorted(VIDEO_SUFFIXES))
+	return f"Видео ({patterns})"
 
 
 @dataclass(frozen=True)
@@ -246,7 +259,9 @@ def parse_intro_source(source: str) -> tuple[IntroSourceKind, str]:
 
 
 #: Стандартные имена папок видео в media/ (настройка пуста — берутся они).
-_VIDEO_DIR_DEFAULTS: dict[SettingKey[str], str] = {
+#: Публичный: страница «Настройки» строит из них подсказки — имена
+#: не должны разъезжаться между движком и интерфейсом.
+VIDEO_DIR_DEFAULTS: dict[SettingKey[str], str] = {
 	VIDEO_SOURCE_DIR: "source",
 	VIDEO_PROCESSED_DIR: "processed",
 	VIDEO_PUBLISHED_DIR: "published",
@@ -263,11 +278,12 @@ def video_base_dir(settings: SettingsService, key: SettingKey[str]) -> Path:
 	не должно разъезжаться между сервисами.
 	"""
 	custom = settings.cached(key)
-	return Path(custom) if custom else media_dir() / _VIDEO_DIR_DEFAULTS[key]
+	return Path(custom) if custom else media_dir() / VIDEO_DIR_DEFAULTS[key]
 
 
-#: Символы, недопустимые в имени подпапки (разделители путей и спецсимволы ОС).
-_SUBDIR_FORBIDDEN = '/\\:*?"<>|'
+#: Символы, недопустимые в имени подпапки — единый перечень
+#: с очисткой имён файлов (``captions.FORBIDDEN_NAME_CHARS``).
+_SUBDIR_FORBIDDEN = FORBIDDEN_NAME_CHARS
 
 
 def sanitize_subdir(name: str) -> str:
@@ -347,6 +363,14 @@ class PresetFields:
 	subdir: str = ""  # подпапка внутри базовых папок видео (пусто — без неё)
 
 
+#: Формат штампа времени конвейера: имена результатов
+#: (``<исходник>_<пресет>_<штамп>.mp4``) и подпапок пакетов. Связан
+#: контрактом с ``_PIPELINE_SUFFIX`` сервиса подписей
+#: (``title_from_filename`` вырезает суффикс по этому виду) — связка
+#: закреплена тестом ``test_title_from_filename_matches_pipeline_stamp``.
+PIPELINE_STAMP_FORMAT = "%Y%m%d-%H%M%S"
+
+
 def batch_subdir_name(root: str, now: datetime | None = None) -> str:
 	"""Имя подпапки пакета обработки: «штамп_имя-папки-источника».
 
@@ -355,7 +379,7 @@ def batch_subdir_name(root: str, now: datetime | None = None) -> str:
 	и хронологическую сортировку, имя папки-источника — узнаваемость.
 	Спецсимволы вычищает движок при применении (``sanitize_subdir``).
 	"""
-	stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+	stamp = (now or datetime.now()).strftime(PIPELINE_STAMP_FORMAT)
 	return f"{stamp}_{Path(root).name}"
 
 
@@ -866,7 +890,7 @@ class VideoService:
 		if extra:
 			out_dir = out_dir / extra
 		out_dir.mkdir(parents=True, exist_ok=True)
-		stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+		stamp = datetime.now().strftime(PIPELINE_STAMP_FORMAT)
 		# имя пресета — свободный текст: чистим спецсимволы ОС (как подпапку)
 		# и меняем «_» на «-», чтобы суффикс _<пресет>_<штамп> оставался
 		# разборчивым для title_from_filename (captions)

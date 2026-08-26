@@ -32,7 +32,6 @@ from qfluentwidgets import (
 	PushButton,
 	ScrollArea,
 	SubtitleLabel,
-	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -50,6 +49,7 @@ from pxcontrol.engine.services.video import (
 	batch_subdir_name,
 	build_intro_source,
 	parse_intro_source,
+	video_dialog_filter,
 )
 from pxcontrol.engine.services.video_queue import (
 	ProcessingRequest,
@@ -66,6 +66,7 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	confirm_delete,
 	exec_dialog,
+	file_action_buttons,
 	format_local,
 	human_size,
 	noop,
@@ -114,18 +115,12 @@ class _FileEntry:
 		self.batch = batch  # подпапка пакета («» — одиночное добавление)
 		self.preset_name = preset_name  # имя параметров на момент добавления
 		self.advice_note = ""  # пометка авто-битрейта (после совета движка)
-		trailing = QWidget()
-		buttons = QHBoxLayout(trailing)
-		buttons.setContentsMargins(0, 0, 0, 0)
-		buttons.setSpacing(4)
-		play = TransparentToolButton(FluentIcon.PLAY, trailing)
-		play.setToolTip("Посмотреть файл (системный плеер)")
-		play.clicked.connect(bind(open_in_system, path))
-		buttons.addWidget(play)
-		remove = TransparentToolButton(FluentIcon.DELETE, trailing)
-		remove.setToolTip("Убрать из списка (файл на диске не трогается)")
-		remove.clicked.connect(bind(page._remove_entry, self))  # noqa: SLF001
-		buttons.addWidget(remove)
+		trailing = file_action_buttons(
+			page,
+			path,
+			bind(page._remove_entry, self),  # noqa: SLF001 — карточка живёт у страницы
+			remove_tip="Убрать из списка (файл на диске не трогается)",
+		)
 		# чекбокс выбора — слева, перед названием (клик не сворачивает карточку)
 		self.check = CheckBox("", page)
 		self.check.setToolTip("Отправить файл на обработку («Обработать» берёт отмеченные)")
@@ -523,7 +518,7 @@ class VideoPage(ScrollArea):
 		path = pick_file(
 			self,
 			"Исходное видео",
-			"Видео (*.mp4 *.mov *.mkv *.avi *.webm);;Все файлы (*)",
+			f"{video_dialog_filter()};;Все файлы (*)",
 			start_dir=dirs.source,
 		)
 		if path:

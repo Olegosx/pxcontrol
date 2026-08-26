@@ -19,7 +19,7 @@ from qfluentwidgets import BodyLabel, CaptionLabel, ComboBox, MessageBoxBase, Su
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
-from pxcontrol.ui.pages.common import QueuePanel, fixed_list_area, format_local
+from pxcontrol.ui.pages.common import DtoComboBox, QueuePanel, fixed_list_area, format_local
 
 #: Высота списка элементов (прокрутка внутри, а не рост диалога).
 _LIST_HEIGHT = 480
@@ -70,7 +70,7 @@ def apply_view(
 	items: list[QueueItemDto],
 	sort: QueueSort,
 	status: QueueFilter,
-	channel: str | None,
+	channel_id: int | None,
 ) -> list[QueueItemDto]:
 	"""Правило показа: фильтр по статусу и каналу, затем сортировка.
 
@@ -78,10 +78,11 @@ def apply_view(
 		items: видимые элементы очереди (без завершённых).
 		sort: порядок показа.
 		status: фильтр по статусу.
-		channel: название канала (None — все каналы).
+		channel_id: id канала (None — все). Идентичность — по id:
+			названия каналов Telegram не уникальны.
 	"""
-	if channel is not None:
-		items = [item for item in items if item.channel_title == channel]
+	if channel_id is not None:
+		items = [item for item in items if item.channel_id == channel_id]
 	if status is QueueFilter.SENDABLE:
 		wanted = (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
 		items = [item for item in items if item.status in wanted]
@@ -93,9 +94,15 @@ def apply_view(
 	if sort is QueueSort.NEAREST:
 		return sorted(items, key=lambda item: (item.when or nearest, item.id))
 	if sort is QueueSort.CHANNEL:
+		# id в ключе разводит каналы-тёзки, чтобы их посты не перемешивались
 		return sorted(
 			items,
-			key=lambda item: (item.channel_title.casefold(), item.when or nearest, item.id),
+			key=lambda item: (
+				item.channel_title.casefold(),
+				item.channel_id,
+				item.when or nearest,
+				item.id,
+			),
 		)
 	return sorted(items, key=lambda item: item.id)
 
@@ -107,8 +114,8 @@ class QueueViewDialog(MessageBoxBase):
 		super().__init__(parent)
 		self._sort = QueueSort.NEAREST
 		self._status = QueueFilter.ALL
-		self._channel: str | None = None
-		self._known_channels: list[str] = []
+		self._channel: int | None = None
+		self._known_channels: list[tuple[int, str]] = []
 		self._total = 0
 		self.viewLayout.addWidget(SubtitleLabel("Очередь отправки", self))
 		self._build_controls()
@@ -148,8 +155,9 @@ class QueueViewDialog(MessageBoxBase):
 			self._status_combo.addItem(status_option.value)
 		self._status_combo.currentIndexChanged.connect(self._on_view_changed)
 		row.addWidget(self._status_combo)
-		self._channel_combo = ComboBox(self)
-		self._channel_combo.addItem(_ALL_CHANNELS)
+		self._channel_combo: DtoComboBox[tuple[int, str]] = DtoComboBox(
+			self, placeholder=_ALL_CHANNELS
+		)
 		self._channel_combo.currentIndexChanged.connect(self._on_view_changed)
 		row.addWidget(self._channel_combo)
 		row.addStretch()
@@ -167,32 +175,29 @@ class QueueViewDialog(MessageBoxBase):
 		"""Обновляет пункты фильтра канала по каналам, живущим в очереди.
 
 		Пересборка — только при смене набора (каждые полсекунды дёргать
-		комбобокс незачем); выбранный канал сохраняется, исчезнувший
-		из очереди — сбрасывается на «Все каналы».
+		комбобокс незачем). Восстановление выбора и служебный пункт —
+		забота ``DtoComboBox``: выбранный канал сохраняется по id,
+		исчезнувший из очереди — сбрасывается на «Все каналы».
 		"""
-		channels = sorted({item.channel_title for item in items}, key=str.casefold)
+		channels = sorted(
+			{(item.channel_id, item.channel_title) for item in items},
+			key=lambda entry: (entry[1].casefold(), entry[0]),
+		)
 		if channels == self._known_channels:
 			return
 		self._known_channels = channels
-		selected = self._channel
-		self._channel_combo.blockSignals(True)
-		try:
-			self._channel_combo.clear()
-			self._channel_combo.addItem(_ALL_CHANNELS)
-			for title in channels:
-				self._channel_combo.addItem(title)
-			index = channels.index(selected) + 1 if selected in channels else 0
-			self._channel_combo.setCurrentIndex(index)
-		finally:
-			self._channel_combo.blockSignals(False)
-		self._channel = selected if selected in channels else None
+		self._channel_combo.set_items(
+			channels, label=lambda entry: entry[1], key=lambda entry: entry[0]
+		)
+		selected = self._channel_combo.selected()
+		self._channel = selected[0] if selected is not None else None
 
 	def _on_view_changed(self, _index: int = 0) -> None:
 		"""Читает правило показа из списков; следующий опрос его применит."""
 		self._sort = list(QueueSort)[int(self._sort_combo.currentIndex())]
 		self._status = list(QueueFilter)[int(self._status_combo.currentIndex())]
-		channel_index = int(self._channel_combo.currentIndex())
-		self._channel = None if channel_index <= 0 else self._known_channels[channel_index - 1]
+		selected = self._channel_combo.selected()
+		self._channel = selected[0] if selected is not None else None
 		self._panel.poll()  # показ обновляется сразу, не по таймеру
 
 	def _update_summary(self, shown: list[QueueItemDto]) -> None:

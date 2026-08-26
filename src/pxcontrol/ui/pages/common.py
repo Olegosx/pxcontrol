@@ -178,6 +178,30 @@ def open_in_system(path: str) -> None:
 	QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
+def file_action_buttons(
+	parent: QWidget, path: str, on_remove: Callable[[], None], *, remove_tip: str
+) -> QWidget:
+	"""Пара кнопок карточки файла: «посмотреть» и «убрать».
+
+	Общая шапка карточек файлов («Видео», пакет «Публикации»):
+	просмотр — системным плеером, «убрать» — только из списка (файл
+	на диске не трогается — это обещает подсказка ``remove_tip``).
+	"""
+	trailing = QWidget(parent)
+	buttons = QHBoxLayout(trailing)
+	buttons.setContentsMargins(0, 0, 0, 0)
+	buttons.setSpacing(4)
+	play = TransparentToolButton(FluentIcon.PLAY, trailing)
+	play.setToolTip("Посмотреть файл (системный плеер)")
+	play.clicked.connect(bind(open_in_system, path))
+	buttons.addWidget(play)
+	remove = TransparentToolButton(FluentIcon.DELETE, trailing)
+	remove.setToolTip(remove_tip)
+	remove.clicked.connect(on_remove)
+	buttons.addWidget(remove)
+	return trailing
+
+
 def exec_dialog(dialog: QDialog) -> bool:
 	"""Показывает модальный диалог и удаляет его после закрытия.
 

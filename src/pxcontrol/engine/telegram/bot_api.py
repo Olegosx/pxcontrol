@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 	from aiogram import Bot
 
 from pxcontrol.engine.errors import EngineError
-from pxcontrol.engine.telegram.refs import normalize_chat_ref
+from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.types import ChannelInfo, MediaKind
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,8 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	от операции и передаются параметрами.
 
 	Raises:
-		ChannelCheckError: Telegram отклонил операцию (токен, права, запрос).
+		InvalidBotTokenError: Telegram отклонил токен (Unauthorized).
+		ChannelCheckError: Telegram отклонил операцию (права, запрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.exceptions import (
@@ -58,7 +59,7 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	try:
 		yield
 	except TelegramUnauthorizedError as exc:
-		raise ChannelCheckError("Telegram отклонил токен бота.") from exc
+		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
 	except TelegramForbiddenError as exc:
 		raise ChannelCheckError(f"{forbidden} (Telegram: {exc.message})") from exc
 	except TelegramRetryAfter as exc:
@@ -125,21 +126,8 @@ def _make_bot(token: str) -> Bot:
 
 
 def _chat_id(chat_id: str) -> int:
-	"""Числовой ID канала из строки БД (контракт ``ChannelInfo.chat_id``).
-
-	Парный помощник ``_peer_id`` в mtproto: нечисловая строка — повреждённая
-	запись, а не сетевой сбой, и заслуживает понятного текста.
-
-	Raises:
-		ChannelCheckError: В БД оказался нечисловой ID.
-	"""
-	try:
-		return int(chat_id)
-	except ValueError as exc:
-		raise ChannelCheckError(
-			f"Некорректный ID канала в базе: {chat_id!r} — переподключите "
-			"канал на странице «Каналы»."
-		) from exc
+	"""Числовой ID из строки БД (:func:`refs.numeric_chat_id` с нашим классом)."""
+	return numeric_chat_id(chat_id, ChannelCheckError)
 
 
 def ensure_bot_can_post(member: Any) -> None:
@@ -256,27 +244,23 @@ async def get_bot_events(token: str) -> list[str]:
 		ChannelCheckError: Telegram отклонил запрос (вебхук, параллельный опрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	from aiogram.exceptions import (
-		TelegramBadRequest,
-		TelegramConflictError,
-		TelegramNetworkError,
-		TelegramUnauthorizedError,
-	)
+	from aiogram.exceptions import TelegramConflictError
 
 	bot = _make_bot(token)
 	try:
-		# timeout=1 — короткий long-poll: диагностике нужен снимок, не ожидание
-		updates = await bot.get_updates(timeout=1)
-	except TelegramUnauthorizedError as exc:
-		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
-	except TelegramConflictError as exc:
-		raise ChannelCheckError(
-			"События недоступны: у бота включён вебхук или его опрашивает другое приложение."
-		) from exc
-	except TelegramBadRequest as exc:
-		raise ChannelCheckError(f"Telegram отклонил запрос событий. ({exc.message})") from exc
-	except TelegramNetworkError as exc:
-		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
+		async with _bot_errors(
+			"Telegram отклонил запрос событий.", "Telegram отклонил запрос событий."
+		):
+			try:
+				# timeout=1 — короткий long-poll: диагностике нужен снимок,
+				# не ожидание
+				updates = await bot.get_updates(timeout=1)
+			except TelegramConflictError as exc:
+				# точный совет ценнее запасной ветки единого маппера
+				raise ChannelCheckError(
+					"События недоступны: у бота включён вебхук или его "
+					"опрашивает другое приложение."
+				) from exc
 	finally:
 		await bot.session.close()
 	return [line for update in updates if (line := describe_update(update))]
@@ -314,17 +298,15 @@ async def check_token(token: str) -> str:
 
 	Raises:
 		InvalidBotTokenError: Токен неверного формата или отклонён Telegram.
+		ChannelCheckError: Telegram отклонил запрос getMe (практически
+			не случается — запасные ветки единого маппера).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
-
 	bot = _make_bot(token)
 	try:
-		me = await bot.get_me()
-		return me.username or me.first_name
-	except TelegramUnauthorizedError as exc:
-		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
-	except TelegramNetworkError as exc:
-		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
+		text = "Telegram отклонил запрос getMe."
+		async with _bot_errors(text, text):
+			me = await bot.get_me()
+			return me.username or me.first_name
 	finally:
 		await bot.session.close()

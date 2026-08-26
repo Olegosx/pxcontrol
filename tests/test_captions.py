@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from sqlalchemy import select
 
@@ -15,6 +17,7 @@ from pxcontrol.engine.services.captions import (
 	hashtag,
 	title_from_filename,
 )
+from pxcontrol.engine.services.video import PIPELINE_STAMP_FORMAT
 
 # --- чистые функции ---------------------------------------------------------
 
@@ -44,6 +47,16 @@ def test_build_caption_without_title() -> None:
 	"""Без названия подпись начинается сразу с полей."""
 	text = build_caption("", [CaptionLine("Year", False, ["2026"])])
 	assert text == "Year: 2026"
+
+
+def test_title_from_filename_matches_pipeline_stamp() -> None:
+	"""Связка форматов: суффикс с штампом PIPELINE_STAMP_FORMAT вырезается.
+
+	Формат штампа живёт в сервисе видео, вырезающее его регулярное
+	выражение — здесь: тест ловит их молчаливое расхождение.
+	"""
+	stamp = datetime(2026, 8, 26, 12, 30, 45).strftime(PIPELINE_STAMP_FORMAT)
+	assert title_from_filename(f"/x/Имя ролика_пресет_{stamp}.mp4") == "Имя ролика"
 
 
 def test_title_from_filename_strips_pipeline_suffix() -> None:

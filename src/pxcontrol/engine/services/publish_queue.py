@@ -78,6 +78,8 @@ class QueueItemDto:
 	Attributes:
 		id: идентификатор элемента (для отмены и снятия с показа).
 		title: человекочитаемо: имя файла или начало текста.
+		channel_id: id канала-получателя (фильтры и группировки: названия
+			каналов не уникальны, идентичность — только по id).
 		channel_title: название канала-получателя.
 		when: момент публикации (UTC); None — «сейчас». Задан — пост
 			отложенный: после отправки станет записью в канале.
@@ -88,6 +90,7 @@ class QueueItemDto:
 
 	id: int
 	title: str
+	channel_id: int
 	channel_title: str
 	when: datetime | None
 	status: QueueItemStatus
@@ -118,6 +121,7 @@ class _Item:
 		return QueueItemDto(
 			id=self.id,
 			title=_draft_title(self.draft),
+			channel_id=self.draft.channel_id,
 			channel_title=self.channel_title,
 			when=self.draft.when,
 			status=self.status,

@@ -40,7 +40,7 @@ from pxcontrol.engine.services.posts import (
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
 from pxcontrol.engine.services.settings import PUBLISH_LAST_CHANNEL_ID, PUBLISH_TIMES
-from pxcontrol.engine.services.video import ReadyVideo, VideoDirs
+from pxcontrol.engine.services.video import ReadyVideo, VideoDirs, video_dialog_filter
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -90,7 +90,7 @@ class _BatchSetup:
 _KINDS: list[tuple[str, MediaKind, str]] = [
 	("Текст", MediaKind.NONE, ""),
 	("Фото", MediaKind.PHOTO, "Изображения (*.png *.jpg *.jpeg *.webp)"),
-	("Видео", MediaKind.VIDEO, "Видео (*.mp4 *.mov *.mkv *.avi *.webm)"),
+	("Видео", MediaKind.VIDEO, video_dialog_filter()),
 	("Аудио", MediaKind.AUDIO, "Аудио (*.mp3 *.m4a *.flac *.ogg *.wav)"),
 	("Файл", MediaKind.DOCUMENT, "Все файлы (*)"),
 ]

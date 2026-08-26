@@ -39,6 +39,11 @@ from pxcontrol.ui import density
 from pxcontrol.ui.pages.common import INPUT_DEBOUNCE_MS, debounced, pick_file
 
 #: Углы вотермарка: подпись → код (коды понимает движок, filtergraph).
+#: Значения по умолчанию параметров обработки — единственная точка истины
+#: движка (``PresetFields``): «чистая» форма совпадает с «чистым» пресетом,
+#: смена дефолта в движке подхватывается формой сама.
+_DEFAULTS = PresetFields(name="")
+
 _CORNERS = [
 	("Правый верхний", "tr"),
 	("Левый верхний", "tl"),
@@ -274,11 +279,13 @@ class PresetForm(QWidget):
 		for label, _code in _CORNERS:
 			self._corner.addItem(label)
 		self._labeled(look, "Угол:", self._corner)
-		self._margin = self._spin(card, "отступ вотермарка от края кадра", 0, 200, 24)
+		self._margin = self._spin(
+			card, "отступ вотермарка от края кадра", 0, 200, _DEFAULTS.wm_margin
+		)
 		self._labeled(look, "Отступ, пикс:", self._margin)
-		self._opacity = self._dspin(card, "1 — непрозрачен", 0.05, 1.0, 1.0, 0.05)
+		self._opacity = self._dspin(card, "1 — непрозрачен", 0.05, 1.0, _DEFAULTS.wm_opacity, 0.05)
 		self._labeled(look, "Прозрачность:", self._opacity)
-		self._scale = self._dspin(card, "доля ширины кадра", 0.05, 0.5, 0.15, 0.01)
+		self._scale = self._dspin(card, "доля ширины кадра", 0.05, 0.5, _DEFAULTS.wm_scale, 0.01)
 		self._labeled(look, "Масштаб:", self._scale)
 		look.addStretch()
 		box.addLayout(look)
@@ -312,9 +319,13 @@ class PresetForm(QWidget):
 		top = QHBoxLayout()
 		self._intro = SwitchButton(card)
 		self._labeled(top, "Включена:", self._intro)
-		self._hold = self._dspin(card, "сколько секунд держать кадр", 0.2, 5.0, 1.0, 0.1)
+		self._hold = self._dspin(
+			card, "сколько секунд держать кадр", 0.2, 5.0, _DEFAULTS.intro_hold, 0.1
+		)
 		self._labeled(top, "Держать, с:", self._hold)
-		self._xfade = self._dspin(card, "длительность растворения в видео", 0.1, 3.0, 0.5, 0.1)
+		self._xfade = self._dspin(
+			card, "длительность растворения в видео", 0.1, 3.0, _DEFAULTS.xfade, 0.1
+		)
 		self._labeled(top, "Растворение, с:", self._xfade)
 		top.addStretch()
 		box.addLayout(top)

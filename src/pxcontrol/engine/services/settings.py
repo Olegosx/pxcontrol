@@ -101,10 +101,14 @@ VIDEO_PUBLISHED_DIR: SettingKey[str] = SettingKey("video_published_dir", Setting
 VIDEO_QUEUED_DIR: SettingKey[str] = SettingKey("video_queued_dir", SettingScope.APP, "", str)
 
 #: Период проверки свободных слотов отложек для ждущих элементов очереди
-#: отправки, минуты (ADR-0016). Интерфейс ограничивает диапазон 1–120.
+#: отправки, минуты (ADR-0016). Допустимый диапазон — ниже.
 QUEUE_SLOT_POLL_MINUTES: SettingKey[int] = SettingKey(
 	"queue_slot_poll_minutes", SettingScope.APP, 5, int
 )
+
+#: Допустимый диапазон периода проверки слотов, минуты: правило одно
+#: на движок и интерфейс (спин-бокс «Настроек» берёт границы отсюда).
+QUEUE_SLOT_POLL_RANGE: tuple[int, int] = (1, 120)
 
 #: Канал активен: участвует в публикации и опросе расписания.
 CHANNEL_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.CHANNEL, True, bool)
