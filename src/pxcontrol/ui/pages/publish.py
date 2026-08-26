@@ -51,7 +51,6 @@ from pxcontrol.ui.pages.common import (
 	WhenRow,
 	error_reporter,
 	exec_dialog,
-	format_local,
 	noop,
 	page_layout,
 	pick_dir,
@@ -59,11 +58,12 @@ from pxcontrol.ui.pages.common import (
 	show_warning,
 )
 from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
+from pxcontrol.ui.pages.publish_queue_view import QueueViewDialog, queue_subtitle
 
 logger = logging.getLogger(__name__)
 
 #: Сколько карточек очереди показывать на странице (хвост ждущих —
-#: в сводке числом; полный просмотр очереди — следующий срез, ADR-0016).
+#: в сводке числом; всё целиком — кнопка «Вся очередь…», ADR-0016).
 _QUEUE_MAX_CARDS = 20
 
 
@@ -206,6 +206,13 @@ class PublishPage(ScrollArea):
 		)
 		batch_button.clicked.connect(self._on_batch)
 		row.addWidget(batch_button)
+		view_button = PushButton("Вся очередь…", self)
+		view_button.setToolTip(
+			"Все элементы очереди отправки с сортировкой и фильтрами "
+			f"(на странице — ближайшие {_QUEUE_MAX_CARDS})"
+		)
+		view_button.clicked.connect(self._on_queue_view)
+		row.addWidget(view_button)
 		row.addStretch()
 		layout.addLayout(row)
 		self._queue_summary = CaptionLabel("", self)
@@ -219,13 +226,17 @@ class PublishPage(ScrollArea):
 			self,
 			queue_box,
 			service=lambda: self._worker.engine.publish_queue,
-			subtitle=self._queue_subtitle,
+			subtitle=queue_subtitle,
 			on_finished=self._on_queue_finished,
 			on_refreshed=self._update_queue_summary,
 			# длинный хвост ждущих слота (ADR-0016) не раздувает страницу;
-			# полный просмотр очереди — следующий срез разработки
+			# всё целиком — в диалоге «Вся очередь…»
 			max_cards=_QUEUE_MAX_CARDS,
 		)
+
+	def _on_queue_view(self) -> None:
+		"""Открывает полный просмотр очереди (сортировка и фильтры)."""
+		exec_dialog(QueueViewDialog(self._worker, self.window()))
 
 	# --- поведение -----------------------------------------------------------------
 
@@ -827,23 +838,3 @@ class PublishPage(ScrollArea):
 			text += f" · показаны ближайшие {_QUEUE_MAX_CARDS}"
 		self._queue_summary.setText(text)
 		self._queue_summary.show()
-
-	@staticmethod
-	def _queue_subtitle(item: QueueItemDto) -> str:
-		"""Подпись карточки: канал, момент публикации и статус.
-
-		Момент хранится в UTC (как отдаётся Telegram) и показывается
-		в местном времени — как пользователь вводил его в форме.
-		"""
-		when_text = "сейчас" if item.when is None else format_local(item.when)
-		if item.status is QueueItemStatus.SENDING:
-			status = "отправляется"
-		elif item.status is QueueItemStatus.ERROR:
-			status = f"ошибка: {item.error}"
-		elif item.status is QueueItemStatus.WAITING:
-			# лимит Telegram — 100 отложек на канал (ADR-0016); хвост
-			# публикует само приложение, поэтому оно должно быть запущено
-			status = "ждёт слота отложек · уйдёт при запущенном приложении"
-		else:
-			status = "в очереди"
-		return f"{item.channel_title} · публикация: {when_text} · {status}"

@@ -392,6 +392,7 @@ class QueuePanel:
 		on_refreshed: Callable[[list[Any]], None] | None = None,
 		on_drained: Callable[[list[Any]], None] | None = None,
 		max_cards: int | None = None,
+		transform: Callable[[list[Any]], list[Any]] | None = None,
 	) -> None:
 		"""Args:
 		worker: мост к движку.
@@ -401,13 +402,17 @@ class QueuePanel:
 		subtitle: подпись карточки для элемента.
 		on_finished: разовая реакция на завершённый элемент
 			(``True`` — готово, ``False`` — отменено) до снятия с показа.
-		on_refreshed: вызывается после каждого обновления с ПОЛНЫМ списком
-			видимых элементов (сводка очереди; при ``max_cards`` — место
-			сказать «и ещё N»).
+		on_refreshed: вызывается после каждого обновления со списком
+			показанных элементов (после ``transform``; сводка очереди,
+			при ``max_cards`` — место сказать «и ещё N»).
 		on_drained: вызывается с видимым остатком, когда занятость
 			кончилась (итоговая плашка вместо плашки на каждый файл).
 		max_cards: не больше стольких карточек на странице (None — все);
 			длинный хвост ждущих (ADR-0016) не раздувает страницу.
+		transform: правило показа — сортировка/фильтр видимого списка
+			(полный просмотр очереди); занятость считается до него,
+			по нефильтрованному списку. Смена правила отражается
+			следующим опросом — после неё зовите :meth:`poll`.
 		"""
 		self._worker = worker
 		self._page = page
@@ -418,6 +423,7 @@ class QueuePanel:
 		self._on_refreshed = on_refreshed
 		self._on_drained = on_drained
 		self._max_cards = max_cards
+		self._transform = transform
 		self._show_error = error_reporter(page)
 		self._signature: tuple[tuple[Any, ...], ...] = ()
 		self._bars: dict[int, ProgressBar] = {}
@@ -465,6 +471,8 @@ class QueuePanel:
 		if self._busy and not busy and self._on_drained is not None:
 			self._on_drained(visible)
 		self._busy = busy
+		if self._transform is not None:
+			visible = self._transform(visible)
 		signature = tuple((i.id, i.status, i.error, getattr(i, "note", None)) for i in visible)
 		if signature != self._signature:
 			self._signature = signature
