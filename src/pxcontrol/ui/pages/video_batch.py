@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 from qfluentwidgets import (
 	CaptionLabel,
@@ -20,7 +20,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.video import FoundVideo
-from pxcontrol.ui.async_bridge import run_in_engine
+from pxcontrol.ui.async_bridge import run_in_engine, ui_callback
 from pxcontrol.ui.pages.common import (
 	SelectionRow,
 	fixed_list_area,
@@ -35,10 +35,6 @@ _LIST_HEIGHT = 320
 
 class BatchScanDialog(MessageBoxBase):
 	"""Выбор видео для пакета из рекурсивно просканированной папки."""
-
-	#: Ход сканирования (прочитано, всего) — колбэк движка вызывается
-	#: из рабочего потока, сигнал доставляет его в поток интерфейса.
-	_scan_progressed = Signal(int, int)
 
 	def __init__(self, worker: EngineWorker, root: str, parent: QWidget) -> None:
 		super().__init__(parent)
@@ -59,10 +55,14 @@ class BatchScanDialog(MessageBoxBase):
 		self.yesButton.setEnabled(False)
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(720)
-		self._scan_progressed.connect(self._on_scan_progress)
+		# ход сканирования приходит из рабочего потока движка: колбэк —
+		# через безопасный мост (излучать сигнал диалога оттуда нельзя,
+		# см. докстринг async_bridge)
 		run_in_engine(
 			worker,
-			worker.engine.video.scan_sources(root, on_progress=self._scan_progressed.emit),
+			worker.engine.video.scan_sources(
+				root, on_progress=ui_callback(self, self._on_scan_progress)
+			),
 			self,
 			self._show_found,
 			self._on_scan_error,
