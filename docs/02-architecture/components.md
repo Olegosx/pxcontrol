@@ -42,7 +42,8 @@
 - UI-независимый пакет: сервисы (`accounts`, `channels`, `posts`,
   `video`, `captions`, `settings` — реестр ключей и хранение настроек
   ([ADR-0013](decisions/0013-settings-storage.md)), `publish_queue` —
-  очередь отправки в памяти ([ADR-0012](decisions/0012-publish-queue-in-memory.md)),
+  персистентная очередь отправки со слотами отложек
+  ([ADR-0016](decisions/0016-persistent-publish-queue.md)),
   `video_queue` — очередь обработки видео, одиночной и пакетной
   ([ADR-0014](decisions/0014-video-processing-queue.md))),
   модель данных, шлюз Telegram.

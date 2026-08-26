@@ -31,10 +31,11 @@
 | [0009](0009-config-secrets-in-db.md) | Конфиг и секреты в БД, шифрование через keyring | accepted |
 | [0010](0010-posts-fire-and-forget.md) | Посты: истина — канал, доставка — сервер Telegram | accepted — п.2–3 уточнены (→0011) |
 | [0011](0011-publish-via-userbot.md) | Публикация всего контента — единой сущностью через userbot | accepted |
-| [0012](0012-publish-queue-in-memory.md) | Очередь отправки постов в памяти движка | accepted |
+| [0012](0012-publish-queue-in-memory.md) | Очередь отправки постов в памяти движка | superseded ([0016](0016-persistent-publish-queue.md)) |
 | [0013](0013-settings-storage.md) | Хранение настроек: «владелец → имя → значение» + реестр ключей | accepted |
 | [0014](0014-video-processing-queue.md) | Пакетная обработка видео через единую очередь в памяти движка | accepted |
 | [0015](0015-batch-publishing.md) | Пакетная отправка: черновики из готовой папки с раскладкой времени | accepted |
+| [0016](0016-persistent-publish-queue.md) | Персистентная очередь отправки со слотами отложек (лимит 100/канал) | accepted |
 
 ## Как добавить запись
 
