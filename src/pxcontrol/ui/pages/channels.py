@@ -497,7 +497,7 @@ class ChannelsPage(ScrollArea):
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.delete_channel(channel.id),
+			self._worker.engine.delete_channel(channel.id),
 			self,
 			self._reload,
 			self._show_error,

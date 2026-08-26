@@ -15,6 +15,7 @@ EXPECTED_TABLES = {
 	"ai_credentials",
 	"video_presets",
 	"channels",
+	"publish_queue_items",
 	"caption_fields",
 	"caption_values",
 	"caption_templates",

@@ -178,21 +178,25 @@ class PublishQueueItem(TimestampMixin, Base):
 	и отменённые удаляются — истина по вышедшим постам остаётся каналом
 	(ADR-0010). Очередь живёт и умирает вместе с каналом (CASCADE);
 	файл такого элемента остаётся в папке очереди (см. ADR-0016).
+
+	Значения по умолчанию не задаются: очередь заполняет все поля явно,
+	а истина статусов и типов вложений — перечисления в сервисе и шлюзе
+	(дублировать их литералами здесь — риск молчаливого расхождения).
 	"""
 
 	__tablename__ = "publish_queue_items"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
 	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
-	text: Mapped[str] = mapped_column(Text, default="")
-	media_path: Mapped[str | None] = mapped_column(String(1024), default=None)
-	media_kind: Mapped[str] = mapped_column(String(16), default="none")
+	text: Mapped[str] = mapped_column(Text)
+	media_path: Mapped[str | None] = mapped_column(String(1024))
+	media_kind: Mapped[str] = mapped_column(String(16))
 	# желаемый момент публикации (UTC); NULL — «сейчас»
-	when: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-	rename_to: Mapped[str | None] = mapped_column(String(255), default=None)
+	when: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+	rename_to: Mapped[str | None] = mapped_column(String(255))
 	# pending — готов к отправке; waiting — ждёт слота отложек; error
-	status: Mapped[str] = mapped_column(String(16), default="pending")
-	error: Mapped[str | None] = mapped_column(Text, default=None)
+	status: Mapped[str] = mapped_column(String(16))
+	error: Mapped[str | None] = mapped_column(Text)
 
 
 class CaptionField(TimestampMixin, Base):

@@ -110,6 +110,8 @@ class TelegramGateway:
 			UserbotNotConnectedError: Userbot не настроен или нет связи.
 			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
 			UserbotAccessError: Telegram подтвердил отсутствие прав/канала.
+			UserbotScheduleFullError: Все слоты отложек канала заняты —
+				очередь отправки возвращает пост в ожидание (ADR-0016).
 			UserbotUnavailableError: Прочие отказы Telegram (лимиты и т.п.).
 		"""
 		await self.mtproto.publish(chat_id, post, on_progress)

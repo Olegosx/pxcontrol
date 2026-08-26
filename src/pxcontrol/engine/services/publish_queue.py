@@ -331,6 +331,30 @@ class PublishQueue:
 			logger.info("Элемент id=%s возвращён в очередь на повтор.", item_id)
 			return
 
+	async def drop_channel(self, channel_id: int) -> None:
+		"""Снимает все элементы канала из очереди (канал удаляется).
+
+		Живая очередь сама не узнаёт об удалении канала: каскад БД
+		убирает только строки, а элементы в памяти остались бы «зомби» —
+		дозор вечно пропускал бы их с ошибкой «Канал не найден».
+		Ожидающие снимаются как при «Отмене» (файлы возвращаются
+		в результаты), активная отправка обрывается, завершённые
+		уходят с показа.
+		"""
+		for item in list(self._items):
+			if item.draft.channel_id != channel_id:
+				continue
+			if self._active is not None and self._active[0] == item.id:
+				# исход запишет _send: CANCELLED, файл вернётся в результаты
+				item.cancel_requested = True
+				self._active[1].cancel()
+				continue
+			if not item.status.finished():
+				item.status = QueueItemStatus.CANCELLED
+				await self._leave_queue(item)
+			self._items.remove(item)
+		logger.info("Элементы канала id=%s сняты из очереди перед удалением.", channel_id)
+
 	async def dismiss(self, item_id: int) -> None:
 		"""Убирает завершённый элемент из списка (живые не трогаются).
 
@@ -410,8 +434,13 @@ class PublishQueue:
 			self._slot_check = asyncio.create_task(self._release_slots())
 
 	async def _watch_slots(self) -> None:
-		"""Дозор: раз в N минут проверяет слоты, пока есть ждущие."""
-		while True:
+		"""Дозор: раз в N минут проверяет слоты, пока есть ждущие.
+
+		Ждущих не осталось — задача завершается: пока их нет, фоновой
+		задачи нет вовсе; следующая постановка или возврат в ожидание
+		поднимут её заново (``_ensure_watcher``).
+		"""
+		while any(item.status is QueueItemStatus.WAITING for item in self._items):
 			minutes = await self._settings.get(QUEUE_SLOT_POLL_MINUTES)
 			await asyncio.sleep(max(1, minutes) * 60)
 			if any(item.status is QueueItemStatus.WAITING for item in self._items):
@@ -568,6 +597,9 @@ class PublishQueue:
 			# желаемый момент прошёл — это уже не отложка: публикуем
 			# обычным сообщением, слота не занимая (ADR-0016)
 			draft = replace(draft, when=None)
+			# снимок для интерфейса честен: карточка и итоговая плашка
+			# показывают «сейчас», а не несуществующую отложку
+			item.draft = draft
 		item.status = QueueItemStatus.SENDING
 		task = asyncio.create_task(self._posts.publish(draft, on_progress=_on_progress))
 		self._active = (item.id, task)

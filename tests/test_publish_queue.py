@@ -455,8 +455,9 @@ async def test_expired_when_publishes_now_without_slot(db: Database) -> None:
 	# моделируем прошедшее время ожидания (без реального ожидания суток)
 	target.draft = replace(target.draft, when=datetime.now(UTC) - timedelta(hours=1))
 	await queue._release_slots()  # noqa: SLF001 — слоты по-прежнему заняты
-	await _wait_status(queue, item, QueueItemStatus.DONE)
+	done = await _wait_status(queue, item, QueueItemStatus.DONE)
 	assert gateway.published[0].when is None  # ушёл обычным сообщением
+	assert done.when is None  # снимок для интерфейса честен: не «отложка»
 	await queue.shutdown()
 
 
@@ -643,4 +644,25 @@ async def test_retry_expired_scheduled_publishes_now(db: Database) -> None:
 	await queue.retry(item)
 	await _wait_status(queue, item, QueueItemStatus.DONE)
 	assert gateway.published[-1].when is None  # ушёл «сейчас», а не в прошлое
+	await queue.shutdown()
+
+
+async def test_drop_channel_removes_items_and_returns_files(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Снятие элементов канала: очередь пуста, файл вернулся в результаты."""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(
+		PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120))
+	)
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	assert not video.exists()  # файл ушёл в папку очереди
+	await queue.drop_channel(channel_id)
+	assert await queue.state() == []  # «зомби»-элементов в памяти нет
+	assert video.is_file()  # файл вернулся в результаты
 	await queue.shutdown()

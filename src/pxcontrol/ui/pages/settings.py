@@ -37,6 +37,7 @@ from pxcontrol.engine.services.settings import (
 	UI_FONT_SIZE,
 	VIDEO_PROCESSED_DIR,
 	VIDEO_PUBLISHED_DIR,
+	VIDEO_QUEUED_DIR,
 	VIDEO_SOURCE_DIR,
 	SettingKey,
 )
@@ -335,6 +336,7 @@ class _GeneralSettings(QWidget):
 _VIDEO_FOLDERS: list[tuple[str, SettingKey[str], str]] = [
 	("Исходники видео:", VIDEO_SOURCE_DIR, "media/source"),
 	("Результаты обработки:", VIDEO_PROCESSED_DIR, "media/processed"),
+	("Очередь отправки:", VIDEO_QUEUED_DIR, "media/queued"),
 	("Опубликованные:", VIDEO_PUBLISHED_DIR, "media/published"),
 ]
 
@@ -343,8 +345,9 @@ class _FoldersSettings(QWidget):
 	"""Категория «Папки»: базовые папки видео (ADR-0013, ключи video_*_dir).
 
 	Внутри каждой папки живёт подпапка пресета (поле «Подпапка» на странице
-	«Видео»). После публикации видео переезжает из результатов
-	в опубликованные с сохранением подпапки.
+	«Видео»). Жизненный цикл видео зеркалится папками (ADR-0016):
+	постановка в очередь переносит файл из результатов в очередь
+	отправки, публикация — в опубликованные, всё с сохранением подпапки.
 	"""
 
 	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
@@ -356,7 +359,7 @@ class _FoldersSettings(QWidget):
 		self._load()
 
 	def _build(self) -> None:
-		"""Три строки «подпись + путь + Обзор…» и одна кнопка сохранения."""
+		"""Строка «подпись + путь + Обзор…» на папку и кнопка сохранения."""
 		layout = QVBoxLayout(self)
 		margins = density.spacing().page_margins
 		layout.setContentsMargins(0, 0, margins[2], margins[3])
@@ -383,8 +386,9 @@ class _FoldersSettings(QWidget):
 		layout.addWidget(
 			CaptionLabel(
 				"Внутри каждой папки — подпапка пресета (поле «Подпапка» "
-				"на «Видео»). После публикации видео переезжает из результатов "
-				"в опубликованные.",
+				"на «Видео»). Поставленное в очередь видео переезжает "
+				"из результатов в очередь отправки, опубликованное — "
+				"в опубликованные (ADR-0016).",
 				self,
 			)
 		)
