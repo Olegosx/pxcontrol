@@ -725,3 +725,40 @@ async def test_catchup_paces_expired_posts(db: Database) -> None:
 	assert [post.text for post in gateway.published] == ["догон-1", "догон-2"]
 	assert sleeps == [CATCHUP_INTERVAL_S]  # пауза между постами; после хвоста — нет
 	await queue.shutdown()
+
+
+class _FloodOnReadGateway(_SlotGateway):
+	"""Чтение отложек упирается во флуд-лимит; счётчик обращений — для теста."""
+
+	def __init__(self) -> None:
+		super().__init__()
+		self.read_calls = 0
+
+	async def get_scheduled(self, chat_id: str) -> list[object]:
+		self.read_calls += 1
+		raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+
+
+async def test_flood_on_slot_check_aborts_whole_tick(db: Database) -> None:
+	"""Флуд-лимит на чтении слотов прерывает тик дозора: лимит — на аккаунт,
+	стучаться в остальные каналы значит усугублять его (ADR-0017)."""
+	gateway = _FloodOnReadGateway()
+	queue = _queue(db, gateway)
+	first_channel = await _add_channel(db)
+	async with db.session_factory() as session:
+		other = Channel(title="Второй", tg_chat_id="-1002", userbot_admin=True)
+		session.add(other)
+		await session.commit()
+		await session.refresh(other)
+	a = await queue.enqueue(PostDraft(first_channel, text="ждущий А", when=_future(120)))
+	b = await queue.enqueue(PostDraft(other.id, text="ждущий Б", when=_future(180)))
+	await _wait_status(queue, a, QueueItemStatus.WAITING)
+	await _wait_status(queue, b, QueueItemStatus.WAITING)
+	await asyncio.sleep(0.05)  # фоновые проверки после постановки — досидели
+	gateway.read_calls = 0  # изолируем замер от фоновых тиков постановки
+	await queue._release_slots()  # noqa: SLF001 — тик дозора напрямую
+	assert gateway.read_calls == 1  # после флуда — ни одного канала больше
+	state = {item.id: item for item in await queue.state()}
+	assert state[a].status is QueueItemStatus.WAITING  # никто не в ошибке
+	assert state[b].status is QueueItemStatus.WAITING
+	await queue.shutdown()

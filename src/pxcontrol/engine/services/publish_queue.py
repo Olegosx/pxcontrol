@@ -472,6 +472,12 @@ class PublishQueue:
 		for channel_id in channels:
 			try:
 				taken = len(await self._posts.scheduled_times(channel_id))
+			except TelegramFloodError as exc:
+				# флуд-лимит действует на весь аккаунт: стучаться в остальные
+				# каналы — усугублять его (Telegram растит сроки за
+				# настойчивость); тик прерывается, дозор вернётся по таймеру
+				logger.warning("Проверка слотов: флуд-лимит (%s) — тик прерван.", exc)
+				return
 			except (PostError, UserbotUnavailableError) as exc:
 				logger.warning("Слоты канала id=%s не прочитаны: %s", channel_id, exc)
 				continue
