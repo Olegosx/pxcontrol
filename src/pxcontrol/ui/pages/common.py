@@ -546,7 +546,12 @@ class ErrorLabel(CaptionLabel):
 	"""
 
 	def __init__(self, parent: QWidget) -> None:
-		super().__init__("", parent)
+		# ВАЖНО: базовому классу нельзя передавать текст. Конструктор
+		# QFluentWidgets-подписей — диспетчер по типам, и вариант
+		# «текст + родитель» внутри делает self.__init__(parent):
+		# у подкласса это снова этот метод — бесконечная рекурсия
+		# (RecursionError, ловилось вживую на диалоге пакета).
+		super().__init__(parent)
 		self.setTextColor("#c42b1c", "#ff99a4")
 		self.hide()
 
