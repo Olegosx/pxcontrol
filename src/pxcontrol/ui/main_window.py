@@ -96,7 +96,7 @@ class MainWindow(FluentWindow):
 		остаются на диске: результат пишется атомарно).
 		"""
 		reasons = []
-		if self._publish_page.queue_busy():
+		if self._publish_page.upload_active():
 			reasons.append(
 				"идёт отправка поста — загрузка оборвётся (пост уйдёт при следующем запуске)"
 			)

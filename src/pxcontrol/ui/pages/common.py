@@ -362,6 +362,10 @@ class DtoComboBox(ComboBox, Generic[_T]):
 #: осознанный дизайн ADR-0012: интерфейс читает снимок состояния.
 QUEUE_POLL_MS = 500
 
+#: статусы «работа идёт прямо сейчас» обеих очередей (отправка/обработка);
+#: ждущие (PENDING/WAITING) активными не считаются
+_ACTIVE_STATUSES = ("SENDING", "PROCESSING")
+
 
 class QueuePanel:
 	"""Панель очереди движка: опрос, карточки, прогресс, действия.
@@ -429,14 +433,25 @@ class QueuePanel:
 		self._bars: dict[int, ProgressBar] = {}
 		self._handled: set[int] = set()  # завершённые, уже учтённые
 		self._busy = False
+		self._active = False
 		timer = QTimer(page)
 		timer.setInterval(QUEUE_POLL_MS)
 		timer.timeout.connect(self.poll)
 		timer.start()
 
 	def busy(self) -> bool:
-		"""Есть ли незавершённое в очереди (для подтверждения выхода)."""
+		"""Есть ли незавершённое в очереди (включая ждущих)."""
 		return self._busy
+
+	def active(self) -> bool:
+		"""Идёт ли работа прямо сейчас (загрузка или обработка).
+
+		В отличие от :meth:`busy`, ждущие элементы не в счёт: для
+		персистентной очереди отправки (ADR-0016) вопрос при закрытии
+		окна заслуживает только обрыв активной загрузки — ожидающие
+		посты выход переживают.
+		"""
+		return self._active
 
 	def poll(self) -> None:
 		"""Запрашивает состояние очереди (по таймеру и после постановки)."""
@@ -471,6 +486,7 @@ class QueuePanel:
 		if self._busy and not busy and self._on_drained is not None:
 			self._on_drained(visible)
 		self._busy = busy
+		self._active = any(item.status.name in _ACTIVE_STATUSES for item in visible)
 		if self._transform is not None:
 			visible = self._transform(visible)
 		signature = tuple((i.id, i.status, i.error, getattr(i, "note", None)) for i in visible)
@@ -512,7 +528,7 @@ class QueuePanel:
 		row = QHBoxLayout(trailing)
 		row.setContentsMargins(0, 0, 0, 0)
 		# полоса прогресса — только у активных (WAITING/PENDING не растут)
-		if item.status.name in ("SENDING", "PROCESSING"):
+		if item.status.name in _ACTIVE_STATUSES:
 			bar = ProgressBar(trailing)
 			bar.setRange(0, 100)
 			bar.setValue(int(item.progress * 100))

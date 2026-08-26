@@ -393,12 +393,24 @@ class VideoPage(ScrollArea):
 			self._show_error,
 		)
 
+	def _is_stale_channel(self, channel_id: int) -> bool:
+		"""Пришёл ли ответ движка для уже переключённого канала.
+
+		Пока движок занят, ответы задерживаются (та же гонка, что
+		``_is_stale`` на «Публикации»): без проверки пресет канала A
+		лёг бы в шаблон уже выбранного канала B.
+		"""
+		current = self._channel_combo.selected()
+		return current is None or current.id != channel_id
+
 	def _apply_channel_preset(self, channel: ChannelDto, preset_id: int | None) -> None:
 		"""Подставляет пресет канала; нет пресета — форма не трогается.
 
 		Выбор в списке вызывает ``_on_preset_selected`` — панель заполнится.
 		Ссылка на удалённый пресет равнозначна «не задан».
 		"""
+		if self._is_stale_channel(channel.id):
+			return
 		if preset_id is None or not self._preset_combo.select(
 			lambda preset: preset.id == preset_id
 		):
@@ -425,9 +437,15 @@ class VideoPage(ScrollArea):
 			self._worker,
 			self._worker.engine.video.get_preset_fields(preset.id),
 			self,
-			self._form.fill,
+			partial(self._apply_preset_fields, preset.id),
 			self._show_error,
 		)
+
+	def _apply_preset_fields(self, preset_id: int, fields: PresetFields) -> None:
+		"""Заполняет панель, если пресет всё ещё выбран (защита от гонки)."""
+		current = self._preset_combo.selected()
+		if current is not None and current.id == preset_id:
+			self._form.fill(fields)
 
 	def _on_save_preset(self) -> None:
 		"""Перезаписывает выбранный пресет текущим состоянием панели."""
