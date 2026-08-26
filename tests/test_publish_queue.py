@@ -605,3 +605,42 @@ async def test_stash_collision_rejects_batch(
 	assert twin.is_file()  # отклонённый пакет не трогает диск
 	assert len(await queue.state()) == 1
 	await queue.shutdown()
+
+
+async def test_enqueue_rejects_non_video_from_processed(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Не-видео из папки результатов не ставится: конвейер очереди — только для видео."""
+	processed = _media(tmp_path, monkeypatch)
+	photo = processed / "кадр.png"
+	photo.write_bytes(b"png")
+	gateway = _SlowGateway()
+	gateway.release.set()
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	with pytest.raises(PostError, match="только видео"):
+		await queue.enqueue(
+			PostDraft(channel_id, media_path=str(photo), media_kind=MediaKind.PHOTO)
+		)
+	assert photo.is_file()  # файл остался в результатах
+	assert await queue.state() == []  # постановка атомарна — очередь пуста
+	await queue.shutdown()
+
+
+async def test_retry_expired_scheduled_publishes_now(db: Database) -> None:
+	"""Повтор просроченного отложенного публикует «сейчас» (ADR-0016, «просрочка → сейчас»)."""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	gateway.fail_texts = {"ночной"}
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="ночной"))
+	await _wait_status(queue, item, QueueItemStatus.ERROR)
+	# смоделировать «ошибка ночью, повтор утром»: желаемый момент уже прошёл
+	internal = next(i for i in queue._items if i.id == item)  # noqa: SLF001
+	internal.draft = replace(internal.draft, when=datetime.now(UTC) - timedelta(hours=8))
+	gateway.fail_texts = set()  # «сеть починилась»
+	await queue.retry(item)
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert gateway.published[-1].when is None  # ушёл «сейчас», а не в прошлое
+	await queue.shutdown()

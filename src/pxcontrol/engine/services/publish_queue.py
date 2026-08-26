@@ -300,8 +300,10 @@ class PublishQueue:
 		Черновик перепроверяется, как при постановке (файл мог исчезнуть);
 		если прошлая попытка успела переименовать файл, черновик
 		обновляется на новое имя. Отложенный с непрошедшим временем
-		возвращается в ожидание слота (слоты перепроверятся), остальные —
-		сразу в отправку. Элементы в других статусах не трогаются.
+		возвращается в ожидание слота (слоты перепроверятся); просроченное
+		время снимается — пост уйдёт «сейчас», как при рестарте
+		(ADR-0016, п. «просрочка → сейчас»); остальные — сразу в отправку.
+		Элементы в других статусах не трогаются.
 
 		Raises:
 			PostError: Черновик больше не годен к отправке — элемент
@@ -311,6 +313,10 @@ class PublishQueue:
 			if item.id != item_id or item.status is not QueueItemStatus.ERROR:
 				continue
 			item.draft = refresh_draft_media(item.draft)
+			if _expired(item.draft.when, datetime.now(UTC)):
+				# просрочка → «сейчас»: иначе validate_draft отверг бы
+				# прошедшее время и повтор был бы невозможен
+				item.draft = replace(item.draft, when=None)
 			self._posts.validate_draft(item.draft)
 			item.status = self._initial_status(item.draft)
 			item.progress = 0.0
@@ -487,7 +493,7 @@ class PublishQueue:
 				if draft.media_path is None:
 					stashed.append(draft)
 					continue
-				new_path = await self._posts.stash_for_queue(draft.media_path)
+				new_path = await self._posts.stash_for_queue(draft.media_path, draft.media_kind)
 				if new_path != draft.media_path:
 					moved.append(new_path)
 				stashed.append(replace(draft, media_path=new_path))

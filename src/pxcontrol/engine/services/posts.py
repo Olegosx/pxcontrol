@@ -401,7 +401,7 @@ class PostsService:
 		except ValueError:
 			return None
 
-	async def stash_for_queue(self, media_path: str) -> str:
+	async def stash_for_queue(self, media_path: str, media_kind: MediaKind) -> str:
 		"""Переносит файл результата в папку очереди отправки (ADR-0016).
 
 		Зеркалит относительный путь (``queued/<подпапка>/<файл>``), вместе
@@ -410,17 +410,28 @@ class PostsService:
 		повторно. Файл вне папки результатов (произвольное вложение
 		с диска) не трогается.
 
+		Жизненный цикл processed → queued → published определён только
+		для видео: не-видео из папки результатов отклоняется — такой файл
+		принадлежит конвейеру обработки и как фото/документ не уходит.
+
 		Returns:
 			Путь файла в папке очереди (или исходный, если файл не наш).
 
 		Raises:
-			PostError: В папке очереди уже есть файл с таким относительным
-				именем или перенос не удался (права, диск).
+			PostError: Файл из папки результатов — не видео; в папке
+				очереди уже есть файл с таким относительным именем;
+				перенос не удался (права, диск).
 		"""
 		source = Path(media_path)
 		rel = self._relative_to_root(source, VIDEO_PROCESSED_DIR)
 		if rel is None:
 			return media_path
+		if media_kind is not MediaKind.VIDEO:
+			raise PostError(
+				f"Из папки результатов можно отправлять только видео: «{rel}» — "
+				"часть конвейера обработки. Чтобы отправить его как фото или "
+				"документ, скопируйте файл в другую папку."
+			)
 		target = video_base_dir(self._settings, VIDEO_QUEUED_DIR) / rel
 		if target.exists():
 			raise PostError(
