@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from pxcontrol.engine.db.types import EncryptedStr
@@ -169,6 +169,30 @@ class Channel(TimestampMixin, Base):
 	)
 
 	bot: Mapped[Bot | None] = relationship(back_populates="channels")
+
+
+class PublishQueueItem(TimestampMixin, Base):
+	"""Элемент очереди отправки: черновик, ждущий отправки (ADR-0016).
+
+	Хранятся только неотправленные (pending/waiting/error): успешные
+	и отменённые удаляются — истина по вышедшим постам остаётся каналом
+	(ADR-0010). Очередь живёт и умирает вместе с каналом (CASCADE);
+	файл такого элемента остаётся в папке очереди (см. ADR-0016).
+	"""
+
+	__tablename__ = "publish_queue_items"
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
+	text: Mapped[str] = mapped_column(Text, default="")
+	media_path: Mapped[str | None] = mapped_column(String(1024), default=None)
+	media_kind: Mapped[str] = mapped_column(String(16), default="none")
+	# желаемый момент публикации (UTC); NULL — «сейчас»
+	when: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	rename_to: Mapped[str | None] = mapped_column(String(255), default=None)
+	# pending — готов к отправке; waiting — ждёт слота отложек; error
+	status: Mapped[str] = mapped_column(String(16), default="pending")
+	error: Mapped[str | None] = mapped_column(Text, default=None)
 
 
 class CaptionField(TimestampMixin, Base):

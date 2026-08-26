@@ -16,6 +16,12 @@ USERBOT_MAX_FILE_BYTES = 4000 * 512 * 1024
 #: То же с подпиской Premium: 8000 частей (4000 МиБ).
 USERBOT_PREMIUM_MAX_FILE_BYTES = 8000 * 512 * 1024
 
+#: Лимит Telegram на отложенные сообщения в одном чате/канале.
+#: Premium его НЕ увеличивает (даёт только повторяющиеся отложки);
+#: горизонт — до года вперёд. Превышение — ошибка API SCHEDULE_TOO_MUCH.
+#: Проверено 2026-08-26 (limits.tginfo.me, core.telegram.org) — ADR-0016.
+TELEGRAM_MAX_SCHEDULED = 100
+
 
 def userbot_max_file_bytes(premium: bool) -> int:
 	"""Лимит на файл через userbot по статусу подписки аккаунта."""

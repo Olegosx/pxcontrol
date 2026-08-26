@@ -30,6 +30,8 @@ from pxcontrol.engine.services.settings import (
 	CHANNEL_ENABLED,
 	VIDEO_PROCESSED_DIR,
 	VIDEO_PUBLISHED_DIR,
+	VIDEO_QUEUED_DIR,
+	SettingKey,
 	SettingsService,
 )
 from pxcontrol.engine.services.video import video_base_dir
@@ -127,6 +129,18 @@ class PostDraft:
 	media_kind: MediaKind = MediaKind.NONE
 	when: datetime | None = None
 	rename_to: str | None = None
+
+
+def _free_name(target: Path) -> Path:
+	"""Свободное имя рядом с занятым: «имя (2).mp4», «имя (3).mp4»…"""
+	if not target.exists():
+		return target
+	counter = 2
+	while True:
+		candidate = target.with_name(f"{target.stem} ({counter}){target.suffix}")
+		if not candidate.exists():
+			return candidate
+		counter += 1
 
 
 def refresh_draft_media(draft: PostDraft) -> PostDraft:
@@ -349,14 +363,15 @@ class PostsService:
 		любой сбой — предупреждение в лог, публикацию не роняет (пост уже
 		ушёл; у отложенных файл уже загружен на сервер Telegram).
 		"""
-		processed_root = video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
-		published_root = video_base_dir(self._settings, VIDEO_PUBLISHED_DIR)
 		source = Path(media_path)
-		try:
-			rel = source.resolve().relative_to(processed_root.resolve())
-		except ValueError:
-			return  # видео не из папки результатов — оставляем на месте
-		target = published_root / rel
+		# основной путь — из папки очереди (ADR-0016: постановка перенесла
+		# файл туда); прямой вызов publish() минуя очередь — из результатов
+		rel = self._relative_to_root(source, VIDEO_QUEUED_DIR) or self._relative_to_root(
+			source, VIDEO_PROCESSED_DIR
+		)
+		if rel is None:
+			return  # видео не из наших папок — оставляем на месте
+		target = video_base_dir(self._settings, VIDEO_PUBLISHED_DIR) / rel
 		try:
 			# перенос между дисками — это копирование гигабайтов: в отдельном
 			# потоке, чтобы не останавливать цикл событий движка
@@ -377,6 +392,76 @@ class PostsService:
 		preview = source.with_suffix(".png")
 		if preview.is_file():
 			shutil.move(str(preview), str(target.with_suffix(".png")))
+
+	def _relative_to_root(self, path: Path, key: SettingKey[str]) -> Path | None:
+		"""Путь относительно корня папки видео; None — файл вне корня."""
+		root = video_base_dir(self._settings, key)
+		try:
+			return path.resolve().relative_to(root.resolve())
+		except ValueError:
+			return None
+
+	async def stash_for_queue(self, media_path: str) -> str:
+		"""Переносит файл результата в папку очереди отправки (ADR-0016).
+
+		Зеркалит относительный путь (``queued/<подпапка>/<файл>``), вместе
+		с файлом переезжает кадр-превью. Файл ждущего поста уходит
+		из «Готовых видео» — его нельзя случайно удалить или поставить
+		повторно. Файл вне папки результатов (произвольное вложение
+		с диска) не трогается.
+
+		Returns:
+			Путь файла в папке очереди (или исходный, если файл не наш).
+
+		Raises:
+			PostError: В папке очереди уже есть файл с таким относительным
+				именем или перенос не удался (права, диск).
+		"""
+		source = Path(media_path)
+		rel = self._relative_to_root(source, VIDEO_PROCESSED_DIR)
+		if rel is None:
+			return media_path
+		target = video_base_dir(self._settings, VIDEO_QUEUED_DIR) / rel
+		if target.exists():
+			raise PostError(
+				f"В папке очереди уже есть файл «{rel}» — переименуйте "
+				"результат или дождитесь отправки тёзки."
+			)
+		try:
+			await asyncio.to_thread(self._move_with_preview, source, target)
+		except OSError as exc:
+			raise PostError(
+				f"Не удалось перенести файл в папку очереди: {exc.strerror or exc}"
+			) from exc
+		return str(target)
+
+	async def unstash_from_queue(self, media_path: str) -> str:
+		"""Возвращает файл из папки очереди в результаты (ADR-0016).
+
+		Вызывается при отмене или снятии элемента без отправки: файл снова
+		«готовый». Коллизия имён (результат с тем же именем появился
+		заново) решается суффиксом « (2)» — возврат не должен падать;
+		сбой переноса не роняет операцию (файл остаётся в папке очереди,
+		предупреждение в лог). Файл вне папки очереди не трогается.
+
+		Returns:
+			Путь файла в папке результатов (или исходный).
+		"""
+		source = Path(media_path)
+		rel = self._relative_to_root(source, VIDEO_QUEUED_DIR)
+		if rel is None:
+			return media_path
+		target = _free_name(video_base_dir(self._settings, VIDEO_PROCESSED_DIR) / rel)
+		try:
+			await asyncio.to_thread(self._move_with_preview, source, target)
+		except OSError:
+			logger.warning(
+				"Не удалось вернуть файл %s из папки очереди — он остался там.",
+				media_path,
+				exc_info=True,
+			)
+			return media_path
+		return str(target)
 
 	@staticmethod
 	def _apply_rename(media_path: str, rename_to: str) -> str:

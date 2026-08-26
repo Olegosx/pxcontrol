@@ -53,6 +53,15 @@ class UserbotAccessError(UserbotUnavailableError):
 	"""Подтверждённый отказ Telegram: нет прав или канал не виден."""
 
 
+class UserbotScheduleFullError(UserbotUnavailableError):
+	"""Все слоты отложенных сообщений канала заняты (лимит 100, ADR-0016).
+
+	Отдельный класс: очередь отправки по нему возвращает элемент
+	в ожидание слота, а не в ошибку (гонка с ручными отложками
+	из клиента Telegram — штатная ситуация).
+	"""
+
+
 def _default_client(api_id: int, api_hash: str, session: str | None = None) -> Any:
 	"""Создаёт клиента Telethon (пустая сессия — для входа)."""
 	from telethon import TelegramClient
@@ -115,6 +124,11 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		)
 	if isinstance(exc, errors.FloodWaitError):
 		return UserbotUnavailableError(f"Telegram просит подождать {exc.seconds} с.")
+	if isinstance(exc, errors.ScheduleTooMuchError):
+		return UserbotScheduleFullError(
+			"Все слоты отложенных сообщений канала заняты (лимит Telegram — "
+			"100) — пост подождёт освобождения слота."
+		)
 	if isinstance(exc, ValueError):
 		# Telethon: «Could not find the input entity» — канал не в поле
 		# зрения аккаунта (числовые ID валидируются до этой точки).

@@ -29,6 +29,7 @@ from pxcontrol.engine.services.settings import (
 	CHANNEL_DEFAULT_PRESET,
 	VIDEO_PROCESSED_DIR,
 	VIDEO_PUBLISHED_DIR,
+	VIDEO_QUEUED_DIR,
 	VIDEO_SOURCE_DIR,
 	SettingKey,
 	SettingsService,
@@ -249,6 +250,7 @@ _VIDEO_DIR_DEFAULTS: dict[SettingKey[str], str] = {
 	VIDEO_SOURCE_DIR: "source",
 	VIDEO_PROCESSED_DIR: "processed",
 	VIDEO_PUBLISHED_DIR: "published",
+	VIDEO_QUEUED_DIR: "queued",
 }
 
 
@@ -618,7 +620,7 @@ class VideoService:
 		"""Блокирующий обход папки и пробы файлов (выполняется в потоке)."""
 		excluded = [
 			video_base_dir(self._settings, key).resolve()
-			for key in (VIDEO_PROCESSED_DIR, VIDEO_PUBLISHED_DIR)
+			for key in (VIDEO_PROCESSED_DIR, VIDEO_PUBLISHED_DIR, VIDEO_QUEUED_DIR)
 		]
 		files = _walk_videos(directory, excluded)
 		ffprobe = ffprobe_bin_for(self._ffmpeg())

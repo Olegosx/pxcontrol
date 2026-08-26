@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -21,7 +22,8 @@ from pxcontrol.engine.services.publish_queue import (
 	QueueItemDto,
 	QueueItemStatus,
 )
-from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost
+from pxcontrol.engine.telegram.mtproto import UserbotScheduleFullError
+from pxcontrol.engine.telegram.types import TELEGRAM_MAX_SCHEDULED, MediaKind, OutgoingPost
 
 
 class _SlowGateway:
@@ -60,7 +62,7 @@ async def _add_channel(db: Database) -> int:
 
 
 def _queue(db: Database, gateway: _SlowGateway) -> PublishQueue:
-	return PublishQueue(PostsService(db, gateway))
+	return PublishQueue(PostsService(db, gateway), db)
 
 
 async def _wait_status(
@@ -369,3 +371,237 @@ async def test_enqueue_many_validates_before_adding(db: Database) -> None:
 	assert await queue.state() == []
 	with pytest.raises(PostError, match="Пакет пуст"):
 		await queue.enqueue_many([])
+
+
+# --- слоты отложек и персистентность (ADR-0016) -----------------------------
+
+
+class _SlotGateway(_SlowGateway):
+	"""Шлюз со слотами: get_scheduled отдаёт заданные занятые моменты."""
+
+	def __init__(self) -> None:
+		super().__init__()
+		self.scheduled: list[datetime] = []
+		self.slots_full_once = False  # разовая гонка SCHEDULE_TOO_MUCH
+
+	async def get_scheduled(self, chat_id: str) -> list[object]:
+		from types import SimpleNamespace
+
+		return [SimpleNamespace(scheduled_at=moment) for moment in self.scheduled]
+
+	async def publish(
+		self,
+		chat_id: str,
+		post: OutgoingPost,
+		on_progress: ProgressCallback | None = None,
+	) -> None:
+		if self.slots_full_once:
+			self.slots_full_once = False
+			raise UserbotScheduleFullError("Все слоты отложенных сообщений канала заняты.")
+		await super().publish(chat_id, post, on_progress)
+
+
+def _future(minutes: int) -> datetime:
+	return datetime.now(UTC) + timedelta(minutes=minutes)
+
+
+async def test_scheduled_without_free_slot_waits(db: Database) -> None:
+	"""Все 100 слотов заняты — отложенный ждёт; слот освободился — ушёл."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="хвост", when=_future(120)))
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	await asyncio.sleep(0.05)  # внеплановая проверка слотов успевает пройти
+	assert (await queue.state())[0].status is QueueItemStatus.WAITING
+	gateway.scheduled = gateway.scheduled[:-1]  # сервер опубликовал одну отложку
+	await queue._release_slots()  # noqa: SLF001 — тик дозора без ожидания N минут
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert gateway.published[0].when is not None
+	await queue.shutdown()
+
+
+async def test_release_nearest_date_first(db: Database) -> None:
+	"""Свободен один слот — уходит элемент с ближайшей датой, не первый."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED - 1)]
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	later, sooner = await queue.enqueue_many(
+		[
+			PostDraft(channel_id, text="дальний", when=_future(3 * 24 * 60)),
+			PostDraft(channel_id, text="ближний", when=_future(24 * 60)),
+		]
+	)
+	await _wait_status(queue, sooner, QueueItemStatus.DONE)
+	assert [post.text for post in gateway.published] == ["ближний"]
+	assert (await _wait_status(queue, later, QueueItemStatus.WAITING)) is not None
+	await queue.shutdown()
+
+
+async def test_expired_when_publishes_now_without_slot(db: Database) -> None:
+	"""Просроченное время — обычное сообщение: слота не ждёт, when=None."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="опоздал", when=_future(120)))
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	target = next(entry for entry in queue._items if entry.id == item)  # noqa: SLF001
+	# моделируем прошедшее время ожидания (без реального ожидания суток)
+	target.draft = replace(target.draft, when=datetime.now(UTC) - timedelta(hours=1))
+	await queue._release_slots()  # noqa: SLF001 — слоты по-прежнему заняты
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert gateway.published[0].when is None  # ушёл обычным сообщением
+	await queue.shutdown()
+
+
+async def test_schedule_full_race_returns_to_waiting(db: Database) -> None:
+	"""Гонка: слоты заняли руками между проверкой и отправкой — не ошибка."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.slots_full_once = True  # первый publish наткнётся на полный канал
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="гонка", when=_future(120)))
+	for _ in range(200):  # первая попытка отправки съедает разовый отказ
+		if not gateway.slots_full_once:
+			break
+		await asyncio.sleep(0.01)
+	await _wait_status(queue, item, QueueItemStatus.WAITING)  # не ERROR
+	await queue._release_slots()  # noqa: SLF001 — повторная проверка слотов
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert [post.text for post in gateway.published] == ["гонка"]
+	await queue.shutdown()
+
+
+async def test_queue_survives_restart(db: Database) -> None:
+	"""Очередь восстанавливается из БД: статусы, ошибки и aware-времена."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.fail_texts = {"сбойный"}
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	bad = await queue.enqueue(PostDraft(channel_id, text="сбойный"))
+	waiting = await queue.enqueue(PostDraft(channel_id, text="ждущий", when=_future(120)))
+	await _wait_status(queue, bad, QueueItemStatus.ERROR)
+	await _wait_status(queue, waiting, QueueItemStatus.WAITING)
+	await queue.shutdown()
+
+	restarted = _queue(db, gateway)  # «перезапуск приложения»
+	await restarted.load()
+	items = {item.id: item for item in await restarted.state()}
+	assert items[bad].status is QueueItemStatus.ERROR
+	assert items[bad].error is not None and "отклонил" in items[bad].error
+	assert items[waiting].status is QueueItemStatus.WAITING
+	assert items[waiting].when is not None and items[waiting].when.tzinfo is not None
+	await restarted.shutdown()
+
+
+async def test_exit_confirmation_only_for_active_send(db: Database) -> None:
+	"""Ждущие выход не задерживают (очередь персистентная) — только отправка."""
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	await queue.enqueue(PostDraft(channel_id, text="ждущий", when=_future(120)))
+	assert await queue.has_unfinished() is False  # ждёт слота — не задержка
+	sending = await queue.enqueue(PostDraft(channel_id, text="активный"))
+	await _wait_status(queue, sending, QueueItemStatus.SENDING)
+	assert await queue.has_unfinished() is True  # обрыв загрузки — вопрос
+	gateway.release.set()
+	await _wait_status(queue, sending, QueueItemStatus.DONE)
+	await queue.shutdown()
+
+
+# --- папка очереди на диске (ADR-0016) --------------------------------------
+
+
+def _media(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+	"""Подменяет корень media/ на временный; возвращает папку processed."""
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
+	processed = tmp_path / "media" / "processed" / "суб"
+	processed.mkdir(parents=True)
+	return processed
+
+
+def _make_video(processed: Path, name: str = "ролик.mp4") -> Path:
+	video = processed / name
+	video.write_bytes(b"video")
+	video.with_suffix(".png").write_bytes(b"png")
+	return video
+
+
+async def test_enqueue_stashes_file_and_cancel_returns_it(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Постановка уводит файл в папку очереди, отмена возвращает обратно."""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(
+		PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120))
+	)
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	queued = tmp_path / "media" / "queued" / "суб" / "ролик.mp4"
+	assert queued.is_file() and queued.with_suffix(".png").is_file()
+	assert not video.exists()  # из «Готовых видео» файл ушёл
+	await queue.cancel(item)
+	await _wait_status(queue, item, QueueItemStatus.CANCELLED)
+	assert video.is_file() and video.with_suffix(".png").is_file()
+	assert not queued.exists()
+	await queue.shutdown()
+
+
+async def test_sent_file_moves_from_queued_to_published(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Отправленный файл переезжает из папки очереди в опубликованные."""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlotGateway()
+	gateway.release.set()
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(
+		PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO)
+	)
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	published = tmp_path / "media" / "published" / "суб" / "ролик.mp4"
+	assert published.is_file()
+	assert not (tmp_path / "media" / "queued" / "суб" / "ролик.mp4").exists()
+	assert not video.exists()
+	await queue.shutdown()
+
+
+async def test_stash_collision_rejects_batch(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Файл-тёзка уже ждёт в очереди — постановка отклоняется целиком."""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = _queue(db, gateway)
+	channel_id = await _add_channel(db)
+	await queue.enqueue(
+		PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120))
+	)
+	twin = _make_video(processed)  # обработали заново под тем же именем
+	with pytest.raises(PostError, match="уже есть файл"):
+		await queue.enqueue(
+			PostDraft(
+				channel_id, media_path=str(twin), media_kind=MediaKind.VIDEO, when=_future(180)
+			)
+		)
+	assert twin.is_file()  # отклонённый пакет не трогает диск
+	assert len(await queue.state()) == 1
+	await queue.shutdown()

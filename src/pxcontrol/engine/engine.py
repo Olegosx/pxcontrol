@@ -37,7 +37,7 @@ class Engine:
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
 		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)
-		self.publish_queue = PublishQueue(self.posts)
+		self.publish_queue = PublishQueue(self.posts, self.db, self.settings)
 		self.video = VideoService(
 			self.db,
 			self._ffmpeg_path,
@@ -65,6 +65,9 @@ class Engine:
 		await self.db.init()
 		await self.settings.prime()
 		await self.accounts.activate_stored_userbot()
+		# после userbot: восстановленной очереди (ADR-0016) сразу нужна
+		# проверка слотов, а она читает отложки канала через userbot
+		await self.publish_queue.load()
 		logger.info("Движок запущен.")
 
 	async def stop(self) -> None:

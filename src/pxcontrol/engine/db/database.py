@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
 	async_sessionmaker,
 	create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,12 @@ class Database:
 
 	def __init__(self, url: str) -> None:
 		self._url = url
-		self._engine: AsyncEngine = create_async_engine(url, future=True)
+		# без пула (NullPool): отмена asyncio-задачи посреди запроса
+		# (отмена отправки в очереди, ADR-0016) обрывает сессию — с пулом
+		# её соединение вернулось бы в пул с незавершённой транзакцией
+		# и держало бы блокировку SQLite («database is locked» у следующей
+		# записи). Свежее соединение к локальному файлу — микросекунды.
+		self._engine: AsyncEngine = create_async_engine(url, future=True, poolclass=NullPool)
 		event.listens_for(self._engine.sync_engine, "connect")(_enable_foreign_keys)
 		self.session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
 			self._engine, expire_on_commit=False

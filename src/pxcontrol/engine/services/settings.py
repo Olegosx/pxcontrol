@@ -95,6 +95,17 @@ VIDEO_PROCESSED_DIR: SettingKey[str] = SettingKey("video_processed_dir", Setting
 #: Папка опубликованных видео; пусто — media/published в папке приложения.
 VIDEO_PUBLISHED_DIR: SettingKey[str] = SettingKey("video_published_dir", SettingScope.APP, "", str)
 
+#: Папка файлов, ждущих отправки в очереди (ADR-0016); пусто —
+#: media/queued в папке приложения. Постановка в очередь переносит файл
+#: сюда из результатов, отправка — отсюда в опубликованные.
+VIDEO_QUEUED_DIR: SettingKey[str] = SettingKey("video_queued_dir", SettingScope.APP, "", str)
+
+#: Период проверки свободных слотов отложек для ждущих элементов очереди
+#: отправки, минуты (ADR-0016). Интерфейс ограничивает диапазон 1–120.
+QUEUE_SLOT_POLL_MINUTES: SettingKey[int] = SettingKey(
+	"queue_slot_poll_minutes", SettingScope.APP, 5, int
+)
+
 #: Канал активен: участвует в публикации и опросе расписания.
 CHANNEL_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.CHANNEL, True, bool)
 

@@ -62,6 +62,10 @@ from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
 
 logger = logging.getLogger(__name__)
 
+#: Сколько карточек очереди показывать на странице (хвост ждущих —
+#: в сводке числом; полный просмотр очереди — следующий срез, ADR-0016).
+_QUEUE_MAX_CARDS = 20
+
 
 @dataclass
 class _BatchSetup:
@@ -204,6 +208,9 @@ class PublishPage(ScrollArea):
 		row.addWidget(batch_button)
 		row.addStretch()
 		layout.addLayout(row)
+		self._queue_summary = CaptionLabel("", self)
+		self._queue_summary.hide()
+		layout.addWidget(self._queue_summary)
 		queue_box = QVBoxLayout()
 		queue_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(queue_box)
@@ -214,6 +221,10 @@ class PublishPage(ScrollArea):
 			service=lambda: self._worker.engine.publish_queue,
 			subtitle=self._queue_subtitle,
 			on_finished=self._on_queue_finished,
+			on_refreshed=self._update_queue_summary,
+			# длинный хвост ждущих слота (ADR-0016) не раздувает страницу;
+			# полный просмотр очереди — следующий срез разработки
+			max_cards=_QUEUE_MAX_CARDS,
 		)
 
 	# --- поведение -----------------------------------------------------------------
@@ -794,6 +805,29 @@ class PublishPage(ScrollArea):
 		else:
 			InfoBar.info("Отправка отменена", item.title, parent=self.window())
 
+	def _update_queue_summary(self, items: list[QueueItemDto]) -> None:
+		"""Сводка над карточками: отправка, очередь, ждущие слота, ошибки."""
+		if not items:
+			self._queue_summary.hide()
+			return
+		waiting = sum(1 for item in items if item.status is QueueItemStatus.WAITING)
+		pending = sum(
+			1 for item in items if item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
+		)
+		errors = sum(1 for item in items if item.status is QueueItemStatus.ERROR)
+		parts = []
+		if pending:
+			parts.append(f"к отправке {pending}")
+		if waiting:
+			parts.append(f"ждут слота отложек {waiting}")
+		if errors:
+			parts.append(f"ошибок {errors}")
+		text = "Очередь отправки: " + ", ".join(parts)
+		if len(items) > _QUEUE_MAX_CARDS:
+			text += f" · показаны ближайшие {_QUEUE_MAX_CARDS}"
+		self._queue_summary.setText(text)
+		self._queue_summary.show()
+
 	@staticmethod
 	def _queue_subtitle(item: QueueItemDto) -> str:
 		"""Подпись карточки: канал, момент публикации и статус.
@@ -806,6 +840,10 @@ class PublishPage(ScrollArea):
 			status = "отправляется"
 		elif item.status is QueueItemStatus.ERROR:
 			status = f"ошибка: {item.error}"
+		elif item.status is QueueItemStatus.WAITING:
+			# лимит Telegram — 100 отложек на канал (ADR-0016); хвост
+			# публикует само приложение, поэтому оно должно быть запущено
+			status = "ждёт слота отложек · уйдёт при запущенном приложении"
 		else:
 			status = "в очереди"
 		return f"{item.channel_title} · публикация: {when_text} · {status}"

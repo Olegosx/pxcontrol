@@ -391,6 +391,7 @@ class QueuePanel:
 		on_finished: Callable[[Any, bool], None] | None = None,
 		on_refreshed: Callable[[list[Any]], None] | None = None,
 		on_drained: Callable[[list[Any]], None] | None = None,
+		max_cards: int | None = None,
 	) -> None:
 		"""Args:
 		worker: мост к движку.
@@ -400,10 +401,13 @@ class QueuePanel:
 		subtitle: подпись карточки для элемента.
 		on_finished: разовая реакция на завершённый элемент
 			(``True`` — готово, ``False`` — отменено) до снятия с показа.
-		on_refreshed: вызывается после каждого обновления с видимыми
-			элементами (сводка очереди на странице «Видео»).
+		on_refreshed: вызывается после каждого обновления с ПОЛНЫМ списком
+			видимых элементов (сводка очереди; при ``max_cards`` — место
+			сказать «и ещё N»).
 		on_drained: вызывается с видимым остатком, когда занятость
 			кончилась (итоговая плашка вместо плашки на каждый файл).
+		max_cards: не больше стольких карточек на странице (None — все);
+			длинный хвост ждущих (ADR-0016) не раздувает страницу.
 		"""
 		self._worker = worker
 		self._page = page
@@ -413,6 +417,7 @@ class QueuePanel:
 		self._on_finished = on_finished
 		self._on_refreshed = on_refreshed
 		self._on_drained = on_drained
+		self._max_cards = max_cards
 		self._show_error = error_reporter(page)
 		self._signature: tuple[tuple[Any, ...], ...] = ()
 		self._bars: dict[int, ProgressBar] = {}
@@ -488,7 +493,8 @@ class QueuePanel:
 		"""Перестраивает карточки (только при смене состава/статусов)."""
 		clear_layout(self._box)
 		self._bars = {}
-		for item in items:
+		shown = items if self._max_cards is None else items[: self._max_cards]
+		for item in shown:
 			self._box.addWidget(self._row(item))
 
 	def _row(self, item: Any) -> CardWidget:
@@ -497,7 +503,8 @@ class QueuePanel:
 		trailing = QWidget(self._page)
 		row = QHBoxLayout(trailing)
 		row.setContentsMargins(0, 0, 0, 0)
-		if not item.status.finished() and item.status.name != "PENDING":  # активный
+		# полоса прогресса — только у активных (WAITING/PENDING не растут)
+		if item.status.name in ("SENDING", "PROCESSING"):
 			bar = ProgressBar(trailing)
 			bar.setRange(0, 100)
 			bar.setValue(int(item.progress * 100))

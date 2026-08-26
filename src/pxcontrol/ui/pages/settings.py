@@ -30,6 +30,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.settings import (
 	FFMPEG_PATH,
+	QUEUE_SLOT_POLL_MINUTES,
 	THEME_DARK,
 	UI_COMPACT_SPACING,
 	UI_CONTROL_HEIGHT,
@@ -162,6 +163,25 @@ class _GeneralSettings(QWidget):
 				self,
 			)
 		)
+		layout.addSpacing(12)
+		layout.addWidget(SubtitleLabel("Очередь отправки", self))
+		poll_row = QHBoxLayout()
+		poll_row.addWidget(BodyLabel("Проверка слотов отложек, минут:", self))
+		self._poll_spin = SpinBox(self)
+		self._poll_spin.setRange(1, 120)
+		self._poll_spin.setValue(QUEUE_SLOT_POLL_MINUTES.default)
+		self._poll_spin.valueChanged.connect(debounced(self, INPUT_DEBOUNCE_MS, self._save_poll))
+		poll_row.addWidget(self._poll_spin)
+		poll_row.addStretch()
+		layout.addLayout(poll_row)
+		layout.addWidget(
+			CaptionLabel(
+				"Посты сверх лимита отложек Telegram (100 на канал) ждут "
+				"в очереди отправки; с этим периодом проверяется, не освободились "
+				"ли слоты. Применяется со следующей проверки.",
+				self,
+			)
+		)
 		layout.addStretch()
 
 	def _load(self) -> None:
@@ -199,6 +219,13 @@ class _GeneralSettings(QWidget):
 			self._worker.engine.settings.get(UI_FONT_SIZE),
 			self,
 			self._show_font,
+			noop,
+		)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get(QUEUE_SLOT_POLL_MINUTES),
+			self,
+			self._show_poll,
 			noop,
 		)
 
@@ -265,6 +292,20 @@ class _GeneralSettings(QWidget):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.set(UI_FONT_SIZE, int(self._font_spin.value())),
+			self,
+			noop,
+			self._show_error,
+		)
+
+	def _show_poll(self, value: int) -> None:
+		"""Показывает период проверки слотов без срабатывания сохранения."""
+		self._show_spin(self._poll_spin, value)
+
+	def _save_poll(self) -> None:
+		"""Сохраняет период проверки слотов отложек (ADR-0016)."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set(QUEUE_SLOT_POLL_MINUTES, int(self._poll_spin.value())),
 			self,
 			noop,
 			self._show_error,
