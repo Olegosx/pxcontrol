@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
-from pxcontrol.engine.telegram.types import ChannelInfo, MediaKind
+from pxcontrol.engine.telegram.types import ChannelInfo, MediaKind, TelegramFloodError
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен (Unauthorized).
+		TelegramFloodError: Флуд-лимит — подождать и повторить.
 		ChannelCheckError: Telegram отклонил операцию (права, запрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
@@ -63,8 +64,11 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	except TelegramForbiddenError as exc:
 		raise ChannelCheckError(f"{forbidden} (Telegram: {exc.message})") from exc
 	except TelegramRetryAfter as exc:
-		# лимит частоты (429) — парный текст в _translate_error (mtproto)
-		raise ChannelCheckError(f"Telegram просит подождать {exc.retry_after} с.") from exc
+		# флуд-лимит (429) — временное состояние: очередь отправки ждёт
+		# и повторяет (парный перевод — FloodWaitError в mtproto)
+		raise TelegramFloodError(
+			f"Telegram просит подождать {exc.retry_after} с.", retry_after_s=exc.retry_after
+		) from exc
 	except TelegramBadRequest as exc:
 		raise ChannelCheckError(f"{bad_request} (Telegram: {exc.message})") from exc
 	except TelegramEntityTooLarge as exc:

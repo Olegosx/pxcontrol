@@ -22,6 +22,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
+	TelegramFloodError,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,16 @@ class UserbotScheduleFullError(UserbotUnavailableError):
 	Отдельный класс: очередь отправки по нему возвращает элемент
 	в ожидание слота, а не в ошибку (гонка с ручными отложками
 	из клиента Telegram — штатная ситуация).
+	"""
+
+
+class UserbotFloodError(TelegramFloodError, UserbotUnavailableError):
+	"""Флуд-лимит на userbot-аккаунте: «подождите N секунд».
+
+	Двойное наследование сознательно: для очереди отправки это
+	``TelegramFloodError`` (подождать и повторить — не исход элемента),
+	для остальных потребителей — прежняя временная недоступность
+	userbot: существующие except-ветки продолжают работать без правок.
 	"""
 
 
@@ -118,7 +129,9 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 	):
 		return UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
 	if isinstance(exc, errors.FloodWaitError):
-		return UserbotUnavailableError(f"Telegram просит подождать {exc.seconds} с.")
+		return UserbotFloodError(
+			f"Telegram просит подождать {exc.seconds} с.", retry_after_s=exc.seconds
+		)
 	if isinstance(exc, errors.ScheduleTooMuchError):
 		return UserbotScheduleFullError(
 			"Все слоты отложенных сообщений канала заняты (лимит Telegram — "

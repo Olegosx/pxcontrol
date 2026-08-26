@@ -409,8 +409,11 @@ async def test_bot_errors_translate_flood_and_server_failures() -> None:
 		TelegramServerError,
 	)
 
-	with pytest.raises(ChannelCheckError, match="подождать 17 с"):
+	from pxcontrol.engine.telegram.types import TelegramFloodError
+
+	with pytest.raises(TelegramFloodError, match="подождать 17 с") as flood:
 		await _raise_inside(TelegramRetryAfter(GetMe(), "flood", retry_after=17))
+	assert flood.value.retry_after_s == 17  # очередь ждёт ровно названный срок
 	# «файл велик» наследует сетевую ошибку — не должен стать «нет связи»
 	with pytest.raises(ChannelCheckError, match="лимита Bot API"):
 		await _raise_inside(TelegramEntityTooLarge(GetMe(), "too large"))

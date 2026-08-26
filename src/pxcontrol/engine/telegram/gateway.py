@@ -112,6 +112,8 @@ class TelegramGateway:
 			UserbotAccessError: Telegram подтвердил отсутствие прав/канала.
 			UserbotScheduleFullError: Все слоты отложек канала заняты —
 				очередь отправки возвращает пост в ожидание (ADR-0016).
+			UserbotFloodError: Флуд-лимит «подождите N секунд» — очередь
+				отправки ждёт названный срок и повторяет сама.
 			UserbotUnavailableError: Прочие отказы Telegram (лимиты и т.п.).
 		"""
 		await self.mtproto.publish(chat_id, post, on_progress)

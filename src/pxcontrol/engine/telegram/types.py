@@ -6,6 +6,26 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from pxcontrol.engine.errors import EngineError
+
+
+class TelegramFloodError(EngineError):
+	"""Флуд-лимит Telegram: «подождите N секунд перед новой попыткой».
+
+	Временное состояние, а не исход операции: сервер сам называет срок
+	повтора. Очередь отправки по этому классу ждёт и повторяет
+	(не ошибка элемента); переводят в него оба транспорта — Bot API
+	(``TelegramRetryAfter``) и MTProto (``FloodWaitError``).
+
+	Attributes:
+		retry_after_s: сколько секунд просил подождать Telegram.
+	"""
+
+	def __init__(self, message: str, retry_after_s: int) -> None:
+		super().__init__(message)
+		self.retry_after_s = retry_after_s
+
+
 #: Лимит Bot API на отправку файла ботом.
 BOT_MAX_FILE_BYTES = 50 * 1024 * 1024
 

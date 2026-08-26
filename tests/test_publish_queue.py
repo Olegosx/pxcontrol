@@ -18,12 +18,18 @@ from pxcontrol.engine.services.posts import (
 	ProgressCallback,
 )
 from pxcontrol.engine.services.publish_queue import (
+	CATCHUP_INTERVAL_S,
 	PublishQueue,
 	QueueItemDto,
 	QueueItemStatus,
 )
 from pxcontrol.engine.telegram.mtproto import UserbotScheduleFullError
-from pxcontrol.engine.telegram.types import TELEGRAM_MAX_SCHEDULED, MediaKind, OutgoingPost
+from pxcontrol.engine.telegram.types import (
+	TELEGRAM_MAX_SCHEDULED,
+	MediaKind,
+	OutgoingPost,
+	TelegramFloodError,
+)
 
 
 class _SlowGateway:
@@ -648,4 +654,74 @@ async def test_drop_channel_removes_items_and_returns_files(
 	await queue.drop_channel(channel_id)
 	assert await queue.state() == []  # «зомби»-элементов в памяти нет
 	assert video.is_file()  # файл вернулся в результаты
+	await queue.shutdown()
+
+
+class _FloodOnceGateway(_SlowGateway):
+	"""Первая отправка упирается во флуд-лимит, вторая проходит."""
+
+	def __init__(self, seconds: int) -> None:
+		super().__init__()
+		self.seconds = seconds
+		self.flooded = False
+
+	async def publish(
+		self,
+		chat_id: str,
+		post: OutgoingPost,
+		on_progress: ProgressCallback | None = None,
+	) -> None:
+		if not self.flooded:
+			self.flooded = True
+			raise TelegramFloodError(
+				f"Telegram просит подождать {self.seconds} с.", retry_after_s=self.seconds
+			)
+		await super().publish(chat_id, post, on_progress)
+
+
+async def test_flood_waits_and_retries_instead_of_error(db: Database) -> None:
+	"""Флуд-лимит — не исход элемента: очередь ждёт названный срок и повторяет."""
+	gateway = _FloodOnceGateway(seconds=17)
+	gateway.release.set()
+	queue = _queue(db, gateway)
+	sleeps: list[float] = []
+
+	async def _instant(seconds: float) -> None:
+		sleeps.append(seconds)
+
+	queue._sleep = _instant  # noqa: SLF001 — реальная пауза растянула бы тест
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="под флудом"))
+	done = await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert done.error is None and done.note is None  # ошибки не было
+	assert sleeps == [17.0]  # ждали ровно срок, названный сервером
+	assert [post.text for post in gateway.published] == ["под флудом"]
+	await queue.shutdown()
+
+
+async def test_catchup_paces_expired_posts(db: Database) -> None:
+	"""Догон щадящий: между просроченными постами — пауза, залпа нет."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = _queue(db, gateway)
+	sleeps: list[float] = []
+
+	async def _instant(seconds: float) -> None:
+		sleeps.append(seconds)
+
+	queue._sleep = _instant  # noqa: SLF001 — реальная пауза растянула бы тест
+	channel_id = await _add_channel(db)
+	first = await queue.enqueue(PostDraft(channel_id, text="догон-1", when=_future(120)))
+	second = await queue.enqueue(PostDraft(channel_id, text="догон-2", when=_future(180)))
+	await _wait_status(queue, first, QueueItemStatus.WAITING)
+	await _wait_status(queue, second, QueueItemStatus.WAITING)
+	past = datetime.now(UTC) - timedelta(hours=8)
+	for entry in queue._items:  # noqa: SLF001 — смоделировать простой недели
+		entry.draft = replace(entry.draft, when=past)
+	await queue._release_slots()  # noqa: SLF001 — как при старте после простоя
+	await _wait_status(queue, first, QueueItemStatus.DONE)
+	await _wait_status(queue, second, QueueItemStatus.DONE)
+	assert [post.text for post in gateway.published] == ["догон-1", "догон-2"]
+	assert sleeps == [CATCHUP_INTERVAL_S]  # пауза между постами; после хвоста — нет
 	await queue.shutdown()

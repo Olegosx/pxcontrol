@@ -63,7 +63,10 @@ def queue_subtitle(item: QueueItemDto) -> str:
 		status = "ждёт слота отложек · уйдёт при запущенном приложении"
 	else:
 		status = "в очереди"
-	return f"{item.channel_title} · публикация: {when_text} · {status}"
+	subtitle = f"{item.channel_title} · публикация: {when_text} · {status}"
+	if item.note:
+		subtitle += f" · {item.note}"
+	return subtitle
 
 
 def apply_view(

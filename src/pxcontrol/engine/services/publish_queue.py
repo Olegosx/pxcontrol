@@ -43,7 +43,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotScheduleFullError,
 	UserbotUnavailableError,
 )
-from pxcontrol.engine.telegram.types import TELEGRAM_MAX_SCHEDULED, MediaKind
+from pxcontrol.engine.telegram.types import TELEGRAM_MAX_SCHEDULED, MediaKind, TelegramFloodError
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ class QueueItemDto:
 		status: текущий статус.
 		progress: доля загрузки 0.0..1.0 (для отправляющегося).
 		error: текст ошибки (для статуса ERROR).
+		note: пометка состояния для карточки (флуд-пауза); None — нет.
 	"""
 
 	id: int
@@ -96,6 +97,7 @@ class QueueItemDto:
 	status: QueueItemStatus
 	progress: float
 	error: str | None
+	note: str | None = None
 
 	@property
 	def scheduled(self) -> bool:
@@ -113,6 +115,7 @@ class _Item:
 		self.status = QueueItemStatus.PENDING
 		self.progress = 0.0
 		self.error: str | None = None
+		self.note: str | None = None  # пометка карточки (флуд-пауза)
 		# отмену запросил пользователь (отличает её от остановки движка)
 		self.cancel_requested = False
 
@@ -127,6 +130,7 @@ class _Item:
 			status=self.status,
 			progress=self.progress,
 			error=self.error,
+			note=self.note,
 		)
 
 
@@ -149,6 +153,12 @@ def _expired(when: datetime | None, now: datetime) -> bool:
 	return when is not None and when <= now + MIN_SCHEDULE_AHEAD
 
 
+#: Пауза между догоняющими постами (просроченное время → «сейчас»), секунды.
+#: После простоя приложения очередь не строчит залпом: подписчики видят
+#: «канал ожил», а не пулемётную ленту, и флуд-лимит не срабатывает.
+CATCHUP_INTERVAL_S = 30
+
+
 class PublishQueue:
 	"""Последовательная отправка постов с прогрессом, отменой и повтором.
 
@@ -168,6 +178,9 @@ class PublishQueue:
 		self._db = db
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._items: list[_Item] = []
+		# точка подмены в тестах: реальные паузы (флуд, догон) в тестах
+		# растянули бы прогон на минуты
+		self._sleep = asyncio.sleep
 		self._worker: asyncio.Task[None] | None = None
 		self._active: tuple[int, asyncio.Task[None]] | None = None
 		self._watcher: asyncio.Task[None] | None = None
@@ -588,7 +601,8 @@ class PublishQueue:
 			item.progress = fraction
 
 		draft = item.draft
-		if _expired(draft.when, datetime.now(UTC)):
+		catchup = _expired(draft.when, datetime.now(UTC))
+		if catchup:
 			# желаемый момент прошёл — это уже не отложка: публикуем
 			# обычным сообщением, слота не занимая (ADR-0016)
 			draft = replace(draft, when=None)
@@ -621,6 +635,21 @@ class PublishQueue:
 			item.progress = 0.0
 			self._ensure_watcher()  # дозор вернёт элемент, когда слот освободится
 			logger.info("Отправка id=%s: слоты кончились — элемент снова ждёт.", item.id)
+		except TelegramFloodError as exc:
+			# флуд-лимит — временное состояние, не исход элемента: сервер
+			# сам назвал срок повтора (ср. ветку «слоты кончились» выше).
+			# Порядок «БД → память» — тот же
+			await self._persist_values(item.id, QueueItemStatus.PENDING, None)
+			item.status = QueueItemStatus.PENDING
+			item.progress = 0.0
+			item.note = f"{exc} Очередь ждёт и повторит сама."
+			logger.warning(
+				"Отправка id=%s: флуд-лимит — очередь ждёт %d с.", item.id, exc.retry_after_s
+			)
+			try:
+				await self._sleep(exc.retry_after_s)
+			finally:
+				item.note = None
 		except Exception as exc:  # noqa: BLE001 — исход элемента, не очереди
 			# карточка очереди показывает этот текст как есть — сворачиваем
 			# недоменные исключения, как мост интерфейса (контракт errors.py).
@@ -634,5 +663,9 @@ class PublishQueue:
 			item.status = QueueItemStatus.DONE
 			item.progress = 1.0
 			await self._delete_row(item.id)
+			if catchup and self._next_pending() is not None:
+				# щадящий догон: пауза между просроченными постами
+				logger.info("Догон: пауза %d с перед следующим постом.", CATCHUP_INTERVAL_S)
+				await self._sleep(CATCHUP_INTERVAL_S)
 		finally:
 			self._active = None
