@@ -65,6 +65,7 @@ from pxcontrol.ui.pages.common import (
 	bind,
 	clear_layout,
 	confirm_delete,
+	error_reporter,
 	exec_dialog,
 	file_action_buttons,
 	format_local,
@@ -75,7 +76,6 @@ from pxcontrol.ui.pages.common import (
 	pick_dir,
 	pick_file,
 	row_card,
-	show_error,
 	show_warning,
 )
 from pxcontrol.ui.pages.frame_picker import FramePickerDialog
@@ -159,6 +159,7 @@ class VideoPage(ScrollArea):
 		super().__init__(parent)
 		self.setObjectName("video")
 		self._worker = worker
+		self._show_error = error_reporter(self)
 		self._session_done = 0  # готовых с последней итоговой плашки
 		self._entries: list[_FileEntry] = []  # карточки файлов к обработке
 		self._processed_checks: list[tuple[CheckBox, ProcessedVideo]] = []
@@ -329,10 +330,6 @@ class VideoPage(ScrollArea):
 		run_row.addWidget(self._process_button)
 		run_row.addStretch()
 		layout.addLayout(run_row)
-
-	def _show_error(self, message: str) -> None:
-		"""Показывает ошибку всплывающей плашкой."""
-		show_error(self, message)
 
 	# --- пресеты -------------------------------------------------------------------
 
@@ -869,8 +866,8 @@ class VideoPage(ScrollArea):
 
 	# --- массовая публикация готовых видео (ADR-0015) -------------------------------
 
-	def _publish_channel(self) -> ChannelDto | None:
-		"""Канал для пакета публикации (с подсказкой, если не выбран)."""
+	def _current_channel(self) -> ChannelDto | None:
+		"""Выбранный канал или подсказка (имя — как на «Публикации»)."""
 		channel = self._channel_combo.selected()
 		if channel is None:
 			self._show_error("Выберите канал (список над пресетом) — пакет публикуется в него.")
@@ -893,14 +890,14 @@ class VideoPage(ScrollArea):
 		if not items:
 			self._show_error("Готовых видео нет — публиковать нечего.")
 			return
-		channel = self._publish_channel()
+		channel = self._current_channel()
 		if channel is None:
 			return
 		self.publish_files_requested.emit([item.path for item in items], channel.id)
 
 	def _publish_processed_folder(self) -> None:
 		"""Выбор подпапки в обработанных — вся она пакетом на «Публикацию»."""
-		channel = self._publish_channel()
+		channel = self._current_channel()
 		if channel is None:
 			return
 		root = pick_dir(self, "Папка готовых видео", start_dir=self._processed_dir)

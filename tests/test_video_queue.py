@@ -75,7 +75,7 @@ async def _wait_status(
 async def _wait_all_finished(queue: ProcessingQueue, timeout: float = 5.0) -> None:
 	"""Ждёт завершения всех элементов очереди (в любом исходе)."""
 	async with asyncio.timeout(timeout):
-		while await queue.has_unfinished():
+		while any(not item.status.finished() for item in await queue.state()):
 			await asyncio.sleep(0.01)
 
 
@@ -340,14 +340,14 @@ async def test_shutdown_cancels_pending_and_cleans_frames(
 	assert not Path(stashed).exists()
 
 
-async def test_has_unfinished(db: Database, env: Path) -> None:
-	"""Занятость очереди видна, пока элементы не завершены."""
+async def test_state_reflects_busyness(db: Database, env: Path) -> None:
+	"""Снимок state() показывает занятость, пока элементы не завершены."""
 	processor = _GatedProcessor()
 	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=processor))
-	assert not await queue.has_unfinished()
+	assert await queue.state() == []
 	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
-	assert await queue.has_unfinished()
+	assert any(not item.status.finished() for item in await queue.state())
 	await asyncio.to_thread(processor.started.wait, 5.0)
 	processor.release.set()
 	await _wait_status(queue, item_id, VideoItemStatus.DONE)
-	assert not await queue.has_unfinished()
+	assert all(item.status.finished() for item in await queue.state())

@@ -147,11 +147,16 @@ def run_streaming(
 			raise RuntimeError(f"ffmpeg ({what}): каналы процесса не открылись.")
 		stderr_pipe = proc.stderr
 		stderr_chunks: list[str] = []
-		reader = threading.Thread(
-			target=lambda: stderr_chunks.append(stderr_pipe.read()),
-			name="ffmpeg-stderr",
-			daemon=True,
-		)
+
+		def _read_stderr() -> None:
+			try:
+				stderr_chunks.append(stderr_pipe.read())
+			except (ValueError, OSError):
+				# канал закрыт при отмене/kill — штатный исход, не ошибка;
+				# без except трейсбек потока ушёл бы в stderr мимо logging
+				logger.debug("Канал stderr ffmpeg закрыт до конца чтения.", exc_info=True)
+
+		reader = threading.Thread(target=_read_stderr, name="ffmpeg-stderr", daemon=True)
 		reader.start()
 		try:
 			_stream_progress(proc, proc.stdout, on_progress, total_seconds)
@@ -193,6 +198,9 @@ def _stream_progress(
 		try:
 			for line in stdout:
 				lines.put(line)
+		except (ValueError, OSError):
+			# канал закрыт при отмене/kill — штатный исход, не ошибка
+			logger.debug("Канал прогресса ffmpeg закрыт до конца чтения.", exc_info=True)
 		finally:
 			lines.put(None)  # конец потока (или канал закрыт после kill)
 

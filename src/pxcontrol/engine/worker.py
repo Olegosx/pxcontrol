@@ -97,7 +97,11 @@ class EngineWorker:
 		Returns:
 			``Future`` с результатом выполнения.
 		"""
-		if self._loop is None:
+		# после аварийного старта/остановки цикл существует, но закрыт:
+		# без проверки наружу летел бы «Event loop is closed» из глубин
+		# asyncio плюс предупреждение о непробуждённой корутине
+		if self._loop is None or self._loop.is_closed():
+			coro.close()
 			raise RuntimeError("Движок не запущен")
 		return asyncio.run_coroutine_threadsafe(coro, self._loop)
 

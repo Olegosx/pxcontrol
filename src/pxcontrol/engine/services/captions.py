@@ -639,10 +639,16 @@ class CaptionsService:
 		return stem + suffix
 
 	def _probe_quality(self, media_path: str) -> str:
-		"""Качество видео (меньшая сторона кадра) или пустая строка."""
+		"""Качество видео (меньшая сторона кадра) или пустая строка.
+
+		Сбой ffprobe — не повод ронять сборку имени: ``{quality}``
+		становится пустым (закреплено тестом), но причина уходит в лог —
+		иначе «имя без качества» было бы неразбираемым молча.
+		"""
 		try:
 			info = probe_video(media_path, ffprobe_bin_for(self._ffmpeg()))
 		except (OSError, RuntimeError, ValueError):
+			logger.warning("Качество видео %s не прочитано ffprobe.", media_path, exc_info=True)
 			return ""
 		return str(min(info.width, info.height))
 

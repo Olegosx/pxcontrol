@@ -23,15 +23,13 @@ def resolve_timestamp(source: str, info: VideoInfo) -> float:
 	"""Вычисляет момент времени (сек), из которого брать кадр заставки.
 
 	Args:
-		source: режим источника — 'random-middle', 'random-choice',
-			'first', 'time:СЕК' или 'frame:N'.
+		source: режим источника — 'random-middle', 'random-choice'
+			или 'time:СЕК' (протокол ``IntroSourceKind`` сервиса видео).
 		info: метаданные видео.
 
 	Raises:
 		ValueError: Если режим источника не распознан.
 	"""
-	if source == "first":
-		return 0.0
 	if source == "random-middle":
 		return random.uniform(info.duration * MIDDLE_FROM, info.duration * MIDDLE_TO)
 	if source == "random-choice":
@@ -45,11 +43,6 @@ def resolve_timestamp(source: str, info: VideoInfo) -> float:
 			return float(source.split(":", 1)[1])
 		except ValueError as exc:
 			raise ValueError(f"Момент кадра не число: {source}") from exc
-	if source.startswith("frame:"):
-		try:
-			return int(source.split(":", 1)[1]) / info.fps
-		except ValueError as exc:
-			raise ValueError(f"Номер кадра не целое число: {source}") from exc
 	raise ValueError(f"Неизвестный источник кадра: {source}")
 
 

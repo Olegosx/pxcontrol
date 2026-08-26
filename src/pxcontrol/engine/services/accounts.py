@@ -209,9 +209,12 @@ class AccountsService:
 		"""Удаляет userbot-аккаунт и переподключает userbot без него.
 
 		Движок не должен продолжать публиковать от имени удалённого
-		аккаунта: если у аккаунта была сессия, userbot отключается
+		аккаунта: если удалён именно активный, userbot отключается
 		и активируется заново по оставшимся сессиям (или остаётся
-		выключенным, если сессий больше нет).
+		выключенным). Удаление неактивного аккаунта работающий userbot
+		не трогает — иначе живая отправка получала бы ничем
+		не оправданное окно недоступности. Если активного нет вовсе,
+		попытка активации по оставшимся сессиям не повредит.
 		"""
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
@@ -220,7 +223,7 @@ class AccountsService:
 			had_session = account.session is not None
 			await session.delete(account)
 			await session.commit()
-		if had_session:
+		if had_session and self._active_account_id in (None, account_id):
 			await self._gateway.deactivate_userbot()
 			await self.activate_stored_userbot()
 

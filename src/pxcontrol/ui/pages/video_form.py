@@ -1,8 +1,11 @@
-"""Панель параметров обработки видео (раздел страницы «Видео»).
+"""Панель параметров обработки видео и сворачиваемая карточка.
 
-Самостоятельный виджет без знания о странице: заполняется пресетом
-(:meth:`PresetForm.fill`), правится свободно, текущее состояние отдаёт
-:meth:`PresetForm.fields`. Контракт со страницей — только ``PresetFields``.
+Два экспорта: :class:`PresetForm` — самостоятельный виджет параметров
+без знания о странице (заполняется пресетом через :meth:`PresetForm.fill`,
+состояние отдаёт :meth:`PresetForm.fields`; контракт со страницей —
+только ``PresetFields``) и :class:`CollapsibleCard` — универсальная
+сворачиваемая карточка, в которой живут и панель, и карточки файлов
+страницы «Видео» (перенос в ``common`` — при третьем пользователе).
 """
 
 from __future__ import annotations
@@ -43,6 +46,11 @@ from pxcontrol.ui.pages.common import INPUT_DEBOUNCE_MS, debounced, pick_file
 #: движка (``PresetFields``): «чистая» форма совпадает с «чистым» пресетом,
 #: смена дефолта в движке подхватывается формой сама.
 _DEFAULTS = PresetFields(name="")
+
+#: Приглушённый цвет сводки в шапке карточки: светлая/тёмная тема.
+#: Подпись, а не ошибка — единая точка цветов ошибок (``ErrorLabel``
+#: в ``common``) тут не подходит.
+_SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
 
 _CORNERS = [
 	("Правый верхний", "tr"),
@@ -118,7 +126,7 @@ class CollapsibleCard(CardWidget):
 		head_row.addWidget(StrongBodyLabel(title, header))
 		self._summary_text = ""
 		self._summary = CaptionLabel("", header)
-		self._summary.setTextColor("#5f5f5f", "#9c9c9c")
+		self._summary.setTextColor(*_SUMMARY_COLORS)
 		# сводка занимает остаток шапки и обрезается, а не распирает форму
 		self._summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 		head_row.addWidget(self._summary, stretch=1)
@@ -576,17 +584,6 @@ class PresetForm(QWidget):
 		self._set_bitrate_programmatically(mbps)
 		self._bitrate_suggested = True
 		return True
-
-	def clear_suggested_bitrate(self) -> None:
-		"""Сбрасывает автоподстановку в «0» (рекомендация больше не нужна).
-
-		Значение, введённое руками или пресетом, не трогается — иначе
-		выбор файла затирал бы осознанно выставленный битрейт.
-		"""
-		if not self._bitrate_suggested:
-			return
-		self._set_bitrate_programmatically(0.0)
-		self._bitrate_suggested = False
 
 	def _set_bitrate_programmatically(self, mbps: float) -> None:
 		"""Пишет значение в поле, не снимая пометку «автоподстановка»."""

@@ -34,7 +34,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.video import FrameCandidate
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import format_duration, show_error
+from pxcontrol.ui.pages.common import clear_layout, format_duration, show_error
 
 #: Колонок в плитке выбора кадра заставки.
 _FRAME_GRID_COLUMNS = 3
@@ -42,6 +42,12 @@ _FRAME_GRID_COLUMNS = 3
 #: Размеры плитки кадра: кнопка и картинка внутри (кнопка минус поля 2×8).
 _TILE_SIZE = QSize(232, 133)
 _TILE_PADDING = 8
+
+#: Границы и умолчание числа кадров-кандидатов за раз: максимум кратен
+#: сетке (_FRAME_GRID_COLUMNS × 4 ряда), больше — плитка нечитаема.
+_FRAMES_MIN = 2
+_FRAMES_MAX = 12
+_FRAMES_DEFAULT = 6
 
 
 class _FrameTileButton(TogglePushButton):
@@ -101,8 +107,8 @@ class FramePickerDialog(MessageBoxBase):
 		row = QHBoxLayout()
 		row.addWidget(BodyLabel("Кадров:", self))
 		self._count = SpinBox(self)
-		self._count.setRange(2, 12)
-		self._count.setValue(6)
+		self._count.setRange(_FRAMES_MIN, _FRAMES_MAX)
+		self._count.setValue(_FRAMES_DEFAULT)
 		row.addWidget(self._count)
 		self._refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
 		self._refresh.clicked.connect(self._reload)
@@ -135,12 +141,8 @@ class FramePickerDialog(MessageBoxBase):
 		)
 
 	def _clear_grid(self) -> None:
-		"""Убирает плитку кандидатов."""
-		while self._grid.count():
-			item = self._grid.takeAt(0)
-			widget = item.widget() if item else None
-			if widget is not None:
-				widget.deleteLater()
+		"""Убирает плитку кандидатов (общая очистка + снятие кнопок из группы)."""
+		clear_layout(self._grid)
 		for button in self._group.buttons():
 			self._group.removeButton(button)
 

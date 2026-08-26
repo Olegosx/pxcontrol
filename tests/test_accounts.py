@@ -125,6 +125,28 @@ async def test_delete_active_tg_account_reconnects_userbot(db: Database) -> None
 	assert gateway.activated is None  # сессий не осталось — userbot выключен
 
 
+async def test_delete_inactive_tg_account_keeps_userbot(db: Database) -> None:
+	"""Удаление неактивного аккаунта не трогает работающий userbot.
+
+	Переподключение — окно, в котором отправка из очереди упала бы;
+	оно оправдано только когда удалён именно активный аккаунт.
+	"""
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	first = await service.add_tg_account("Первый", "+7900", 11, "h1")
+	second = await service.add_tg_account("Второй", "+7901", 22, "h2")
+	await service.start_login(first.id)
+	assert await service.confirm_login_code(first.id, "12345") is True
+	await service.start_login(second.id)
+	assert await service.confirm_login_code(second.id, "12345") is True
+	deactivations_before = gateway.deactivations
+	await service.delete_tg_account(first.id)  # активный — второй
+	assert gateway.deactivations == deactivations_before  # подключение не рвалось
+	await service.delete_tg_account(second.id)  # а вот активный — переключает
+	assert gateway.deactivations == deactivations_before + 1
+	assert gateway.activated is None  # сессий не осталось
+
+
 async def test_bot_whereabouts(db: Database) -> None:
 	"""Диагностика возвращает строки событий; неизвестный бот — ошибка."""
 	service = AccountsService(db, _FakeGateway())

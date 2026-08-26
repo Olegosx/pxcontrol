@@ -157,9 +157,7 @@ def test_fit_pad_filter_letterboxes() -> None:
 
 def test_resolve_timestamp_modes() -> None:
 	"""Все режимы источника кадра дают ожидаемое время."""
-	assert resolve_timestamp("first", INFO) == 0.0
 	assert resolve_timestamp("time:5.5", INFO) == 5.5
-	assert resolve_timestamp("frame:50", INFO) == 2.0  # 50 кадров при 25 fps
 	random.seed(0)
 	for _ in range(100):
 		assert 25.0 <= resolve_timestamp("random-middle", INFO) <= 75.0

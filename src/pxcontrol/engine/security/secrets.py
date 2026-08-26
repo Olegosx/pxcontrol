@@ -73,8 +73,10 @@ def _load_or_create_key() -> bytes:
 			new_key = Fernet.generate_key().decode("ascii")
 			keyring.set_password(KEYRING_SERVICE, KEYRING_KEY_NAME, new_key)
 			logger.info("Создан новый ключ шифрования в системном хранилище.")
-			# перечитываем из хранилища: если два первых запуска создали
-			# ключи наперегонки, оба процесса будут шифровать победившим
+			# перечитываем из хранилища: это сужает окно гонки двух первых
+			# запусков (оба, скорее всего, будут шифровать победившим), но
+			# не закрывает её полностью — приложение одноэкземплярное,
+			# полноценная блокировка была бы защитой от несуществующего
 			stored = keyring.get_password(KEYRING_SERVICE, KEYRING_KEY_NAME) or new_key
 		return stored.encode("ascii")
 	except KeyringError as exc:

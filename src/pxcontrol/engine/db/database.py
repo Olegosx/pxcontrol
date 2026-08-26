@@ -57,7 +57,7 @@ class Database:
 		# её соединение вернулось бы в пул с незавершённой транзакцией
 		# и держало бы блокировку SQLite («database is locked» у следующей
 		# записи). Свежее соединение к локальному файлу — микросекунды.
-		self._engine: AsyncEngine = create_async_engine(url, future=True, poolclass=NullPool)
+		self._engine: AsyncEngine = create_async_engine(url, poolclass=NullPool)
 		event.listens_for(self._engine.sync_engine, "connect")(_enable_foreign_keys)
 		self.session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
 			self._engine, expire_on_commit=False

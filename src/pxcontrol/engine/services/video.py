@@ -435,10 +435,11 @@ class VideoService:
 			VideoError: Даже минимальный битрейт не впишет видео в лимит.
 		"""
 		path = Path(source_path)
-		if not path.is_file():
+		# is_file/stat — обращения к диску: вне цикла событий движка
+		if not await asyncio.to_thread(path.is_file):
 			return None
 		limit = userbot_max_file_bytes(self._userbot_premium())
-		if path.stat().st_size <= limit:
+		if (await asyncio.to_thread(path.stat)).st_size <= limit:
 			return None
 		try:
 			info = await asyncio.to_thread(
@@ -514,7 +515,9 @@ class VideoService:
 		dirs = []
 		for key in (VIDEO_SOURCE_DIR, VIDEO_PROCESSED_DIR, VIDEO_PUBLISHED_DIR):
 			path = video_base_dir(self._settings, key) / cleaned
-			path.mkdir(parents=True, exist_ok=True)
+			# диск (в т.ч. сетевой/заснувший) — вне цикла событий движка,
+			# как у соседей list_processed/scan_sources
+			await asyncio.to_thread(path.mkdir, parents=True, exist_ok=True)
 			dirs.append(str(path))
 		return VideoDirs(*dirs)
 
@@ -762,7 +765,10 @@ class VideoService:
 		"""
 		self._require_ready(source_path)
 		source = Path(source_path)
-		options = self._build_options(source, fields, intro_source, extra_subdir)
+		# сборка включает создание папки результата (диск) — вне цикла
+		options = await asyncio.to_thread(
+			self._build_options, source, fields, intro_source, extra_subdir
+		)
 		logger.info("Обработка видео: %s (параметры «%s»)…", source.name, fields.name)
 		try:
 			await asyncio.to_thread(self._processor, options, on_progress)

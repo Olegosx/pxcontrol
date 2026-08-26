@@ -386,15 +386,6 @@ class PublishQueue:
 		waiting.sort(key=lambda item: item.draft.when or fallback)
 		return [item.dto() for item in [*others, *waiting]]
 
-	async def has_unfinished(self) -> bool:
-		"""Идёт ли сейчас отправка (для подтверждения выхода).
-
-		Ожидающие и ждущие слота выход не задерживают: очередь
-		персистентная (ADR-0016) и продолжится при следующем запуске;
-		вопрос заслуживает только обрыв активной загрузки.
-		"""
-		return any(item.status is QueueItemStatus.SENDING for item in self._items)
-
 	async def shutdown(self) -> None:
 		"""Останавливает воркер и дозор слотов (при остановке движка).
 

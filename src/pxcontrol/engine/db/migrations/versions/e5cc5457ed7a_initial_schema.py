@@ -20,25 +20,28 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
-_TIMESTAMPS = (
-	sa.Column(
-		"created_at",
-		sa.DateTime(timezone=True),
-		server_default=sa.text("(CURRENT_TIMESTAMP)"),
-		nullable=False,
-	),
-	sa.Column(
-		"updated_at",
-		sa.DateTime(timezone=True),
-		server_default=sa.text("(CURRENT_TIMESTAMP)"),
-		nullable=False,
-	),
-)
-
 
 def _timestamps() -> tuple[sa.Column, ...]:
-	"""Возвращает свежие колонки времени (Column нельзя переиспользовать)."""
-	return tuple(col._copy() for col in _TIMESTAMPS)
+	"""Возвращает свежие колонки времени (Column нельзя переиспользовать).
+
+	Колонки создаются заново при каждом вызове (как в поздних миграциях):
+	приватный ``Column._copy()`` не переживёт смену версии SQLAlchemy,
+	а миграции обязаны выполняться на любой свежей БД вечно.
+	"""
+	return (
+		sa.Column(
+			"created_at",
+			sa.DateTime(timezone=True),
+			server_default=sa.text("(CURRENT_TIMESTAMP)"),
+			nullable=False,
+		),
+		sa.Column(
+			"updated_at",
+			sa.DateTime(timezone=True),
+			server_default=sa.text("(CURRENT_TIMESTAMP)"),
+			nullable=False,
+		),
+	)
 
 
 def upgrade() -> None:

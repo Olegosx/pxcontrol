@@ -350,9 +350,12 @@ class PublishBatchDialog(MessageBoxBase):
 				noop,
 			)
 
-	@staticmethod
-	def _set_rename(row: _BatchRow, filename: str) -> None:
-		row.rename.setText(filename)
+	def _set_rename(self, row: _BatchRow, filename: str) -> None:
+		"""Подсказка имени — только в живую строку: пока движок отвечал,
+		строку могли убрать из пакета (иначе setText по удалённому
+		Qt-объекту — RuntimeError; ср. ``_is_stale`` на «Публикации»)."""
+		if row in self._rows:
+			row.rename.setText(filename)
 
 	# --- раскладка времени -------------------------------------------------------
 

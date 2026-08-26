@@ -108,7 +108,7 @@ async def test_enqueue_during_send_keeps_order(db: Database) -> None:
 	await _wait_status(queue, first, QueueItemStatus.DONE)
 	await _wait_status(queue, second, QueueItemStatus.DONE)
 	assert [post.text for post in gateway.published] == ["первый", "второй"]
-	assert not await queue.has_unfinished()
+	assert all(item.status.finished() for item in await queue.state())
 
 
 async def test_cancel_pending_skips_send(db: Database) -> None:
@@ -195,7 +195,6 @@ async def test_dto_titles_and_flags(db: Database, tmp_path: Path) -> None:
 	assert second.title == "о" * 59 + "…" and second.scheduled
 	assert second.when == when  # момент публикации виден в карточке очереди
 	assert second.channel_title == "Канал"
-	assert await queue.has_unfinished()
 	await queue.shutdown()  # гасим воркер с висящей отправкой
 
 
@@ -502,22 +501,6 @@ async def test_queue_survives_restart(db: Database) -> None:
 	assert items[waiting].status is QueueItemStatus.WAITING
 	assert items[waiting].when is not None and items[waiting].when.tzinfo is not None
 	await restarted.shutdown()
-
-
-async def test_exit_confirmation_only_for_active_send(db: Database) -> None:
-	"""Ждущие выход не задерживают (очередь персистентная) — только отправка."""
-	gateway = _SlotGateway()
-	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
-	queue = _queue(db, gateway)
-	channel_id = await _add_channel(db)
-	await queue.enqueue(PostDraft(channel_id, text="ждущий", when=_future(120)))
-	assert await queue.has_unfinished() is False  # ждёт слота — не задержка
-	sending = await queue.enqueue(PostDraft(channel_id, text="активный"))
-	await _wait_status(queue, sending, QueueItemStatus.SENDING)
-	assert await queue.has_unfinished() is True  # обрыв загрузки — вопрос
-	gateway.release.set()
-	await _wait_status(queue, sending, QueueItemStatus.DONE)
-	await queue.shutdown()
 
 
 # --- папка очереди на диске (ADR-0016) --------------------------------------

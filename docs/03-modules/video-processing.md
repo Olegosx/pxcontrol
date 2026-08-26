@@ -49,7 +49,7 @@
 |---|---|
 | `probe.py` | метаданные через ffprobe (размеры, длительность, fps, звук, битрейт) |
 | `filtergraph.py` | сборка `-filter_complex`: FullHD, вотермарк с окном показа, заставка hold+xfade — чистые функции |
-| `frames.py` | кадр заставки: random-middle / first / time / frame / image |
+| `frames.py` | кадр заставки: random-middle / random-choice / time / image |
 | `pipeline.py` | сборка и запуск команды ffmpeg, вшивание обложки (`attached_pic`) |
 | `ffmpeg.py` | единый запуск ffmpeg/ffprobe: лог команды, перевод ошибок, прогресс |
 
