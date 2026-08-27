@@ -881,8 +881,11 @@ class VideoPage(ScrollArea):
 		"""Отмеченные чекбоксами видео — пакетом на «Публикацию»."""
 		picked = [item for check, item in self._processed_checks if check.isChecked()]
 		if not picked:
-			self._show_error("Отметьте чекбоксами готовые видео для публикации.")
-			return
+			if len(self._processed_checks) != 1:
+				self._show_error("Отметьте чекбоксами готовые видео для публикации.")
+				return
+			# файл один — выбирать не из чего, галочка избыточна
+			picked = [item for _check, item in self._processed_checks]
 		self._emit_publish_files(picked)
 
 	def _emit_publish_files(self, items: list[ProcessedVideo]) -> None:
