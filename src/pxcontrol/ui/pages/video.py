@@ -620,8 +620,11 @@ class VideoPage(ScrollArea):
 			return
 		selected = [entry for entry in self._entries if entry.check.isChecked()]
 		if not selected:
-			self._show_error("Отметьте чекбоксами файлы, которые обрабатывать.")
-			return
+			if len(self._entries) != 1:
+				self._show_error("Отметьте чекбоксами файлы, которые обрабатывать.")
+				return
+			# файл один — выбирать не из чего, галочка избыточна
+			selected = list(self._entries)
 		collected = self._collect_requests(selected)
 		if collected is None:
 			return
@@ -895,6 +898,11 @@ class VideoPage(ScrollArea):
 			return
 		channel = self._current_channel()
 		if channel is None:
+			return
+		if len(items) == 1:
+			# один файл — не пакет: обычная форма публикации,
+			# как у кнопки «Опубликовать…» на карточке
+			self.publish_requested.emit(items[0].path, channel.id)
 			return
 		self.publish_files_requested.emit([item.path for item in items], channel.id)
 
