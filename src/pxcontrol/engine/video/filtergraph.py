@@ -14,11 +14,15 @@ from dataclasses import dataclass
 
 from pxcontrol.engine.video.constants import TARGET_COLOR_MATRIX, TARGET_PIX_FMT
 
-# Выражения позиции overlay по углу: W/H — размеры фона, w/h — размеры вотермарка.
+# Выражения позиции overlay: W/H — размеры фона, w/h — размеры вотермарка.
+# Четыре угла и центр верхней/нижней кромки; по центру горизонтальный
+# отступ не нужен, вертикальный работает как у углов.
 CORNER_POSITIONS = {
 	"tl": "{m}:{m}",
+	"tc": "(W-w)/2:{m}",
 	"tr": "W-w-{m}:{m}",
 	"bl": "{m}:H-h-{m}",
+	"bc": "(W-w)/2:H-h-{m}",
 	"br": "W-w-{m}:H-h-{m}",
 }
 
@@ -31,7 +35,8 @@ class WatermarkOptions:
 	"""Параметры вотермарка.
 
 	Attributes:
-		corner: угол — 'tl', 'tr', 'bl' или 'br'.
+		corner: позиция — угол ('tl', 'tr', 'bl', 'br') или центр
+			верхней/нижней кромки ('tc', 'bc').
 		margin: отступ от края в пикселях.
 		opacity: прозрачность от 0 (невидим) до 1 (непрозрачен).
 		scale: ширина вотермарка как доля ширины кадра (например 0.15).
@@ -92,13 +97,13 @@ def _intro_chains(fps: str, hold: float, xfade: float, still_index: int) -> list
 
 
 def _overlay_position(corner: str, margin: int) -> str:
-	"""Возвращает выражение x:y для overlay по углу и отступу.
+	"""Возвращает выражение x:y для overlay по позиции и отступу.
 
 	Raises:
-		ValueError: если угол не из набора tl/tr/bl/br.
+		ValueError: если позиция не из набора tl/tc/tr/bl/bc/br.
 	"""
 	if corner not in CORNER_POSITIONS:
-		raise ValueError(f"Неизвестный угол вотермарка: {corner}")
+		raise ValueError(f"Неизвестная позиция вотермарка: {corner}")
 	return CORNER_POSITIONS[corner].format(m=margin)
 
 

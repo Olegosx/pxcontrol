@@ -61,10 +61,12 @@ def _build(**kwargs: object) -> object:
 
 
 def test_overlay_position_corners() -> None:
-	"""Каждый угол даёт корректное выражение позиции."""
+	"""Каждая позиция даёт корректное выражение (углы и центры кромок)."""
 	assert _overlay_position("tl", 10) == "10:10"
+	assert _overlay_position("tc", 10) == "(W-w)/2:10"
 	assert _overlay_position("tr", 10) == "W-w-10:10"
 	assert _overlay_position("bl", 10) == "10:H-h-10"
+	assert _overlay_position("bc", 10) == "(W-w)/2:H-h-10"
 	assert _overlay_position("br", 10) == "W-w-10:H-h-10"
 
 

@@ -55,8 +55,10 @@ _SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
 _CORNERS = [
 	("Правый верхний", "tr"),
 	("Левый верхний", "tl"),
+	("Сверху по центру", "tc"),
 	("Правый нижний", "br"),
 	("Левый нижний", "bl"),
+	("Снизу по центру", "bc"),
 ]
 #: Источники кадра заставки: подпись → вид (протокол — в сервисе видео).
 _INTRO_SOURCES = [
@@ -286,7 +288,7 @@ class PresetForm(QWidget):
 		self._corner = ComboBox(card)
 		for label, _code in _CORNERS:
 			self._corner.addItem(label)
-		self._labeled(look, "Угол:", self._corner)
+		self._labeled(look, "Положение:", self._corner)
 		self._margin = self._spin(
 			card, "отступ вотермарка от края кадра", 0, 200, _DEFAULTS.wm_margin
 		)
@@ -459,7 +461,7 @@ class PresetForm(QWidget):
 		return ", ".join(parts) or "выкл"
 
 	def _watermark_summary(self) -> str:
-		"""«Вотермарк»: имя файла, угол и особенности показа — или «выкл»."""
+		"""«Вотермарк»: имя файла, положение и особенности показа — или «выкл»."""
 		path = str(self._wm_path.text()).strip()
 		if not path:
 			return "выкл"
