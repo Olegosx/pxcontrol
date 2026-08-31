@@ -68,8 +68,8 @@ def test_overlay_position_corners() -> None:
 	assert _overlay_position("bl", 10) == "10:H-h-10"
 	assert _overlay_position("bc", 10) == "(W-w)/2:H-h-10"
 	assert _overlay_position("br", 10) == "W-w-10:H-h-10"
-	assert _overlay_position("lc", 10) == "10:(H-h)/2"
-	assert _overlay_position("rc", 10) == "W-w-10:(H-h)/2"
+	assert _overlay_position("lc", 10) == "10:H-h-10"
+	assert _overlay_position("rc", 10) == "W-w-10:10"
 
 
 def test_overlay_position_unknown_corner_raises() -> None:
@@ -107,7 +107,7 @@ def test_watermark_side_position_rotates() -> None:
 	"""Боковая позиция поворачивает вотермарк после масштабирования (CCW)."""
 	graph = _build(wm=replace(WM, corner="lc"), wm_index=1)
 	assert "scale=w=rw*0.15:h=-2,transpose=2[wm_s]" in graph.filter_complex
-	assert "overlay=24:(H-h)/2:format=yuv444" in graph.filter_complex
+	assert "overlay=24:H-h-24:format=yuv444" in graph.filter_complex
 
 
 def test_watermark_corner_position_without_rotation() -> None:

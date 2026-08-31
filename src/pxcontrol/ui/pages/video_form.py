@@ -297,7 +297,7 @@ class PresetForm(QWidget):
 		self._labeled(look, "Отступ, пикс:", self._margin)
 		self._opacity = self._dspin(card, "1 — непрозрачен", 0.05, 1.0, _DEFAULTS.wm_opacity, 0.05)
 		self._labeled(look, "Прозрачность:", self._opacity)
-		self._scale = self._dspin(card, "доля ширины кадра", 0.05, 0.5, _DEFAULTS.wm_scale, 0.01)
+		self._scale = self._dspin(card, "доля ширины кадра", 0.05, 0.75, _DEFAULTS.wm_scale, 0.01)
 		self._labeled(look, "Масштаб:", self._scale)
 		look.addStretch()
 		box.addLayout(look)
