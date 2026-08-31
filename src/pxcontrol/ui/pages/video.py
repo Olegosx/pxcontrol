@@ -6,9 +6,10 @@
 файла — своя карточка параметров, заполненная из карточки-шаблона
 «[Параметры пресета]» (под строкой пресета) в момент добавления;
 шаблон правится всегда и служит пресетам («загрузчик»: выбор пресета
-заполняет шаблон, сохранение — по явным кнопкам). «Обработать» ставит
-в очередь движка (ADR-0014) файлы, отмеченные чекбоксами в шапках
-карточек, — каждый со своими параметрами; карточки очереди видны
+заполняет шаблон, сохранение — по явным кнопкам). «Обработать все»
+ставит в очередь движка (ADR-0014) весь список, «Обработать» — файлы,
+отмеченные чекбоксами в шапках карточек (единственный файл в списке —
+и без галочки); каждый — со своими параметрами; карточки очереди видны
 на странице. Результат — файл в папке результатов; кнопка
 «Опубликовать…» передаёт его странице «Публикация» (контракт — путь
 к файлу). Выбор кадра заставки — отдельный диалог (:mod:`frame_picker`).
@@ -325,6 +326,10 @@ class VideoPage(ScrollArea):
 
 	def _build_process_row(self, layout: QVBoxLayout) -> None:
 		run_row = QHBoxLayout()
+		process_all = PushButton(FluentIcon.PLAY, "Обработать все", self)
+		process_all.setToolTip("Поставить в очередь весь список — галочки не важны")
+		process_all.clicked.connect(self._on_process_all)
+		run_row.addWidget(process_all)
 		self._process_button = PrimaryPushButton(FluentIcon.PLAY, "Обработать", self)
 		self._process_button.clicked.connect(self._on_process)
 		run_row.addWidget(self._process_button)
@@ -613,6 +618,13 @@ class VideoPage(ScrollArea):
 				entry.card.deleteLater()
 		self._update_empty_hint()
 
+	def _on_process_all(self) -> None:
+		"""Ставит в очередь весь список — независимо от галочек."""
+		if not self._entries:
+			self._show_error("Добавьте файл или папку — список пуст.")
+			return
+		self._process_entries(list(self._entries))
+
 	def _on_process(self) -> None:
 		"""Ставит отмеченные файлы в очередь — каждый со своими параметрами."""
 		if not self._entries:
@@ -625,7 +637,11 @@ class VideoPage(ScrollArea):
 				return
 			# файл один — выбирать не из чего, галочка избыточна
 			selected = list(self._entries)
-		collected = self._collect_requests(selected)
+		self._process_entries(selected)
+
+	def _process_entries(self, entries: list[_FileEntry]) -> None:
+		"""Собирает запросы перечисленных карточек и ставит их в очередь."""
+		collected = self._collect_requests(entries)
 		if collected is None:
 			return
 		requests, submitted = collected
