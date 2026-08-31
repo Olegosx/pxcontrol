@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -68,6 +68,8 @@ def test_overlay_position_corners() -> None:
 	assert _overlay_position("bl", 10) == "10:H-h-10"
 	assert _overlay_position("bc", 10) == "(W-w)/2:H-h-10"
 	assert _overlay_position("br", 10) == "W-w-10:H-h-10"
+	assert _overlay_position("lc", 10) == "10:(H-h)/2"
+	assert _overlay_position("rc", 10) == "W-w-10:(H-h)/2"
 
 
 def test_overlay_position_unknown_corner_raises() -> None:
@@ -99,6 +101,19 @@ def test_watermark_adds_overlay() -> None:
 	assert "overlay=W-w-24:24:format=yuv444" in graph.filter_complex
 	assert "scale2ref" not in graph.filter_complex  # устарел, искажал пропорции
 	assert graph.video_label == "[vout]"
+
+
+def test_watermark_side_position_rotates() -> None:
+	"""Боковая позиция поворачивает вотермарк после масштабирования (CCW)."""
+	graph = _build(wm=replace(WM, corner="lc"), wm_index=1)
+	assert "scale=w=rw*0.15:h=-2,transpose=2[wm_s]" in graph.filter_complex
+	assert "overlay=24:(H-h)/2:format=yuv444" in graph.filter_complex
+
+
+def test_watermark_corner_position_without_rotation() -> None:
+	"""Угловая позиция поворота не получает (transpose не «протекает»)."""
+	graph = _build(wm=WM, wm_index=1)
+	assert "transpose" not in graph.filter_complex
 
 
 def test_watermark_requires_input_index() -> None:

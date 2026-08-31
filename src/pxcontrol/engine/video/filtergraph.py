@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from pxcontrol.engine.video.constants import TARGET_COLOR_MATRIX, TARGET_PIX_FMT
 
 # Выражения позиции overlay: W/H — размеры фона, w/h — размеры вотермарка.
-# Четыре угла и центр верхней/нижней кромки; по центру горизонтальный
-# отступ не нужен, вертикальный работает как у углов.
+# Четыре угла, центр верхней/нижней кромки и середина боковых кромок;
+# по центру кромки отступ нужен только от неё самой. Выражения честны
+# и для повёрнутых позиций: overlay берёт w/h уже повёрнутого вотермарка.
 CORNER_POSITIONS = {
 	"tl": "{m}:{m}",
 	"tc": "(W-w)/2:{m}",
@@ -24,7 +25,13 @@ CORNER_POSITIONS = {
 	"bl": "{m}:H-h-{m}",
 	"bc": "(W-w)/2:H-h-{m}",
 	"br": "W-w-{m}:H-h-{m}",
+	"lc": "{m}:(H-h)/2",
+	"rc": "W-w-{m}:(H-h)/2",
 }
+
+#: Позиции вдоль боковой кромки: вотермарк поворачивается на 90°
+#: против часовой стрелки (transpose=2) — надпись читается снизу вверх.
+SIDE_POSITIONS = frozenset({"lc", "rc"})
 
 # Условный «бесконечный» конец окна показа вотермарка, если задан только старт.
 _OPEN_END = 1_000_000.0
@@ -35,8 +42,9 @@ class WatermarkOptions:
 	"""Параметры вотермарка.
 
 	Attributes:
-		corner: позиция — угол ('tl', 'tr', 'bl', 'br') или центр
-			верхней/нижней кромки ('tc', 'bc').
+		corner: позиция — угол ('tl', 'tr', 'bl', 'br'), центр
+			верхней/нижней кромки ('tc', 'bc') или вдоль боковой
+			('lc', 'rc' — с поворотом против часовой стрелки).
 		margin: отступ от края в пикселях.
 		opacity: прозрачность от 0 (невидим) до 1 (непрозрачен).
 		scale: ширина вотермарка как доля ширины кадра (например 0.15).
@@ -100,7 +108,7 @@ def _overlay_position(corner: str, margin: int) -> str:
 	"""Возвращает выражение x:y для overlay по позиции и отступу.
 
 	Raises:
-		ValueError: если позиция не из набора tl/tc/tr/bl/bc/br.
+		ValueError: если позиция не из набора tl/tc/tr/bl/bc/br/lc/rc.
 	"""
 	if corner not in CORNER_POSITIONS:
 		raise ValueError(f"Неизвестная позиция вотермарка: {corner}")
@@ -166,6 +174,9 @@ def _watermark_chains(
 	position = _overlay_position(wm.corner, wm.margin)
 	enable = _enable_expr(wm, offset)
 	fades = _watermark_fades(wm, offset)
+	# боковые позиции: поворот после масштабирования, поэтому «размер»
+	# сохраняет смысл — длина надписи остаётся долей ширины кадра
+	rotate = ",transpose=2" if wm.corner in SIDE_POSITIONS else ""
 	wm_in = f"[{wm_index}:v]"
 	chains = [f"{base}split[bg][wm_ref]"]
 	if fades:
@@ -177,7 +188,7 @@ def _watermark_chains(
 		)
 		wm_in = "[wm_v]"
 	chains += [
-		f"{wm_in}[wm_ref]scale=w=rw*{wm.scale}:h=-2[wm_s]",
+		f"{wm_in}[wm_ref]scale=w=rw*{wm.scale}:h=-2{rotate}[wm_s]",
 		f"[wm_s]format=rgba,colorchannelmixer=aa={wm.opacity}{fades},"
 		f"scale=out_color_matrix={TARGET_COLOR_MATRIX}:out_range=tv,"
 		f"format=yuva444p[wm_a]",
