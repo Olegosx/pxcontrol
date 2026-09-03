@@ -84,8 +84,9 @@ docs/                  документация проекта (точка вх�
 ## Запуск
 
 ```bash
-# окружение и зависимости (менеджер — uv; подойдёт и pip + venv)
-uv venv && uv pip install -e ".[dev]"
+# окружение и зависимости — штатные venv + pip
+# (есть uv — подойдёт и он: uv venv && uv pip install -e ".[dev]")
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 # настройки: скопировать шаблон (секреты в .env не хранятся — они в БД)
 cp .env.example .env
