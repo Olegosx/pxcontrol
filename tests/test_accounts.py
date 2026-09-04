@@ -38,23 +38,29 @@ class _FakeLogin:
 
 
 class _FakeGateway:
-	"""Подмена шлюза: проверка токена, вход и события — без похода в сеть."""
+	"""Подмена шлюза: пул userbot-клиентов (ADR-0019) — без похода в сеть.
+
+	``activated`` — снимок пула: id аккаунта → (api_id, сессия);
+	``premium_ids`` — аккаунты «с подпиской».
+	"""
 
 	def __init__(self) -> None:
 		self.login = _FakeLogin()
-		self.activated: tuple[int, str] | None = None
-		self.deactivations = 0
-		self.premium = False  # статус подписки «подключённого» аккаунта
+		self.activated: dict[int, tuple[int, str]] = {}
+		self.deactivations: list[int] = []
+		self.premium_ids: set[int] = set()
 
-	def userbot_premium(self) -> bool:
-		return self.premium
+	def userbot_premium(self, account_id: int | None) -> bool:
+		return account_id in self.premium_ids
 
-	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None:
-		self.activated = (api_id, session)
+	async def activate_userbot(
+		self, account_id: int, api_id: int, api_hash: str, session: str
+	) -> None:
+		self.activated[account_id] = (api_id, session)
 
-	async def deactivate_userbot(self) -> None:
-		self.deactivations += 1
-		self.activated = None
+	async def deactivate_userbot(self, account_id: int) -> None:
+		self.deactivations.append(account_id)
+		self.activated.pop(account_id, None)
 
 	async def check_bot_token(self, token: str) -> str:
 		if token == "bad-token":
@@ -142,28 +148,35 @@ async def test_login_requires_app_api_key(db: Database) -> None:
 		await service.start_login(account.id)
 
 
-async def test_activate_stored_userbot_needs_api_key(db: Database) -> None:
-	"""Активация по сессии без ключа приложения не падает и не активирует."""
+async def test_activate_stored_userbots_needs_api_key(db: Database) -> None:
+	"""Активация по сессиям без ключа приложения не падает и не активирует;
+	с ключом поднимаются все аккаунты с сессиями."""
 	from pxcontrol.engine.db.models import TgAccount
 
 	gateway = _FakeGateway()
 	service = AccountsService(db, gateway)
 	async with db.session_factory() as session:
-		session.add(TgAccount(label="ub", phone="+7900", session="s"))
+		one = TgAccount(label="ub1", phone="+7900", session="s1")
+		two = TgAccount(label="ub2", phone="+7901", session="s2")
+		three = TgAccount(label="без входа", phone="+7902")  # сессии нет
+		session.add_all([one, two, three])
 		await session.commit()
-	await service.activate_stored_userbot()  # ключа нет — тихо пропускается
-	assert gateway.activated is None
+		await session.refresh(one)
+		await session.refresh(two)
+	await service.activate_stored_userbots()  # ключа нет — тихо пропускается
+	assert gateway.activated == {}
 	await service.set_tg_api(777, "hash-hash-hash-hash")
-	await service.activate_stored_userbot()
-	assert gateway.activated == (777, "s")  # подключение — общим ключом
+	await service.activate_stored_userbots()
+	# подключены оба вошедших, каждый своей сессией, общим ключом
+	assert gateway.activated == {one.id: (777, "s1"), two.id: (777, "s2")}
 
 
-async def test_delete_active_tg_account_reconnects_userbot(db: Database) -> None:
-	"""Удаление аккаунта с сессией переключает userbot на оставшийся.
+async def test_delete_tg_account_deactivates_only_it(db: Database) -> None:
+	"""Удаление аккаунта гасит только его клиента; остальные живут (ADR-0019).
 
-	Движок не должен публиковать от имени удалённого аккаунта: шлюз
-	отключается и активируется заново по оставшимся сессиям; когда
-	сессий не осталось — userbot выключен.
+	Движок не должен публиковать от имени удалённого аккаунта, но и
+	рвать подключения чужих аккаунтов удаление не вправе — их каналы
+	продолжают отправку.
 	"""
 	gateway = _FakeGateway()
 	service = AccountsService(db, gateway)
@@ -174,37 +187,15 @@ async def test_delete_active_tg_account_reconnects_userbot(db: Database) -> None
 	assert await service.confirm_login_code(first.id, "12345") is True
 	await service.start_login(second.id)
 	assert await service.confirm_login_code(second.id, "12345") is True
+	assert set(gateway.activated) == {first.id, second.id}  # оба в пуле
 
 	await service.delete_tg_account(second.id)
-	assert gateway.deactivations == 1
-	assert gateway.activated == (777, "session-string-ok")  # остался первый
+	assert gateway.deactivations == [second.id]  # погашен только удалённый
+	assert set(gateway.activated) == {first.id}  # первый работает дальше
 
 	await service.delete_tg_account(first.id)
-	assert gateway.deactivations == 2
-	assert gateway.activated is None  # сессий не осталось — userbot выключен
-
-
-async def test_delete_inactive_tg_account_keeps_userbot(db: Database) -> None:
-	"""Удаление неактивного аккаунта не трогает работающий userbot.
-
-	Переподключение — окно, в котором отправка из очереди упала бы;
-	оно оправдано только когда удалён именно активный аккаунт.
-	"""
-	gateway = _FakeGateway()
-	service = AccountsService(db, gateway)
-	await service.set_tg_api(777, "app-hash-app-hash")
-	first = await service.add_tg_account("Первый", "+7900")
-	second = await service.add_tg_account("Второй", "+7901")
-	await service.start_login(first.id)
-	assert await service.confirm_login_code(first.id, "12345") is True
-	await service.start_login(second.id)
-	assert await service.confirm_login_code(second.id, "12345") is True
-	deactivations_before = gateway.deactivations
-	await service.delete_tg_account(first.id)  # активный — второй
-	assert gateway.deactivations == deactivations_before  # подключение не рвалось
-	await service.delete_tg_account(second.id)  # а вот активный — переключает
-	assert gateway.deactivations == deactivations_before + 1
-	assert gateway.activated is None  # сессий не осталось
+	assert gateway.deactivations == [second.id, first.id]
+	assert gateway.activated == {}  # аккаунтов не осталось
 
 
 async def test_bot_whereabouts(db: Database) -> None:
@@ -276,30 +267,16 @@ async def test_login_bad_code_keeps_logged_out(db: Database) -> None:
 	assert (await service.list_tg_accounts())[0].logged_in is False
 
 
-async def test_premium_follows_activated_account(db: Database) -> None:
-	"""Premium светится у фактически подключённого аккаунта.
-
-	После входа во второй аккаунт активен именно он (шлюз подключён
-	к нему), а после «перезапуска» (activate_stored_userbot) — первый
-	по id с сессией: признак должен следовать за фактом, не за эвристикой.
-	"""
+async def test_premium_per_account(db: Database) -> None:
+	"""Premium светится у каждого подключённого аккаунта честно (ADR-0019)."""
 	gateway = _FakeGateway()
-	gateway.premium = True
 	service = AccountsService(db, gateway)
 	await service.set_tg_api(777, "app-hash-app-hash")
 	first = await service.add_tg_account("Первый", "+7900")
 	second = await service.add_tg_account("Второй", "+7901")
-	await service.start_login(first.id)
-	assert await service.confirm_login_code(first.id, "12345") is True
-	await service.start_login(second.id)
-	assert await service.confirm_login_code(second.id, "12345") is True
-
+	gateway.premium_ids = {second.id}
 	flags = {a.id: a.premium for a in await service.list_tg_accounts()}
-	assert flags == {first.id: False, second.id: True}  # активен второй
-
-	await service.activate_stored_userbot()  # как при перезапуске приложения
-	flags = {a.id: a.premium for a in await service.list_tg_accounts()}
-	assert flags == {first.id: True, second.id: False}  # правило «первый с сессией»
+	assert flags == {first.id: False, second.id: True}
 
 
 async def test_activate_stored_userbot_survives_wrong_secret_key(db: Database) -> None:
@@ -325,5 +302,5 @@ async def test_activate_stored_userbot_survives_wrong_secret_key(db: Database) -
 	get_secret_store.cache_clear()
 	gateway = _FakeGateway()
 	service = AccountsService(db, gateway)
-	await service.activate_stored_userbot()  # не должно бросить исключение
-	assert gateway.activated is None  # userbot не активирован, но и не упали
+	await service.activate_stored_userbots()  # не должно бросить исключение
+	assert gateway.activated == {}  # userbot не активирован, но и не упали

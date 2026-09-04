@@ -329,30 +329,61 @@ def test_ensure_userbot_can_post() -> None:
 		)
 
 
-async def test_activate_userbot_applies_new_credentials() -> None:
-	"""Повторная активация закрывает старого клиента и применяет реквизиты.
-
-	Сценарии: вход во второй аккаунт, повторный вход после отзыва сессии —
-	оба должны работать без перезапуска приложения.
-	"""
+async def test_activate_userbot_pool_per_account() -> None:
+	"""Пул шлюза: у каждого аккаунта свой клиент, повторная активация
+	заменяет клиента только этого аккаунта (ADR-0019)."""
 	from pxcontrol.engine.telegram.gateway import TelegramGateway
 
 	created: list[tuple[int, str, str | None]] = []
 	clients: list[_FakeClient] = []
 
-	def factory(api_id: int, api_hash: str, session: str | None) -> _FakeClient:
+	def client_factory(api_id: int, api_hash: str, session: str | None) -> _FakeClient:
 		created.append((api_id, api_hash, session))
 		client = _FakeClient()
 		clients.append(client)
 		return client
 
 	gateway = TelegramGateway()
-	gateway.mtproto = MtprotoTransport(client_factory=factory)
-	await gateway.activate_userbot(1, "h1", "s1")
-	await gateway.activate_userbot(2, "h2", "s2")
-	assert created == [(1, "h1", "s1"), (2, "h2", "s2")]
-	assert clients[0].connected is False  # старый клиент закрыт
-	assert clients[1].connected is True
+	gateway.transport_factory = lambda: MtprotoTransport(client_factory=client_factory)
+	await gateway.activate_userbot(10, 1, "h", "s1")
+	await gateway.activate_userbot(20, 1, "h", "s2")
+	assert created == [(1, "h", "s1"), (1, "h", "s2")]
+	assert clients[0].connected and clients[1].connected  # оба аккаунта в пуле
+	# повторный вход аккаунта 10 заменяет только его клиента
+	await gateway.activate_userbot(10, 1, "h", "s1-new")
+	assert clients[0].connected is False  # старый клиент аккаунта закрыт
+	assert clients[1].connected is True  # чужой аккаунт не тронут
+	assert clients[2].connected is True
+	# деактивация выборочная; публикация без клиента — понятная ошибка
+	await gateway.deactivate_userbot(20)
+	assert clients[1].connected is False
+	with pytest.raises(UserbotNotConnectedError, match="войдите"):
+		await gateway.publish(20, "-1001", OutgoingPost(text="x"))
+	await gateway.stop()
+	assert clients[2].connected is False  # остановка гасит весь пул
+
+
+async def test_gateway_premium_per_account() -> None:
+	"""Premium читается по аккаунту; неизвестный аккаунт и None — False."""
+	from pxcontrol.engine.telegram.gateway import TelegramGateway
+
+	premium_client = _FakeClient()
+	premium_client.me_premium = True
+	plain_client = _FakeClient()
+	clients = [premium_client, plain_client]
+	gateway = TelegramGateway()
+	gateway.transport_factory = lambda: MtprotoTransport(
+		client_factory=lambda a, b, c: clients.pop(0)
+	)
+	await gateway.activate_userbot(10, 1, "h", "s1")
+	await gateway.activate_userbot(20, 1, "h", "s2")
+	assert gateway.userbot_premium(10) is True
+	assert gateway.userbot_premium(20) is False
+	assert gateway.userbot_premium(None) is False
+	assert gateway.userbot_premium(99) is False  # не активирован
+	assert gateway.any_userbot_premium() is True
+	await gateway.stop()
+	assert gateway.any_userbot_premium() is False
 
 
 async def test_get_scheduled_returns_messages() -> None:

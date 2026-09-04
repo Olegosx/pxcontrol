@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Bot, Channel
+from pxcontrol.engine.db.models import Bot, Channel, TgAccount
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
@@ -21,17 +21,21 @@ from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMe
 
 
 class _FakeGateway:
-	"""Подмена шлюза: фиксирует отправки бота и публикации userbot."""
+	"""Подмена шлюза: фиксирует отправки бота и публикации userbot.
+
+	Публикации и чтения приходят с id аккаунта (ADR-0019) — он пишется
+	в журнал вызовов, тесты проверяют адресацию.
+	"""
 
 	def __init__(self) -> None:
 		self.sent: list[tuple[str, str, str]] = []
 		self.media: list[tuple[str, str, str, str, str]] = []
-		self.published: list[tuple[str, OutgoingPost]] = []
+		self.published: list[tuple[int, str, OutgoingPost]] = []
 		self.userbot_ok = True
-		self.premium = False
+		self.premium_ids: set[int] = set()
 
-	def userbot_premium(self) -> bool:
-		return self.premium
+	def userbot_premium(self, account_id: int | None) -> bool:
+		return account_id in self.premium_ids
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
 		self.sent.append((token, chat_id, text))
@@ -41,19 +45,25 @@ class _FakeGateway:
 		self.media.append((token, chat_id, kind, path, caption))
 		return 43
 
-	async def publish(self, chat_id: str, post: OutgoingPost, on_progress: object) -> None:
+	async def publish(
+		self, account_id: int, chat_id: str, post: OutgoingPost, on_progress: object
+	) -> None:
 		if not self.userbot_ok:
 			raise UserbotUnavailableError("Userbot не подключён — войдите в аккаунт.")
 		if post.media_path is not None and callable(on_progress):
 			on_progress(0.5)
 			on_progress(1.0)
-		self.published.append((chat_id, post))
+		self.published.append((account_id, chat_id, post))
+
+	def sent_posts(self) -> list[tuple[str, OutgoingPost]]:
+		"""Публикации без id аккаунта (для тестов, где адресация не важна)."""
+		return [(chat, post) for _acc, chat, post in self.published]
 
 	def thumbs(self) -> list[str | None]:
 		"""Миниатюры отправленных постов (в порядке отправки)."""
-		return [post.thumb_path for _chat, post in self.published]
+		return [post.thumb_path for _acc, _chat, post in self.published]
 
-	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
+	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		return [
 			ScheduledMessage(
 				text="Отложенный текст",
@@ -62,8 +72,18 @@ class _FakeGateway:
 		]
 
 
+async def _add_account(db: Database, label: str = "@ub") -> int:
+	"""Создаёт userbot-аккаунт с сессией, возвращает id."""
+	async with db.session_factory() as session:
+		account = TgAccount(label=label, phone="+7900", session="s")
+		session.add(account)
+		await session.commit()
+		await session.refresh(account)
+		return account.id
+
+
 async def _add_channel(db: Database, with_bot: bool = True, userbot_admin: bool = True) -> int:
-	"""Создаёт канал (и бота при необходимости), возвращает id канала."""
+	"""Создаёт канал (при нужде — бота и userbot-аккаунт), возвращает id."""
 	async with db.session_factory() as session:
 		bot_id = None
 		if with_bot:
@@ -71,11 +91,17 @@ async def _add_channel(db: Database, with_bot: bool = True, userbot_admin: bool 
 			session.add(bot)
 			await session.flush()
 			bot_id = bot.id
+		account_id = None
+		if userbot_admin:
+			account = TgAccount(label="@ub", phone="+7900", session="s")
+			session.add(account)
+			await session.flush()
+			account_id = account.id
 		channel = Channel(
 			title="Канал",
 			tg_chat_id="-1001",
 			bot_id=bot_id,
-			userbot_admin=userbot_admin,
+			tg_account_id=account_id,
 		)
 		session.add(channel)
 		await session.commit()
@@ -91,10 +117,13 @@ async def test_publish_text_now_and_scheduled(db: Database) -> None:
 	await service.publish(PostDraft(channel_id, text="сразу"))
 	when = datetime.now(UTC) + timedelta(hours=1)
 	await service.publish(PostDraft(channel_id, text="позже", when=when))
-	assert gateway.published == [
+	assert gateway.sent_posts() == [
 		("-1001", OutgoingPost(text="сразу")),
 		("-1001", OutgoingPost(text="позже", when=when)),
 	]
+	# публикация адресована аккаунту, привязанному к каналу (ADR-0019)
+	bound = await service.account_for_channel(channel_id)
+	assert [acc for acc, _chat, _post in gateway.published] == [bound, bound]
 
 
 async def test_publish_media_with_progress(db: Database, tmp_path: Path) -> None:
@@ -112,7 +141,7 @@ async def test_publish_media_with_progress(db: Database, tmp_path: Path) -> None
 		media_kind=MediaKind.VIDEO,
 	)
 	await service.publish(draft, on_progress=received.append)
-	chat_id, post = gateway.published[0]
+	chat_id, post = gateway.sent_posts()[0]
 	assert (chat_id, post.text, post.media_path) == ("-1001", "подпись", str(video))
 	assert post.media_kind == "video" and post.when is None
 	assert received == [0.5, 1.0]
@@ -248,7 +277,7 @@ async def test_publish_renames_file_and_preview(
 			rename_to="Новое имя.mp4",
 		)
 	)
-	_chat, post = gateway.published[0]
+	_chat, post = gateway.sent_posts()[0]
 	assert post.media_path == str(tmp_path / "Новое имя.mp4")
 	assert (tmp_path / "Новое имя.mp4").is_file()
 	assert (tmp_path / "Новое имя.png").is_file()
@@ -395,20 +424,21 @@ async def test_list_scheduled_isolates_channel_failure(db: Database) -> None:
 	"""Ошибка одного канала не роняет список: канал пропускается."""
 
 	class _FlakyGateway(_FakeGateway):
-		async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
+		async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 			if chat_id == "-1001":
 				raise UserbotUnavailableError("Telegram просит подождать 5 с.")
-			return await super().get_scheduled(chat_id)
+			return await super().get_scheduled(account_id, chat_id)
 
 	service = PostsService(db, _FlakyGateway())
 	await _add_channel(db)  # tg_chat_id="-1001" — упадёт
+	other_account = await _add_account(db, "@второй")
 	async with db.session_factory() as session:
 		session.add(
 			Channel(
 				title="Второй",
 				tg_chat_id="-1002",
 				bot_id=None,
-				userbot_admin=True,
+				tg_account_id=other_account,
 			)
 		)
 		await session.commit()
@@ -448,8 +478,10 @@ async def test_publish_userbot_rejects_oversized_file(
 	with pytest.raises(PostError, match="лимит"):
 		await service.publish(draft)
 	assert gateway.published == []
-	# тот же файл у Premium-аккаунта проходит (лимит выше)
-	gateway.premium = True
+	# тот же файл у Premium-аккаунта канала проходит (лимит выше)
+	bound = await service.account_for_channel(channel_id)
+	assert bound is not None
+	gateway.premium_ids = {bound}
 	await service.publish(draft)
 	assert len(gateway.published) == 1
 
@@ -565,7 +597,7 @@ async def test_scheduled_times_for_batch_planning(db: Database) -> None:
 	assert await service.scheduled_times(channel_id) == [datetime(2026, 7, 13, 12, 0, tzinfo=UTC)]
 	# канал без userbot-админа отложек иметь не может — пустой список
 	async with db.session_factory() as session:
-		other = Channel(title="Бот-канал", tg_chat_id="-1002", userbot_admin=False)
+		other = Channel(title="Бот-канал", tg_chat_id="-1002", tg_account_id=None)
 		session.add(other)
 		await session.commit()
 		await session.refresh(other)

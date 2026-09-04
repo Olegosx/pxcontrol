@@ -335,7 +335,7 @@ class PublishPage(ScrollArea):
 			)
 			run_in_engine(
 				self._worker,
-				self._worker.engine.posts.userbot_limit_gb(),
+				self._worker.engine.posts.userbot_limit_gb(channel.id),
 				self,
 				partial(self._show_userbot_limit, channel.id),
 				noop,
@@ -681,7 +681,7 @@ class PublishPage(ScrollArea):
 		if caps.userbot:
 			run_in_engine(
 				self._worker,
-				self._worker.engine.posts.userbot_limit_bytes(),
+				self._worker.engine.posts.userbot_limit_bytes(setup.channel.id),
 				self,
 				partial(self._open_batch_dialog, setup, True),
 				self._show_error,

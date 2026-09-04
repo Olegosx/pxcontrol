@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from pxcontrol.engine.db.database import Database
+from pxcontrol.engine.db.models import TgAccount
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.channels import ChannelError, ChannelsService
 from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
@@ -21,11 +22,17 @@ from pxcontrol.engine.telegram.types import ChannelInfo
 
 
 class _FakeGateway:
-	"""Подмена шлюза: токены и каналы проверяются без сети."""
+	"""Подмена шлюза: токены и каналы проверяются без сети.
+
+	Userbot-проверки адресные (ADR-0019): «админами» считаются аккаунты
+	из ``userbot_admins``, остальным Telegram «подтверждает отказ».
+	"""
 
 	login = None  # вход userbot в этих тестах не используется
-	userbot_is_admin = True  # ответ попутной/основной userbot-проверки
-	bot_is_admin = True  # ответ проверки прав бота
+
+	def __init__(self) -> None:
+		self.userbot_admins: set[int] = set()
+		self.bot_is_admin = True  # ответ проверки прав бота
 
 	async def check_bot_token(self, token: str) -> str:
 		return "test_bot"
@@ -37,8 +44,8 @@ class _FakeGateway:
 			raise ChannelCheckError("У бота нет права публиковать сообщения в канале.")
 		return ChannelInfo("-1001234", "Тестовый канал", "testchan")
 
-	async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo:
-		if not self.userbot_is_admin:
+	async def check_channel_userbot(self, account_id: int, chat_ref: str) -> ChannelInfo:
+		if account_id not in self.userbot_admins:
 			raise UserbotAccessError(
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
@@ -51,6 +58,16 @@ async def _make_bot(db: Database) -> int:
 	accounts = AccountsService(db, _FakeGateway())  # type: ignore[arg-type]
 	bot = await accounts.add_bot("Публикатор", "123456:AAAbbb")
 	return bot.id
+
+
+async def _make_account(db: Database, label: str = "@ub") -> int:
+	"""Создаёт вошедший userbot-аккаунт, возвращает его id."""
+	async with db.session_factory() as session:
+		account = TgAccount(label=label, phone="+7900", session="s")
+		session.add(account)
+		await session.commit()
+		await session.refresh(account)
+		return account.id
 
 
 async def test_channel_lifecycle(db: Database) -> None:
@@ -89,84 +106,124 @@ async def test_duplicate_channel_rejected(db: Database) -> None:
 
 
 async def test_bot_connect_probes_userbot(db: Database) -> None:
-	"""Бот-путь попутно отмечает userbot-админа; сбой пробы не мешает."""
+	"""Бот-путь попутно привязывает аккаунта-админа; не нашёлся — без него."""
 	bot_id = await _make_bot(db)
+	account_id = await _make_account(db)
 	gateway = _FakeGateway()
+	gateway.userbot_admins = {account_id}
 	service = ChannelsService(db, gateway)
 	dto = await service.add_channel(bot_id, "@testchan")
 	assert dto.userbot_admin is True
+	assert dto.tg_account_id == account_id and dto.tg_account_label == "@ub"
 	await service.delete_channel(dto.id)
-	gateway.userbot_is_admin = False
+	gateway.userbot_admins = set()  # аккаунт есть, но не админ канала
 	dto = await service.add_channel(bot_id, "@testchan")
-	assert dto.userbot_admin is False  # подключение состоялось без userbot
+	assert dto.userbot_admin is False and dto.tg_account_id is None
 
 
 async def test_connect_via_userbot(db: Database) -> None:
-	"""Через userbot канал подключается без бота; не админ — ошибка."""
+	"""Через выбранный аккаунт канал подключается без бота; не админ — ошибка."""
+	account_id = await _make_account(db)
 	gateway = _FakeGateway()
+	gateway.userbot_admins = {account_id}
 	service = ChannelsService(db, gateway)
-	dto = await service.add_channel_via_userbot("@testchan")
+	dto = await service.add_channel_via_userbot(account_id, "@testchan")
 	assert dto.bot_id is None and dto.bot_label is None
-	assert dto.userbot_admin is True
+	assert dto.tg_account_id == account_id and dto.userbot_admin is True
 	listed = await service.list_channels()
-	assert listed[0].userbot_admin is True
+	assert listed[0].tg_account_label == "@ub"
 	with pytest.raises(ChannelError, match="уже подключён"):
-		await service.add_channel_via_userbot("@testchan")
+		await service.add_channel_via_userbot(account_id, "@testchan")
 	await service.delete_channel(dto.id)
-	gateway.userbot_is_admin = False
+	gateway.userbot_admins = set()
 	with pytest.raises(UserbotUnavailableError, match="не администратор"):
-		await service.add_channel_via_userbot("@testchan")
+		await service.add_channel_via_userbot(account_id, "@testchan")
 	assert await service.list_channels() == []
+	with pytest.raises(ChannelError, match="Аккаунт не найден"):
+		await service.add_channel_via_userbot(999, "@testchan")
 
 
-async def test_recheck_updates_flags_both_ways(db: Database) -> None:
-	"""Перепроверка актуализирует userbot-флаг и сообщает о правах бота."""
+async def test_recheck_updates_binding_both_ways(db: Database) -> None:
+	"""Перепроверка привязывает найденного админа и снимает потерявшего права."""
 	bot_id = await _make_bot(db)
+	account_id = await _make_account(db)
 	gateway = _FakeGateway()
-	gateway.userbot_is_admin = False
 	service = ChannelsService(db, gateway)
-	dto = await service.add_channel(bot_id, "@testchan")
-	assert dto.userbot_admin is False
-	# userbot стал админом (например, добавили после подключения)
-	gateway.userbot_is_admin = True
+	dto = await service.add_channel(bot_id, "@testchan")  # аккаунт пока не админ
+	assert dto.tg_account_id is None
+	# аккаунт стал админом (например, добавили после подключения)
+	gateway.userbot_admins = {account_id}
 	access = await service.recheck_channel(dto.id)
-	assert access.userbot_ok and access.channel.userbot_admin is True
+	assert access.userbot_ok and access.channel.tg_account_id == account_id
 	assert access.bot_ok is True
-	# бота выгнали из канала: флаг userbot остаётся, бот — предупреждение
+	# бота выгнали: бот — только предупреждение, привязка userbot цела
 	gateway.bot_is_admin = False
 	access = await service.recheck_channel(dto.id)
 	assert access.bot_ok is False
 	assert access.channel.bot_id is not None  # бот не отвязан молча
+	assert access.channel.tg_account_id == account_id
+	# аккаунт потерял права (подтверждённый отказ) — привязка снимается
+	gateway.userbot_admins = set()
+	gateway.bot_is_admin = True
+	access = await service.recheck_channel(dto.id)
+	assert access.userbot_ok is False
+	assert access.channel.tg_account_id is None
 
 
-async def test_recheck_keeps_flag_when_userbot_unreachable(db: Database) -> None:
-	"""Сбой связи/подключения userbot не сбрасывает сохранённые права.
+async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> None:
+	"""Сбой связи/подключения аккаунта не сбрасывает привязку.
 
 	Иначе перепроверка при мигнувшей сети молча лишала бы канал
-	отложенных постов и больших файлов (маршрутизация идёт по флагу).
+	отложенных постов и больших файлов (маршрутизация идёт по привязке).
 	"""
 
 	class _OfflineGateway(_FakeGateway):
-		async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo:
+		async def check_channel_userbot(self, account_id: int, chat_ref: str) -> ChannelInfo:
 			raise UserbotNotConnectedError("Userbot не подключён — войдите.")
 
 	bot_id = await _make_bot(db)
+	account_id = await _make_account(db)
 	gateway = _FakeGateway()
+	gateway.userbot_admins = {account_id}
 	service = ChannelsService(db, gateway)
 	dto = await service.add_channel(bot_id, "@testchan")
-	assert dto.userbot_admin is True
+	assert dto.tg_account_id == account_id
 	offline = ChannelsService(db, _OfflineGateway())
 	access = await offline.recheck_channel(dto.id)
 	assert access.userbot_ok is None  # «не удалось проверить», не «не админ»
-	assert access.channel.userbot_admin is True  # флаг не тронут
+	assert access.channel.tg_account_id == account_id  # привязка не тронута
+
+
+async def test_assign_and_unassign_userbot(db: Database) -> None:
+	"""Каналу привязывается аккаунт (с проверкой прав) и отвязывается."""
+	bot_id = await _make_bot(db)
+	account_id = await _make_account(db)
+	gateway = _FakeGateway()
+	service = ChannelsService(db, gateway)
+	dto = await service.add_channel(bot_id, "@testchan")
+	assert dto.tg_account_id is None
+	# без прав — не привязывается
+	with pytest.raises(UserbotUnavailableError, match="не администратор"):
+		await service.assign_userbot(dto.id, account_id)
+	# с правами — привязывается
+	gateway.userbot_admins = {account_id}
+	updated = await service.assign_userbot(dto.id, account_id)
+	assert updated.tg_account_id == account_id and updated.tg_account_label == "@ub"
+	# отвязка: аккаунт исчезает из канала, но остаётся в приложении
+	updated = await service.unassign_userbot(dto.id)
+	assert updated.tg_account_id is None and updated.userbot_admin is False
+	with pytest.raises(ChannelError, match="Аккаунт не найден"):
+		await service.assign_userbot(dto.id, 999)
 
 
 async def test_assign_and_unassign_bot(db: Database) -> None:
 	"""Каналу без бота назначается бот (с проверкой прав) и отвязывается."""
 	bot_id = await _make_bot(db)
+	account_id = await _make_account(db)
 	gateway = _FakeGateway()
+	gateway.userbot_admins = {account_id}
 	service = ChannelsService(db, gateway)
-	dto = await service.add_channel_via_userbot("@testchan")
+	dto = await service.add_channel_via_userbot(account_id, "@testchan")
 	assert dto.bot_id is None
 	# без прав — не назначается
 	gateway.bot_is_admin = False
@@ -176,9 +233,9 @@ async def test_assign_and_unassign_bot(db: Database) -> None:
 	gateway.bot_is_admin = True
 	updated = await service.assign_bot(dto.id, bot_id)
 	assert updated.bot_id == bot_id and updated.bot_label == "Публикатор"
-	# отвязка: бот исчезает, userbot-флаг не трогается
+	# отвязка: бот исчезает, привязка userbot не трогается
 	updated = await service.unassign_bot(dto.id)
-	assert updated.bot_id is None and updated.userbot_admin is True
+	assert updated.bot_id is None and updated.tg_account_id == account_id
 
 
 async def test_unknown_bot_rejected(db: Database) -> None:
@@ -242,8 +299,11 @@ def test_describe_update() -> None:
 
 async def test_channel_enabled_comes_from_settings(db: Database) -> None:
 	"""Флаг активности канала в DTO читается из настроек (умолчание — True)."""
-	service = ChannelsService(db, _FakeGateway())
-	channel = await service.add_channel_via_userbot("@chan")
+	account_id = await _make_account(db)
+	gateway = _FakeGateway()
+	gateway.userbot_admins = {account_id}
+	service = ChannelsService(db, gateway)
+	channel = await service.add_channel_via_userbot(account_id, "@chan")
 	assert channel.enabled is True
 	await SettingsService(db).set_for(CHANNEL_ENABLED, channel.id, False)
 	listed = await service.list_channels()

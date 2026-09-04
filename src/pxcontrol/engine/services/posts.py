@@ -35,10 +35,7 @@ from pxcontrol.engine.services.settings import (
 	SettingsService,
 )
 from pxcontrol.engine.services.video import video_base_dir
-from pxcontrol.engine.telegram.mtproto import (
-	UserbotNotConnectedError,
-	UserbotUnavailableError,
-)
+from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
 
 # лимит Bot API живёт в telegram/types.py; здесь — явный реэкспорт
 # (интерфейс исторически берёт его из сервиса постов)
@@ -166,12 +163,13 @@ def refresh_draft_media(draft: PostDraft) -> PostDraft:
 class _PostPort(Protocol):
 	"""Часть шлюза Telegram, нужная сервису (для подмены в тестах)."""
 
-	def userbot_premium(self) -> bool: ...
+	def userbot_premium(self, account_id: int | None) -> bool: ...
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int: ...
 
 	async def publish(
 		self,
+		account_id: int,
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: ProgressCallback | None,
@@ -181,7 +179,7 @@ class _PostPort(Protocol):
 		self, token: str, chat_id: str, kind: MediaKind, path: str, caption: str
 	) -> int: ...
 
-	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]: ...
+	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
 
 
 @dataclass(frozen=True)
@@ -238,8 +236,8 @@ class PostsService:
 			raise PostError(
 				f"Канал «{channel.title}» выключен — включите его на странице «Каналы»."
 			)
-		caps = publish_capabilities(channel.bot is not None, channel.userbot_admin)
-		self._check_transport(caps, draft)
+		caps = publish_capabilities(channel.bot is not None, channel.tg_account_id is not None)
+		self._check_transport(caps, draft, channel.tg_account_id)
 		# переименование — после всех проверок, способных отклонить черновик:
 		# отклонённая публикация не должна оставлять файл переименованным
 		media_path = draft.media_path
@@ -259,11 +257,15 @@ class PostsService:
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
 
-	def _check_transport(self, caps: PublishCapabilities, draft: PostDraft) -> None:
+	def _check_transport(
+		self, caps: PublishCapabilities, draft: PostDraft, account_id: int | None
+	) -> None:
 		"""Проверки транспорта, способные отклонить черновик.
 
 		Выполняются до побочных эффектов публикации (переименование файла):
 		отклонённый черновик не должен менять ничего на диске.
+		``account_id`` — привязанный userbot-аккаунт канала (ADR-0019):
+		лимит файла зависит от Premium именно этого аккаунта.
 
 		Raises:
 			PostError: Нет способа публикации, отложенный пост через бота
@@ -275,7 +277,7 @@ class PostsService:
 			)
 		media_path = draft.media_path
 		if caps.userbot:
-			limit = userbot_max_file_bytes(self._gateway.userbot_premium())
+			limit = userbot_max_file_bytes(self._gateway.userbot_premium(account_id))
 			if media_path is not None and self._file_size(media_path) > limit:
 				raise PostError(
 					f"Файл больше {limit // 10**9} ГБ — лимит Telegram на файл "
@@ -315,10 +317,13 @@ class PostsService:
 		media_path: str | None,
 		on_progress: ProgressCallback | None,
 	) -> None:
-		"""Полный путь через userbot (MTProto): всё, включая отложенные.
+		"""Полный путь через userbot: из сессии аккаунта канала (ADR-0019).
 
-		Лимит размера файла проверен раньше (:meth:`_check_transport`).
+		Лимит размера файла проверен раньше (:meth:`_check_transport`);
+		сюда канал приходит только с привязкой (маршрутизация ``publish``).
 		"""
+		if channel.tg_account_id is None:  # publish() сюда без привязки не приводит
+			raise PostError("У канала нет userbot-админа — проверьте доступы.")
 		with tempfile.TemporaryDirectory() as tmp:
 			thumb: str | None = None
 			if draft.media_kind is MediaKind.VIDEO and media_path:
@@ -330,7 +335,9 @@ class PostsService:
 				when=draft.when,
 				thumb_path=thumb,
 			)
-			await self._gateway.publish(channel.tg_chat_id, post, on_progress)
+			await self._gateway.publish(
+				channel.tg_account_id, channel.tg_chat_id, post, on_progress
+			)
 
 	async def _publish_bot(
 		self, channel: Channel, draft: PostDraft, media_path: str | None
@@ -543,18 +550,29 @@ class PostsService:
 			return None
 		return thumb
 
-	async def userbot_limit_gb(self) -> int:
-		"""Лимит userbot на файл в целых ГБ — для подсказок интерфейса."""
-		return userbot_max_file_bytes(self._gateway.userbot_premium()) // 10**9
+	async def userbot_limit_gb(self, channel_id: int) -> int:
+		"""Лимит на файл канала в целых ГБ — для подсказок интерфейса.
 
-	async def userbot_limit_bytes(self) -> int:
-		"""Точный лимит userbot на файл в байтах (2000/4000 МиБ по Premium).
+		Зависит от Premium аккаунта, привязанного к каналу (ADR-0019);
+		канал без привязки — меньший, безопасный лимит.
+
+		Raises:
+			PostError: Канал не найден.
+		"""
+		return (await self.userbot_limit_bytes(channel_id)) // 10**9
+
+	async def userbot_limit_bytes(self, channel_id: int) -> int:
+		"""Точный лимит на файл канала в байтах (2000/4000 МиБ по Premium).
 
 		Для пометки «больше лимита канала» в пакете отправки (ADR-0015):
 		округление до целых ГБ здесь дало бы ложные пометки у файлов
 		между 2 ГБ и фактическими 2000 МиБ.
+
+		Raises:
+			PostError: Канал не найден.
 		"""
-		return userbot_max_file_bytes(self._gateway.userbot_premium())
+		channel = await self._get_channel(channel_id)
+		return userbot_max_file_bytes(self._gateway.userbot_premium(channel.tg_account_id))
 
 	async def channel_title(self, channel_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).
@@ -602,22 +620,22 @@ class PostsService:
 	async def list_scheduled(self) -> list[ScheduledPostDto]:
 		"""Собирает отложенные записи активных userbot-каналов из Telegram.
 
-		Опрашиваются только каналы с userbot-админом: у бот-канала
-		отложенных быть не может (Bot API их не умеет, ADR-0010/0011).
-		Выключенные каналы (настройка ``enabled`` = False) не опрашиваются.
-		Ошибка одного канала не роняет весь список — канал пропускается
-		с предупреждением в логе.
-
-		Raises:
-			UserbotNotConnectedError: Userbot не подключён вовсе — без него
-				опрашивать нечего, ошибка общая для всех каналов.
+		Опрашиваются только каналы с привязанным userbot-аккаунтом —
+		каждый своим аккаунтом (ADR-0019): у бот-канала отложенных быть
+		не может (Bot API их не умеет, ADR-0010/0011). Выключенные каналы
+		(настройка ``enabled`` = False) не опрашиваются. Ошибка одного
+		канала не роняет весь список — канал пропускается
+		с предупреждением в логе (включая «его аккаунт не подключён»:
+		другие аккаунты могут быть живы).
 		"""
 		enabled = await self._settings.get_for_all(CHANNEL_ENABLED)
 		async with self._db.session_factory() as session:
 			channels = (
 				(
 					await session.execute(
-						select(Channel).where(Channel.userbot_admin).order_by(Channel.id)
+						select(Channel)
+						.where(Channel.tg_account_id.is_not(None))
+						.order_by(Channel.id)
 					)
 				)
 				.scalars()
@@ -627,10 +645,12 @@ class PostsService:
 		for channel in channels:
 			if not enabled.get(channel.id, CHANNEL_ENABLED.default):
 				continue
+			if channel.tg_account_id is None:  # для mypy: выборка отфильтровала
+				continue
 			try:
-				messages = await self._gateway.get_scheduled(channel.tg_chat_id)
-			except UserbotNotConnectedError:
-				raise
+				messages = await self._gateway.get_scheduled(
+					channel.tg_account_id, channel.tg_chat_id
+				)
 			except UserbotUnavailableError as exc:
 				logger.warning("Отложенные канала «%s» не прочитаны: %s", channel.title, exc)
 				continue
@@ -643,8 +663,9 @@ class PostsService:
 		"""Моменты существующих отложек канала (для раскладки пакета).
 
 		Пакетная отправка (ADR-0015) пропускает занятые слоты — сюда
-		отдаются времена уже созданных в Telegram отложенных записей.
-		Канал без userbot-админа отложек иметь не может — пустой список.
+		отдаются времена уже созданных в Telegram отложенных записей;
+		читает их аккаунт, привязанный к каналу (ADR-0019). Канал без
+		userbot-админа отложек иметь не может — пустой список.
 
 		Raises:
 			PostError: Канал не найден.
@@ -652,10 +673,22 @@ class PostsService:
 				вызывающая сторона решает, продолжать ли без них.
 		"""
 		channel = await self._get_channel(channel_id)
-		if not channel.userbot_admin:
+		if channel.tg_account_id is None:
 			return []
-		messages = await self._gateway.get_scheduled(channel.tg_chat_id)
+		messages = await self._gateway.get_scheduled(channel.tg_account_id, channel.tg_chat_id)
 		return [message.scheduled_at for message in messages]
+
+	async def account_for_channel(self, channel_id: int) -> int | None:
+		"""Привязанный userbot-аккаунт канала (None — привязки нет).
+
+		Нужен дозору слотов очереди отправки (ADR-0016/0019): флуд-лимит
+		действует на аккаунт, и тик прекращает опрос только каналов
+		провинившегося аккаунта.
+
+		Raises:
+			PostError: Канал не найден.
+		"""
+		return (await self._get_channel(channel_id)).tg_account_id
 
 	async def _get_channel(self, channel_id: int) -> Channel:
 		"""Возвращает канал с ботом или объясняет, что канал не найден."""

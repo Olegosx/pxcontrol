@@ -24,7 +24,7 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.accounts import BotDto
+from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.channels import ChannelAccess, ChannelDto
 from pxcontrol.engine.services.settings import (
 	CHANNEL_DEFAULT_PRESET,
@@ -53,11 +53,15 @@ from pxcontrol.ui.pages.common import (
 
 
 class _ConnectDialog(MessageBoxBase):
-	"""Диалог подключения: способ (userbot/бот), бот для бот-способа, ссылка."""
+	"""Диалог подключения: способ (userbot/бот), исполнитель, ссылка.
+
+	Для userbot-способа аккаунт выбирается явно (ADR-0019): его права
+	проверяются, и именно он привязывается к каналу как публикатор.
+	"""
 
 	_HINTS = {
 		"userbot": (
-			"Аккаунт userbot должен быть администратором канала\n"
+			"Выбранный аккаунт должен быть администратором канала\n"
 			"с правом публиковать сообщения (бот не нужен)."
 		),
 		"bot": (
@@ -66,7 +70,8 @@ class _ConnectDialog(MessageBoxBase):
 		),
 	}
 
-	def __init__(self, bots: list[BotDto], parent: QWidget) -> None:
+	def __init__(self, bots: list[BotDto], accounts: list[TgAccountDto], parent: QWidget) -> None:
+		"""``accounts`` — вошедшие userbot-аккаунты (кандидаты в админы)."""
 		super().__init__(parent)
 		self.viewLayout.addWidget(SubtitleLabel("Подключить канал", self))
 		self._way = ComboBox(self)
@@ -76,6 +81,9 @@ class _ConnectDialog(MessageBoxBase):
 		self.viewLayout.addWidget(self._way)
 		self._hint = BodyLabel("", self)
 		self.viewLayout.addWidget(self._hint)
+		self._account_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
+		self._account_combo.set_items(accounts, label=lambda acc: f"{acc.label} ({acc.phone})")
+		self.viewLayout.addWidget(self._account_combo)
 		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
 		self._combo.set_items(bots, label=lambda bot: bot_caption(bot.label, bot.username))
 		self.viewLayout.addWidget(self._combo)
@@ -97,11 +105,16 @@ class _ConnectDialog(MessageBoxBase):
 			return self._error.fail("Укажите @имя, ссылку или ID канала.")
 		if self.way() == "bot" and self.bot_id() is None:
 			return self._error.fail("Сначала добавьте бота: Настройки → Аккаунты.")
+		if self.way() == "userbot" and self.account_id() is None:
+			return self._error.fail(
+				"Нет вошедших userbot-аккаунтов — войдите: Настройки → Аккаунты."
+			)
 		return self._error.succeed()
 
 	def _on_way_changed(self, index: int) -> None:
-		"""Показывает выбор бота только для бот-способа."""
+		"""Показывает выбор исполнителя своего способа."""
 		self._combo.setVisible(index == 1)
+		self._account_combo.setVisible(index == 0)
 		self._hint.setText(self._HINTS["bot" if index == 1 else "userbot"])
 
 	def way(self) -> str:
@@ -112,6 +125,11 @@ class _ConnectDialog(MessageBoxBase):
 		"""Идентификатор выбранного бота (None — ботов нет)."""
 		bot = self._combo.selected()
 		return bot.id if bot is not None else None
+
+	def account_id(self) -> int | None:
+		"""Идентификатор выбранного userbot-аккаунта (None — вошедших нет)."""
+		account = self._account_combo.selected()
+		return account.id if account is not None else None
 
 	def chat_ref(self) -> str:
 		"""Введённая ссылка на канал."""
@@ -141,6 +159,32 @@ class _AssignBotDialog(MessageBoxBase):
 		"""Идентификатор выбранного бота (None — ботов нет)."""
 		bot = self._combo.selected()
 		return bot.id if bot is not None else None
+
+
+class _AssignUserbotDialog(MessageBoxBase):
+	"""Выбор userbot-аккаунта для привязки к каналу (ADR-0019)."""
+
+	def __init__(self, accounts: list[TgAccountDto], parent: QWidget) -> None:
+		super().__init__(parent)
+		self.viewLayout.addWidget(SubtitleLabel("Привязать userbot", self))
+		self.viewLayout.addWidget(
+			BodyLabel(
+				"Аккаунт должен быть администратором канала с правом\n"
+				"публиковать — посты пойдут из его сессии.",
+				self,
+			)
+		)
+		self._combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
+		self._combo.set_items(accounts, label=lambda acc: f"{acc.label} ({acc.phone})")
+		self.viewLayout.addWidget(self._combo)
+		self.yesButton.setText("Привязать")
+		self.cancelButton.setText("Отмена")
+		self.widget.setMinimumWidth(420)
+
+	def account_id(self) -> int | None:
+		"""Идентификатор выбранного аккаунта (None — вошедших нет)."""
+		account = self._combo.selected()
+		return account.id if account is not None else None
 
 
 class _ChannelPrefsDialog(MessageBoxBase):
@@ -268,12 +312,12 @@ class ChannelsPage(ScrollArea):
 		return box
 
 	def _channel_row(self, channel: ChannelDto) -> CardWidget:
-		"""Карточка канала: название, способы администрирования, действия."""
+		"""Карточка канала: название, публикаторы, действия."""
 		ways = []
+		if channel.tg_account_label:
+			ways.append(f"userbot {channel.tg_account_label}")
 		if channel.bot_label:
 			ways.append(f"бот {channel.bot_label}")
-		if channel.userbot_admin:
-			ways.append("userbot")
 		subtitle = f"@{channel.username or '—'} · админ: {' + '.join(ways) or '—'}"
 		buttons = QWidget(self)
 		row = QHBoxLayout(buttons)
@@ -290,6 +334,14 @@ class ChannelsPage(ScrollArea):
 		prefs_action.setToolTip("Пресет видео по умолчанию и времена публикации")
 		prefs_action.clicked.connect(bind(self._on_open_prefs, channel))
 		row.addWidget(prefs_action)
+		if channel.tg_account_id is None:
+			userbot_action = PushButton("Привязать userbot…", buttons)
+			userbot_action.setToolTip("Постинг пойдёт из сессии привязанного аккаунта")
+			userbot_action.clicked.connect(bind(self._on_assign_userbot, channel))
+		else:
+			userbot_action = PushButton("Отвязать userbot", buttons)
+			userbot_action.clicked.connect(bind(self._on_unassign_userbot, channel))
+		row.addWidget(userbot_action)
 		if channel.bot_id is None:
 			bot_action = PushButton("Назначить бота…", buttons)
 			bot_action.clicked.connect(bind(self._on_assign_bot, channel))
@@ -398,9 +450,11 @@ class ChannelsPage(ScrollArea):
 	def _on_rechecked(self, access: ChannelAccess) -> None:
 		"""Показывает итог перепроверки и обновляет список."""
 		if access.userbot_ok is None:
-			userbot_text = "не удалось проверить (нет связи или userbot отключён)"
+			userbot_text = "не удалось проверить (нет связи или аккаунт не подключён)"
+		elif access.userbot_ok:
+			userbot_text = f"админ — {access.channel.tg_account_label or '—'}"
 		else:
-			userbot_text = "админ" if access.userbot_ok else "не админ"
+			userbot_text = "не админ — привязка снята"
 		parts = [f"userbot: {userbot_text}"]
 		if access.bot_ok is not None:
 			parts.append(f"бот: {'права на месте' if access.bot_ok else 'права потеряны'}")
@@ -460,20 +514,82 @@ class ChannelsPage(ScrollArea):
 		InfoBar.success("Готово", channel.title, parent=self)
 		self._reload()
 
+	# --- привязка userbot (ADR-0019) --------------------------------------------
+
+	def _on_assign_userbot(self, channel: ChannelDto) -> None:
+		"""Открывает выбор аккаунта для привязки к каналу."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.accounts.list_tg_accounts(),
+			self,
+			partial(self._open_assign_userbot_dialog, channel),
+			self._show_error,
+		)
+
+	def _open_assign_userbot_dialog(
+		self, channel: ChannelDto, accounts: list[TgAccountDto]
+	) -> None:
+		"""Диалог выбора аккаунта; после выбора — проверка его прав в канале."""
+		logged_in = [account for account in accounts if account.logged_in]
+		if not logged_in:
+			self._show_error("Нет вошедших userbot-аккаунтов — войдите: Настройки → Аккаунты.")
+			return
+		dialog = _AssignUserbotDialog(logged_in, self.window())
+		if not exec_dialog(dialog):
+			return
+		account_id = dialog.account_id()
+		if account_id is None:
+			return
+		InfoBar.info("Проверка", "Проверяю права аккаунта в канале…", parent=self)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.channels.assign_userbot(channel.id, account_id),
+			self,
+			self._on_bot_changed,
+			self._show_error,
+		)
+
+	def _on_unassign_userbot(self, channel: ChannelDto) -> None:
+		if not confirm_delete(
+			self,
+			f"Отвязать userbot от канала «{channel.title}»? Отложенные посты "
+			"и большие файлы станут ему недоступны.",
+			accept_text="Отвязать",
+		):
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.channels.unassign_userbot(channel.id),
+			self,
+			self._on_bot_changed,
+			self._show_error,
+		)
+
 	# --- подключение -----------------------------------------------------------
 
 	def _on_connect(self) -> None:
-		"""Загружает список ботов и открывает диалог подключения."""
+		"""Загружает ботов и аккаунты, затем открывает диалог подключения."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.accounts.list_bots(),
 			self,
-			self._open_connect_dialog,
+			self._on_connect_bots_loaded,
 			self._show_error,
 		)
 
-	def _open_connect_dialog(self, bots: list[BotDto]) -> None:
-		dialog = _ConnectDialog(bots, self.window())
+	def _on_connect_bots_loaded(self, bots: list[BotDto]) -> None:
+		"""Боты получены — вторым шагом список userbot-аккаунтов."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.accounts.list_tg_accounts(),
+			self,
+			partial(self._open_connect_dialog, bots),
+			self._show_error,
+		)
+
+	def _open_connect_dialog(self, bots: list[BotDto], accounts: list[TgAccountDto]) -> None:
+		logged_in = [account for account in accounts if account.logged_in]
+		dialog = _ConnectDialog(bots, logged_in, self.window())
 		if not exec_dialog(dialog):
 			return
 		# пригодность ввода проверил validate() диалога — здесь только сборка
@@ -484,7 +600,13 @@ class ChannelsPage(ScrollArea):
 				return
 			coro = self._worker.engine.channels.add_channel(bot_id, dialog.chat_ref())
 		else:
-			coro = self._worker.engine.channels.add_channel_via_userbot(dialog.chat_ref())
+			account_id = dialog.account_id()
+			if account_id is None:  # недостижимо после validate(), страховка типа
+				self._show_error("Войдите в userbot-аккаунт: Настройки → Аккаунты.")
+				return
+			coro = self._worker.engine.channels.add_channel_via_userbot(
+				account_id, dialog.chat_ref()
+			)
 		InfoBar.info("Проверка", "Проверяю канал и права…", parent=self)
 		run_in_engine(self._worker, coro, self, self._on_connected, self._show_error)
 

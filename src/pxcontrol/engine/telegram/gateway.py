@@ -1,9 +1,14 @@
 """Единая точка доступа к Telegram поверх двух транспортов (ADR-0007).
 
 Остальной код не знает, каким транспортом выполнена операция. Ориентир:
-публикация любого контента и чтение — MTProto (постоянно подключённый
-userbot, ADR-0011); Bot API — проверки, диагностика и запасная публикация
-для каналов без userbot-админа (текст и медиа до 50 МБ, только «сейчас»).
+публикация любого контента и чтение — MTProto (userbot, ADR-0011);
+Bot API — проверки, диагностика и запасная публикация для каналов без
+userbot-админа (текст и медиа до 50 МБ, только «сейчас»).
+
+Userbot-аккаунтов может быть несколько — по одному на канал-админа
+(ADR-0019): шлюз держит пул клиентов MTProto «id аккаунта → транспорт»,
+и каждая userbot-операция адресуется конкретному аккаунту. Лимиты
+Telegram (флуд, Premium) — пер-аккаунтные, транспорты независимы.
 """
 
 from __future__ import annotations
@@ -18,7 +23,11 @@ from pxcontrol.engine.telegram.bot_api import (
 	send_media,
 	send_text,
 )
-from pxcontrol.engine.telegram.mtproto import MtprotoLoginManager, MtprotoTransport
+from pxcontrol.engine.telegram.mtproto import (
+	MtprotoLoginManager,
+	MtprotoTransport,
+	UserbotNotConnectedError,
+)
 from pxcontrol.engine.telegram.types import (
 	ChannelInfo,
 	MediaKind,
@@ -33,37 +42,83 @@ class TelegramGateway:
 	"""Объединяет транспорты Bot API и MTProto за общим интерфейсом."""
 
 	def __init__(self) -> None:
-		# Реквизиты берутся из БД (таблицы bots / tg_accounts, ADR-0009):
-		# движок активирует userbot при старте, боты — по токену на операцию.
-		self.mtproto = MtprotoTransport()
+		# Реквизиты берутся из БД (ключ API — ADR-0018, сессии — tg_accounts):
+		# движок активирует userbot-аккаунты при старте, боты — по токену
+		# на операцию. Пул транспортов: id аккаунта → клиент MTProto.
+		self._userbots: dict[int, MtprotoTransport] = {}
 		self.login = MtprotoLoginManager()
+		# точка подмены в тестах: фабрика транспорта с подставным клиентом
+		self.transport_factory: Callable[[], MtprotoTransport] = MtprotoTransport
 
 	async def stop(self) -> None:
 		"""Останавливает подключения (включая незавершённые входы)."""
 		await self.login.cancel_all()
-		await self.mtproto.stop()
+		for transport in self._userbots.values():
+			await transport.stop()
+		self._userbots.clear()
 
-	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None:
-		"""Настраивает и (пере)подключает userbot (при старте или после входа).
+	async def activate_userbot(
+		self, account_id: int, api_id: int, api_hash: str, session: str
+	) -> None:
+		"""Настраивает и (пере)подключает userbot аккаунта (старт или вход).
 
-		Работающий клиент закрывается: новые реквизиты (повторный вход,
-		другой аккаунт) должны применяться без перезапуска приложения.
+		Прежний клиент этого аккаунта закрывается: новые реквизиты
+		(повторный вход) должны применяться без перезапуска приложения.
+		Транспорт регистрируется в пуле до подключения: неудача старта
+		(нет сети) не выкидывает аккаунт — первая же операция чинит
+		соединение сама (самопочинка транспорта).
 
 		Raises:
 			UserbotNotConnectedError: Соединение с Telegram не удалось.
 			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
 		"""
-		await self.mtproto.stop()
-		self.mtproto.configure(api_id, api_hash, session)
-		await self.mtproto.start()
+		old = self._userbots.pop(account_id, None)
+		if old is not None:
+			await old.stop()
+		transport = self.transport_factory()
+		transport.configure(api_id, api_hash, session)
+		self._userbots[account_id] = transport
+		await transport.start()
 
-	async def deactivate_userbot(self) -> None:
-		"""Отключает userbot (например, после удаления его аккаунта)."""
-		await self.mtproto.stop()
+	async def deactivate_userbot(self, account_id: int) -> None:
+		"""Отключает userbot аккаунта (например, после его удаления)."""
+		transport = self._userbots.pop(account_id, None)
+		if transport is not None:
+			await transport.stop()
 
-	def userbot_premium(self) -> bool:
-		"""Есть ли у подключённого userbot подписка Premium (лимит файла)."""
-		return self.mtproto.premium
+	def userbot_premium(self, account_id: int | None) -> bool:
+		"""Есть ли у аккаунта подписка Premium (лимит файла 2000/4000 МиБ).
+
+		None или неактивированный аккаунт — False: действует меньший,
+		безопасный лимит.
+		"""
+		if account_id is None:
+			return False
+		transport = self._userbots.get(account_id)
+		return transport.premium if transport is not None else False
+
+	def any_userbot_premium(self) -> bool:
+		"""Есть ли Premium хоть у одного подключённого аккаунта.
+
+		Эвристика для подсказок без контекста канала (рекомендация
+		битрейта на «Видео»: очередь обработки канала не знает).
+		Строгая пер-канальная проверка лимита остаётся за публикацией.
+		"""
+		return any(t.premium for t in self._userbots.values())
+
+	def _userbot(self, account_id: int) -> MtprotoTransport:
+		"""Транспорт аккаунта из пула — или понятная ошибка.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован (нет сессии
+				или ключа API) — нужен вход: Настройки → Аккаунты.
+		"""
+		transport = self._userbots.get(account_id)
+		if transport is None:
+			raise UserbotNotConnectedError(
+				"Userbot этого канала не подключён — войдите в его аккаунт: Настройки → Аккаунты."
+			)
+		return transport
 
 	# --- Bot API ---------------------------------------------------------------
 
@@ -91,23 +146,24 @@ class TelegramGateway:
 
 	# --- MTProto (userbot) -------------------------------------------------------
 
-	async def check_channel_userbot(self, chat_ref: str) -> ChannelInfo:
-		"""Проверяет канал и права userbot (админ + право публиковать)."""
-		return await self.mtproto.check_channel(chat_ref)
+	async def check_channel_userbot(self, account_id: int, chat_ref: str) -> ChannelInfo:
+		"""Проверяет канал и права аккаунта (админ + право публиковать)."""
+		return await self._userbot(account_id).check_channel(chat_ref)
 
 	async def publish(
 		self,
+		account_id: int,
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: Callable[[float], None] | None = None,
 	) -> None:
-		"""Публикует пост любого типа через userbot (ADR-0011).
+		"""Публикует пост из сессии привязанного к каналу аккаунта (ADR-0019).
 
 		Текст или медиа с подписью; сразу (when=None) или отложенно —
 		отложенные хранит и публикует сервер Telegram (ADR-0010).
 
 		Raises:
-			UserbotNotConnectedError: Userbot не настроен или нет связи.
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
 			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
 			UserbotAccessError: Telegram подтвердил отсутствие прав/канала.
 			UserbotScheduleFullError: Все слоты отложек канала заняты —
@@ -116,8 +172,8 @@ class TelegramGateway:
 				отправки ждёт названный срок и повторяет сама.
 			UserbotUnavailableError: Прочие отказы Telegram (лимиты и т.п.).
 		"""
-		await self.mtproto.publish(chat_id, post, on_progress)
+		await self._userbot(account_id).publish(chat_id, post, on_progress)
 
-	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
-		"""Читает отложенные записи канала из Telegram."""
-		return await self.mtproto.get_scheduled(chat_id)
+	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+		"""Читает отложенные записи канала из Telegram (его аккаунтом)."""
+		return await self._userbot(account_id).get_scheduled(chat_id)

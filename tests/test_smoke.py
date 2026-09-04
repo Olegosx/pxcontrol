@@ -81,6 +81,8 @@ async def test_start_survives_unreachable_userbot(tmp_path: Path) -> None:
 		session.add(TgAccount(label="ub", phone="+7900", session="s"))
 		await session.commit()
 	for client in (_DeadClient(), _RevokedClient()):
-		engine.gateway.mtproto = MtprotoTransport(client_factory=lambda a, b, c, _c=client: _c)
+		engine.gateway.transport_factory = lambda _c=client: MtprotoTransport(
+			client_factory=lambda a, b, c, _c=_c: _c
+		)
 		await engine.start()  # не должно бросить исключение
 	await engine.stop()

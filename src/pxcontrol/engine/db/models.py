@@ -165,8 +165,11 @@ class VideoPreset(TimestampMixin, Base):
 class Channel(TimestampMixin, Base):
 	"""Подключённый Telegram-канал.
 
-	Ссылается на бота-публикатора (``NULL`` — канал подключён через
-	userbot). Параметры-предпочтения канала — строками
+	Два возможных публикатора — ссылками (оба необязательны, ADR-0019):
+	``tg_account_id`` — userbot-аккаунт-админ (постинг идёт из его
+	сессии, приоритетный путь по ADR-0011), ``bot_id`` — бот-публикатор
+	(запасной путь; самостоятелен — работает по токену, без
+	пользовательской сессии). Параметры-предпочтения канала — строками
 	в ``channel_settings`` (ADR-0013), например пресет обработки
 	по умолчанию.
 	"""
@@ -177,14 +180,17 @@ class Channel(TimestampMixin, Base):
 	title: Mapped[str] = mapped_column(String(255))
 	tg_chat_id: Mapped[str] = mapped_column(String(64), unique=True)
 	username: Mapped[str | None] = mapped_column(String(255), default=None)
-	# userbot — админ канала (проверено при подключении); бот — через bot_id
-	userbot_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+	# userbot-аккаунт-админ; аккаунт удаляется — канал остаётся без него
+	tg_account_id: Mapped[int | None] = mapped_column(
+		ForeignKey("tg_accounts.id", ondelete="SET NULL"), default=None
+	)
 	# бот удаляется — канал остаётся без бота (проверку ключей включает Database)
 	bot_id: Mapped[int | None] = mapped_column(
 		ForeignKey("bots.id", ondelete="SET NULL"), default=None
 	)
 
 	bot: Mapped[Bot | None] = relationship(back_populates="channels")
+	tg_account: Mapped[TgAccount | None] = relationship()
 
 
 class PublishQueueItem(TimestampMixin, Base):

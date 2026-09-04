@@ -48,11 +48,13 @@ class _TelegramPort(Protocol):
 
 	async def bot_events(self, token: str) -> list[str]: ...
 
-	async def activate_userbot(self, api_id: int, api_hash: str, session: str) -> None: ...
+	async def activate_userbot(
+		self, account_id: int, api_id: int, api_hash: str, session: str
+	) -> None: ...
 
-	async def deactivate_userbot(self) -> None: ...
+	async def deactivate_userbot(self, account_id: int) -> None: ...
 
-	def userbot_premium(self) -> bool: ...
+	def userbot_premium(self, account_id: int | None) -> bool: ...
 
 
 def mask_secret(secret: str) -> str:
@@ -119,10 +121,6 @@ class AccountsService:
 	def __init__(self, db: Database, gateway: _TelegramPort) -> None:
 		self._db = db
 		self._gateway = gateway
-		# id фактически активированного userbot-аккаунта: признак Premium
-		# в списке принадлежит ему, а не «первому с сессией» (после входа
-		# во второй аккаунт активен именно он — до перезапуска приложения)
-		self._active_account_id: int | None = None
 
 	# --- боты -------------------------------------------------------------
 
@@ -258,8 +256,7 @@ class AccountsService:
 		"""
 		async with self._db.session_factory() as session:
 			rows = list((await session.execute(select(TgAccount).order_by(TgAccount.id))).scalars())
-		premium = self._gateway.userbot_premium()
-		return [self._acc_dto(a, premium=premium and a.id == self._active_account_id) for a in rows]
+		return [self._acc_dto(a, premium=self._gateway.userbot_premium(a.id)) for a in rows]
 
 	async def add_tg_account(self, label: str, phone: str) -> TgAccountDto:
 		"""Сохраняет userbot-аккаунт: название и телефон (вход — отдельным шагом).
@@ -286,42 +283,36 @@ class AccountsService:
 		return self._acc_dto(acc)
 
 	async def delete_tg_account(self, account_id: int) -> None:
-		"""Удаляет userbot-аккаунт и переподключает userbot без него.
+		"""Удаляет userbot-аккаунт и отключает его транспорт.
 
 		Движок не должен продолжать публиковать от имени удалённого
-		аккаунта: если удалён именно активный, userbot отключается
-		и активируется заново по оставшимся сессиям (или остаётся
-		выключенным). Удаление неактивного аккаунта работающий userbot
-		не трогает — иначе живая отправка получала бы ничем
-		не оправданное окно недоступности. Если активного нет вовсе,
-		попытка активации по оставшимся сессиям не повредит.
+		аккаунта: его клиент в пуле шлюза закрывается. Остальные аккаунты
+		не трогаются — их подключения живут независимо (ADR-0019).
+		Каналы, привязанные к удалённому аккаунту, отвязывает политика
+		внешнего ключа (SET NULL) — интерфейс предупреждает об этом
+		до удаления.
 		"""
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
 			if account is None:
 				return
-			had_session = account.session is not None
 			await session.delete(account)
 			await session.commit()
-		if had_session and self._active_account_id in (None, account_id):
-			await self._gateway.deactivate_userbot()
-			await self.activate_stored_userbot()
+		await self._gateway.deactivate_userbot(account_id)
 
-	async def activate_stored_userbot(self) -> None:
-		"""Подключает userbot по сохранённой сессии, если она есть.
+	async def activate_stored_userbots(self) -> None:
+		"""Подключает все аккаунты с сохранёнными сессиями (при старте).
 
-		Правило выбора: первый по id аккаунт с сессией (обычно userbot
-		один); реквизиты подключения — общий ключ API приложения
-		(ADR-0018). Неудача подключения (нет сети, сессия отозвана)
-		не ошибка: приложение работает дальше, userbot подключится после
-		повторного входа. Вызывается движком при старте и после удаления
-		аккаунта.
+		Реквизиты подключения — общий ключ API приложения (ADR-0018),
+		сессия у каждого аккаунта своя (ADR-0019). Неудача подключения
+		одного аккаунта (нет сети, сессия отозвана) не ошибка и не мешает
+		остальным: приложение работает дальше, транспорт чинится первой
+		операцией или повторным входом.
 		"""
-		self._active_account_id = None
 		try:
 			credential = await self._read_tg_api()
 			async with self._db.session_factory() as session:
-				account = (
+				accounts = (
 					(
 						await session.execute(
 							select(TgAccount)
@@ -330,28 +321,28 @@ class AccountsService:
 						)
 					)
 					.scalars()
-					.first()
+					.all()
 				)
 		except SecretDecryptionError as exc:
 			# сменился ключ шифрования — не мешаем запуску приложения:
 			# пользователь увидит ту же ошибку на странице аккаунтов
-			logger.warning("Userbot не активирован: %s", exc)
+			logger.warning("Userbot-аккаунты не активированы: %s", exc)
 			return
 		if credential is None:
-			logger.info("Ключ API Telegram не задан — userbot отключён.")
+			if accounts:
+				logger.info("Ключ API Telegram не задан — userbot-аккаунты отключены.")
 			return
-		if account is None or account.session is None:
-			logger.info("Аккаунт MTProto не настроен — userbot отключён.")
-			return
-		try:
-			await self._gateway.activate_userbot(
-				credential.api_id, credential.api_hash, account.session
-			)
-		except UserbotUnavailableError as exc:
-			logger.warning("Userbot «%s» не подключён: %s", account.label, exc)
-			return
-		self._active_account_id = account.id
-		logger.info("Userbot «%s» подключён.", account.label)
+		for account in accounts:
+			if account.session is None:  # для mypy: выборка уже отфильтровала
+				continue
+			try:
+				await self._gateway.activate_userbot(
+					account.id, credential.api_id, credential.api_hash, account.session
+				)
+			except UserbotUnavailableError as exc:
+				logger.warning("Userbot «%s» не подключён: %s", account.label, exc)
+				continue
+			logger.info("Userbot «%s» подключён.", account.label)
 
 	@staticmethod
 	def _acc_dto(acc: TgAccount, premium: bool = False) -> TgAccountDto:
@@ -430,12 +421,10 @@ class AccountsService:
 			# _require_tg_api даст понятный текст вместо падения активации
 			credential = await self._require_tg_api()
 			await self._gateway.activate_userbot(
-				credential.api_id, credential.api_hash, session_string
+				account_id, credential.api_id, credential.api_hash, session_string
 			)
 		except Exception:  # noqa: BLE001 — вход удался, подключение не критично
 			logger.exception("Не удалось подключить userbot сразу после входа.")
-		else:
-			self._active_account_id = account_id
 
 	# --- ключи ИИ -----------------------------------------------------------
 

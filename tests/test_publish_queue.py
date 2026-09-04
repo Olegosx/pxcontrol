@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.db.models import Channel, TgAccount
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
@@ -40,11 +40,12 @@ class _SlowGateway:
 		self.published: list[OutgoingPost] = []
 		self.fail_texts: set[str] = set()
 
-	def userbot_premium(self) -> bool:
+	def userbot_premium(self, account_id: int | None) -> bool:
 		return False
 
 	async def publish(
 		self,
+		account_id: int,
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: ProgressCallback | None = None,
@@ -57,10 +58,13 @@ class _SlowGateway:
 		self.published.append(post)
 
 
-async def _add_channel(db: Database) -> int:
-	"""Создаёт канал с userbot-админом, возвращает id."""
+async def _add_channel(db: Database, tg_chat_id: str = "-1001", title: str = "Канал") -> int:
+	"""Создаёт канал с userbot-админом (свой аккаунт), возвращает id."""
 	async with db.session_factory() as session:
-		channel = Channel(title="Канал", tg_chat_id="-1001", userbot_admin=True)
+		account = TgAccount(label=f"@ub{tg_chat_id}", phone="+7900", session="s")
+		session.add(account)
+		await session.flush()
+		channel = Channel(title=title, tg_chat_id=tg_chat_id, tg_account_id=account.id)
 		session.add(channel)
 		await session.commit()
 		await session.refresh(channel)
@@ -389,13 +393,14 @@ class _SlotGateway(_SlowGateway):
 		self.scheduled: list[datetime] = []
 		self.slots_full_once = False  # разовая гонка SCHEDULE_TOO_MUCH
 
-	async def get_scheduled(self, chat_id: str) -> list[object]:
+	async def get_scheduled(self, account_id: int, chat_id: str) -> list[object]:
 		from types import SimpleNamespace
 
 		return [SimpleNamespace(scheduled_at=moment) for moment in self.scheduled]
 
 	async def publish(
 		self,
+		account_id: int,
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: ProgressCallback | None = None,
@@ -403,7 +408,7 @@ class _SlotGateway(_SlowGateway):
 		if self.slots_full_once:
 			self.slots_full_once = False
 			raise UserbotScheduleFullError("Все слоты отложенных сообщений канала заняты.")
-		await super().publish(chat_id, post, on_progress)
+		await super().publish(account_id, chat_id, post, on_progress)
 
 
 def _future(minutes: int) -> datetime:
@@ -667,6 +672,7 @@ class _FloodOnceGateway(_SlowGateway):
 
 	async def publish(
 		self,
+		account_id: int,
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: ProgressCallback | None = None,
@@ -676,7 +682,7 @@ class _FloodOnceGateway(_SlowGateway):
 			raise TelegramFloodError(
 				f"Telegram просит подождать {self.seconds} с.", retry_after_s=self.seconds
 			)
-		await super().publish(chat_id, post, on_progress)
+		await super().publish(account_id, chat_id, post, on_progress)
 
 
 async def test_flood_waits_and_retries_instead_of_error(db: Database) -> None:
@@ -734,30 +740,35 @@ class _FloodOnReadGateway(_SlotGateway):
 		super().__init__()
 		self.read_calls = 0
 
-	async def get_scheduled(self, chat_id: str) -> list[object]:
+	async def get_scheduled(self, account_id: int, chat_id: str) -> list[object]:
 		self.read_calls += 1
 		raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
 
 
-async def test_flood_on_slot_check_aborts_whole_tick(db: Database) -> None:
-	"""Флуд-лимит на чтении слотов прерывает тик дозора: лимит — на аккаунт,
-	стучаться в остальные каналы значит усугублять его (ADR-0017)."""
+async def test_flood_on_slot_check_skips_rest_of_account(db: Database) -> None:
+	"""Флуд-лимит на чтении слотов глушит остальные каналы ТОГО ЖЕ аккаунта:
+	лимит действует на аккаунт (ADR-0017/0019), настойчивость растит сроки."""
 	gateway = _FloodOnReadGateway()
 	queue = _queue(db, gateway)
-	first_channel = await _add_channel(db)
+	# оба канала — на одном аккаунте: флуд первого отменяет чтение второго
 	async with db.session_factory() as session:
-		other = Channel(title="Второй", tg_chat_id="-1002", userbot_admin=True)
-		session.add(other)
+		account = TgAccount(label="@ub", phone="+7900", session="s")
+		session.add(account)
+		await session.flush()
+		first = Channel(title="Первый", tg_chat_id="-1001", tg_account_id=account.id)
+		other = Channel(title="Второй", tg_chat_id="-1002", tg_account_id=account.id)
+		session.add_all([first, other])
 		await session.commit()
+		await session.refresh(first)
 		await session.refresh(other)
-	a = await queue.enqueue(PostDraft(first_channel, text="ждущий А", when=_future(120)))
+	a = await queue.enqueue(PostDraft(first.id, text="ждущий А", when=_future(120)))
 	b = await queue.enqueue(PostDraft(other.id, text="ждущий Б", when=_future(180)))
 	await _wait_status(queue, a, QueueItemStatus.WAITING)
 	await _wait_status(queue, b, QueueItemStatus.WAITING)
 	await asyncio.sleep(0.05)  # фоновые проверки после постановки — досидели
 	gateway.read_calls = 0  # изолируем замер от фоновых тиков постановки
 	await queue._release_slots()  # noqa: SLF001 — тик дозора напрямую
-	assert gateway.read_calls == 1  # после флуда — ни одного канала больше
+	assert gateway.read_calls == 1  # после флуда — ни одного канала аккаунта больше
 	state = {item.id: item for item in await queue.state()}
 	assert state[a].status is QueueItemStatus.WAITING  # никто не в ошибке
 	assert state[b].status is QueueItemStatus.WAITING

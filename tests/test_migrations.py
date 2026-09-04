@@ -100,8 +100,14 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 		)
 		await session.execute(
 			text(
-				"INSERT INTO channels (title, tg_chat_id, bot_id, userbot_admin,"
-				" created_at, updated_at) VALUES ('c', '-1001', 1, 0,"
+				"INSERT INTO tg_accounts (label, phone, created_at, updated_at) "
+				"VALUES ('ub', '+7900', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+			)
+		)
+		await session.execute(
+			text(
+				"INSERT INTO channels (title, tg_chat_id, bot_id, tg_account_id,"
+				" created_at, updated_at) VALUES ('c', '-1001', 1, 1,"
 				" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
 			)
 		)
@@ -134,6 +140,13 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 			await session.execute(text("SELECT bot_id FROM channels WHERE id = 1"))
 		).scalar_one()
 		assert bot_id is None  # SET NULL, а не висячая ссылка
+
+		await session.execute(text("DELETE FROM tg_accounts WHERE id = 1"))
+		await session.commit()
+		account_id = (
+			await session.execute(text("SELECT tg_account_id FROM channels WHERE id = 1"))
+		).scalar_one()
+		assert account_id is None  # удаление аккаунта отвязывает канал (ADR-0019)
 
 		await session.execute(text("DELETE FROM channels WHERE id = 1"))
 		await session.commit()
@@ -170,6 +183,29 @@ def test_tg_api_columns_dropped_accounts_survive(tmp_path: Path) -> None:
 	assert "api_id" not in columns and "api_hash" not in columns
 	assert row == ("ub", "+7900", "session-cipher")  # аккаунт и сессия не тронуты
 	assert api_rows == (0,)  # данные не переносятся — таблица пуста
+
+
+def test_channel_userbot_flag_becomes_binding_column(tmp_path: Path) -> None:
+	"""Миграция e6b9d43a7f21: флаг уходит, колонка привязки появляется пустой.
+
+	Переноса данных в миграции нет сознательно (разовая ручная привязка,
+	ADR-0019) — проверяется схема и сохранность строки канала.
+	"""
+	db_file = tmp_path / "binding.db"
+	_upgrade(db_file, "d8f2a61c4e93")  # состояние до привязки
+	with sqlite3.connect(db_file) as conn:
+		conn.execute(
+			"INSERT INTO channels (title, tg_chat_id, userbot_admin,"
+			" created_at, updated_at) VALUES ('c', '-1001', 1,"
+			" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		)
+		conn.commit()
+	_upgrade(db_file, "head")
+	with sqlite3.connect(db_file) as conn:
+		columns = [row[1] for row in conn.execute("PRAGMA table_info(channels)")]
+		row = conn.execute("SELECT title, tg_account_id FROM channels").fetchone()
+	assert "userbot_admin" not in columns and "tg_account_id" in columns
+	assert row == ("c", None)  # канал цел, привязка не переносится — ручная
 
 
 def test_channel_enabled_moves_to_settings(tmp_path: Path) -> None:

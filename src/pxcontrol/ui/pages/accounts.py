@@ -20,6 +20,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import AiKeyDto, BotDto, TgAccountDto
+from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -332,7 +333,26 @@ class AccountsPage(ScrollArea):
 		self._reload_accounts()
 
 	def _delete_account(self, account: TgAccountDto) -> None:
-		if not confirm_delete(self, f"Удалить аккаунт «{account.label}»?"):
+		"""Удаление аккаунта: сначала — какие каналы останутся без админа."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.channels.list_channels(),
+			self,
+			partial(self._confirm_delete_account, account),
+			self._show_error,
+		)
+
+	def _confirm_delete_account(self, account: TgAccountDto, channels: list[ChannelDto]) -> None:
+		"""Подтверждение с перечнем каналов, привязанных к аккаунту (ADR-0019)."""
+		bound = [ch.title for ch in channels if ch.tg_account_id == account.id]
+		text = f"Удалить аккаунт «{account.label}»?"
+		if bound:
+			names = ", ".join(f"«{title}»" for title in bound)
+			text += (
+				f"\n\nБез userbot-админа останутся каналы: {names} — "
+				"им будут недоступны отложенные посты и большие файлы."
+			)
+		if not confirm_delete(self, text):
 			return
 		run_in_engine(
 			self._worker,

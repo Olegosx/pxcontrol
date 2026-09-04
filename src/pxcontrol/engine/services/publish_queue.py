@@ -469,15 +469,26 @@ class PublishQueue:
 		channels = {
 			item.draft.channel_id for item in self._items if item.status is QueueItemStatus.WAITING
 		}
+		# флуд-лимит действует на аккаунт (ADR-0017/0019): каналы разных
+		# аккаунтов независимы, флуд одного не должен глушить остальные
+		flooded_accounts: set[int | None] = set()
 		for channel_id in channels:
 			try:
+				account_id = await self._posts.account_for_channel(channel_id)
+				if account_id in flooded_accounts:
+					continue
 				taken = len(await self._posts.scheduled_times(channel_id))
 			except TelegramFloodError as exc:
-				# флуд-лимит действует на весь аккаунт: стучаться в остальные
-				# каналы — усугублять его (Telegram растит сроки за
-				# настойчивость); тик прерывается, дозор вернётся по таймеру
-				logger.warning("Проверка слотов: флуд-лимит (%s) — тик прерван.", exc)
-				return
+				# стучаться в другие каналы того же аккаунта — усугублять
+				# лимит (Telegram растит сроки за настойчивость); каналы
+				# остальных аккаунтов проверяются дальше
+				logger.warning(
+					"Проверка слотов: флуд-лимит аккаунта id=%s (%s) — его каналы ждут тика.",
+					account_id,
+					exc,
+				)
+				flooded_accounts.add(account_id)
+				continue
 			except (PostError, UserbotUnavailableError) as exc:
 				logger.warning("Слоты канала id=%s не прочитаны: %s", channel_id, exc)
 				continue

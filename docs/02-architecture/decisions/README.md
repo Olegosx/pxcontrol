@@ -38,6 +38,7 @@
 | [0016](0016-persistent-publish-queue.md) | Персистентная очередь отправки со слотами отложек (лимит 100/канал) | accepted |
 | [0017](0017-telegram-request-budget.md) | Бюджет запросов Telegram на аккаунт (предусловие этапа 2) | accepted |
 | [0018](0018-telegram-api-key-per-app.md) | Ключ API Telegram — один на приложение | accepted |
+| [0019](0019-channel-userbot-binding.md) | Привязка userbot-аккаунта к каналу; пул клиентов MTProto | accepted |
 
 ## Как добавить запись
 

@@ -42,7 +42,10 @@ class Engine:
 			self.db,
 			self._ffmpeg_path,
 			self.settings,
-			userbot_premium=self.gateway.userbot_premium,
+			# эвристика без контекста канала (очередь обработки канала
+			# не знает): Premium хоть одного подключённого аккаунта; строгий
+			# пер-канальный лимит остаётся за публикацией (ADR-0019)
+			userbot_premium=self.gateway.any_userbot_premium,
 		)
 		self.video_queue = ProcessingQueue(self.video)
 		self.captions = CaptionsService(self.db, self._ffmpeg_path)
@@ -65,17 +68,19 @@ class Engine:
 	async def start(self) -> None:
 		"""Запускает компоненты в правильном порядке.
 
-		Userbot активируется по сохранённой сессии: отложенные посты
-		публикует сервер Telegram (ADR-0010), но для их создания и чтения
-		нужен подключённый userbot. Неудача подключения не мешает запуску:
-		активация сама ловит недоступность (нет сети, сессия отозвана),
-		а повторного подключения через шлюз здесь нет — иначе то же
-		исключение улетело бы наружу и уронило приложение.
+		Userbot-аккаунты активируются по сохранённым сессиям (все,
+		у кого они есть, — ADR-0019): отложенные посты публикует сервер
+		Telegram (ADR-0010), но для их создания и чтения нужен
+		подключённый userbot канала. Неудача подключения не мешает
+		запуску: активация сама ловит недоступность каждого аккаунта
+		(нет сети, сессия отозвана), а повторного подключения через шлюз
+		здесь нет — иначе то же исключение улетело бы наружу и уронило
+		приложение.
 		"""
 		logger.info("Запуск движка…")
 		await self.db.init()
 		await self.settings.prime()
-		await self.accounts.activate_stored_userbot()
+		await self.accounts.activate_stored_userbots()
 		# после userbot: восстановленной очереди (ADR-0016) сразу нужна
 		# проверка слотов, а она читает отложки канала через userbot
 		await self.publish_queue.load()
