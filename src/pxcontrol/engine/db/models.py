@@ -72,11 +72,29 @@ class Bot(TimestampMixin, Base):
 	channels: Mapped[list[Channel]] = relationship(back_populates="bot")
 
 
+class TgApiCredential(TimestampMixin, Base):
+	"""Ключ API Telegram с my.telegram.org — один на всё приложение (ADR-0018).
+
+	Реквизиты приложения, а не аккаунта: с одной парой входят все
+	userbot-аккаунты (так работают и обычные клиенты Telegram). Запись
+	одна; ``api_hash`` шифруется. Правится на странице
+	«Настройки → Общие».
+	"""
+
+	__tablename__ = "tg_api_credentials"
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	api_id: Mapped[int] = mapped_column(Integer)
+	api_hash: Mapped[str] = mapped_column(EncryptedStr(512))
+
+
 class TgAccount(TimestampMixin, Base):
 	"""Userbot-аккаунт MTProto (отдельный аккаунт, ADR-0007).
 
-	``session`` — строка сессии, секрет уровня пароля; заполняется после
-	входа по номеру телефона. ``api_hash`` и ``session`` шифруются.
+	Только реквизиты самого аккаунта: название, телефон и ``session`` —
+	строка сессии, секрет уровня пароля (шифруется), заполняется после
+	входа по номеру телефона. Ключ API приложения — общий,
+	в ``tg_api_credentials`` (ADR-0018).
 	"""
 
 	__tablename__ = "tg_accounts"
@@ -84,8 +102,6 @@ class TgAccount(TimestampMixin, Base):
 	id: Mapped[int] = mapped_column(primary_key=True)
 	label: Mapped[str] = mapped_column(String(128))
 	phone: Mapped[str | None] = mapped_column(String(32), default=None)
-	api_id: Mapped[int] = mapped_column(Integer)
-	api_hash: Mapped[str] = mapped_column(EncryptedStr(512))
 	session: Mapped[str | None] = mapped_column(EncryptedStr(2048), default=None)
 
 

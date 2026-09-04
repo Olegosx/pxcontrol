@@ -12,6 +12,7 @@ EXPECTED_TABLES = {
 	"channel_settings",
 	"bots",
 	"tg_accounts",
+	"tg_api_credentials",
 	"ai_credentials",
 	"video_presets",
 	"channels",
@@ -144,6 +145,31 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 			).scalar_one()
 			assert count == 0, f"{table}: сироты после удаления канала"
 	await db.close()
+
+
+def test_tg_api_columns_dropped_accounts_survive(tmp_path: Path) -> None:
+	"""Миграция d8f2a61c4e93: колонки ключа уходят, аккаунты и сессии целы.
+
+	Переноса данных в миграции нет сознательно (разовая ручная операция,
+	ADR-0018) — проверяется только схема и сохранность строк аккаунтов.
+	"""
+	db_file = tmp_path / "api_key.db"
+	_upgrade(db_file, "b7f3d92c5a41")  # состояние до выделения ключа
+	with sqlite3.connect(db_file) as conn:
+		conn.execute(
+			"INSERT INTO tg_accounts (label, phone, api_id, api_hash, session,"
+			" created_at, updated_at) VALUES ('ub', '+7900', 37612995, 'cipher',"
+			" 'session-cipher', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		)
+		conn.commit()
+	_upgrade(db_file, "head")
+	with sqlite3.connect(db_file) as conn:
+		columns = [row[1] for row in conn.execute("PRAGMA table_info(tg_accounts)")]
+		row = conn.execute("SELECT label, phone, session FROM tg_accounts").fetchone()
+		api_rows = conn.execute("SELECT COUNT(*) FROM tg_api_credentials").fetchone()
+	assert "api_id" not in columns and "api_hash" not in columns
+	assert row == ("ub", "+7900", "session-cipher")  # аккаунт и сессия не тронуты
+	assert api_rows == (0,)  # данные не переносятся — таблица пуста
 
 
 def test_channel_enabled_moves_to_settings(tmp_path: Path) -> None:

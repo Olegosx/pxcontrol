@@ -88,7 +88,7 @@ async def test_bad_token_not_saved(db: Database) -> None:
 async def test_tg_account_and_ai_key_lifecycle(db: Database) -> None:
 	"""Userbot-аккаунт и ключ ИИ добавляются, маскируются и удаляются."""
 	service = AccountsService(db, _FakeGateway())
-	account = await service.add_tg_account("Личный", "+79000000000", 12345, "hash-abc")
+	account = await service.add_tg_account("Личный", "+79000000000")
 	assert account.logged_in is False, "до входа сессии нет"
 	key = await service.add_ai_key("Основной", "sk-ant-1234567890")
 	assert "sk-ant-1234567890" not in key.key_masked
@@ -100,6 +100,64 @@ async def test_tg_account_and_ai_key_lifecycle(db: Database) -> None:
 	assert await service.list_ai_keys() == []
 
 
+async def test_tg_api_key_roundtrip_and_masking(db: Database) -> None:
+	"""Ключ API приложения: один на приложение, hash маскируется, замена — без дублей."""
+	service = AccountsService(db, _FakeGateway())
+	assert await service.get_tg_api() is None  # до настройки ключа нет
+	saved = await service.set_tg_api(37612995, "abcdef1234567890abcdef1234567890")
+	assert saved.api_id == 37612995
+	assert "abcdef1234567890" not in saved.api_hash_masked, "hash не должен попадать в UI целиком"
+	# повторное сохранение заменяет запись, а не плодит вторую
+	updated = await service.set_tg_api(111, "another-hash-value-long-enough")
+	assert updated.api_id == 111
+	current = await service.get_tg_api()
+	assert current is not None and current.api_id == 111
+
+
+async def test_tg_api_key_validation(db: Database) -> None:
+	"""Негодный ключ отклоняется: api_id — положительное число, hash — непустой."""
+	service = AccountsService(db, _FakeGateway())
+	with pytest.raises(AccountsError, match="api_id"):
+		await service.set_tg_api(0, "hash")
+	with pytest.raises(AccountsError, match="api_hash"):
+		await service.set_tg_api(123, "   ")
+	assert await service.get_tg_api() is None
+
+
+async def test_add_tg_account_requires_label_and_phone(db: Database) -> None:
+	"""Аккаунт без названия или телефона — понятная ошибка (тупик входа)."""
+	service = AccountsService(db, _FakeGateway())
+	with pytest.raises(AccountsError, match="название"):
+		await service.add_tg_account("  ", "+7900")
+	with pytest.raises(AccountsError, match="телефон"):
+		await service.add_tg_account("Личный", "  ")
+	assert await service.list_tg_accounts() == []
+
+
+async def test_login_requires_app_api_key(db: Database) -> None:
+	"""Вход без ключа приложения — понятная ошибка, куда его вписать."""
+	service = AccountsService(db, _FakeGateway())
+	account = await service.add_tg_account("Личный", "+79000000000")
+	with pytest.raises(AccountsError, match="Настройки → Общие"):
+		await service.start_login(account.id)
+
+
+async def test_activate_stored_userbot_needs_api_key(db: Database) -> None:
+	"""Активация по сессии без ключа приложения не падает и не активирует."""
+	from pxcontrol.engine.db.models import TgAccount
+
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	async with db.session_factory() as session:
+		session.add(TgAccount(label="ub", phone="+7900", session="s"))
+		await session.commit()
+	await service.activate_stored_userbot()  # ключа нет — тихо пропускается
+	assert gateway.activated is None
+	await service.set_tg_api(777, "hash-hash-hash-hash")
+	await service.activate_stored_userbot()
+	assert gateway.activated == (777, "s")  # подключение — общим ключом
+
+
 async def test_delete_active_tg_account_reconnects_userbot(db: Database) -> None:
 	"""Удаление аккаунта с сессией переключает userbot на оставшийся.
 
@@ -109,8 +167,9 @@ async def test_delete_active_tg_account_reconnects_userbot(db: Database) -> None
 	"""
 	gateway = _FakeGateway()
 	service = AccountsService(db, gateway)
-	first = await service.add_tg_account("Первый", "+7900", 11, "h1")
-	second = await service.add_tg_account("Второй", "+7901", 22, "h2")
+	await service.set_tg_api(777, "app-hash-app-hash")
+	first = await service.add_tg_account("Первый", "+7900")
+	second = await service.add_tg_account("Второй", "+7901")
 	await service.start_login(first.id)
 	assert await service.confirm_login_code(first.id, "12345") is True
 	await service.start_login(second.id)
@@ -118,7 +177,7 @@ async def test_delete_active_tg_account_reconnects_userbot(db: Database) -> None
 
 	await service.delete_tg_account(second.id)
 	assert gateway.deactivations == 1
-	assert gateway.activated == (11, "session-string-ok")  # остался первый
+	assert gateway.activated == (777, "session-string-ok")  # остался первый
 
 	await service.delete_tg_account(first.id)
 	assert gateway.deactivations == 2
@@ -133,8 +192,9 @@ async def test_delete_inactive_tg_account_keeps_userbot(db: Database) -> None:
 	"""
 	gateway = _FakeGateway()
 	service = AccountsService(db, gateway)
-	first = await service.add_tg_account("Первый", "+7900", 11, "h1")
-	second = await service.add_tg_account("Второй", "+7901", 22, "h2")
+	await service.set_tg_api(777, "app-hash-app-hash")
+	first = await service.add_tg_account("Первый", "+7900")
+	second = await service.add_tg_account("Второй", "+7901")
 	await service.start_login(first.id)
 	assert await service.confirm_login_code(first.id, "12345") is True
 	await service.start_login(second.id)
@@ -166,7 +226,8 @@ def test_mask_secret() -> None:
 async def test_login_simple(db: Database) -> None:
 	"""Вход без 2FA: код подтверждён — сессия сохранена, статус обновился."""
 	service = AccountsService(db, _FakeGateway())
-	account = await service.add_tg_account("Личный", "+79000000000", 123, "hash")
+	await service.set_tg_api(123, "app-hash-app-hash")
+	account = await service.add_tg_account("Личный", "+79000000000")
 	await service.start_login(account.id)
 	assert await service.confirm_login_code(account.id, "12345") is True
 	updated = (await service.list_tg_accounts())[0]
@@ -176,7 +237,8 @@ async def test_login_simple(db: Database) -> None:
 async def test_login_with_2fa(db: Database) -> None:
 	"""Ветка 2FA: после кода нужен пароль, после пароля — вход выполнен."""
 	service = AccountsService(db, _FakeGateway())
-	account = await service.add_tg_account("2FA", "+79000000001", 123, "hash")
+	await service.set_tg_api(123, "app-hash-app-hash")
+	account = await service.add_tg_account("2FA", "+79000000001")
 	await service.start_login(account.id)
 	assert await service.confirm_login_code(account.id, "need-2fa") is False
 	assert (await service.list_tg_accounts())[0].logged_in is False
@@ -185,17 +247,29 @@ async def test_login_with_2fa(db: Database) -> None:
 
 
 async def test_login_requires_phone(db: Database) -> None:
-	"""Без телефона вход не начинается — понятная ошибка."""
+	"""Аккаунт без телефона (старая запись в БД) — понятная ошибка входа.
+
+	Новые аккаунты без телефона не создаются (add_tg_account требует его),
+	но строка из старой схемы могла остаться — вход честно объясняет тупик.
+	"""
+	from pxcontrol.engine.db.models import TgAccount
+
 	service = AccountsService(db, _FakeGateway())
-	account = await service.add_tg_account("Без номера", None, 123, "hash")
+	await service.set_tg_api(123, "app-hash-app-hash")
+	async with db.session_factory() as session:
+		legacy = TgAccount(label="Без номера", phone=None)
+		session.add(legacy)
+		await session.commit()
+		await session.refresh(legacy)
 	with pytest.raises(LoginError, match="телефона"):
-		await service.start_login(account.id)
+		await service.start_login(legacy.id)
 
 
 async def test_login_bad_code_keeps_logged_out(db: Database) -> None:
 	"""Неверный код: ошибка наружу, сессия не сохраняется."""
 	service = AccountsService(db, _FakeGateway())
-	account = await service.add_tg_account("Личный", "+79000000002", 123, "hash")
+	await service.set_tg_api(123, "app-hash-app-hash")
+	account = await service.add_tg_account("Личный", "+79000000002")
 	await service.start_login(account.id)
 	with pytest.raises(LoginError, match="Неверный код"):
 		await service.confirm_login_code(account.id, "bad")
@@ -212,8 +286,9 @@ async def test_premium_follows_activated_account(db: Database) -> None:
 	gateway = _FakeGateway()
 	gateway.premium = True
 	service = AccountsService(db, gateway)
-	first = await service.add_tg_account("Первый", "+7900", 11, "h1")
-	second = await service.add_tg_account("Второй", "+7901", 22, "h2")
+	await service.set_tg_api(777, "app-hash-app-hash")
+	first = await service.add_tg_account("Первый", "+7900")
+	second = await service.add_tg_account("Второй", "+7901")
 	await service.start_login(first.id)
 	assert await service.confirm_login_code(first.id, "12345") is True
 	await service.start_login(second.id)
@@ -237,12 +312,13 @@ async def test_activate_stored_userbot_survives_wrong_secret_key(db: Database) -
 	"""
 	import keyring
 
-	from pxcontrol.engine.db.models import TgAccount
+	from pxcontrol.engine.db.models import TgAccount, TgApiCredential
 	from pxcontrol.engine.security.secrets import get_secret_store
 	from tests.conftest import MemoryKeyring
 
 	async with db.session_factory() as session:
-		session.add(TgAccount(label="ub", api_id=1, api_hash="h", session="s"))
+		session.add(TgApiCredential(api_id=1, api_hash="h"))
+		session.add(TgAccount(label="ub", phone="+7900", session="s"))
 		await session.commit()
 	# «перезапуск» с другим ключом: старое хранилище (и его ключ) исчезло
 	keyring.set_keyring(MemoryKeyring())

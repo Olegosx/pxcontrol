@@ -198,7 +198,9 @@ class AccountsPage(ScrollArea):
 	def _show_accounts(self, accounts: list[TgAccountDto]) -> None:
 		rows = [self._account_row(account) for account in accounts]
 		self._accounts.set_rows(
-			rows, "Пока нет аккаунтов — понадобятся api_id и api_hash с my.telegram.org."
+			rows,
+			"Пока нет аккаунтов — добавьте название и телефон "
+			"(ключ API приложения задаётся в «Настройки → Общие»).",
 		)
 
 	def _account_row(self, account: TgAccountDto) -> CardWidget:
@@ -211,7 +213,7 @@ class AccountsPage(ScrollArea):
 			login_button = PushButton("Войти", self)
 			login_button.clicked.connect(bind(self._start_login, account))
 			trailing = login_button
-		subtitle = f"{account.phone or 'без телефона'} · api_id {account.api_id} · {status}"
+		subtitle = f"{account.phone or 'без телефона'} · {status}"
 		return row_card(
 			self,
 			account.label,
@@ -302,26 +304,26 @@ class AccountsPage(ScrollArea):
 		)
 
 	def _on_add_account(self) -> None:
+		"""Диалог нового аккаунта: только название и телефон.
+
+		Ключ API (api_id/api_hash) у аккаунта не спрашивается — он один
+		на всё приложение и задаётся в «Настройки → Общие» (ADR-0018).
+		"""
 		fields = [
-			("label", "Название"),
-			("phone", "Телефон (справочно)"),
-			("api_id", "api_id с my.telegram.org"),
-			("api_hash", "api_hash"),
+			("label", "Название (для себя)"),
+			("phone", "Телефон — на него придёт код входа"),
 		]
-
-		def _check(values: dict[str, str]) -> str | None:
-			if values["label"] and values["api_hash"] and values["api_id"].isdigit():
-				return None
-			return "Обязательны: название, числовой api_id и api_hash."
-
-		dialog = FormDialog("Новый userbot-аккаунт", fields, self.window(), validator=_check)
+		dialog = FormDialog(
+			"Новый userbot-аккаунт",
+			fields,
+			self.window(),
+			validator=require_filled("label", "phone", message="Заполните оба поля."),
+		)
 		if not exec_dialog(dialog):
 			return
 		coro = self._worker.engine.accounts.add_tg_account(
 			dialog.value("label"),
-			dialog.value("phone") or None,
-			int(dialog.value("api_id")),
-			dialog.value("api_hash"),
+			dialog.value("phone"),
 		)
 		run_in_engine(self._worker, coro, self, self._on_account_added, self._show_error)
 

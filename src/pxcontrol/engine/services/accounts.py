@@ -14,7 +14,7 @@ from typing import Protocol
 from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import AiCredential, Bot, TgAccount
+from pxcontrol.engine.db.models import AiCredential, Bot, TgAccount, TgApiCredential
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.security.secrets import SecretDecryptionError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
@@ -78,6 +78,17 @@ class BotDto:
 
 
 @dataclass(frozen=True)
+class TgApiDto:
+	"""Ключ API Telegram приложения для показа в интерфейсе (ADR-0018).
+
+	``api_hash_masked`` — секрет в замаскированном виде (как токены ботов).
+	"""
+
+	api_id: int
+	api_hash_masked: str
+
+
+@dataclass(frozen=True)
 class TgAccountDto:
 	"""Userbot-аккаунт для показа в интерфейсе.
 
@@ -88,7 +99,6 @@ class TgAccountDto:
 	id: int
 	label: str
 	phone: str | None
-	api_id: int
 	logged_in: bool
 	premium: bool = False
 
@@ -179,6 +189,64 @@ class AccountsService:
 	def _bot_dto(bot: Bot) -> BotDto:
 		return BotDto(bot.id, bot.label, bot.username, mask_secret(bot.token))
 
+	# --- ключ API Telegram (один на приложение, ADR-0018) ---------------------
+
+	async def get_tg_api(self) -> TgApiDto | None:
+		"""Возвращает ключ API приложения (None — ещё не задан)."""
+		credential = await self._read_tg_api()
+		if credential is None:
+			return None
+		return TgApiDto(credential.api_id, mask_secret(credential.api_hash))
+
+	async def set_tg_api(self, api_id: int, api_hash: str) -> TgApiDto:
+		"""Сохраняет ключ API приложения (запись одна: создаёт или заменяет).
+
+		Raises:
+			AccountsError: api_id не положительный или api_hash пуст.
+		"""
+		api_hash = api_hash.strip()
+		if api_id <= 0:
+			raise AccountsError("api_id — положительное число с my.telegram.org.")
+		if not api_hash:
+			raise AccountsError("Укажите api_hash с my.telegram.org.")
+		async with self._db.session_factory() as session:
+			credential = (
+				(await session.execute(select(TgApiCredential).order_by(TgApiCredential.id)))
+				.scalars()
+				.first()
+			)
+			if credential is None:
+				credential = TgApiCredential(api_id=api_id, api_hash=api_hash)
+				session.add(credential)
+			else:
+				credential.api_id = api_id
+				credential.api_hash = api_hash
+			await session.commit()
+		logger.info("Ключ API Telegram сохранён (api_id=%s).", api_id)
+		return TgApiDto(api_id, mask_secret(api_hash))
+
+	async def _read_tg_api(self) -> TgApiCredential | None:
+		"""Читает запись ключа API (или None — не задан)."""
+		async with self._db.session_factory() as session:
+			return (
+				(await session.execute(select(TgApiCredential).order_by(TgApiCredential.id)))
+				.scalars()
+				.first()
+			)
+
+	async def _require_tg_api(self) -> TgApiCredential:
+		"""Ключ API приложения — или понятная ошибка, где его задать.
+
+		Raises:
+			AccountsError: Ключ ещё не задан.
+		"""
+		credential = await self._read_tg_api()
+		if credential is None:
+			raise AccountsError(
+				"Сначала укажите api_id и api_hash приложения (my.telegram.org): Настройки → Общие."
+			)
+		return credential
+
 	# --- userbot (MTProto) --------------------------------------------------
 
 	async def list_tg_accounts(self) -> list[TgAccountDto]:
@@ -193,12 +261,24 @@ class AccountsService:
 		premium = self._gateway.userbot_premium()
 		return [self._acc_dto(a, premium=premium and a.id == self._active_account_id) for a in rows]
 
-	async def add_tg_account(
-		self, label: str, phone: str | None, api_id: int, api_hash: str
-	) -> TgAccountDto:
-		"""Сохраняет реквизиты userbot-аккаунта (вход — отдельным шагом)."""
+	async def add_tg_account(self, label: str, phone: str) -> TgAccountDto:
+		"""Сохраняет userbot-аккаунт: название и телефон (вход — отдельным шагом).
+
+		Ключ API у аккаунта не спрашивается — он один на приложение
+		(ADR-0018) и задаётся в «Настройки → Общие». Телефон обязателен:
+		аккаунт без телефона — тупик, в него нельзя войти.
+
+		Raises:
+			AccountsError: Пустое название или телефон.
+		"""
+		label = label.strip()
+		phone = phone.strip()
+		if not label:
+			raise AccountsError("У аккаунта должно быть название.")
+		if not phone:
+			raise AccountsError("Укажите телефон аккаунта — на него придёт код входа.")
 		async with self._db.session_factory() as session:
-			acc = TgAccount(label=label, phone=phone, api_id=api_id, api_hash=api_hash)
+			acc = TgAccount(label=label, phone=phone)
 			session.add(acc)
 			await session.commit()
 			await session.refresh(acc)
@@ -231,12 +311,15 @@ class AccountsService:
 		"""Подключает userbot по сохранённой сессии, если она есть.
 
 		Правило выбора: первый по id аккаунт с сессией (обычно userbot
-		один). Неудача подключения (нет сети, сессия отозвана) не ошибка:
-		приложение работает дальше, userbot подключится после повторного
-		входа. Вызывается движком при старте и после удаления аккаунта.
+		один); реквизиты подключения — общий ключ API приложения
+		(ADR-0018). Неудача подключения (нет сети, сессия отозвана)
+		не ошибка: приложение работает дальше, userbot подключится после
+		повторного входа. Вызывается движком при старте и после удаления
+		аккаунта.
 		"""
 		self._active_account_id = None
 		try:
+			credential = await self._read_tg_api()
 			async with self._db.session_factory() as session:
 				account = (
 					(
@@ -254,11 +337,16 @@ class AccountsService:
 			# пользователь увидит ту же ошибку на странице аккаунтов
 			logger.warning("Userbot не активирован: %s", exc)
 			return
+		if credential is None:
+			logger.info("Ключ API Telegram не задан — userbot отключён.")
+			return
 		if account is None or account.session is None:
 			logger.info("Аккаунт MTProto не настроен — userbot отключён.")
 			return
 		try:
-			await self._gateway.activate_userbot(account.api_id, account.api_hash, account.session)
+			await self._gateway.activate_userbot(
+				credential.api_id, credential.api_hash, account.session
+			)
 		except UserbotUnavailableError as exc:
 			logger.warning("Userbot «%s» не подключён: %s", account.label, exc)
 			return
@@ -271,7 +359,6 @@ class AccountsService:
 			acc.id,
 			acc.label,
 			acc.phone,
-			acc.api_id,
 			logged_in=acc.session is not None,
 			premium=premium,
 		)
@@ -281,13 +368,19 @@ class AccountsService:
 	async def start_login(self, account_id: int) -> None:
 		"""Просит Telegram отправить код входа на телефон аккаунта.
 
+		Реквизиты подключения — общий ключ API приложения (ADR-0018).
+
 		Raises:
+			AccountsError: Ключ API приложения ещё не задан.
 			LoginError: Нет телефона у аккаунта или Telegram отклонил запрос.
 		"""
 		account = await self._get_account(account_id)
 		if not account.phone:
 			raise LoginError("У аккаунта не указан номер телефона.")
-		await self._gateway.login.start(account.id, account.api_id, account.api_hash, account.phone)
+		credential = await self._require_tg_api()
+		await self._gateway.login.start(
+			account.id, credential.api_id, credential.api_hash, account.phone
+		)
 
 	async def confirm_login_code(self, account_id: int, code: str) -> bool:
 		"""Подтверждает код. ``True`` — вход завершён; ``False`` — нужен 2FA.
@@ -331,10 +424,14 @@ class AccountsService:
 				raise LoginError("Аккаунт не найден.")
 			account.session = session_string
 			await session.commit()
-			api_id, api_hash = account.api_id, account.api_hash
 		logger.info("Userbot id=%s: сессия сохранена.", account_id)
 		try:
-			await self._gateway.activate_userbot(api_id, api_hash, session_string)
+			# ключ не мог исчезнуть между шагами входа, но страховка честная:
+			# _require_tg_api даст понятный текст вместо падения активации
+			credential = await self._require_tg_api()
+			await self._gateway.activate_userbot(
+				credential.api_id, credential.api_hash, session_string
+			)
 		except Exception:  # noqa: BLE001 — вход удался, подключение не критично
 			logger.exception("Не удалось подключить userbot сразу после входа.")
 		else:

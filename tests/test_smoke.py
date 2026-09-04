@@ -69,7 +69,7 @@ async def test_start_survives_unreachable_userbot(tmp_path: Path) -> None:
 	при старте без сети, а при отозванной сессии блокировало запуск
 	насовсем (войти заново через «Настройки» было бы уже негде).
 	"""
-	from pxcontrol.engine.db.models import TgAccount
+	from pxcontrol.engine.db.models import TgAccount, TgApiCredential
 	from pxcontrol.engine.engine import Engine
 	from pxcontrol.engine.telegram.mtproto import MtprotoTransport
 
@@ -77,7 +77,8 @@ async def test_start_survives_unreachable_userbot(tmp_path: Path) -> None:
 	engine = Engine(Settings(_env_file=None, database_url=url))
 	await engine.db.init()
 	async with engine.db.session_factory() as session:
-		session.add(TgAccount(label="ub", api_id=1, api_hash="h", session="s"))
+		session.add(TgApiCredential(api_id=1, api_hash="h"))
+		session.add(TgAccount(label="ub", phone="+7900", session="s"))
 		await session.commit()
 	for client in (_DeadClient(), _RevokedClient()):
 		engine.gateway.mtproto = MtprotoTransport(client_factory=lambda a, b, c, _c=client: _c)

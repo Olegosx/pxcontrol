@@ -1,7 +1,8 @@
 """Страница «Настройки»: категории слева, правка выбранной — справа.
 
 Категории: «Общие» (оформление: тема, компактные отступы, высота
-полей, шрифт; путь к ffmpeg), «Папки»
+полей, шрифт; ключ API Telegram — один на приложение, ADR-0018;
+путь к ffmpeg), «Папки»
 (базовые папки видео: исходники / результаты / опубликованные)
 и «Аккаунты» (боты, userbot, ключи ИИ — встроенная
 :class:`AccountsPage`).
@@ -28,6 +29,7 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.accounts import TgApiDto
 from pxcontrol.engine.services.settings import (
 	FFMPEG_PATH,
 	QUEUE_SLOT_POLL_MINUTES,
@@ -149,6 +151,8 @@ class _GeneralSettings(QWidget):
 			)
 		)
 		layout.addSpacing(12)
+		self._build_tg_api_block(layout)
+		layout.addSpacing(12)
 		layout.addWidget(SubtitleLabel("Обработка видео", self))
 		ffmpeg_row = QHBoxLayout()
 		ffmpeg_row.addWidget(BodyLabel("Путь к ffmpeg:", self))
@@ -187,8 +191,46 @@ class _GeneralSettings(QWidget):
 		)
 		layout.addStretch()
 
+	def _build_tg_api_block(self, layout: QVBoxLayout) -> None:
+		"""Блок «API Telegram»: ключ приложения — один на всё приложение.
+
+		Пара api_id/api_hash с my.telegram.org — реквизиты приложения,
+		а не аккаунта (ADR-0018): задаётся здесь один раз, аккаунты
+		добавляются в «Аккаунтах» только названием и телефоном.
+		"""
+		layout.addWidget(SubtitleLabel("API Telegram", self))
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("api_id:", self))
+		self._api_id_edit = LineEdit(self)
+		self._api_id_edit.setPlaceholderText("число с my.telegram.org…")
+		self._api_id_edit.setMaximumWidth(160)
+		row.addWidget(self._api_id_edit)
+		row.addSpacing(8)
+		row.addWidget(BodyLabel("api_hash:", self))
+		self._api_hash_edit = LineEdit(self)
+		self._api_hash_edit.setPlaceholderText("строка с my.telegram.org…")
+		row.addWidget(self._api_hash_edit, stretch=1)
+		save = PushButton("Сохранить", self)
+		save.clicked.connect(self._on_save_tg_api)
+		row.addWidget(save)
+		layout.addLayout(row)
+		self._api_status = CaptionLabel(
+			"Ключ приложения — один на всё приложение; с ним входят все "
+			"userbot-аккаунты (их телефоны добавляются в «Аккаунтах»).",
+			self,
+		)
+		self._api_status.setWordWrap(True)
+		layout.addWidget(self._api_status)
+
 	def _load(self) -> None:
 		"""Подтягивает сохранённые значения из движка."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.accounts.get_tg_api(),
+			self,
+			self._show_tg_api,
+			noop,
+		)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get(THEME_DARK),
@@ -231,6 +273,44 @@ class _GeneralSettings(QWidget):
 			self._show_poll,
 			noop,
 		)
+
+	def _show_tg_api(self, credential: TgApiDto | None) -> None:
+		"""Показывает состояние ключа API (hash — только маской)."""
+		if credential is None:
+			self._api_status.setText(
+				"Ключ не задан — получите api_id и api_hash на my.telegram.org "
+				"и сохраните здесь (один раз, на всё приложение)."
+			)
+			return
+		self._api_id_edit.setText(str(credential.api_id))
+		self._api_hash_edit.clear()
+		self._api_hash_edit.setPlaceholderText(
+			f"сохранён: {credential.api_hash_masked} — введите новый, чтобы заменить…"
+		)
+		self._api_status.setText(
+			f"Ключ задан: api_id {credential.api_id}, api_hash "
+			f"{credential.api_hash_masked}. С ним входят все userbot-аккаунты."
+		)
+
+	def _on_save_tg_api(self) -> None:
+		"""Сохраняет ключ API приложения (оба поля обязательны)."""
+		api_id_text = str(self._api_id_edit.text()).strip()
+		api_hash = str(self._api_hash_edit.text()).strip()
+		if not api_id_text.isdigit() or not api_hash:
+			self._show_error("Заполните оба поля: числовой api_id и api_hash с my.telegram.org.")
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.accounts.set_tg_api(int(api_id_text), api_hash),
+			self,
+			self._on_tg_api_saved,
+			self._show_error,
+		)
+
+	def _on_tg_api_saved(self, credential: TgApiDto) -> None:
+		"""Подтверждает сохранение и обновляет маску."""
+		self._show_tg_api(credential)
+		InfoBar.success("Сохранено", "Ключ API Telegram применён.", parent=self)
 
 	def _show_theme(self, dark: bool) -> None:
 		"""Ставит переключатель без срабатывания сохранения."""

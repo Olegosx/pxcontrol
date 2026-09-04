@@ -37,6 +37,7 @@
 | [0015](0015-batch-publishing.md) | Пакетная отправка: черновики из готовой папки с раскладкой времени | accepted |
 | [0016](0016-persistent-publish-queue.md) | Персистентная очередь отправки со слотами отложек (лимит 100/канал) | accepted |
 | [0017](0017-telegram-request-budget.md) | Бюджет запросов Telegram на аккаунт (предусловие этапа 2) | accepted |
+| [0018](0018-telegram-api-key-per-app.md) | Ключ API Telegram — один на приложение | accepted |
 
 ## Как добавить запись
 
