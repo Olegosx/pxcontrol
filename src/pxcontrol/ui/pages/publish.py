@@ -39,8 +39,8 @@ from pxcontrol.engine.services.captions import (
 )
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import (
-	BOT_MAX_FILE_BYTES,
 	PostDraft,
+	PublishCapabilities,
 	publish_capabilities,
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
@@ -50,7 +50,7 @@ from pxcontrol.engine.services.settings import (
 	TITLE_PARSE_RULES,
 )
 from pxcontrol.engine.services.video import ReadyVideo, VideoDirs, video_dialog_filter
-from pxcontrol.engine.telegram.types import MediaKind
+from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES, MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
@@ -104,6 +104,15 @@ _KINDS: list[tuple[str, MediaKind, str]] = [
 	("Аудио", MediaKind.AUDIO, "Аудио (*.mp3 *.m4a *.flac *.ogg *.wav)"),
 	("Файл", MediaKind.DOCUMENT, "Все файлы (*)"),
 ]
+
+
+def _channel_caps(channel: ChannelDto) -> PublishCapabilities:
+	"""Возможности публикации канала из DTO — одна точка перевода.
+
+	Правило «бот назначен» = ``bot_id is not None`` живёт здесь,
+	а не в трёх местах страницы.
+	"""
+	return publish_capabilities(channel.bot_id is not None, channel.userbot_admin)
 
 
 class PublishPage(ScrollArea):
@@ -337,7 +346,7 @@ class PublishPage(ScrollArea):
 			partial(self._apply_times, channel.id),
 			noop,
 		)
-		caps = publish_capabilities(channel.bot_id is not None, channel.userbot_admin)
+		caps = _channel_caps(channel)
 		if caps.userbot:
 			# лимит зависит от Premium userbot — узнаём у движка
 			self._caps_hint.setText(
@@ -370,8 +379,7 @@ class PublishPage(ScrollArea):
 		ответы задерживаются: без проверки подсказка и времена канала A
 		перезаписали бы уже показанные данные канала B.
 		"""
-		current = self._channel_or_none()
-		return current is None or current.id != channel_id
+		return not self._channel_combo.is_current_id(channel_id)
 
 	def _apply_times(self, channel_id: int, times: list[str]) -> None:
 		"""Подставляет времена канала, если он всё ещё выбран."""
@@ -527,7 +535,7 @@ class PublishPage(ScrollArea):
 		channel = self._current_channel()
 		if channel is None:
 			return
-		caps = publish_capabilities(channel.bot_id is not None, channel.userbot_admin)
+		caps = _channel_caps(channel)
 		if not (caps.userbot or caps.bot):
 			self._show_error("Нет способа публикации — проверьте доступы на странице «Каналы».")
 			return
@@ -698,7 +706,7 @@ class PublishPage(ScrollArea):
 	def _batch_rules_loaded(self, setup: _BatchSetup, tokens: list[str]) -> None:
 		"""Правила разбора получены — осталась граница размера файла."""
 		setup.title_rules = TitleParseRules.from_tokens(tokens)
-		caps = publish_capabilities(setup.channel.bot_id is not None, setup.channel.userbot_admin)
+		caps = _channel_caps(setup.channel)
 		if caps.userbot:
 			run_in_engine(
 				self._worker,

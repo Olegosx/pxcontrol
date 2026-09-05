@@ -116,6 +116,12 @@ class AiCredential(TimestampMixin, Base):
 	api_key: Mapped[str] = mapped_column(EncryptedStr(512))
 
 
+#: Предел длины имени подпапки пресета: длина колонки ``subdir`` ниже.
+#: SQLite длину String не проверяет — соблюдение обеспечивает
+#: ``video.sanitize_subdir``, который берёт предел отсюда.
+SUBDIR_MAX_CHARS = 128
+
+
 class VideoPreset(TimestampMixin, Base):
 	"""Шаблон обработки видео (параметры из референса makeVideo).
 
@@ -159,7 +165,7 @@ class VideoPreset(TimestampMixin, Base):
 	meta_comment: Mapped[str | None] = mapped_column(String(512))
 	# подпапка внутри базовых папок видео (исходники/результаты/опубликованные);
 	# пустая строка — без подпапки
-	subdir: Mapped[str] = mapped_column(String(128), default="")
+	subdir: Mapped[str] = mapped_column(String(SUBDIR_MAX_CHARS), default="")
 
 
 class Channel(TimestampMixin, Base):

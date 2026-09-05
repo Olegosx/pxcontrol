@@ -259,7 +259,7 @@ class AccountsPage(ScrollArea):
 			self._show_error,
 		)
 
-	def _after_code(self, account: TgAccountDto, done: object) -> None:
+	def _after_code(self, account: TgAccountDto, done: bool) -> None:
 		"""После кода: вход завершён (``done``) или нужен пароль 2FA."""
 		if done:
 			InfoBar.success("Вход выполнен", account.label, parent=self)

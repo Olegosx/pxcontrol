@@ -14,6 +14,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotSessionExpiredError,
 	UserbotUnavailableError,
+	ensure_userbot_can_post,
 )
 from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost
 
@@ -304,15 +305,15 @@ def test_ensure_userbot_can_post() -> None:
 		is_creator=False,
 		participant=SimpleNamespace(admin_rights=SimpleNamespace(post_messages=True)),
 	)
-	MtprotoTransport._ensure_userbot_can_post(ok)
+	ensure_userbot_can_post(ok)
 	creator = SimpleNamespace(
 		is_admin=True,
 		is_creator=True,
 		participant=SimpleNamespace(admin_rights=None),
 	)
-	MtprotoTransport._ensure_userbot_can_post(creator)
+	ensure_userbot_can_post(creator)
 	with pytest.raises(UserbotUnavailableError, match="не администратор"):
-		MtprotoTransport._ensure_userbot_can_post(
+		ensure_userbot_can_post(
 			SimpleNamespace(
 				is_admin=False,
 				is_creator=False,
@@ -320,7 +321,7 @@ def test_ensure_userbot_can_post() -> None:
 			)
 		)
 	with pytest.raises(UserbotUnavailableError, match="нет права публиковать"):
-		MtprotoTransport._ensure_userbot_can_post(
+		ensure_userbot_can_post(
 			SimpleNamespace(
 				is_admin=True,
 				is_creator=False,

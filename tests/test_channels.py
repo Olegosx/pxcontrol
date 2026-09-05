@@ -251,6 +251,8 @@ def test_normalize_chat_ref() -> None:
 	assert normalize_chat_ref("mychannel") == "@mychannel"
 	assert normalize_chat_ref("https://t.me/mychannel") == "@mychannel"
 	assert normalize_chat_ref("t.me/mychannel/") == "@mychannel"
+	# веб-превью браузерного Telegram: t.me/s/имя — эквивалент t.me/имя
+	assert normalize_chat_ref("https://t.me/s/mychannel") == "@mychannel"
 	assert normalize_chat_ref("-1001234567") == -1001234567
 	with pytest.raises(ChatRefError):
 		normalize_chat_ref("   ")

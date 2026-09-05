@@ -23,7 +23,7 @@ from typing import Any
 from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import VideoPreset
+from pxcontrol.engine.db.models import SUBDIR_MAX_CHARS, VideoPreset
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.captions import FORBIDDEN_NAME_CHARS
 from pxcontrol.engine.services.settings import (
@@ -315,20 +315,16 @@ def prune_empty_dirs(start: Path, root: Path, mirror_root: Path | None = None) -
 		current = current.parent
 
 
-#: Символы, недопустимые в имени подпапки — единый перечень
-#: с очисткой имён файлов (``captions.FORBIDDEN_NAME_CHARS``).
-_SUBDIR_FORBIDDEN = FORBIDDEN_NAME_CHARS
-
-
 def sanitize_subdir(name: str) -> str:
 	"""Очищает имя подпапки: без разделителей путей и спецсимволов ОС.
 
 	Крайние точки и пробелы срезаются (Windows их не терпит в именах),
-	результат ограничен 128 символами (длина колонки). Пустой результат —
-	«без подпапки».
+	результат ограничен ``SUBDIR_MAX_CHARS`` (длина колонки).
+	Пустой результат — «без подпапки».
 	"""
-	cleaned = "".join(ch for ch in name if ch not in _SUBDIR_FORBIDDEN)
-	return cleaned.strip(" .")[:128]
+	# единый перечень запрещённых символов — captions.FORBIDDEN_NAME_CHARS
+	cleaned = "".join(ch for ch in name if ch not in FORBIDDEN_NAME_CHARS)
+	return cleaned.strip(" .")[:SUBDIR_MAX_CHARS]
 
 
 def _is_hidden(name: str) -> bool:

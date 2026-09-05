@@ -38,6 +38,7 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
+	account_caption,
 	bind,
 	bot_caption,
 	clear_layout,
@@ -82,7 +83,9 @@ class _ConnectDialog(MessageBoxBase):
 		self._hint = BodyLabel("", self)
 		self.viewLayout.addWidget(self._hint)
 		self._account_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
-		self._account_combo.set_items(accounts, label=lambda acc: f"{acc.label} ({acc.phone})")
+		self._account_combo.set_items(
+			accounts, label=lambda acc: account_caption(acc.label, acc.phone)
+		)
 		self.viewLayout.addWidget(self._account_combo)
 		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
 		self._combo.set_items(bots, label=lambda bot: bot_caption(bot.label, bot.username))
@@ -175,7 +178,7 @@ class _AssignUserbotDialog(MessageBoxBase):
 			)
 		)
 		self._combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
-		self._combo.set_items(accounts, label=lambda acc: f"{acc.label} ({acc.phone})")
+		self._combo.set_items(accounts, label=lambda acc: account_caption(acc.label, acc.phone))
 		self.viewLayout.addWidget(self._combo)
 		self.yesButton.setText("Привязать")
 		self.cancelButton.setText("Отмена")
@@ -216,6 +219,10 @@ class _ChannelPrefsDialog(MessageBoxBase):
 		self.viewLayout.addWidget(self._times_edit)
 		self._times_hint = CaptionLabel(self._TIMES_HINT, self)
 		self.viewLayout.addWidget(self._times_hint)
+		# ошибка валидации — единой красной подписью (как у всех диалогов),
+		# подсказка о формате при этом остаётся на месте
+		self._error = ErrorLabel(self)
+		self.viewLayout.addWidget(self._error)
 		self.yesButton.setText("Сохранить")
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(420)
@@ -225,9 +232,8 @@ class _ChannelPrefsDialog(MessageBoxBase):
 		try:
 			self.times()
 		except ValueError as exc:
-			self._times_hint.setText(f"⚠ {exc}")
-			return False
-		return True
+			return self._error.fail(str(exc))
+		return self._error.succeed()
 
 	def preset_id(self) -> int | None:
 		"""Идентификатор выбранного пресета (None — «не задан»)."""
@@ -491,7 +497,7 @@ class ChannelsPage(ScrollArea):
 			self._worker,
 			self._worker.engine.channels.assign_bot(channel.id, bot_id),
 			self,
-			self._on_bot_changed,
+			self._on_publisher_changed,
 			self._show_error,
 		)
 
@@ -506,11 +512,11 @@ class ChannelsPage(ScrollArea):
 			self._worker,
 			self._worker.engine.channels.unassign_bot(channel.id),
 			self,
-			self._on_bot_changed,
+			self._on_publisher_changed,
 			self._show_error,
 		)
 
-	def _on_bot_changed(self, channel: ChannelDto) -> None:
+	def _on_publisher_changed(self, channel: ChannelDto) -> None:
 		InfoBar.success("Готово", channel.title, parent=self)
 		self._reload()
 
@@ -545,7 +551,7 @@ class ChannelsPage(ScrollArea):
 			self._worker,
 			self._worker.engine.channels.assign_userbot(channel.id, account_id),
 			self,
-			self._on_bot_changed,
+			self._on_publisher_changed,
 			self._show_error,
 		)
 
@@ -561,7 +567,7 @@ class ChannelsPage(ScrollArea):
 			self._worker,
 			self._worker.engine.channels.unassign_userbot(channel.id),
 			self,
-			self._on_bot_changed,
+			self._on_publisher_changed,
 			self._show_error,
 		)
 

@@ -6,7 +6,7 @@ from datetime import date, datetime
 
 import pytest
 
-from pxcontrol.engine.services.publish_plan import (
+from pxcontrol.engine.services.schedule_plan import (
 	PlanError,
 	PlanKind,
 	SchedulePlan,

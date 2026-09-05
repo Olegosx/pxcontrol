@@ -63,6 +63,11 @@ def normalize_chat_ref(chat_ref: str) -> str | int:
 			"Инвайт-ссылка (t.me/+… или t.me/joinchat/…) не подходит — "
 			"укажите @имя канала или его ID (начинается с -100)."
 		)
+	if ref.lower().startswith("s/"):
+		# веб-превью канала (браузерный Telegram даёт t.me/s/имя):
+		# без среза префикс превратился бы в кривое «@s/имя» и ушёл
+		# в API с общим «канал не найден» — как у инвайт-ссылок выше
+		ref = ref[2:]
 	if ref.lower().startswith("c/"):
 		internal = ref[2:].split("/", 1)[0]
 		if internal.isdigit():

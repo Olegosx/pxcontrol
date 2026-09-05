@@ -38,7 +38,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `VideoDirs`, `IntroSourceKind` | `video.py` | действующие папки видео; вид источника кадра заставки |
 | `ProcessingRequest` | `video_queue.py` | заявка очереди обработки: файл со своими параметрами (ADR-0014) |
 | `VideoItemDto`, `VideoItemStatus` | `video_queue.py` | элемент очереди обработки и его статус |
-| `SchedulePlan`, `PlanKind` | `publish_plan.py` | раскладка времени пакета отправки: стратегия и параметры (ADR-0015) |
+| `SchedulePlan`, `PlanKind` | `schedule_plan.py` | раскладка времени пакета отправки: стратегия и параметры (ADR-0015) |
 | `FieldDto`, `TemplateDto`, `TemplateFieldDto`, `CaptionLine` | `captions.py` | поля со словарями и шаблоны подписей |
 | `ValueDto` | `captions.py` | значение словаря поля (с привязкой к родительскому значению) |
 

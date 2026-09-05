@@ -36,13 +36,8 @@ from pxcontrol.engine.services.settings import (
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
-
-# лимит Bot API живёт в telegram/types.py; здесь — явный реэкспорт
-# (интерфейс исторически берёт его из сервиса постов)
 from pxcontrol.engine.telegram.types import (
-	BOT_MAX_FILE_BYTES as BOT_MAX_FILE_BYTES,
-)
-from pxcontrol.engine.telegram.types import (
+	BOT_MAX_FILE_BYTES,
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
@@ -62,6 +57,10 @@ MIN_SCHEDULE_AHEAD = timedelta(seconds=60)
 #: Миниатюра видео для Telegram: вписывается в квадрат, JPEG-качество ffmpeg.
 _THUMB_BOX_PX = 320
 _THUMB_JPEG_QUALITY = "4"
+
+#: Предел ожидания ffmpeg на миниатюру: один кадр — секунды, предел
+#: с большим запасом ловит зависший процесс (например, на битом файле).
+_THUMBNAIL_TIMEOUT_S = 120.0
 
 #: Длина превью текста отложенной записи на странице «Расписание».
 _SCHEDULED_PREVIEW_CHARS = 80
@@ -884,4 +883,4 @@ def _make_thumbnail(
 		output_jpg,
 	]
 	# один кадр — секунды; предел ловит зависший ffmpeg (недоступный диск)
-	run_tool(cmd, "миниатюра видео", timeout=120.0)
+	run_tool(cmd, "миниатюра видео", timeout=_THUMBNAIL_TIMEOUT_S)

@@ -60,6 +60,7 @@ from pxcontrol.engine.services.video_queue import (
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	CollapsibleCard,
 	DtoComboBox,
 	FormDialog,
 	QueuePanel,
@@ -81,7 +82,7 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.frame_picker import FramePickerDialog
 from pxcontrol.ui.pages.video_batch import BatchScanDialog
-from pxcontrol.ui.pages.video_form import CollapsibleCard, PresetForm
+from pxcontrol.ui.pages.video_form import PresetForm
 
 #: Имя «пресета» в имени файла результата, когда пресет не выбран.
 _MANUAL_NAME = "ручные"
@@ -397,8 +398,7 @@ class VideoPage(ScrollArea):
 		``_is_stale`` на «Публикации»): без проверки пресет канала A
 		лёг бы в шаблон уже выбранного канала B.
 		"""
-		current = self._channel_combo.selected()
-		return current is None or current.id != channel_id
+		return not self._channel_combo.is_current_id(channel_id)
 
 	def _apply_channel_preset(self, channel: ChannelDto, preset_id: int | None) -> None:
 		"""Подставляет пресет канала; нет пресета — форма не трогается.
@@ -440,8 +440,7 @@ class VideoPage(ScrollArea):
 
 	def _apply_preset_fields(self, preset_id: int, fields: PresetFields) -> None:
 		"""Заполняет панель, если пресет всё ещё выбран (защита от гонки)."""
-		current = self._preset_combo.selected()
-		if current is not None and current.id == preset_id:
+		if self._preset_combo.is_current_id(preset_id):
 			self._form.fill(fields)
 
 	def _on_save_preset(self) -> None:

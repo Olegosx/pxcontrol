@@ -7,13 +7,14 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Generic, TypeVar
 
-from PySide6.QtCore import QDate, QObject, QTime, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QDate, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QMouseEvent
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
 	QHBoxLayout,
 	QLayout,
+	QSizePolicy,
 	QVBoxLayout,
 	QWidget,
 )
@@ -85,9 +86,19 @@ def format_local(moment: datetime) -> str:
 	return moment.astimezone().strftime("%d.%m.%Y %H:%M")
 
 
+#: Умолчание времени публикации: «через час» — предзаполнение поля
+#: времени (WhenRow) и старта раскладки пакета.
+DEFAULT_SCHEDULE_OFFSET_S = 3600
+
+
 def bot_caption(label: str, username: str | None) -> str:
 	"""Единая метка бота в списках и диалогах: «Имя (@username)»."""
 	return f"{label} (@{username or '—'})"
+
+
+def account_caption(label: str, phone: str | None) -> str:
+	"""Единая метка userbot-аккаунта в списках и диалогах: «Имя (телефон)»."""
+	return f"{label} ({phone or '—'})"
 
 
 def bind(action: Callable[[_T], None], item: _T) -> Callable[[], None]:
@@ -200,6 +211,108 @@ def file_action_buttons(
 	remove.clicked.connect(on_remove)
 	buttons.addWidget(remove)
 	return trailing
+
+
+#: Приглушённый цвет сводки в шапке карточки: светлая/тёмная тема.
+#: Подпись, а не ошибка — единая точка цветов ошибок (``ErrorLabel``
+#: в ``common``) тут не подходит.
+_SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
+
+
+class _CardHeader(QWidget):
+	"""Шапка сворачиваемой карточки: ловит клик по всей своей площади."""
+
+	clicked = Signal()
+
+	def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
+		"""Левый клик в любом месте шапки — сигнал о сворачивании."""
+		if event.button() == Qt.MouseButton.LeftButton:
+			self.clicked.emit()
+		super().mouseReleaseEvent(event)
+
+
+class CollapsibleCard(CardWidget):
+	"""Карточка-раздел, сворачиваемая кликом по шапке.
+
+	Разделы параметров свёрнуты по умолчанию: форма занимает несколько
+	строк вместо целого экрана (параметры обычно приходят из пресета
+	и правятся редко). Свёрнутость — только про показ: виджеты скрытого
+	тела сохраняют значения, и :meth:`PresetForm.fields` читает их
+	как обычно.
+	"""
+
+	def __init__(
+		self,
+		title: str,
+		parent: QWidget,
+		trailing: QWidget | None = None,
+		leading: QWidget | None = None,
+	) -> None:
+		"""``trailing`` — виджет с кнопками в правом краю шапки (например,
+		просмотр и удаление у карточки файла); ``leading`` — виджет перед
+		названием (например, чекбокс выбора). Клики по обоим остаются
+		их виджетам и карточку не сворачивают (Qt не передаёт их шапке)."""
+		super().__init__(parent)
+		outer = QVBoxLayout(self)
+		outer.setContentsMargins(0, 0, 0, 0)
+		outer.setSpacing(0)
+		self._chevron = TransparentToolButton(FluentIcon.CHEVRON_RIGHT_MED, self)
+		self._chevron.setFixedSize(24, 24)
+		self._chevron.setIconSize(QSize(12, 12))
+		self._chevron.clicked.connect(self.toggle)
+		header = _CardHeader(self)
+		header.setCursor(Qt.CursorShape.PointingHandCursor)
+		header.clicked.connect(self.toggle)
+		head_row = QHBoxLayout(header)
+		head_row.setContentsMargins(12, 8, 16, 8)
+		head_row.setSpacing(8)
+		head_row.addWidget(self._chevron)
+		if leading is not None:
+			leading.setParent(header)
+			head_row.addWidget(leading)
+		head_row.addWidget(StrongBodyLabel(title, header))
+		self._summary_text = ""
+		self._summary = CaptionLabel("", header)
+		self._summary.setTextColor(*_SUMMARY_COLORS)
+		# сводка занимает остаток шапки и обрезается, а не распирает форму
+		self._summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		head_row.addWidget(self._summary, stretch=1)
+		head_row.addStretch()
+		if trailing is not None:
+			trailing.setParent(header)
+			head_row.addWidget(trailing)
+		outer.addWidget(header)
+		self._body = QWidget(self)
+		#: Компоновка тела — раздел добавляет сюда своё содержимое.
+		self.body = QVBoxLayout(self._body)
+		self.body.setContentsMargins(*density.spacing().card_body_margins)
+		self.body.setSpacing(density.spacing().card_body_spacing)
+		outer.addWidget(self._body)
+		self._body.hide()
+
+	def toggle(self) -> None:
+		"""Разворачивает свёрнутое и наоборот (клик по шапке или стрелке)."""
+		self.set_expanded(not self._body.isVisible())
+
+	def set_expanded(self, expanded: bool) -> None:
+		"""Показывает или прячет тело; стрелка отражает состояние."""
+		self._body.setVisible(expanded)
+		icon = FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED
+		self._chevron.setIcon(icon)
+		self._refresh_summary()
+
+	def set_summary(self, text: str) -> None:
+		"""Сводка значений для шапки; видна только у свёрнутой карточки.
+
+		У развёрнутой сводка дублировала бы поля прямо под шапкой —
+		поэтому прячется.
+		"""
+		self._summary_text = text
+		self._refresh_summary()
+
+	def _refresh_summary(self) -> None:
+		self._summary.setText(self._summary_text)
+		self._summary.setVisible(bool(self._summary_text) and not self._body.isVisible())
 
 
 def exec_dialog(dialog: QDialog) -> bool:
@@ -353,6 +466,17 @@ class DtoComboBox(ComboBox, Generic[_T]):
 			self.setCurrentIndex(index)
 		finally:
 			self.blockSignals(False)
+
+	def is_current_id(self, item_id: object) -> bool:
+		"""Выбран ли сейчас элемент с данным ``id``.
+
+		Общая проверка «ответ движка не устарел»: пока движок занят,
+		ответы задерживаются, и без неё данные элемента A легли бы
+		в виджеты уже выбранного элемента B. Контракт: элементы списка
+		несут поле ``id`` (все DTO движка ему следуют).
+		"""
+		current = self.selected()
+		return current is not None and getattr(current, "id", None) == item_id
 
 	def selected(self) -> _T | None:
 		"""Выбранный элемент; None — служебный пункт или пустой список."""
@@ -725,7 +849,7 @@ class WhenRow:
 		self._date.setDate(QDate.currentDate())
 		self._time = EditableComboBox(dialog)
 		self._time.setPlaceholderText("ЧЧ:ММ")
-		self._time.setText(QTime.currentTime().addSecs(3600).toString("HH:mm"))
+		self._time.setText(QTime.currentTime().addSecs(DEFAULT_SCHEDULE_OFFSET_S).toString("HH:mm"))
 		self._time.setMaximumWidth(120)
 		row.addWidget(self._date)
 		row.addWidget(self._time)
@@ -763,7 +887,9 @@ class WhenRow:
 			self._time.setText(valid[0])
 		else:
 			self._time.setCurrentIndex(-1)
-			self._time.setText(QTime.currentTime().addSecs(3600).toString("HH:mm"))
+			self._time.setText(
+				QTime.currentTime().addSecs(DEFAULT_SCHEDULE_OFFSET_S).toString("HH:mm")
+			)
 		self._adjust_date()
 
 	def _adjust_date(self) -> None:

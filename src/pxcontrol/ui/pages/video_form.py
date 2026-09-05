@@ -1,11 +1,10 @@
-"""Панель параметров обработки видео и сворачиваемая карточка.
+"""Панель параметров обработки видео (раздел страницы «Видео»).
 
-Два экспорта: :class:`PresetForm` — самостоятельный виджет параметров
-без знания о странице (заполняется пресетом через :meth:`PresetForm.fill`,
-состояние отдаёт :meth:`PresetForm.fields`; контракт со страницей —
-только ``PresetFields``) и :class:`CollapsibleCard` — универсальная
-сворачиваемая карточка, в которой живут и панель, и карточки файлов
-страницы «Видео» (перенос в ``common`` — при третьем пользователе).
+Самостоятельный виджет без знания о странице: заполняется пресетом
+(:meth:`PresetForm.fill`), правится свободно, текущее состояние отдаёт
+:meth:`PresetForm.fields`. Контракт со страницей — только ``PresetFields``.
+Сворачиваемая карточка ``CollapsibleCard`` жила здесь до третьего
+пользователя — теперь она в ``common`` (аудит 05.09).
 """
 
 from __future__ import annotations
@@ -13,9 +12,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal, SignalInstance
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtCore import Signal, SignalInstance
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
@@ -23,13 +21,10 @@ from qfluentwidgets import (
 	CheckBox,
 	ComboBox,
 	DoubleSpinBox,
-	FluentIcon,
 	LineEdit,
 	PushButton,
 	SpinBox,
-	StrongBodyLabel,
 	SwitchButton,
-	TransparentToolButton,
 )
 
 from pxcontrol.engine.services.video import (
@@ -39,17 +34,12 @@ from pxcontrol.engine.services.video import (
 	parse_intro_source,
 )
 from pxcontrol.ui import density
-from pxcontrol.ui.pages.common import INPUT_DEBOUNCE_MS, debounced, pick_file
+from pxcontrol.ui.pages.common import INPUT_DEBOUNCE_MS, CollapsibleCard, debounced, pick_file
 
 #: Значения по умолчанию параметров обработки — единственная точка истины
 #: движка (``PresetFields``): «чистая» форма совпадает с «чистым» пресетом,
 #: смена дефолта в движке подхватывается формой сама.
 _DEFAULTS = PresetFields(name="")
-
-#: Приглушённый цвет сводки в шапке карточки: светлая/тёмная тема.
-#: Подпись, а не ошибка — единая точка цветов ошибок (``ErrorLabel``
-#: в ``common``) тут не подходит.
-_SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
 
 #: Углы вотермарка: подпись → код (коды понимает движок, filtergraph).
 _CORNERS = [
@@ -74,102 +64,6 @@ _INTRO_SOURCES = [
 def _fmt_num(value: float) -> str:
 	"""Число для сводки: без хвостовых нулей, запятая по-русски."""
 	return f"{value:g}".replace(".", ",")
-
-
-class _CardHeader(QWidget):
-	"""Шапка сворачиваемой карточки: ловит клик по всей своей площади."""
-
-	clicked = Signal()
-
-	def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
-		"""Левый клик в любом месте шапки — сигнал о сворачивании."""
-		if event.button() == Qt.MouseButton.LeftButton:
-			self.clicked.emit()
-		super().mouseReleaseEvent(event)
-
-
-class CollapsibleCard(CardWidget):
-	"""Карточка-раздел, сворачиваемая кликом по шапке.
-
-	Разделы параметров свёрнуты по умолчанию: форма занимает несколько
-	строк вместо целого экрана (параметры обычно приходят из пресета
-	и правятся редко). Свёрнутость — только про показ: виджеты скрытого
-	тела сохраняют значения, и :meth:`PresetForm.fields` читает их
-	как обычно.
-	"""
-
-	def __init__(
-		self,
-		title: str,
-		parent: QWidget,
-		trailing: QWidget | None = None,
-		leading: QWidget | None = None,
-	) -> None:
-		"""``trailing`` — виджет с кнопками в правом краю шапки (например,
-		просмотр и удаление у карточки файла); ``leading`` — виджет перед
-		названием (например, чекбокс выбора). Клики по обоим остаются
-		их виджетам и карточку не сворачивают (Qt не передаёт их шапке)."""
-		super().__init__(parent)
-		outer = QVBoxLayout(self)
-		outer.setContentsMargins(0, 0, 0, 0)
-		outer.setSpacing(0)
-		self._chevron = TransparentToolButton(FluentIcon.CHEVRON_RIGHT_MED, self)
-		self._chevron.setFixedSize(24, 24)
-		self._chevron.setIconSize(QSize(12, 12))
-		self._chevron.clicked.connect(self.toggle)
-		header = _CardHeader(self)
-		header.setCursor(Qt.CursorShape.PointingHandCursor)
-		header.clicked.connect(self.toggle)
-		head_row = QHBoxLayout(header)
-		head_row.setContentsMargins(12, 8, 16, 8)
-		head_row.setSpacing(8)
-		head_row.addWidget(self._chevron)
-		if leading is not None:
-			leading.setParent(header)
-			head_row.addWidget(leading)
-		head_row.addWidget(StrongBodyLabel(title, header))
-		self._summary_text = ""
-		self._summary = CaptionLabel("", header)
-		self._summary.setTextColor(*_SUMMARY_COLORS)
-		# сводка занимает остаток шапки и обрезается, а не распирает форму
-		self._summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		head_row.addWidget(self._summary, stretch=1)
-		head_row.addStretch()
-		if trailing is not None:
-			trailing.setParent(header)
-			head_row.addWidget(trailing)
-		outer.addWidget(header)
-		self._body = QWidget(self)
-		#: Компоновка тела — раздел добавляет сюда своё содержимое.
-		self.body = QVBoxLayout(self._body)
-		self.body.setContentsMargins(*density.spacing().card_body_margins)
-		self.body.setSpacing(density.spacing().card_body_spacing)
-		outer.addWidget(self._body)
-		self._body.hide()
-
-	def toggle(self) -> None:
-		"""Разворачивает свёрнутое и наоборот (клик по шапке или стрелке)."""
-		self.set_expanded(not self._body.isVisible())
-
-	def set_expanded(self, expanded: bool) -> None:
-		"""Показывает или прячет тело; стрелка отражает состояние."""
-		self._body.setVisible(expanded)
-		icon = FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED
-		self._chevron.setIcon(icon)
-		self._refresh_summary()
-
-	def set_summary(self, text: str) -> None:
-		"""Сводка значений для шапки; видна только у свёрнутой карточки.
-
-		У развёрнутой сводка дублировала бы поля прямо под шапкой —
-		поэтому прячется.
-		"""
-		self._summary_text = text
-		self._refresh_summary()
-
-	def _refresh_summary(self) -> None:
-		self._summary.setText(self._summary_text)
-		self._summary.setVisible(bool(self._summary_text) and not self._body.isVisible())
 
 
 class PresetForm(QWidget):

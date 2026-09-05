@@ -20,6 +20,11 @@ from pxcontrol.ui.pages.video import VideoPage
 
 logger = logging.getLogger(__name__)
 
+#: Предел синхронного чтения/записи настроек окна из цикла движка:
+#: геометрия нужна до показа и при выходе, штатно это миллисекунды —
+#: предел лишь страхует от зависшего цикла.
+_SETTINGS_SYNC_TIMEOUT_S = 5
+
 
 class MainWindow(FluentWindow):
 	"""Окно с боковой навигацией. К движку обращается через `EngineWorker`."""

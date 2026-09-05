@@ -17,12 +17,18 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from pxcontrol.config import get_settings
 from pxcontrol.engine import EngineWorker
 from pxcontrol.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+
+#: Предел ожидания чтения оформления из цикла движка перед созданием
+#: окна: движок уже готов, штатно это миллисекунды — предел лишь
+#: страхует от зависшего цикла, не задерживая запуск заметно.
+_APPEARANCE_READ_TIMEOUT_S = 5
 
 
 def run() -> int:
@@ -32,7 +38,7 @@ def run() -> int:
 		Код выхода процесса.
 	"""
 	settings = get_settings()
-	setup_logging(settings.log_level)
+	log_file = setup_logging(settings.log_level)
 	worker = EngineWorker(settings)
 	try:
 		worker.start()
@@ -41,7 +47,7 @@ def run() -> int:
 		# в stderr: при запуске из ярлыка окно «просто не открывалось»,
 		# а лог-файл оставался пустым (ADR-0009 обещает честное падение)
 		logger.critical("Движок не запустился.", exc_info=True)
-		_show_startup_error(exc)
+		_show_startup_error(exc, log_file)
 		return 1
 	try:
 		return _run_qt(worker)
@@ -49,7 +55,7 @@ def run() -> int:
 		worker.stop()
 
 
-def _show_startup_error(exc: BaseException) -> None:
+def _show_startup_error(exc: BaseException, log_file: Path) -> None:
 	"""Показывает ошибку старта системным диалогом (терминала может не быть)."""
 	try:
 		from PySide6.QtWidgets import QApplication, QMessageBox
@@ -61,7 +67,8 @@ def _show_startup_error(exc: BaseException) -> None:
 			None,
 			"pXcontrol — ошибка запуска",
 			f"Движок не запустился: {user_message(exc.__cause__ or exc)}\n\n"
-			"Подробности — в logs/pxcontrol.log.",
+			# фактический путь возвращает setup_logging — литерал разъезжался
+			f"Подробности — в {log_file}.",
 		)
 	except Exception:  # noqa: BLE001 — диалог вспомогательный, лог уже записан
 		logger.debug("Диалог ошибки запуска показать не удалось.", exc_info=True)
@@ -98,7 +105,7 @@ def _run_qt(worker: EngineWorker) -> int:
 	# не валит запуск — откат к умолчаниям ключей.
 	try:
 		dark, compact, control_height, font_size = worker.submit(read_appearance()).result(
-			timeout=5
+			timeout=_APPEARANCE_READ_TIMEOUT_S
 		)
 	except Exception:  # noqa: BLE001 — оформление не стоит отказа в запуске
 		logger.warning("Не удалось прочитать оформление — использую умолчания.", exc_info=True)

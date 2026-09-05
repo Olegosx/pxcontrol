@@ -18,6 +18,7 @@ from typing import Any
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.types import (
+	TELEGRAM_MAX_SCHEDULED,
 	ChannelInfo,
 	MediaKind,
 	OutgoingPost,
@@ -134,8 +135,8 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		)
 	if isinstance(exc, errors.ScheduleTooMuchError):
 		return UserbotScheduleFullError(
-			"Все слоты отложенных сообщений канала заняты (лимит Telegram — "
-			"100) — пост подождёт освобождения слота."
+			f"Все слоты отложенных сообщений канала заняты (лимит Telegram — "
+			f"{TELEGRAM_MAX_SCHEDULED}) — пост подождёт освобождения слота."
 		)
 	if isinstance(exc, ValueError):
 		# Telethon: «Could not find the input entity» — канал не в поле
@@ -180,6 +181,23 @@ _SESSION_EXPIRED_TEXT = (
 _NOT_ADMIN_TEXT = (
 	"Userbot не администратор канала — добавьте аккаунт администратором с правом публиковать."
 )
+
+
+def ensure_userbot_can_post(perms: Any) -> None:
+	"""Требует права админа с публикацией (владельцу можно всё).
+
+	Парная форма ``ensure_bot_can_post`` бот-пути: публичная функция
+	модуля, тестируется по имени, а не через внутренности класса.
+
+	Raises:
+		UserbotAccessError: Прав не хватает (подтверждённый отказ —
+			основание для сервисов менять привязку аккаунта, ADR-0019).
+	"""
+	if not perms.is_admin:
+		raise UserbotAccessError(_NOT_ADMIN_TEXT)
+	rights = getattr(perms.participant, "admin_rights", None)
+	if not perms.is_creator and not getattr(rights, "post_messages", False):
+		raise UserbotAccessError("У userbot нет права публиковать сообщения в канале.")
 
 
 def _peer_id(chat_id: str) -> int:
@@ -406,26 +424,12 @@ class MtprotoTransport:
 		async with _mtproto_errors():
 			entity = await client.get_entity(ref)
 			perms = await client.get_permissions(entity, "me")
-		self._ensure_userbot_can_post(perms)
+		ensure_userbot_can_post(perms)
 		return ChannelInfo(
 			chat_id=str(utils.get_peer_id(entity)),
 			title=str(getattr(entity, "title", "") or chat_ref),
 			username=getattr(entity, "username", None),
 		)
-
-	@staticmethod
-	def _ensure_userbot_can_post(perms: Any) -> None:
-		"""Требует права админа с публикацией (владельцу можно всё).
-
-		Raises:
-			UserbotAccessError: Прав не хватает (подтверждённый отказ —
-				основание для сервисов менять хранимый флаг прав).
-		"""
-		if not perms.is_admin:
-			raise UserbotAccessError(_NOT_ADMIN_TEXT)
-		rights = getattr(perms.participant, "admin_rights", None)
-		if not perms.is_creator and not getattr(rights, "post_messages", False):
-			raise UserbotAccessError("У userbot нет права публиковать сообщения в канале.")
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""

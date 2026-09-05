@@ -43,7 +43,7 @@ from pxcontrol.engine.services.captions import (
 )
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import PostDraft
-from pxcontrol.engine.services.publish_plan import (
+from pxcontrol.engine.services.schedule_plan import (
 	PlanError,
 	PlanKind,
 	SchedulePlan,
@@ -54,6 +54,8 @@ from pxcontrol.engine.services.video import ReadyVideo
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	DEFAULT_SCHEDULE_OFFSET_S,
+	CollapsibleCard,
 	ErrorLabel,
 	SelectionRow,
 	file_action_buttons,
@@ -63,7 +65,6 @@ from pxcontrol.ui.pages.common import (
 	parse_hhmm,
 	show_error,
 )
-from pxcontrol.ui.pages.video_form import CollapsibleCard
 
 #: Формат времени публикации в строке черновика (местное время).
 _WHEN_FORMAT = "%d.%m.%Y %H:%M"
@@ -381,7 +382,9 @@ class PublishBatchDialog(MessageBoxBase):
 		self._start_label = BodyLabel("старт:", self)
 		self._start = LineEdit(self)
 		self._start.setFixedWidth(220)
-		self._start.setText((datetime.now() + timedelta(hours=1)).strftime(_WHEN_FORMAT))
+		self._start.setText(
+			(datetime.now() + timedelta(seconds=DEFAULT_SCHEDULE_OFFSET_S)).strftime(_WHEN_FORMAT)
+		)
 		for widget in (
 			self._date_label,
 			self._date,
