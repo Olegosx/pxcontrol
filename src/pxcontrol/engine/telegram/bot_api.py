@@ -157,6 +157,7 @@ async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, capti
 
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
+		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
 		ChannelCheckError: Telegram отклонил отправку (нет прав, размер и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
@@ -197,6 +198,7 @@ async def send_text(token: str, chat_id: str, text: str) -> int:
 
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
+		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
 		ChannelCheckError: Telegram отклонил отправку (нет прав и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
@@ -245,6 +247,7 @@ async def get_bot_events(token: str) -> list[str]:
 
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен.
+		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
 		ChannelCheckError: Telegram отклонил запрос (вебхук, параллельный опрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
@@ -276,6 +279,7 @@ async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
 	Raises:
 		ChatRefError: Введённую ссылку/имя не удалось разобрать.
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
+		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
 		ChannelCheckError: Канал не найден / бот не добавлен / нет прав.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
@@ -302,6 +306,7 @@ async def check_token(token: str) -> str:
 
 	Raises:
 		InvalidBotTokenError: Токен неверного формата или отклонён Telegram.
+		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
 		ChannelCheckError: Telegram отклонил запрос getMe (практически
 			не случается — запасные ветки единого маппера).
 		ConnectionError: Нет связи с серверами Telegram.

@@ -122,32 +122,59 @@ class TelegramGateway:
 
 	# --- Bot API ---------------------------------------------------------------
 
+	# Исходы бот-методов — таксономия бот-пути, единая для всех пяти
+	# (см. Raises одноимённых функций bot_api): InvalidBotTokenError /
+	# TelegramFloodError / ChannelCheckError / ConnectionError.
+
 	async def check_bot_token(self, token: str) -> str:
-		"""Проверяет токен бота через getMe и возвращает его @имя."""
+		"""Проверяет токен бота через getMe и возвращает его @имя.
+
+		Raises: см. :func:`bot_api.check_token`.
+		"""
 		return await check_token(token)
 
 	async def check_channel(self, token: str, chat_ref: str) -> ChannelInfo:
-		"""Проверяет канал и права бота в нём (getChat + getChatMember)."""
+		"""Проверяет канал и права бота в нём (getChat + getChatMember).
+
+		Raises: см. :func:`bot_api.check_channel` (+ ``ChatRefError``).
+		"""
 		return await check_channel(token, chat_ref)
 
 	async def bot_events(self, token: str) -> list[str]:
-		"""Диагностика: события бота за 24 ч (getUpdates, без удаления)."""
+		"""Диагностика: события бота за 24 ч (getUpdates, без удаления).
+
+		Raises: см. :func:`bot_api.get_bot_events`.
+		"""
 		return await get_bot_events(token)
 
 	async def send_text(self, token: str, chat_id: str, text: str) -> int:
-		"""Публикует текстовый пост «сейчас» через бота."""
+		"""Публикует текстовый пост «сейчас» через бота.
+
+		Raises: см. :func:`bot_api.send_text`.
+		"""
 		return await send_text(token, chat_id, text)
 
 	async def send_media(
 		self, token: str, chat_id: str, kind: MediaKind, path: str, caption: str
 	) -> int:
-		"""Отправляет медиа ботом (запасной транспорт, лимит 50 МБ)."""
+		"""Отправляет медиа ботом (запасной транспорт, лимит 50 МБ).
+
+		Raises: см. :func:`bot_api.send_media`.
+		"""
 		return await send_media(token, chat_id, kind, path, caption)
 
 	# --- MTProto (userbot) -------------------------------------------------------
 
 	async def check_channel_userbot(self, account_id: int, chat_ref: str) -> ChannelInfo:
-		"""Проверяет канал и права аккаунта (админ + право публиковать)."""
+		"""Проверяет канал и права аккаунта (админ + право публиковать).
+
+		Raises:
+			ChatRefError: Введённую ссылку/имя не удалось разобрать.
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotAccessError: Прав нет или канал не виден (подтверждено).
+			UserbotUnavailableError: Прочие отказы Telegram (включая флуд).
+		"""
 		return await self._userbot(account_id).check_channel(chat_ref)
 
 	async def publish(
@@ -175,5 +202,14 @@ class TelegramGateway:
 		await self._userbot(account_id).publish(chat_id, post, on_progress)
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
-		"""Читает отложенные записи канала из Telegram (его аккаунтом)."""
+		"""Читает отложенные записи канала из Telegram (его аккаунтом).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotAccessError: Прав нет или канал не виден (подтверждено).
+			UserbotFloodError: Флуд-лимит — потребители пропускают
+				остальные каналы аккаунта до конца прохода (ADR-0017).
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
 		return await self._userbot(account_id).get_scheduled(chat_id)

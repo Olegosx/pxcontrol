@@ -41,7 +41,6 @@ from pxcontrol.engine.services.video import (
 from pxcontrol.ui import density
 from pxcontrol.ui.pages.common import INPUT_DEBOUNCE_MS, debounced, pick_file
 
-#: Углы вотермарка: подпись → код (коды понимает движок, filtergraph).
 #: Значения по умолчанию параметров обработки — единственная точка истины
 #: движка (``PresetFields``): «чистая» форма совпадает с «чистым» пресетом,
 #: смена дефолта в движке подхватывается формой сама.
@@ -52,6 +51,7 @@ _DEFAULTS = PresetFields(name="")
 #: в ``common``) тут не подходит.
 _SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
 
+#: Углы вотермарка: подпись → код (коды понимает движок, filtergraph).
 _CORNERS = [
 	("Правый верхний", "tr"),
 	("Левый верхний", "tl"),

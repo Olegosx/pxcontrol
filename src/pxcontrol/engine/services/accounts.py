@@ -250,9 +250,9 @@ class AccountsService:
 	async def list_tg_accounts(self) -> list[TgAccountDto]:
 		"""Возвращает все userbot-аккаунты.
 
-		Статус Premium отмечается только фактически активированному
-		аккаунту (``_active_account_id``): признак у шлюза один
-		на подключение, приписывать его всем вошедшим нельзя.
+		Статус Premium запрашивается у шлюза по id каждого аккаунта
+		(пул клиентов, ADR-0019): True — только у фактически
+		подключённого клиента, приписывать его всем вошедшим нельзя.
 		"""
 		async with self._db.session_factory() as session:
 			rows = list((await session.execute(select(TgAccount).order_by(TgAccount.id))).scalars())
