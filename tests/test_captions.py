@@ -13,8 +13,11 @@ from pxcontrol.engine.services.captions import (
 	CaptionLine,
 	CaptionsError,
 	CaptionsService,
+	TitleCaseMode,
+	TitleParseRules,
 	build_caption,
 	hashtag,
+	parse_title,
 	title_from_filename,
 )
 from pxcontrol.engine.services.video import PIPELINE_STAMP_FORMAT
@@ -63,6 +66,62 @@ def test_title_from_filename_strips_pipeline_suffix() -> None:
 	"""Суффикс конвейера _<пресет>_<штамп> отрезается, чужие имена — как есть."""
 	assert title_from_filename("/x/Lara Croft_test_20260713-223049.mp4") == "Lara Croft"
 	assert title_from_filename("/x/Просто видео.mp4") == "Просто видео"
+
+
+# --- разбор имени файла в название (пакетная публикация) ---------------------
+
+
+def test_parse_title_separators_and_case() -> None:
+	"""Разделители → пробелы, регистры: каждое слово и первая буква."""
+	rules = TitleParseRules(separators_to_spaces=True, case=TitleCaseMode.EVERY_WORD)
+	assert parse_title("lara_croft-tomb_raider", rules) == "Lara Croft Tomb Raider"
+	first = TitleParseRules(separators_to_spaces=True, case=TitleCaseMode.FIRST_WORD)
+	assert parse_title("новый_ролик_серии", first) == "Новый ролик серии"
+
+
+def test_parse_title_keeps_inner_capitals() -> None:
+	"""«Каждое Слово» поднимает первую букву, не ломая остальные (iPhone)."""
+	rules = TitleParseRules(case=TitleCaseMode.EVERY_WORD)
+	assert parse_title("обзор iPhone", rules) == "Обзор IPhone"
+
+
+def test_parse_title_brackets_and_edge_numbers() -> None:
+	"""Скобки с содержимым и номера по краям срезаются."""
+	rules = TitleParseRules(strip_brackets=True, strip_edge_numbers=True)
+	assert parse_title("01. Ролик [1080p] (final)", rules) == "Ролик"
+	assert parse_title("Ролик - 2", rules) == "Ролик"
+
+
+def test_parse_title_remove_words_case_insensitive() -> None:
+	"""Слова-мусор убираются без учёта регистра, по целым словам."""
+	rules = TitleParseRules(separators_to_spaces=True, remove_words=("official", "4k"))
+	assert parse_title("клип_OFFICIAL_4K_версия", rules) == "клип версия"
+	# часть слова не трогается: «официальный» — не «official»
+	assert parse_title("официальный клип", TitleParseRules(remove_words=("официал",))) == (
+		"официальный клип"
+	)
+
+
+def test_parse_title_empty_result_falls_back_to_raw() -> None:
+	"""Правила съели всё — возвращается исходное название, не пустота."""
+	rules = TitleParseRules(strip_brackets=True, remove_words=("ролик",))
+	assert parse_title("[1080p] ролик", rules) == "[1080p] ролик"
+
+
+def test_parse_title_rules_tokens_round_trip() -> None:
+	"""Сериализация в токены и обратно без потерь; незнакомое — мимо."""
+	rules = TitleParseRules(
+		separators_to_spaces=True,
+		strip_brackets=True,
+		strip_edge_numbers=True,
+		case=TitleCaseMode.FIRST_WORD,
+		remove_words=("official", "два слова"),
+	)
+	assert TitleParseRules.from_tokens(rules.to_tokens()) == rules
+	assert TitleParseRules.from_tokens([]) == TitleParseRules()
+	# токены будущих версий не ломают чтение (прямая совместимость)
+	tolerant = TitleParseRules.from_tokens(["separators", "новое_правило", "case:чудо"])
+	assert tolerant == TitleParseRules(separators_to_spaces=True)
 
 
 def test_sanitize_filename_limits_bytes_not_chars() -> None:

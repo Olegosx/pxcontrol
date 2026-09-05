@@ -113,6 +113,15 @@ QUEUE_SLOT_POLL_RANGE: tuple[int, int] = (1, 120)
 #: Канал активен: участвует в публикации и опросе расписания.
 CHANNEL_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.CHANNEL, True, bool)
 
+#: Заготовка правил разбора имени файла для пакетной публикации:
+#: список токенов ``TitleParseRules`` (сериализацию и терпимость
+#: к незнакомым токенам держит сам датакласс в сервисе подписей).
+#: Правила пакетные по природе; у канала хранится последний применённый
+#: набор как удобный старт следующего пакета.
+TITLE_PARSE_RULES: SettingKey[list[str]] = SettingKey(
+	"title_parse_rules", SettingScope.CHANNEL, [], list
+)
+
 #: Компактные отступы интерфейса. Читается один раз при запуске:
 #: вёрстка строится при старте, смена действует после перезапуска.
 UI_COMPACT_SPACING: SettingKey[bool] = SettingKey(

@@ -20,6 +20,7 @@ import re
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from sqlalchemy import delete, select, update
@@ -190,6 +191,127 @@ def title_from_filename(path: str) -> str:
 	"""Название поста из имени файла (без суффикса нашего конвейера)."""
 	stem = Path(path).stem
 	return _PIPELINE_SUFFIX.sub("", stem).strip()
+
+
+# --- элементарный разбор имени файла в название (пакетная публикация) ---------
+
+#: Содержимое квадратных и круглых скобок вместе со скобками: частый
+#: мусор источников — [1080p], (official) и т.п.
+_BRACKETED = re.compile(r"\[[^\[\]]*\]|\([^()]*\)")
+
+#: Номер в начале названия: «01. », «2 — », «3) » (нумерация серий).
+_EDGE_NUMBER_LEAD = re.compile(r"^\s*\d+[\s.\-–—)]+")
+
+#: Номер в конце названия: « - 2», «.3» (счётчики дублей загрузки).
+_EDGE_NUMBER_TAIL = re.compile(r"[\s.\-–—(]+\d+\s*$")
+
+
+class TitleCaseMode(StrEnum):
+	"""Режим регистра названия после разбора имени файла."""
+
+	KEEP = "keep"  # как есть
+	EVERY_WORD = "every_word"  # Каждое Слово С Заглавной
+	FIRST_WORD = "first_word"  # Только первая буква фразы
+
+
+@dataclass(frozen=True)
+class TitleParseRules:
+	"""Правила элементарного разбора имени файла в название поста.
+
+	Осознанно простые и детерминированные (полный смысловой разбор —
+	будущая задача ИИ, ей эти правила не мешают). Хранятся настройкой
+	канала как список токенов (:meth:`to_tokens`/:meth:`from_tokens`).
+
+	Attributes:
+		separators_to_spaces: заменять ``_`` и ``-`` пробелами.
+		strip_brackets: убирать содержимое [квадратных] и (круглых) скобок.
+		strip_edge_numbers: срезать номера в начале и в конце названия.
+		case: режим регистра результата.
+		remove_words: слова-мусор (без учёта регистра, по целым словам).
+	"""
+
+	separators_to_spaces: bool = False
+	strip_brackets: bool = False
+	strip_edge_numbers: bool = False
+	case: TitleCaseMode = TitleCaseMode.KEEP
+	remove_words: tuple[str, ...] = ()
+
+	def to_tokens(self) -> list[str]:
+		"""Сериализация в список токенов для настройки канала."""
+		tokens: list[str] = []
+		if self.separators_to_spaces:
+			tokens.append("separators")
+		if self.strip_brackets:
+			tokens.append("brackets")
+		if self.strip_edge_numbers:
+			tokens.append("edge_numbers")
+		if self.case is not TitleCaseMode.KEEP:
+			tokens.append(f"case:{self.case.value}")
+		tokens.extend(f"remove:{word}" for word in self.remove_words)
+		return tokens
+
+	@classmethod
+	def from_tokens(cls, tokens: list[str]) -> TitleParseRules:
+		"""Правила из списка токенов; незнакомые токены игнорируются.
+
+		Терпимость к незнакомому — прямая совместимость: настройка,
+		записанная более новой версией, не ломает старую.
+		"""
+		case = TitleCaseMode.KEEP
+		remove: list[str] = []
+		flags = set()
+		for token in tokens:
+			if token in ("separators", "brackets", "edge_numbers"):
+				flags.add(token)
+			elif token.startswith("case:"):
+				try:
+					case = TitleCaseMode(token.removeprefix("case:"))
+				except ValueError:
+					logger.warning("Неизвестный режим регистра в настройке: %s", token)
+			elif token.startswith("remove:"):
+				word = token.removeprefix("remove:").strip()
+				if word:
+					remove.append(word)
+			else:
+				logger.warning("Неизвестный токен правил разбора: %s", token)
+		return cls(
+			separators_to_spaces="separators" in flags,
+			strip_brackets="brackets" in flags,
+			strip_edge_numbers="edge_numbers" in flags,
+			case=case,
+			remove_words=tuple(remove),
+		)
+
+
+def parse_title(raw: str, rules: TitleParseRules) -> str:
+	"""Применяет правила разбора к названию из имени файла.
+
+	Порядок фиксирован и закреплён тестами: скобки → разделители →
+	номера по краям → удаление слов → схлопывание пробелов → регистр.
+	Скобки и номера идут до удаления слов (они позиционные и не должны
+	зависеть от выпавших слов); регистр — последним, по итоговой фразе.
+	Пустой результат откатывается к исходному названию: пост без
+	названия хуже поста с сырым.
+	"""
+	text = raw
+	if rules.strip_brackets:
+		text = _BRACKETED.sub(" ", text)
+	if rules.separators_to_spaces:
+		text = text.replace("_", " ").replace("-", " ")
+	if rules.strip_edge_numbers:
+		text = _EDGE_NUMBER_LEAD.sub(" ", text)
+		text = _EDGE_NUMBER_TAIL.sub(" ", text)
+	words = text.split()
+	if rules.remove_words:
+		stop = {word.casefold() for word in rules.remove_words}
+		words = [word for word in words if word.casefold() not in stop]
+	if rules.case is TitleCaseMode.EVERY_WORD:
+		# только первая буква каждого слова: title() ломал бы «iPhone»
+		words = [word[:1].upper() + word[1:] for word in words]
+	text = " ".join(words)
+	if rules.case is TitleCaseMode.FIRST_WORD:
+		text = text[:1].upper() + text[1:]
+	return text if text else raw.strip()
 
 
 def sanitize_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:

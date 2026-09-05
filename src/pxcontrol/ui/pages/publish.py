@@ -31,7 +31,12 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.captions import CaptionLine, TemplateDto, title_from_filename
+from pxcontrol.engine.services.captions import (
+	CaptionLine,
+	TemplateDto,
+	TitleParseRules,
+	title_from_filename,
+)
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import (
 	BOT_MAX_FILE_BYTES,
@@ -39,7 +44,11 @@ from pxcontrol.engine.services.posts import (
 	publish_capabilities,
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
-from pxcontrol.engine.services.settings import PUBLISH_LAST_CHANNEL_ID, PUBLISH_TIMES
+from pxcontrol.engine.services.settings import (
+	PUBLISH_LAST_CHANNEL_ID,
+	PUBLISH_TIMES,
+	TITLE_PARSE_RULES,
+)
 from pxcontrol.engine.services.video import ReadyVideo, VideoDirs, video_dialog_filter
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui import density
@@ -84,6 +93,7 @@ class _BatchSetup:
 	used_values: dict[int, list[str]] = field(default_factory=dict)
 	times: list[str] = field(default_factory=list)
 	busy: list[datetime] = field(default_factory=list)  # отложки канала (UTC)
+	title_rules: TitleParseRules = field(default_factory=TitleParseRules)
 
 
 #: Сегменты типов контента: подпись → тип → фильтр диалога выбора файла.
@@ -675,8 +685,19 @@ class PublishPage(ScrollArea):
 		self._batch_scheduled_loaded(setup, [])
 
 	def _batch_scheduled_loaded(self, setup: _BatchSetup, scheduled: list[datetime]) -> None:
-		"""Отложки получены — осталась граница размера файла."""
+		"""Отложки получены — заготовка правил разбора имени файла."""
 		setup.busy = scheduled
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.get_for(TITLE_PARSE_RULES, setup.channel.id),
+			self,
+			partial(self._batch_rules_loaded, setup),
+			self._show_error,
+		)
+
+	def _batch_rules_loaded(self, setup: _BatchSetup, tokens: list[str]) -> None:
+		"""Правила разбора получены — осталась граница размера файла."""
+		setup.title_rules = TitleParseRules.from_tokens(tokens)
 		caps = publish_capabilities(setup.channel.bot_id is not None, setup.channel.userbot_admin)
 		if caps.userbot:
 			run_in_engine(
@@ -706,6 +727,7 @@ class PublishPage(ScrollArea):
 			channel_times=setup.times,
 			limit_bytes=limit_bytes,
 			schedule_allowed=schedule_allowed,
+			title_rules=setup.title_rules,
 			# отложки приходят из Telegram в UTC, раскладка живёт
 			# в местном наивном времени — как ввод пользователя
 			busy=[moment.astimezone().replace(tzinfo=None) for moment in setup.busy],

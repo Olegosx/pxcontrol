@@ -2,8 +2,11 @@
 
 Строка на файл: галочка, подпись (собрана по общему шаблону, правится),
 переименование (по шаблону имени, правится) и время публикации (заполнено
-раскладкой по выбранной стратегии, правится). «В очередь» отдаёт список
-черновиков ``PostDraft`` — дальше работает обычная очередь отправки.
+раскладкой по выбранной стратегии, правится). Разворачивающийся блок
+«Правила разбора имени файла» (чистая ``parse_title`` движка) по явной
+кнопке пересобирает подписи и подсказки имён из разобранных названий.
+«В очередь» отдаёт список черновиков ``PostDraft`` — дальше работает
+обычная очередь отправки.
 """
 
 from __future__ import annotations
@@ -30,7 +33,14 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.captions import CaptionLine, build_caption, title_from_filename
+from pxcontrol.engine.services.captions import (
+	CaptionLine,
+	TitleCaseMode,
+	TitleParseRules,
+	build_caption,
+	parse_title,
+	title_from_filename,
+)
 from pxcontrol.engine.services.channels import ChannelDto
 from pxcontrol.engine.services.posts import PostDraft
 from pxcontrol.engine.services.publish_plan import (
@@ -39,6 +49,7 @@ from pxcontrol.engine.services.publish_plan import (
 	SchedulePlan,
 	plan_times,
 )
+from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import ReadyVideo
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -52,6 +63,7 @@ from pxcontrol.ui.pages.common import (
 	parse_hhmm,
 	show_error,
 )
+from pxcontrol.ui.pages.video_form import CollapsibleCard
 
 #: Формат времени публикации в строке черновика (местное время).
 _WHEN_FORMAT = "%d.%m.%Y %H:%M"
@@ -61,6 +73,13 @@ _LIST_HEIGHT = 420
 
 #: Высота поля подписи в строке (несколько строк текста без прокрутки окна).
 _CAPTION_HEIGHT = 64
+
+#: Режимы регистра разбора имени файла: подпись → режим движка.
+_CASE_MODES: list[tuple[str, TitleCaseMode]] = [
+	("Как есть", TitleCaseMode.KEEP),
+	("Каждое Слово С Заглавной", TitleCaseMode.EVERY_WORD),
+	("Только первая буква", TitleCaseMode.FIRST_WORD),
+]
 
 #: Стратегии раскладки: подпись → вид плана и «раз в N дней?».
 _STRATEGIES: list[tuple[str, PlanKind, bool]] = [
@@ -164,6 +183,7 @@ class PublishBatchDialog(MessageBoxBase):
 		limit_bytes: int | None = None,
 		schedule_allowed: bool = True,
 		busy: list[datetime] | None = None,
+		title_rules: TitleParseRules | None = None,
 	) -> None:
 		"""``caption_lines`` — строки общего шаблона подписи (None — без
 		подписей); ``filename_template_id`` — шаблон имени файла для
@@ -171,7 +191,9 @@ class PublishBatchDialog(MessageBoxBase):
 		файла выбранного канала (пометка и снятая галочка у больших);
 		``schedule_allowed`` — доступна ли отложка (у бот-канала — нет);
 		``busy`` — занятые моменты существующих отложек канала (местное
-		наивное время) — раскладка их пропускает."""
+		наивное время) — раскладка их пропускает; ``title_rules`` —
+		заготовка правил разбора имени файла (наполняет блок правил,
+		применяется только явной кнопкой)."""
 		super().__init__(parent)
 		self._worker = worker
 		self._channel = channel
@@ -179,10 +201,15 @@ class PublishBatchDialog(MessageBoxBase):
 		self._schedule_allowed = schedule_allowed
 		self._busy = list(busy or [])
 		self._rows: list[_BatchRow] = []
+		self._caption_lines = caption_lines
+		self._filename_template_id = filename_template_id
+		self._used_values = dict(used_values or {})
+		self._applied_rules: TitleParseRules | None = None
 		self.viewLayout.addWidget(SubtitleLabel(f"Пакет в «{channel.title}»", self))
 		folder = CaptionLabel(f"Папка: {root}", self)
 		folder.setWordWrap(True)
 		self.viewLayout.addWidget(folder)
+		self._build_rules_card(title_rules or TitleParseRules())
 		self._build_strategy_row()
 		self._build_rows(files, caption_lines, limit_bytes)
 		self._build_selection_row()
@@ -192,7 +219,7 @@ class PublishBatchDialog(MessageBoxBase):
 		self.cancelButton.setText("Отмена")
 		self.widget.setMinimumWidth(900)
 		self._update_summary()
-		self._request_renames(filename_template_id, used_values or {})
+		self._request_renames()
 		self._apply_initial_plan()
 
 	def drafts(self, channel_id: int) -> list[PostDraft]:
@@ -235,6 +262,97 @@ class PublishBatchDialog(MessageBoxBase):
 		return self._error.succeed()
 
 	# --- сборка ----------------------------------------------------------------
+
+	def _build_rules_card(self, rules: TitleParseRules) -> None:
+		"""Разворачивающийся блок «Правила разбора имени файла».
+
+		Правила применяются только явной кнопкой: подписи и подсказки
+		имён всех строк пересобираются из разобранных названий, после
+		чего строки правятся руками как обычно. Заготовка правил
+		приходит из настройки канала и туда же сохраняется при
+		применении (``TITLE_PARSE_RULES``).
+		"""
+		card = CollapsibleCard("Правила разбора имени файла", self)
+		checks_row = QHBoxLayout()
+		self._rule_separators = CheckBox("_ и - → пробелы", card)
+		self._rule_separators.setChecked(rules.separators_to_spaces)
+		self._rule_brackets = CheckBox("Убирать [скобки] и (скобки)", card)
+		self._rule_brackets.setChecked(rules.strip_brackets)
+		self._rule_numbers = CheckBox("Срезать номера по краям", card)
+		self._rule_numbers.setChecked(rules.strip_edge_numbers)
+		for check in (self._rule_separators, self._rule_brackets, self._rule_numbers):
+			checks_row.addWidget(check)
+		self._rule_case = ComboBox(card)
+		for label, _mode in _CASE_MODES:
+			self._rule_case.addItem(label)
+		modes = [mode for _label, mode in _CASE_MODES]
+		self._rule_case.setCurrentIndex(modes.index(rules.case))
+		checks_row.addWidget(self._rule_case)
+		checks_row.addStretch()
+		card.body.addLayout(checks_row)
+		words_row = QHBoxLayout()
+		words_row.addWidget(BodyLabel("Убирать слова:", card))
+		self._rule_words = LineEdit(card)
+		self._rule_words.setPlaceholderText("через запятую: 4k, official, final")
+		self._rule_words.setText(", ".join(rules.remove_words))
+		words_row.addWidget(self._rule_words, stretch=1)
+		apply_button = PushButton("Применить разбор", card)
+		apply_button.setToolTip(
+			"Пересобрать подписи и имена всех строк по правилам (ручные правки строк перезапишутся)"
+		)
+		apply_button.clicked.connect(self._apply_title_rules)
+		words_row.addWidget(apply_button)
+		card.body.addLayout(words_row)
+		self.viewLayout.addWidget(card)
+
+	def _rules_from_form(self) -> TitleParseRules:
+		"""Правила из виджетов блока (слова — через запятую, пустые долой)."""
+		words = tuple(
+			word
+			for word in (part.strip() for part in str(self._rule_words.text()).split(","))
+			if word
+		)
+		return TitleParseRules(
+			separators_to_spaces=self._rule_separators.isChecked(),
+			strip_brackets=self._rule_brackets.isChecked(),
+			strip_edge_numbers=self._rule_numbers.isChecked(),
+			case=_CASE_MODES[int(self._rule_case.currentIndex())][1],
+			remove_words=words,
+		)
+
+	def _row_title(self, row: _BatchRow) -> str:
+		"""Название строки: из имени файла, с учётом применённых правил."""
+		title = title_from_filename(row.video.path)
+		if self._applied_rules is not None:
+			title = parse_title(title, self._applied_rules)
+		return title
+
+	def _apply_title_rules(self) -> None:
+		"""Пересобирает подписи и подсказки имён всех строк по правилам.
+
+		Без общего шаблона подписи результат — жирное название само
+		по себе (до применения правил подпись была пустой — раз правила
+		настраивают, разобранное название должно быть видно в форме).
+		Применённый набор сохраняется заготовкой канала; сбой сохранения
+		применению не мешает (текст — в плашку ошибок диалога).
+		"""
+		self._applied_rules = self._rules_from_form()
+		for row in self._rows:
+			row.caption.setPlainText(build_caption(self._row_title(row), self._caption_lines or []))
+		self._request_renames()
+
+		def _save_failed(message: str) -> None:
+			self._error.fail(message)  # fail возвращает bool — мосту нужен None
+
+		run_in_engine(
+			self._worker,
+			self._worker.engine.settings.set_for(
+				TITLE_PARSE_RULES, self._channel.id, self._applied_rules.to_tokens()
+			),
+			self,
+			noop,
+			_save_failed,
+		)
 
 	def _build_strategy_row(self) -> None:
 		"""Стратегия раскладки времени и её параметры."""
@@ -327,22 +445,23 @@ class PublishBatchDialog(MessageBoxBase):
 		self._selection = SelectionRow(self, self._set_all)
 		self.viewLayout.addLayout(self._selection.layout)
 
-	def _request_renames(self, template_id: int | None, used_values: dict[int, list[str]]) -> None:
+	def _request_renames(self) -> None:
 		"""Просит движок предложить имена файлов по шаблону имени.
 
 		Подсказка вспомогательная: ошибка одной строки не мешает
 		остальным (и не показывается плашкой — просто поле пустое).
+		Название строки — с учётом применённых правил разбора.
 		"""
-		if template_id is None:
+		if self._filename_template_id is None:
 			return
 		for row in self._rows:
 			run_in_engine(
 				self._worker,
 				self._worker.engine.captions.render_filename(
-					template_id,
+					self._filename_template_id,
 					self._channel.id,
-					title_from_filename(row.video.path),
-					used_values,
+					self._row_title(row),
+					self._used_values,
 					row.video.path,
 				),
 				self,
