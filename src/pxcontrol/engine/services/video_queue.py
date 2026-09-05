@@ -188,8 +188,7 @@ class ProcessingQueue:
 		"""
 		if not requests:
 			raise VideoError("Список файлов пуст — обрабатывать нечего.")
-		for request in requests:
-			self._video.ensure_ready(request.source_path)
+		await self._video.ensure_ready([request.source_path for request in requests])
 		ids: list[int] = []
 		for request in requests:
 			item = _Item(self._next_id, request)
@@ -218,7 +217,10 @@ class ProcessingQueue:
 			VideoError: Кадр скопировать не удалось.
 		"""
 		if self._frames_dir is None:
-			self._frames_dir = tempfile.mkdtemp(prefix="pxcontrol-queue-frames-")
+			# mkdtemp — диск: вне цикла событий движка
+			self._frames_dir = await asyncio.to_thread(
+				tempfile.mkdtemp, prefix="pxcontrol-queue-frames-"
+			)
 		target = Path(self._frames_dir) / f"frame_{self._next_frame:04d}.png"
 		self._next_frame += 1
 		try:
@@ -238,7 +240,7 @@ class ProcessingQueue:
 				continue
 			if item.status is VideoItemStatus.PENDING:
 				item.status = VideoItemStatus.CANCELLED
-				self._drop_stashed_frame(item)
+				await self._drop_stashed_frame(item)
 				logger.info("Элемент обработки id=%s отменён (ждал).", item_id)
 			elif item.status is VideoItemStatus.PROCESSING:
 				item.cancel_requested = True
@@ -256,7 +258,7 @@ class ProcessingQueue:
 		for item in self._items:
 			if item.id != item_id or item.status is not VideoItemStatus.ERROR:
 				continue
-			self._video.ensure_ready(item.request.source_path)
+			await self._video.ensure_ready([item.request.source_path])
 			item.status = VideoItemStatus.PENDING
 			item.progress = 0.0
 			item.error = None
@@ -272,7 +274,7 @@ class ProcessingQueue:
 		"""Убирает завершённый элемент из списка (живые не трогаются)."""
 		for item in self._items:
 			if item.id == item_id and item.status.finished():
-				self._drop_stashed_frame(item)
+				await self._drop_stashed_frame(item)
 		self._items = [
 			item for item in self._items if not (item.id == item_id and item.status.finished())
 		]
@@ -298,7 +300,7 @@ class ProcessingQueue:
 				await asyncio.wait_for(self._worker, timeout=_SHUTDOWN_TIMEOUT)
 			self._worker = None
 		if self._frames_dir is not None:
-			shutil.rmtree(self._frames_dir, ignore_errors=True)
+			await asyncio.to_thread(shutil.rmtree, self._frames_dir, ignore_errors=True)
 			self._frames_dir = None
 
 	# --- внутреннее ---------------------------------------------------------
@@ -342,7 +344,7 @@ class ProcessingQueue:
 			)
 		except ProcessingCancelled:
 			item.status = VideoItemStatus.CANCELLED
-			self._drop_stashed_frame(item)
+			await self._drop_stashed_frame(item)
 			logger.info("Обработка id=%s отменена.", item.id)
 		except asyncio.CancelledError:
 			# отменили сам воркер (остановка цикла): очередь не продолжается
@@ -356,7 +358,7 @@ class ProcessingQueue:
 		else:
 			item.status = VideoItemStatus.DONE
 			item.progress = 1.0
-			self._drop_stashed_frame(item)
+			await self._drop_stashed_frame(item)
 
 	async def _fit_bitrate(self, item: _Item) -> PresetFields:
 		"""Вписывает исходник больше лимита Telegram в лимит (ADR-0014).
@@ -384,7 +386,7 @@ class ProcessingQueue:
 		logger.info("Обработка id=%s: %s.", item.id, item.note)
 		return replace(fields, video_bitrate_kbps=advice.kbps)
 
-	def _drop_stashed_frame(self, item: _Item) -> None:
+	async def _drop_stashed_frame(self, item: _Item) -> None:
 		"""Удаляет копию выбранного кадра, если ею владеет очередь.
 
 		Кадры вне папки очереди (свой PNG из пресета, «image:» руками)
@@ -398,4 +400,5 @@ class ProcessingQueue:
 			return
 		path = Path(value)
 		if Path(self._frames_dir) in path.parents:
-			path.unlink(missing_ok=True)
+			# unlink — диск: вне цикла событий движка
+			await asyncio.to_thread(path.unlink, missing_ok=True)

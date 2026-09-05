@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Channel, PublishQueueItem, TgAccount
@@ -855,3 +855,55 @@ async def test_shutdown_during_prepare_leaves_pending_row(
 	async with db.session_factory() as session:
 		rows = (await session.execute(select(PublishQueueItem))).scalars().all()
 	assert [row.status for row in rows] == ["pending"]  # уйдёт после перезапуска
+
+
+async def _wait_queue_empty(queue: PublishQueue, tries: int = 500) -> None:
+	"""Ждёт, пока очередь опустеет (снятие по исходу — асинхронное)."""
+	for _ in range(tries):
+		if await queue.state() == []:
+			return
+		await asyncio.sleep(0.01)
+	raise AssertionError("очередь не опустела")
+
+
+async def test_drop_channel_finishes_active_item(db: Database, make_queue: QueueFactory) -> None:
+	"""Удаление канала при активной отправке: элемент доводится до снятия.
+
+	Гарантия «зомби-элементов нет» — уровня движка: карточка исчезает
+	по исходу сама, без участия панели интерфейса.
+	"""
+	gateway = _SlowGateway()  # без release: отправка висит, как долгая загрузка
+	queue = make_queue(gateway)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="в полёте"))
+	await _wait_status(queue, item, QueueItemStatus.SENDING)
+	await queue.drop_channel(channel_id)
+	await _wait_queue_empty(queue)  # исход записан, элемент снят с показа
+	assert gateway.published == []  # пост не ушёл
+	await queue.shutdown()
+
+
+async def test_drop_channel_during_prepare_cancels_not_errors(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Гонка «канал удалён во время подготовки»: исход — отмена, не ошибка.
+
+	Порядок Engine.delete_channel: сначала drop_channel, затем удаление
+	строки канала; подготовка, упавшая «Канал не найден» на фоне
+	взведённой отмены, не должна хоронить элемент в ERROR.
+	"""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	queue = make_queue(gateway)
+	started, proceed = _gate_prepare(queue)
+	channel_id = await _add_channel(db)
+	await queue.enqueue(PostDraft(channel_id, text="канал исчезнет"))
+	await started.wait()  # воркер в подготовке, активной задачи нет
+	await queue.drop_channel(channel_id)  # взводит флаг и пометку снятия
+	async with db.session_factory() as session:  # Engine удаляет строку канала
+		await session.execute(delete(Channel).where(Channel.id == channel_id))
+		await session.commit()
+	proceed.set()  # подготовка продолжится и упадёт «Канал не найден»
+	await _wait_queue_empty(queue)  # исход — CANCELLED и снятие, не ERROR
+	assert gateway.published == []
+	await queue.shutdown()

@@ -46,6 +46,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
+	TelegramFloodError,
 	userbot_max_file_bytes,
 )
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source, run_tool
@@ -764,15 +765,30 @@ class PostsService:
 				.all()
 			)
 		items: list[ScheduledPostDto] = []
+		flooded: set[int] = set()  # аккаунты, поймавшие флуд-лимит в этом проходе
 		for channel in channels:
 			if not enabled.get(channel.id, CHANNEL_ENABLED.default):
 				continue
 			if channel.tg_account_id is None:  # для mypy: выборка отфильтровала
 				continue
+			if channel.tg_account_id in flooded:
+				continue
 			try:
 				messages = await self._gateway.get_scheduled(
 					channel.tg_account_id, channel.tg_chat_id
 				)
+			except TelegramFloodError as exc:
+				# флуд-лимит — на весь аккаунт (ADR-0017): стучаться в его
+				# остальные каналы значит удлинять срок, который ждёт
+				# и очередь отправки; пропускаем их до конца прохода
+				# (та же дисциплина, что у дозора слотов)
+				flooded.add(channel.tg_account_id)
+				logger.warning(
+					"Отложенные: флуд-лимит аккаунта id=%s (%s) — его каналы пропущены.",
+					channel.tg_account_id,
+					exc,
+				)
+				continue
 			except UserbotUnavailableError as exc:
 				logger.warning("Отложенные канала «%s» не прочитаны: %s", channel.title, exc)
 				continue

@@ -86,3 +86,29 @@ async def test_start_survives_unreachable_userbot(tmp_path: Path) -> None:
 		)
 		await engine.start()  # не должно бросить исключение
 	await engine.stop()
+
+
+async def test_queued_dir_change_blocked_while_queue_live(tmp_path: Path) -> None:
+	"""Папка очереди не меняется при живой очереди (инвариант зеркала ADR-0016)."""
+	import pytest
+
+	from pxcontrol.engine.engine import Engine
+	from pxcontrol.engine.errors import EngineError
+	from pxcontrol.engine.services.posts import PostDraft
+	from pxcontrol.engine.services.publish_queue import _Item
+	from pxcontrol.engine.services.settings import VIDEO_QUEUED_DIR, VIDEO_SOURCE_DIR
+
+	engine = Engine(Settings(_env_file=None, database_url=f"sqlite+aiosqlite:///{tmp_path}/e.db"))
+	await engine.db.init()
+	# живой элемент в очереди (постановка напрямую — сети не нужно)
+	engine.publish_queue._items.append(  # noqa: SLF001 — смоделировать живую очередь
+		_Item(1, PostDraft(channel_id=1, text="ждёт"), "Канал")
+	)
+	with pytest.raises(EngineError, match="нельзя менять"):
+		await engine.update_video_folders([(VIDEO_QUEUED_DIR, str(tmp_path / "new"))])
+	# другие папки меняются свободно, та же папка очереди — не смена
+	await engine.update_video_folders([(VIDEO_SOURCE_DIR, str(tmp_path / "src"))])
+	await engine.update_video_folders([(VIDEO_QUEUED_DIR, "")])  # прежнее значение
+	engine.publish_queue._items.clear()  # noqa: SLF001
+	await engine.update_video_folders([(VIDEO_QUEUED_DIR, str(tmp_path / "new"))])
+	await engine.db.close()

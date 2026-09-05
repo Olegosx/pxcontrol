@@ -119,6 +119,8 @@ class _Item:
 		self.note: str | None = None  # пометка карточки (флуд-пауза)
 		# отмену запросил пользователь (отличает её от остановки движка)
 		self.cancel_requested = False
+		# канал удаляется: по исходу элемент снимается и с показа
+		self.drop_on_finish = False
 
 	def dto(self) -> QueueItemDto:
 		"""Снимок элемента для интерфейса."""
@@ -304,6 +306,17 @@ class PublishQueue:
 		self._request_slot_check()
 		return ids
 
+	def _request_cancel(self, item: _Item) -> None:
+		"""Взводит отмену активного элемента; исход запишет ``_send``.
+
+		Сеть обрывается отменой задачи; если идёт ещё подготовка
+		(задачи нет — ADR-0020), флаг увидит сам ``_send`` сразу
+		после неё. Общая точка для «Отмены» и ``drop_channel``.
+		"""
+		item.cancel_requested = True
+		if self._active is not None and self._active[0] == item.id:
+			self._active[1].cancel()
+
 	async def cancel(self, item_id: int) -> None:
 		"""Отменяет элемент: ожидающий убирается, отправляющийся обрывается."""
 		cancellable = (QueueItemStatus.PENDING, QueueItemStatus.WAITING)
@@ -311,12 +324,7 @@ class PublishQueue:
 			if item.id != item_id:
 				continue
 			if item.status is QueueItemStatus.SENDING:
-				# исход запишет _send. Сеть обрывается отменой задачи; если
-				# идёт ещё подготовка (задачи нет — ADR-0020), флаг увидит
-				# сам _send сразу после неё
-				item.cancel_requested = True
-				if self._active is not None and self._active[0] == item_id:
-					self._active[1].cancel()
+				self._request_cancel(item)
 				return
 			if item.status in cancellable:
 				item.status = QueueItemStatus.CANCELLED
@@ -375,12 +383,11 @@ class PublishQueue:
 			if item.draft.channel_id != channel_id:
 				continue
 			if item.status is QueueItemStatus.SENDING:
-				# исход запишет _send: CANCELLED, файл вернётся в результаты.
-				# Сеть обрывается отменой задачи; подготовка без задачи
-				# (ADR-0020) увидит флаг сама
-				item.cancel_requested = True
-				if self._active is not None and self._active[0] == item.id:
-					self._active[1].cancel()
+				# исход запишет _send: CANCELLED, файл вернётся в результаты;
+				# пометка drop_on_finish снимет элемент и с показа — гарантия
+				# «зомби-элементов нет» держится движком, а не панелью
+				self._request_cancel(item)
+				item.drop_on_finish = True
 				continue
 			if not item.status.finished():
 				item.status = QueueItemStatus.CANCELLED
@@ -740,14 +747,24 @@ class PublishQueue:
 			finally:
 				item.note = None
 		except Exception as exc:  # noqa: BLE001 — исход элемента, не очереди
-			# карточка очереди показывает этот текст как есть — сворачиваем
-			# недоменные исключения, как мост интерфейса (контракт errors.py).
-			# Порядок «БД → память» — как у ветки выше
-			message = user_message(exc)
-			await self._persist_values(item.id, QueueItemStatus.ERROR, message)
-			item.status = QueueItemStatus.ERROR
-			item.error = message
-			logger.exception("Отправка id=%s не удалась.", item.id)
+			if item.cancel_requested:
+				# ошибка на фоне взведённой отмены — типовой случай:
+				# drop_channel уже удалил канал, и подготовка падает
+				# «Канал не найден». Честный исход — отмена, не ошибка:
+				# иначе файл застрял бы в папке очереди, а «Повторить»
+				# вечно падал тем же текстом
+				item.status = QueueItemStatus.CANCELLED
+				await self._leave_queue(item)
+				logger.info("Отправка id=%s отменена (ошибка на фоне отмены: %s).", item.id, exc)
+			else:
+				# карточка очереди показывает этот текст как есть — сворачиваем
+				# недоменные исключения, как мост интерфейса (контракт errors.py).
+				# Порядок «БД → память» — как у ветки выше
+				message = user_message(exc)
+				await self._persist_values(item.id, QueueItemStatus.ERROR, message)
+				item.status = QueueItemStatus.ERROR
+				item.error = message
+				logger.exception("Отправка id=%s не удалась.", item.id)
 		else:
 			# порядок «БД → память» — как у остальных веток (ADR-0020):
 			# наблюдатель, увидевший DONE, знает, что запросов в полёте
@@ -762,3 +779,8 @@ class PublishQueue:
 				await self._sleep(CATCHUP_INTERVAL_S)
 		finally:
 			self._active = None
+			if item.drop_on_finish and item.status.finished():
+				# канал удалён (drop_channel): исход записан — элемент
+				# уходит и с показа, без участия панели интерфейса
+				with suppress(ValueError):
+					self._items.remove(item)

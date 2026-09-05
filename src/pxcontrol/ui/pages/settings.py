@@ -504,7 +504,9 @@ class _FoldersSettings(QWidget):
 		items = [(key, str(self._edits[key.name].text()).strip()) for _label, key in _VIDEO_FOLDERS]
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.set_many(items),
+			# охраняемая точка движка: папка очереди при непустой очереди
+			# отправки не меняется (файлы ждущих живут по текущему пути)
+			self._worker.engine.update_video_folders(items),
 			self,
 			self._on_saved,
 			self._show_error,

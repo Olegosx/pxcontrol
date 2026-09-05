@@ -16,7 +16,7 @@ from pxcontrol.engine.services.posts import (
 	ScheduledPostDto,
 )
 from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
-from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
+from pxcontrol.engine.telegram.mtproto import UserbotFloodError, UserbotUnavailableError
 from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
 
 
@@ -677,3 +677,34 @@ async def test_scheduled_times_for_batch_planning(db: Database) -> None:
 		await session.commit()
 		await session.refresh(other)
 	assert await service.scheduled_times(other.id) == []
+
+
+async def test_list_scheduled_flood_skips_rest_of_account(db: Database) -> None:
+	"""Флуд-лимит — на аккаунт: его остальные каналы пропускаются (ADR-0017).
+
+	Стучаться в лимитированный аккаунт дальше — удлинять срок, который
+	ждёт и очередь отправки; дисциплина та же, что у дозора слотов.
+	"""
+	calls: list[str] = []
+
+	class _FloodedGateway(_FakeGateway):
+		async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+			calls.append(chat_id)
+			raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+
+	service = PostsService(db, _FloodedGateway())
+	first_account = await _add_channel(db)  # канал «-1001», аккаунт 1
+	async with db.session_factory() as session:  # второй канал того же аккаунта
+		channel = (await session.get(Channel, first_account)) or None
+		assert channel is not None
+		session.add(
+			Channel(
+				title="Второй",
+				tg_chat_id="-1002",
+				bot_id=None,
+				tg_account_id=channel.tg_account_id,
+			)
+		)
+		await session.commit()
+	assert await service.list_scheduled() == []  # ни ошибок, ни данных
+	assert len(calls) == 1  # после флуда второй канал аккаунта не опрашивался

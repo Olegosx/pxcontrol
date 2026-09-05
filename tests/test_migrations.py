@@ -233,3 +233,39 @@ def test_channel_enabled_moves_to_settings(tmp_path: Path) -> None:
 		columns = [row[1] for row in conn.execute("PRAGMA table_info(channels)")]
 	assert rows == [(1, "false")]  # JSON-текст значения False
 	assert "enabled" not in columns
+
+
+async def test_backup_before_upgrade_copies_and_rotates(tmp_path: Path) -> None:
+	"""Автокопия БД: делается при непримененных ревизиях, ротация — только своих."""
+	from sqlalchemy.engine import make_url
+
+	from pxcontrol.engine.db.database import (
+		_alembic_config,
+		_backup_before_upgrade,
+		_run_migrations,
+	)
+
+	db_file = tmp_path / "app.db"
+	url = f"sqlite:///{db_file}"
+	cfg = _alembic_config(url)
+	assert make_url(url).database == str(db_file)  # разбор адреса честный
+	# свежей БД нет — копировать нечего
+	assert _backup_before_upgrade(cfg, url) is None
+	# «старая» БД (пустой файл — ревизия None, применять есть что) — копия
+	db_file.write_bytes(b"old")
+	manual = tmp_path / "app.db.bak-20260101-000000"  # ручная копия владельца
+	manual.write_bytes(b"manual")
+	for stamp in ("20260102-000000", "20260103-000000", "20260104-000000"):
+		(tmp_path / f"app.db.pre-migration-{stamp}").write_bytes(b"x")
+	created = _backup_before_upgrade(cfg, url)
+	assert created is not None and created.read_bytes() == b"old"
+	ours = sorted(p.name for p in tmp_path.glob("app.db.pre-migration-*"))
+	assert len(ours) == 3  # ротация: старшая своя копия удалена
+	assert "app.db.pre-migration-20260102-000000" not in ours
+	assert manual.exists()  # ручные копии владельца не трогаются
+	# БД на актуальной ревизии — копия больше не делается
+	db_file.unlink()
+	_run_migrations(url)
+	before = sorted(p.name for p in tmp_path.glob("app.db.pre-migration-*"))
+	assert _backup_before_upgrade(cfg, url) is None
+	assert sorted(p.name for p in tmp_path.glob("app.db.pre-migration-*")) == before

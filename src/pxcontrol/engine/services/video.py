@@ -12,7 +12,7 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from datetime import datetime
@@ -617,9 +617,10 @@ class VideoService:
 			VideoError: Папка не существует или ffmpeg/ffprobe не найдены.
 		"""
 		directory = Path(root)
-		if not directory.is_dir():
+		# is_dir и which — обращения к диску: вне цикла событий движка
+		if not await asyncio.to_thread(directory.is_dir):
 			raise VideoError(f"Папка не найдена: {root}")
-		self._require_ffmpeg()
+		await asyncio.to_thread(self._require_ffmpeg)
 		return await asyncio.to_thread(self._scan_sources, directory, on_progress)
 
 	async def scan_ready(self, root: str) -> list[ReadyVideo]:
@@ -635,7 +636,7 @@ class VideoService:
 			VideoError: Папка не существует.
 		"""
 		directory = Path(root)
-		if not directory.is_dir():
+		if not await asyncio.to_thread(directory.is_dir):  # диск — вне цикла
 			raise VideoError(f"Папка не найдена: {root}")
 		return await asyncio.to_thread(self._scan_ready, directory)
 
@@ -766,7 +767,7 @@ class VideoService:
 	async def shutdown(self) -> None:
 		"""Убирает временную папку кадров-кандидатов (при остановке движка)."""
 		if self._candidates_dir is not None:
-			shutil.rmtree(self._candidates_dir, ignore_errors=True)
+			await asyncio.to_thread(shutil.rmtree, self._candidates_dir, ignore_errors=True)
 			self._candidates_dir = None
 
 	async def delete_preset(self, preset_id: int) -> None:
@@ -808,7 +809,7 @@ class VideoService:
 		Raises:
 			VideoError: Файл/ffmpeg не найдены или обработка упала.
 		"""
-		self._require_ready(source_path)
+		await self.ensure_ready([source_path])
 		source = Path(source_path)
 		# сборка включает создание папки результата (диск) — вне цикла
 		options = await asyncio.to_thread(
@@ -844,10 +845,15 @@ class VideoService:
 			VideoError: Файл/ffmpeg не найдены, обрезка съедает всё видео
 				или извлечение упало.
 		"""
-		self._require_ready(source_path)
-		if self._candidates_dir is not None:
-			shutil.rmtree(self._candidates_dir, ignore_errors=True)
-		self._candidates_dir = tempfile.mkdtemp(prefix="pxcontrol-frames-")
+		await self.ensure_ready([source_path])
+
+		def _fresh_candidates_dir() -> str:
+			# rmtree/mkdtemp — диск: вне цикла событий движка
+			if self._candidates_dir is not None:
+				shutil.rmtree(self._candidates_dir, ignore_errors=True)
+			return tempfile.mkdtemp(prefix="pxcontrol-frames-")
+
+		self._candidates_dir = await asyncio.to_thread(_fresh_candidates_dir)
 		try:
 			return await asyncio.to_thread(
 				self._extract_candidates,
@@ -892,27 +898,26 @@ class VideoService:
 			frames.append(FrameCandidate(timestamp, path))
 		return frames
 
-	def ensure_ready(self, source_path: str) -> None:
-		"""Проверяет пригодность исходника к обработке (для очереди).
+	async def ensure_ready(self, source_paths: Sequence[str]) -> None:
+		"""Пакетно проверяет: ffmpeg доступен, каждый исходник существует.
 
-		Очередь обработки (ADR-0014) зовёт эту проверку при постановке
-		элемента: битый путь честно отклоняется сразу, а не в момент,
-		когда до него дойдёт обработка.
-
-		Raises:
-			VideoError: Файл или ffmpeg не найдены.
-		"""
-		self._require_ready(source_path)
-
-	def _require_ready(self, source_path: str) -> None:
-		"""Проверяет, что исходник существует и ffmpeg доступен.
+		Обращения к диску (``which`` перебирает каталоги PATH, ``is_file`` —
+		stat) идут одним заходом в отдельном потоке: постановка пакета
+		из десятков файлов не держит цикл событий движка (норма
+		«файловые операции — вне цикла», аудит 26.08); ffmpeg
+		проверяется один раз на пакет, а не на файл.
 
 		Raises:
-			VideoError: Файл или ffmpeg не найдены.
+			VideoError: ffmpeg или один из файлов не найдены.
 		"""
-		if not Path(source_path).is_file():
-			raise VideoError(f"Файл не найден: {source_path}")
-		self._require_ffmpeg()
+
+		def _check_all() -> None:
+			self._require_ffmpeg()
+			for source_path in source_paths:
+				if not Path(source_path).is_file():
+					raise VideoError(f"Файл не найден: {source_path}")
+
+		await asyncio.to_thread(_check_all)
 
 	def _require_ffmpeg(self) -> None:
 		"""Проверяет доступность ffmpeg (ffprobe лежит рядом с ним).

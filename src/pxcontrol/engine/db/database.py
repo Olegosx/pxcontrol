@@ -36,14 +36,77 @@ def _enable_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
 	cursor.close()
 
 
-def _run_migrations(sync_url: str) -> None:
-	"""Применяет миграции до последней версии (синхронно, для потока)."""
-	from alembic import command
+#: Сколько автокопий БД держать рядом с файлом (старшие удаляются).
+_BACKUP_KEEP = 3
+
+#: Суффикс автокопий: свой, отличный от ручных ``.bak-…`` владельца —
+#: ротация не должна трогать чужие копии.
+_BACKUP_SUFFIX = ".pre-migration-"
+
+
+def _alembic_config(sync_url: str) -> Any:
+	"""Конфигурация Alembic для нашей папки миграций."""
 	from alembic.config import Config
 
 	cfg = Config()
 	cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
 	cfg.set_main_option("sqlalchemy.url", sync_url)
+	return cfg
+
+
+def _backup_before_upgrade(cfg: Any, sync_url: str) -> Path | None:
+	"""Копирует файл БД, если миграциям есть что применять.
+
+	Прерванная миграция (питание, диск) — единственный сценарий потери
+	невосполнимого: сессий аккаунтов, привязок каналов, очереди
+	отправки. Копия перед ``upgrade`` делает его обратимым; держится
+	``_BACKUP_KEEP`` последних копий, старшие удаляются (только наши,
+	с суффиксом ``_BACKUP_SUFFIX`` — ручные копии не трогаются).
+
+	Returns:
+		Путь созданной копии; None — копия не нужна (БД свежая
+		или уже на актуальной ревизии).
+	"""
+	import shutil
+	from datetime import datetime
+
+	from alembic.runtime.migration import MigrationContext
+	from alembic.script import ScriptDirectory
+	from sqlalchemy import create_engine
+
+	db_path = Path(make_url(sync_url).database or "")
+	if not db_path.is_file():
+		return None  # свежая БД — терять нечего
+	sync_engine = create_engine(sync_url)
+	try:
+		with sync_engine.connect() as conn:
+			current = MigrationContext.configure(conn).get_current_revision()
+	except Exception:  # noqa: BLE001 — битый файл: копия тем более нужна
+		logger.warning(
+			"Ревизию БД прочитать не удалось — копия делается на всякий случай.",
+			exc_info=True,
+		)
+		current = None
+	finally:
+		sync_engine.dispose()
+	if current == ScriptDirectory.from_config(cfg).get_current_head():
+		return None  # применять нечего — копия не нужна
+	stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+	target = db_path.with_name(f"{db_path.name}{_BACKUP_SUFFIX}{stamp}")
+	shutil.copy2(db_path, target)
+	logger.info("Перед миграциями сделана копия БД: %s", target.name)
+	backups = sorted(db_path.parent.glob(f"{db_path.name}{_BACKUP_SUFFIX}*"))
+	for old in backups[:-_BACKUP_KEEP]:
+		old.unlink(missing_ok=True)
+	return target
+
+
+def _run_migrations(sync_url: str) -> None:
+	"""Применяет миграции до последней версии (синхронно, для потока)."""
+	from alembic import command
+
+	cfg = _alembic_config(sync_url)
+	_backup_before_upgrade(cfg, sync_url)
 	command.upgrade(cfg, "head")
 
 

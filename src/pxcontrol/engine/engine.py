@@ -6,12 +6,18 @@ import logging
 
 from pxcontrol.config import Settings
 from pxcontrol.engine.db.database import Database
+from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.channels import ChannelsService
 from pxcontrol.engine.services.posts import PostsService
-from pxcontrol.engine.services.publish_queue import PublishQueue
-from pxcontrol.engine.services.settings import FFMPEG_PATH, SettingsService
+from pxcontrol.engine.services.publish_queue import PublishQueue, QueueItemStatus
+from pxcontrol.engine.services.settings import (
+	FFMPEG_PATH,
+	VIDEO_QUEUED_DIR,
+	SettingKey,
+	SettingsService,
+)
 from pxcontrol.engine.services.video import VideoService
 from pxcontrol.engine.services.video_queue import ProcessingQueue
 from pxcontrol.engine.telegram.gateway import TelegramGateway
@@ -49,6 +55,33 @@ class Engine:
 		)
 		self.video_queue = ProcessingQueue(self.video)
 		self.captions = CaptionsService(self.db, self._ffmpeg_path)
+
+	async def update_video_folders(self, items: list[tuple[SettingKey[str], str]]) -> None:
+		"""Сохраняет папки видео, охраняя папку очереди отправки.
+
+		Пока в очереди есть посты (включая ошибки: их файлы тоже живут
+		в папке очереди и нужны повтору), менять ``video_queued_dir``
+		нельзя — операции жизненного цикла узнают файлы по текущему
+		пути, и после смены отмена и отправка молча теряли бы файлы
+		в брошенной папке (инвариант зеркала ADR-0016).
+
+		Raises:
+			EngineError: Папка очереди меняется при непустой очереди.
+		"""
+		new_queued = next(
+			(value for key, value in items if key.name == VIDEO_QUEUED_DIR.name), None
+		)
+		if new_queued is not None:
+			current = await self.settings.get(VIDEO_QUEUED_DIR)
+			finished = (QueueItemStatus.DONE, QueueItemStatus.CANCELLED)
+			live = [i for i in await self.publish_queue.state() if i.status not in finished]
+			if new_queued.strip() != (current or "").strip() and live:
+				raise EngineError(
+					f"Папку очереди отправки нельзя менять: в очереди "
+					f"{len(live)} пост(ов), их файлы живут в текущей папке. "
+					"Дождитесь отправки или снимите элементы."
+				)
+		await self.settings.set_many(items)
 
 	async def delete_channel(self, channel_id: int) -> None:
 		"""Удаляет канал вместе с его элементами в очереди отправки.
