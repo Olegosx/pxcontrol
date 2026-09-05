@@ -183,6 +183,28 @@ class _PostPort(Protocol):
 
 
 @dataclass(frozen=True)
+class PublishPlan:
+	"""Подготовленная публикация: проверки и чтения БД уже выполнены.
+
+	Разделение подготовки и передачи — ADR-0020: отменяемая задача
+	отправки работает только с сетью и файлами, жёсткая отмена
+	не застаёт запрос к БД (иначе соединение aiosqlite бросалось бы
+	с запросом «в полёте»).
+
+	Attributes:
+		draft: черновик (после снятия просрочки, если она была).
+		channel: канал-получатель (строка БД с привязками).
+		media_path: путь файла после переименования; None — текст.
+		use_userbot: транспорт: userbot (True) или бот (False).
+	"""
+
+	draft: PostDraft
+	channel: Channel
+	media_path: str | None
+	use_userbot: bool
+
+
+@dataclass(frozen=True)
 class ScheduledPostDto:
 	"""Отложенная запись канала (прочитана из Telegram) для интерфейса.
 
@@ -221,12 +243,29 @@ class PostsService:
 		возможностям канала (:func:`publish_capabilities`): userbot —
 		полный набор; только бот — текст и медиа до 50 МБ, «сейчас».
 		``on_progress`` получает долю загрузки файла 0.0..1.0
-		(бот-путь прогресс не отдаёт).
+		(бот-путь прогресс не отдаёт). Композиция двух фаз (ADR-0020):
+		очередь отправки вызывает их раздельно, чтобы отменяемой была
+		только передача.
 
 		Raises:
 			PostError: Черновик/канал/файл не годятся, канал выключен
 				или у канала нет способа публикации.
 			UserbotUnavailableError: Userbot отвалился по дороге.
+		"""
+		await self.transmit(await self.prepare_publish(draft), on_progress)
+
+	async def prepare_publish(self, draft: PostDraft) -> PublishPlan:
+		"""Подготовка публикации: проверки, чтения БД, переименование.
+
+		Сетевых операций нет — фаза выполняется вне отменяемой задачи
+		отправки (ADR-0020): жёсткая отмена загрузки не может застать
+		запрос к БД. Побочный эффект один — переименование файла, и оно
+		идёт после всех проверок, способных отклонить черновик:
+		отклонённая публикация не должна оставлять файл переименованным.
+
+		Raises:
+			PostError: Черновик/канал/файл не годятся, канал выключен
+				или у канала нет способа публикации.
 		"""
 		self.validate_draft(draft)
 		channel = await self._get_channel(draft.channel_id)
@@ -238,22 +277,37 @@ class PostsService:
 			)
 		caps = publish_capabilities(channel.bot is not None, channel.tg_account_id is not None)
 		self._check_transport(caps, draft, channel.tg_account_id)
-		# переименование — после всех проверок, способных отклонить черновик:
-		# отклонённая публикация не должна оставлять файл переименованным
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
 			media_path = self._apply_rename(media_path, draft.rename_to)
-		if caps.userbot:
-			await self._publish_userbot(channel, draft, media_path, on_progress)
+		return PublishPlan(
+			draft=draft, channel=channel, media_path=media_path, use_userbot=caps.userbot
+		)
+
+	async def transmit(
+		self, plan: PublishPlan, on_progress: ProgressCallback | None = None
+	) -> None:
+		"""Передача подготовленного поста: сеть и файлы, без запросов к БД.
+
+		Отменяемая фаза публикации (ADR-0020): обрыв здесь безопасен —
+		недосланное Telegram не публикует, соединений с БД в полёте нет.
+
+		Raises:
+			PostError: Транспорт отклонил отправку.
+			UserbotUnavailableError: Userbot отвалился по дороге.
+		"""
+		draft = plan.draft
+		if plan.use_userbot:
+			await self._publish_userbot(plan.channel, draft, plan.media_path, on_progress)
 		else:
-			await self._publish_bot(channel, draft, media_path)
-		if draft.media_kind is MediaKind.VIDEO and media_path is not None:
-			await self._move_to_published(media_path)
+			await self._publish_bot(plan.channel, draft, plan.media_path)
+		if draft.media_kind is MediaKind.VIDEO and plan.media_path is not None:
+			await self._move_to_published(plan.media_path)
 		logger.info(
 			"Пост (%s) → «%s» (%s, %s).",
 			draft.media_kind if draft.media_path else "текст",
-			channel.title,
-			"userbot" if caps.userbot else "бот",
+			plan.channel.title,
+			"userbot" if plan.use_userbot else "бот",
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
 

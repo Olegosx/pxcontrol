@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -158,6 +159,11 @@ def _expired(when: datetime | None, now: datetime) -> bool:
 #: «канал ожил», а не пулемётную ленту, и флуд-лимит не срабатывает.
 CATCHUP_INTERVAL_S = 30
 
+#: Страховка кооперативной остановки (ADR-0020): столько ждём каждую
+#: фоновую задачу, затем — жёсткая отмена как последнее средство.
+#: Согласовано с ожиданием потока движка в EngineWorker.stop (10 с).
+_SHUTDOWN_TIMEOUT_S = 10.0
+
 
 class PublishQueue:
 	"""Последовательная отправка постов с прогрессом, отменой и повтором.
@@ -178,9 +184,12 @@ class PublishQueue:
 		self._db = db
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._items: list[_Item] = []
+		# кооперативная остановка (ADR-0020): задачи проверяют событие
+		# в безопасных точках, отмена не застаёт их посреди запроса к БД
+		self._stop = asyncio.Event()
 		# точка подмены в тестах: реальные паузы (флуд, догон) в тестах
 		# растянули бы прогон на минуты
-		self._sleep = asyncio.sleep
+		self._sleep: Callable[[float], Awaitable[None]] = self._wait_stop
 		self._worker: asyncio.Task[None] | None = None
 		self._active: tuple[int, asyncio.Task[None]] | None = None
 		self._watcher: asyncio.Task[None] | None = None
@@ -297,15 +306,19 @@ class PublishQueue:
 
 	async def cancel(self, item_id: int) -> None:
 		"""Отменяет элемент: ожидающий убирается, отправляющийся обрывается."""
-		if self._active is not None and self._active[0] == item_id:
-			for item in self._items:
-				if item.id == item_id:
-					item.cancel_requested = True
-			self._active[1].cancel()
-			return
 		cancellable = (QueueItemStatus.PENDING, QueueItemStatus.WAITING)
 		for item in self._items:
-			if item.id == item_id and item.status in cancellable:
+			if item.id != item_id:
+				continue
+			if item.status is QueueItemStatus.SENDING:
+				# исход запишет _send. Сеть обрывается отменой задачи; если
+				# идёт ещё подготовка (задачи нет — ADR-0020), флаг увидит
+				# сам _send сразу после неё
+				item.cancel_requested = True
+				if self._active is not None and self._active[0] == item_id:
+					self._active[1].cancel()
+				return
+			if item.status in cancellable:
 				item.status = QueueItemStatus.CANCELLED
 				await self._leave_queue(item)
 				logger.info("Элемент очереди id=%s отменён (ждал).", item_id)
@@ -361,10 +374,13 @@ class PublishQueue:
 		for item in list(self._items):
 			if item.draft.channel_id != channel_id:
 				continue
-			if self._active is not None and self._active[0] == item.id:
-				# исход запишет _send: CANCELLED, файл вернётся в результаты
+			if item.status is QueueItemStatus.SENDING:
+				# исход запишет _send: CANCELLED, файл вернётся в результаты.
+				# Сеть обрывается отменой задачи; подготовка без задачи
+				# (ADR-0020) увидит флаг сама
 				item.cancel_requested = True
-				self._active[1].cancel()
+				if self._active is not None and self._active[0] == item.id:
+					self._active[1].cancel()
 				continue
 			if not item.status.finished():
 				item.status = QueueItemStatus.CANCELLED
@@ -399,21 +415,51 @@ class PublishQueue:
 		waiting.sort(key=lambda item: item.draft.when or fallback)
 		return [item.dto() for item in [*others, *waiting]]
 
-	async def shutdown(self) -> None:
-		"""Останавливает воркер и дозор слотов (при остановке движка).
+	async def settle(self) -> None:
+		"""Дожидается завершения внеплановой проверки слотов (ADR-0020).
 
-		Статусы в БД дочищать не нужно: SENDING не персистится, при
-		следующем запуске элемент уйдёт повторно; отмена задачи обрывает
-		активную отправку (недосланное Telegram не публикует).
+		Детерминированная точка присоединения: после возврата фоновые
+		тики, запущенные постановкой или загрузкой, завершены — снимок
+		очереди отражает их результат. Нужна тестам вместо синхронизации
+		сном настенного времени (гонка по построению).
 		"""
+		while (check := self._slot_check) is not None and not check.done():
+			with suppress(asyncio.CancelledError):
+				await check
+
+	async def shutdown(self) -> None:
+		"""Останавливает фоновые задачи кооперативно (ADR-0020).
+
+		Взводится событие остановки: задачи выходят в безопасных точках,
+		их запросы к БД не обрываются — иначе соединение aiosqlite
+		бросалось бы с запросом «в полёте» и его поток стрелял бы
+		в закрытый цикл событий. Жёстко отменяется только активная
+		отправка (обрыв недосланной загрузки — доменное поведение,
+		сетевая операция без БД); статусы в БД дочищать не нужно:
+		SENDING не персистится, при следующем запуске элемент уйдёт
+		повторно. Задача, не завершившаяся за страховочный таймаут,
+		отменяется — последнее средство.
+		"""
+		self._stop.set()
+		if self._active is not None:
+			self._active[1].cancel()
 		for task in (self._worker, self._watcher, self._slot_check):
 			if task is not None:
-				task.cancel()
-				with suppress(asyncio.CancelledError):
-					await task
+				with suppress(asyncio.CancelledError, TimeoutError):
+					await asyncio.wait_for(task, timeout=_SHUTDOWN_TIMEOUT_S)
 		self._worker = None
 		self._watcher = None
 		self._slot_check = None
+
+	async def _wait_stop(self, seconds: float) -> None:
+		"""Ждёт срок или остановку движка — смотря что наступит раньше.
+
+		Все паузы фоновых задач идут через это ожидание: остановка
+		прерывает их немедленно, не оставляя `shutdown` ждать флуд-паузу
+		(до минут) или тик дозора.
+		"""
+		with suppress(TimeoutError):
+			await asyncio.wait_for(self._stop.wait(), timeout=seconds)
 
 	# --- слоты отложек (ADR-0016) --------------------------------------------
 
@@ -446,12 +492,17 @@ class PublishQueue:
 
 		Ждущих не осталось — задача завершается: пока их нет, фоновой
 		задачи нет вовсе; следующая постановка или возврат в ожидание
-		поднимут её заново (``_ensure_watcher``).
+		поднимут её заново (``_ensure_watcher``). Остановка движка
+		прерывает сон и выводит из цикла в безопасной точке (ADR-0020).
 		"""
-		while any(item.status is QueueItemStatus.WAITING for item in self._items):
+		while not self._stop.is_set() and any(
+			item.status is QueueItemStatus.WAITING for item in self._items
+		):
 			minutes = await self._settings.get(QUEUE_SLOT_POLL_MINUTES)
-			await asyncio.sleep(max(1, minutes) * 60)
-			if any(item.status is QueueItemStatus.WAITING for item in self._items):
+			await self._wait_stop(max(1, minutes) * 60)
+			if not self._stop.is_set() and any(
+				item.status is QueueItemStatus.WAITING for item in self._items
+			):
 				await self._release_slots()
 
 	async def _release_slots(self) -> None:
@@ -473,6 +524,10 @@ class PublishQueue:
 		# аккаунтов независимы, флуд одного не должен глушить остальные
 		flooded_accounts: set[int | None] = set()
 		for channel_id in channels:
+			if self._stop.is_set():
+				# остановка движка: недопроверенные каналы подождут запуска —
+				# дозор перепроверит слоты при восстановлении очереди
+				return
 			try:
 				account_id = await self._posts.account_for_channel(channel_id)
 				if account_id in flooded_accounts:
@@ -600,8 +655,13 @@ class PublishQueue:
 			self._worker = asyncio.create_task(self._run())
 
 	async def _run(self) -> None:
-		"""Отправляет элементы по одному, пока есть готовые к отправке."""
-		while (item := self._next_pending()) is not None:
+		"""Отправляет элементы по одному, пока есть готовые к отправке.
+
+		Остановка движка выводит из цикла между элементами (ADR-0020);
+		начатый элемент дорабатывается — его обрывает отмена активной
+		отправки в ``shutdown``, а не отмена воркера.
+		"""
+		while not self._stop.is_set() and (item := self._next_pending()) is not None:
 			await self._send(item)
 
 	def _next_pending(self) -> _Item | None:
@@ -627,17 +687,29 @@ class PublishQueue:
 			# показывают «сейчас», а не несуществующую отложку
 			item.draft = draft
 		item.status = QueueItemStatus.SENDING
-		task = asyncio.create_task(self._posts.publish(draft, on_progress=_on_progress))
-		self._active = (item.id, task)
+		task: asyncio.Task[None] | None = None
 		try:
+			# подготовка (проверки, чтения БД, переименование) — в самом
+			# воркере: его не отменяют (ADR-0020), запросы к БД не рвутся;
+			# отменяемая задача ниже — только сеть и файлы
+			plan = await self._posts.prepare_publish(draft)
+			if item.cancel_requested or self._stop.is_set():
+				# отмена или остановка пришла на подготовке: сети ещё
+				# не было, обрывать нечего — исход тот же, что у обрыва
+				# отправки, и обрабатывается той же веткой ниже
+				raise asyncio.CancelledError
+			task = asyncio.create_task(self._posts.transmit(plan, on_progress=_on_progress))
+			self._active = (item.id, task)
 			await task
 		except asyncio.CancelledError:
 			if not item.cancel_requested:
-				# отменили сам воркер (остановка движка): гасим отправку
-				# и пробрасываем отмену дальше — очередь не продолжается.
-				# task.cancelled() здесь не годится: при остановке цикла
-				# отменяются обе задачи, и по нему не отличить пользователя.
-				task.cancel()
+				# не пользователь — остановка: shutdown отменил активную
+				# отправку (ADR-0020) либо воркер отменили извне (снос
+				# цикла). Гасим отправку и пробрасываем отмену дальше —
+				# очередь не продолжается; элемент остаётся PENDING в БД
+				# и уйдёт после перезапуска.
+				if task is not None:
+					task.cancel()
 				raise
 			item.status = QueueItemStatus.CANCELLED
 			await self._leave_queue(item)
@@ -677,9 +749,13 @@ class PublishQueue:
 			item.error = message
 			logger.exception("Отправка id=%s не удалась.", item.id)
 		else:
+			# порядок «БД → память» — как у остальных веток (ADR-0020):
+			# наблюдатель, увидевший DONE, знает, что запросов в полёте
+			# нет; заодно нет окна дубля — падение до удаления строки
+			# оставляло pending, и пост уходил после рестарта повторно
+			await self._delete_row(item.id)
 			item.status = QueueItemStatus.DONE
 			item.progress = 1.0
-			await self._delete_row(item.id)
 			if catchup and self._next_pending() is not None:
 				# щадящий догон: пауза между просроченными постами
 				logger.info("Догон: пауза %d с перед следующим постом.", CATCHUP_INTERVAL_S)

@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Channel, TgAccount
+from pxcontrol.engine.db.models import Channel, PublishQueueItem, TgAccount
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
 	PostsService,
 	ProgressCallback,
+	PublishPlan,
 )
 from pxcontrol.engine.services.publish_queue import (
 	CATCHUP_INTERVAL_S,
@@ -71,8 +74,28 @@ async def _add_channel(db: Database, tg_chat_id: str = "-1001", title: str = "К
 		return channel.id
 
 
-def _queue(db: Database, gateway: _SlowGateway) -> PublishQueue:
-	return PublishQueue(PostsService(db, gateway), db)
+#: Тип фабрики очередей из фикстуры make_queue (для аннотаций тестов).
+QueueFactory = Callable[[_SlowGateway], PublishQueue]
+
+
+@pytest.fixture
+async def make_queue(db: Database) -> AsyncIterator[QueueFactory]:
+	"""Фабрика очередей с гарантированной остановкой (ADR-0020).
+
+	Тест, бросивший очередь с живыми фоновыми задачами, оставил бы их
+	запросы к БД «в полёте» при закрытии цикла событий — поток соединения
+	aiosqlite стрелял бы в уже закрытый цикл (см. диагностику в ADR-0020).
+	"""
+	created: list[PublishQueue] = []
+
+	def factory(gateway: _SlowGateway) -> PublishQueue:
+		queue = PublishQueue(PostsService(db, gateway), db)
+		created.append(queue)
+		return queue
+
+	yield factory
+	for queue in created:
+		await queue.shutdown()
 
 
 async def _wait_status(
@@ -103,10 +126,10 @@ async def _wait_progress(
 	raise AssertionError(f"элемент {item_id} не получил прогресс {expected}")
 
 
-async def test_enqueue_during_send_keeps_order(db: Database) -> None:
+async def test_enqueue_during_send_keeps_order(db: Database, make_queue: QueueFactory) -> None:
 	"""Пока первый уходит, второй свободно встаёт в хвост; порядок сохраняется."""
 	gateway = _SlowGateway()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	first = await queue.enqueue(PostDraft(channel_id, text="первый"))
 	second = await queue.enqueue(PostDraft(channel_id, text="второй"))
@@ -121,10 +144,10 @@ async def test_enqueue_during_send_keeps_order(db: Database) -> None:
 	assert all(item.status.finished() for item in await queue.state())
 
 
-async def test_cancel_pending_skips_send(db: Database) -> None:
+async def test_cancel_pending_skips_send(db: Database, make_queue: QueueFactory) -> None:
 	"""Отмена ожидающего: он не отправляется, остальные — по плану."""
 	gateway = _SlowGateway()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	first = await queue.enqueue(PostDraft(channel_id, text="первый"))
 	second = await queue.enqueue(PostDraft(channel_id, text="второй"))
@@ -137,10 +160,10 @@ async def test_cancel_pending_skips_send(db: Database) -> None:
 	assert [post.text for post in gateway.published] == ["первый"]
 
 
-async def test_cancel_active_moves_to_next(db: Database) -> None:
+async def test_cancel_active_moves_to_next(db: Database, make_queue: QueueFactory) -> None:
 	"""Отмена отправляющегося обрывает загрузку; очередь идёт дальше."""
 	gateway = _SlowGateway()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	first = await queue.enqueue(PostDraft(channel_id, text="первый"))
 	second = await queue.enqueue(PostDraft(channel_id, text="второй"))
@@ -153,12 +176,12 @@ async def test_cancel_active_moves_to_next(db: Database) -> None:
 	assert [post.text for post in gateway.published] == ["второй"]
 
 
-async def test_error_does_not_stop_queue(db: Database) -> None:
+async def test_error_does_not_stop_queue(db: Database, make_queue: QueueFactory) -> None:
 	"""Ошибка одного элемента фиксируется в нём и не роняет следующие."""
 	gateway = _SlowGateway()
 	gateway.release.set()  # отправка без задержки
 	gateway.fail_texts = {"сбойный"}
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	bad = await queue.enqueue(PostDraft(channel_id, text="сбойный"))
 	good = await queue.enqueue(PostDraft(channel_id, text="целый"))
@@ -171,9 +194,9 @@ async def test_error_does_not_stop_queue(db: Database) -> None:
 	assert [item.id for item in await queue.state()] == [good]
 
 
-async def test_enqueue_validates_immediately(db: Database) -> None:
+async def test_enqueue_validates_immediately(db: Database, make_queue: QueueFactory) -> None:
 	"""Негодный черновик отклоняется при постановке, а не при отправке."""
-	queue = _queue(db, _SlowGateway())
+	queue = make_queue(_SlowGateway())
 	channel_id = await _add_channel(db)
 	with pytest.raises(PostError, match="пуст"):
 		await queue.enqueue(PostDraft(channel_id))
@@ -182,10 +205,10 @@ async def test_enqueue_validates_immediately(db: Database) -> None:
 	assert await queue.state() == []
 
 
-async def test_dto_titles_and_flags(db: Database, tmp_path: Path) -> None:
+async def test_dto_titles_and_flags(db: Database, make_queue: QueueFactory, tmp_path: Path) -> None:
 	"""Заголовок — имя файла (учитывая переименование) или начало текста."""
 	gateway = _SlowGateway()  # отмашки нет — всё висит, удобно смотреть
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	video = tmp_path / "ролик.mp4"
 	video.write_bytes(b"v")
@@ -205,15 +228,14 @@ async def test_dto_titles_and_flags(db: Database, tmp_path: Path) -> None:
 	assert second.title == "о" * 59 + "…" and second.scheduled
 	assert second.when == when  # момент публикации виден в карточке очереди
 	assert second.channel_title == "Канал"
-	await queue.shutdown()  # гасим воркер с висящей отправкой
 
 
-async def test_retry_error_sends_again(db: Database) -> None:
+async def test_retry_error_sends_again(db: Database, make_queue: QueueFactory) -> None:
 	"""Повтор возвращает ошибочный элемент в очередь; вторая попытка уходит."""
 	gateway = _SlowGateway()
 	gateway.release.set()  # отправка без задержки
 	gateway.fail_texts = {"сбойный"}
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(PostDraft(channel_id, text="сбойный"))
 	await _wait_status(queue, item, QueueItemStatus.ERROR)
@@ -225,12 +247,14 @@ async def test_retry_error_sends_again(db: Database) -> None:
 	assert [post.text for post in gateway.published] == ["сбойный"]
 
 
-async def test_retry_validates_draft_again(db: Database, tmp_path: Path) -> None:
+async def test_retry_validates_draft_again(
+	db: Database, make_queue: QueueFactory, tmp_path: Path
+) -> None:
 	"""Повтор перепроверяет черновик: исчезнувший файл — ошибка, статус прежний."""
 	gateway = _SlowGateway()
 	gateway.release.set()
 	gateway.fail_texts = {"с файлом"}
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	attachment = tmp_path / "вложение.pdf"
 	attachment.write_bytes(b"f")
@@ -251,12 +275,14 @@ async def test_retry_validates_draft_again(db: Database, tmp_path: Path) -> None
 	assert still.error == failed.error  # прежний текст ошибки сохранён
 
 
-async def test_retry_after_rename_uses_new_name(db: Database, tmp_path: Path) -> None:
+async def test_retry_after_rename_uses_new_name(
+	db: Database, make_queue: QueueFactory, tmp_path: Path
+) -> None:
 	"""Файл, переименованный неудачной попыткой, при повторе уходит как есть."""
 	gateway = _SlowGateway()
 	gateway.release.set()
 	gateway.fail_texts = {"с файлом"}
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	attachment = tmp_path / "старое.pdf"
 	attachment.write_bytes(b"f")
@@ -278,30 +304,28 @@ async def test_retry_after_rename_uses_new_name(db: Database, tmp_path: Path) ->
 	assert published.media_path == str(tmp_path / "новое.pdf")
 
 
-async def test_retry_ignores_unfinished(db: Database) -> None:
+async def test_retry_ignores_unfinished(db: Database, make_queue: QueueFactory) -> None:
 	"""Повтор действует только на ошибку: живой элемент не трогается."""
 	gateway = _SlowGateway()  # отмашки нет — элемент висит в отправке
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(PostDraft(channel_id, text="живой"))
 	await _wait_status(queue, item, QueueItemStatus.SENDING)
 	await queue.retry(item)
 	sending = {i.id: i for i in await queue.state()}[item]
 	assert sending.status is QueueItemStatus.SENDING
-	await queue.shutdown()
 
 
-async def test_dismiss_ignores_unfinished(db: Database) -> None:
+async def test_dismiss_ignores_unfinished(db: Database, make_queue: QueueFactory) -> None:
 	"""Снять с показа можно только завершённый элемент."""
-	queue = _queue(db, _SlowGateway())
+	queue = make_queue(_SlowGateway())
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(PostDraft(channel_id, text="живой"))
 	await queue.dismiss(item)
 	assert [i.id for i in await queue.state()] == [item]
-	await queue.shutdown()
 
 
-async def test_unexpected_error_shown_collapsed(db: Database) -> None:
+async def test_unexpected_error_shown_collapsed(db: Database, make_queue: QueueFactory) -> None:
 	"""Карточка очереди показывает сводку, а не дамп (контракт errors.py).
 
 	Мост интерфейса сворачивает недоменные исключения через user_message;
@@ -309,7 +333,7 @@ async def test_unexpected_error_shown_collapsed(db: Database) -> None:
 	"""
 	gateway = _SlowGateway()
 	gateway.release.set()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	dump = "Traceback (most recent call last)\n" + "  строка дампа\n" * 40
 
@@ -324,7 +348,7 @@ async def test_unexpected_error_shown_collapsed(db: Database) -> None:
 	assert "Внутренняя ошибка" in failed.error
 
 
-async def test_retry_resets_cancel_flag(db: Database) -> None:
+async def test_retry_resets_cancel_flag(db: Database, make_queue: QueueFactory) -> None:
 	"""Повтор снимает застрявший флаг отмены.
 
 	Флаг взводится, когда отмена совпала с завершением попытки ошибкой;
@@ -334,7 +358,7 @@ async def test_retry_resets_cancel_flag(db: Database) -> None:
 	gateway = _SlowGateway()
 	gateway.release.set()
 	gateway.fail_texts = {"сбойный"}
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item_id = await queue.enqueue(PostDraft(channel_id, text="сбойный"))
 	await _wait_status(queue, item_id, QueueItemStatus.ERROR)
@@ -346,11 +370,13 @@ async def test_retry_resets_cancel_flag(db: Database) -> None:
 	await _wait_status(queue, item_id, QueueItemStatus.DONE)
 
 
-async def test_enqueue_many_keeps_order_and_sends_all(db: Database) -> None:
+async def test_enqueue_many_keeps_order_and_sends_all(
+	db: Database, make_queue: QueueFactory
+) -> None:
 	"""Пакет черновиков ставится целиком и отправляется по порядку."""
 	gateway = _SlowGateway()
 	gateway.release.set()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	ids = await queue.enqueue_many(
 		[
@@ -365,10 +391,10 @@ async def test_enqueue_many_keeps_order_and_sends_all(db: Database) -> None:
 	assert [post.text for post in gateway.published] == ["первый", "второй", "третий"]
 
 
-async def test_enqueue_many_validates_before_adding(db: Database) -> None:
+async def test_enqueue_many_validates_before_adding(db: Database, make_queue: QueueFactory) -> None:
 	"""Негодный черновик в середине пакета — отказ целиком, очередь пуста."""
 	gateway = _SlowGateway()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	with pytest.raises(PostError, match="пуст"):
 		await queue.enqueue_many(
@@ -415,30 +441,29 @@ def _future(minutes: int) -> datetime:
 	return datetime.now(UTC) + timedelta(minutes=minutes)
 
 
-async def test_scheduled_without_free_slot_waits(db: Database) -> None:
+async def test_scheduled_without_free_slot_waits(db: Database, make_queue: QueueFactory) -> None:
 	"""Все 100 слотов заняты — отложенный ждёт; слот освободился — ушёл."""
 	gateway = _SlotGateway()
 	gateway.release.set()
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(PostDraft(channel_id, text="хвост", when=_future(120)))
 	await _wait_status(queue, item, QueueItemStatus.WAITING)
-	await asyncio.sleep(0.05)  # внеплановая проверка слотов успевает пройти
+	await queue.settle()  # внеплановая проверка слотов — завершена (ADR-0020)
 	assert (await queue.state())[0].status is QueueItemStatus.WAITING
 	gateway.scheduled = gateway.scheduled[:-1]  # сервер опубликовал одну отложку
 	await queue._release_slots()  # noqa: SLF001 — тик дозора без ожидания N минут
 	await _wait_status(queue, item, QueueItemStatus.DONE)
 	assert gateway.published[0].when is not None
-	await queue.shutdown()
 
 
-async def test_release_nearest_date_first(db: Database) -> None:
+async def test_release_nearest_date_first(db: Database, make_queue: QueueFactory) -> None:
 	"""Свободен один слот — уходит элемент с ближайшей датой, не первый."""
 	gateway = _SlotGateway()
 	gateway.release.set()
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED - 1)]
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	later, sooner = await queue.enqueue_many(
 		[
@@ -449,15 +474,16 @@ async def test_release_nearest_date_first(db: Database) -> None:
 	await _wait_status(queue, sooner, QueueItemStatus.DONE)
 	assert [post.text for post in gateway.published] == ["ближний"]
 	assert (await _wait_status(queue, later, QueueItemStatus.WAITING)) is not None
-	await queue.shutdown()
 
 
-async def test_expired_when_publishes_now_without_slot(db: Database) -> None:
+async def test_expired_when_publishes_now_without_slot(
+	db: Database, make_queue: QueueFactory
+) -> None:
 	"""Просроченное время — обычное сообщение: слота не ждёт, when=None."""
 	gateway = _SlotGateway()
 	gateway.release.set()
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(PostDraft(channel_id, text="опоздал", when=_future(120)))
 	await _wait_status(queue, item, QueueItemStatus.WAITING)
@@ -468,15 +494,16 @@ async def test_expired_when_publishes_now_without_slot(db: Database) -> None:
 	done = await _wait_status(queue, item, QueueItemStatus.DONE)
 	assert gateway.published[0].when is None  # ушёл обычным сообщением
 	assert done.when is None  # снимок для интерфейса честен: не «отложка»
-	await queue.shutdown()
 
 
-async def test_schedule_full_race_returns_to_waiting(db: Database) -> None:
+async def test_schedule_full_race_returns_to_waiting(
+	db: Database, make_queue: QueueFactory
+) -> None:
 	"""Гонка: слоты заняли руками между проверкой и отправкой — не ошибка."""
 	gateway = _SlotGateway()
 	gateway.release.set()
 	gateway.slots_full_once = True  # первый publish наткнётся на полный канал
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(PostDraft(channel_id, text="гонка", when=_future(120)))
 	for _ in range(200):  # первая попытка отправки съедает разовый отказ
@@ -487,16 +514,15 @@ async def test_schedule_full_race_returns_to_waiting(db: Database) -> None:
 	await queue._release_slots()  # noqa: SLF001 — повторная проверка слотов
 	await _wait_status(queue, item, QueueItemStatus.DONE)
 	assert [post.text for post in gateway.published] == ["гонка"]
-	await queue.shutdown()
 
 
-async def test_queue_survives_restart(db: Database) -> None:
+async def test_queue_survives_restart(db: Database, make_queue: QueueFactory) -> None:
 	"""Очередь восстанавливается из БД: статусы, ошибки и aware-времена."""
 	gateway = _SlotGateway()
 	gateway.release.set()
 	gateway.fail_texts = {"сбойный"}
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	bad = await queue.enqueue(PostDraft(channel_id, text="сбойный"))
 	waiting = await queue.enqueue(PostDraft(channel_id, text="ждущий", when=_future(120)))
@@ -504,14 +530,13 @@ async def test_queue_survives_restart(db: Database) -> None:
 	await _wait_status(queue, waiting, QueueItemStatus.WAITING)
 	await queue.shutdown()
 
-	restarted = _queue(db, gateway)  # «перезапуск приложения»
+	restarted = make_queue(gateway)  # «перезапуск приложения»
 	await restarted.load()
 	items = {item.id: item for item in await restarted.state()}
 	assert items[bad].status is QueueItemStatus.ERROR
 	assert items[bad].error is not None and "отклонил" in items[bad].error
 	assert items[waiting].status is QueueItemStatus.WAITING
 	assert items[waiting].when is not None and items[waiting].when.tzinfo is not None
-	await restarted.shutdown()
 
 
 # --- папка очереди на диске (ADR-0016) --------------------------------------
@@ -533,14 +558,14 @@ def _make_video(processed: Path, name: str = "ролик.mp4") -> Path:
 
 
 async def test_enqueue_stashes_file_and_cancel_returns_it(
-	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Постановка уводит файл в папку очереди, отмена возвращает обратно."""
 	processed = _media(tmp_path, monkeypatch)
 	video = _make_video(processed)
 	gateway = _SlotGateway()
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(
 		PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120))
@@ -553,18 +578,17 @@ async def test_enqueue_stashes_file_and_cancel_returns_it(
 	await _wait_status(queue, item, QueueItemStatus.CANCELLED)
 	assert video.is_file() and video.with_suffix(".png").is_file()
 	assert not queued.exists()
-	await queue.shutdown()
 
 
 async def test_sent_file_moves_from_queued_to_published(
-	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Отправленный файл переезжает из папки очереди в опубликованные."""
 	processed = _media(tmp_path, monkeypatch)
 	video = _make_video(processed)
 	gateway = _SlotGateway()
 	gateway.release.set()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(
 		PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO)
@@ -574,18 +598,17 @@ async def test_sent_file_moves_from_queued_to_published(
 	assert published.is_file()
 	assert not (tmp_path / "media" / "queued" / "суб" / "ролик.mp4").exists()
 	assert not video.exists()
-	await queue.shutdown()
 
 
 async def test_stash_collision_rejects_batch(
-	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Файл-тёзка уже ждёт в очереди — постановка отклоняется целиком."""
 	processed = _media(tmp_path, monkeypatch)
 	video = _make_video(processed)
 	gateway = _SlotGateway()
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	await queue.enqueue(
 		PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120))
@@ -599,11 +622,10 @@ async def test_stash_collision_rejects_batch(
 		)
 	assert twin.is_file()  # отклонённый пакет не трогает диск
 	assert len(await queue.state()) == 1
-	await queue.shutdown()
 
 
 async def test_enqueue_rejects_non_video_from_processed(
-	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Не-видео из папки результатов не ставится: конвейер очереди — только для видео."""
 	processed = _media(tmp_path, monkeypatch)
@@ -611,7 +633,7 @@ async def test_enqueue_rejects_non_video_from_processed(
 	photo.write_bytes(b"png")
 	gateway = _SlowGateway()
 	gateway.release.set()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	with pytest.raises(PostError, match="только видео"):
 		await queue.enqueue(
@@ -619,15 +641,16 @@ async def test_enqueue_rejects_non_video_from_processed(
 		)
 	assert photo.is_file()  # файл остался в результатах
 	assert await queue.state() == []  # постановка атомарна — очередь пуста
-	await queue.shutdown()
 
 
-async def test_retry_expired_scheduled_publishes_now(db: Database) -> None:
+async def test_retry_expired_scheduled_publishes_now(
+	db: Database, make_queue: QueueFactory
+) -> None:
 	"""Повтор просроченного отложенного публикует «сейчас» (ADR-0016, «просрочка → сейчас»)."""
 	gateway = _SlowGateway()
 	gateway.release.set()
 	gateway.fail_texts = {"ночной"}
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(PostDraft(channel_id, text="ночной"))
 	await _wait_status(queue, item, QueueItemStatus.ERROR)
@@ -638,18 +661,17 @@ async def test_retry_expired_scheduled_publishes_now(db: Database) -> None:
 	await queue.retry(item)
 	await _wait_status(queue, item, QueueItemStatus.DONE)
 	assert gateway.published[-1].when is None  # ушёл «сейчас», а не в прошлое
-	await queue.shutdown()
 
 
 async def test_drop_channel_removes_items_and_returns_files(
-	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Снятие элементов канала: очередь пуста, файл вернулся в результаты."""
 	processed = _media(tmp_path, monkeypatch)
 	video = _make_video(processed)
 	gateway = _SlotGateway()
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	channel_id = await _add_channel(db)
 	item = await queue.enqueue(
 		PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120))
@@ -659,7 +681,6 @@ async def test_drop_channel_removes_items_and_returns_files(
 	await queue.drop_channel(channel_id)
 	assert await queue.state() == []  # «зомби»-элементов в памяти нет
 	assert video.is_file()  # файл вернулся в результаты
-	await queue.shutdown()
 
 
 class _FloodOnceGateway(_SlowGateway):
@@ -685,11 +706,13 @@ class _FloodOnceGateway(_SlowGateway):
 		await super().publish(account_id, chat_id, post, on_progress)
 
 
-async def test_flood_waits_and_retries_instead_of_error(db: Database) -> None:
+async def test_flood_waits_and_retries_instead_of_error(
+	db: Database, make_queue: QueueFactory
+) -> None:
 	"""Флуд-лимит — не исход элемента: очередь ждёт названный срок и повторяет."""
 	gateway = _FloodOnceGateway(seconds=17)
 	gateway.release.set()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	sleeps: list[float] = []
 
 	async def _instant(seconds: float) -> None:
@@ -702,15 +725,14 @@ async def test_flood_waits_and_retries_instead_of_error(db: Database) -> None:
 	assert done.error is None and done.note is None  # ошибки не было
 	assert sleeps == [17.0]  # ждали ровно срок, названный сервером
 	assert [post.text for post in gateway.published] == ["под флудом"]
-	await queue.shutdown()
 
 
-async def test_catchup_paces_expired_posts(db: Database) -> None:
+async def test_catchup_paces_expired_posts(db: Database, make_queue: QueueFactory) -> None:
 	"""Догон щадящий: между просроченными постами — пауза, залпа нет."""
 	gateway = _SlotGateway()
 	gateway.release.set()
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	sleeps: list[float] = []
 
 	async def _instant(seconds: float) -> None:
@@ -730,7 +752,6 @@ async def test_catchup_paces_expired_posts(db: Database) -> None:
 	await _wait_status(queue, second, QueueItemStatus.DONE)
 	assert [post.text for post in gateway.published] == ["догон-1", "догон-2"]
 	assert sleeps == [CATCHUP_INTERVAL_S]  # пауза между постами; после хвоста — нет
-	await queue.shutdown()
 
 
 class _FloodOnReadGateway(_SlotGateway):
@@ -745,11 +766,13 @@ class _FloodOnReadGateway(_SlotGateway):
 		raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
 
 
-async def test_flood_on_slot_check_skips_rest_of_account(db: Database) -> None:
+async def test_flood_on_slot_check_skips_rest_of_account(
+	db: Database, make_queue: QueueFactory
+) -> None:
 	"""Флуд-лимит на чтении слотов глушит остальные каналы ТОГО ЖЕ аккаунта:
 	лимит действует на аккаунт (ADR-0017/0019), настойчивость растит сроки."""
 	gateway = _FloodOnReadGateway()
-	queue = _queue(db, gateway)
+	queue = make_queue(gateway)
 	# оба канала — на одном аккаунте: флуд первого отменяет чтение второго
 	async with db.session_factory() as session:
 		account = TgAccount(label="@ub", phone="+7900", session="s")
@@ -765,11 +788,70 @@ async def test_flood_on_slot_check_skips_rest_of_account(db: Database) -> None:
 	b = await queue.enqueue(PostDraft(other.id, text="ждущий Б", when=_future(180)))
 	await _wait_status(queue, a, QueueItemStatus.WAITING)
 	await _wait_status(queue, b, QueueItemStatus.WAITING)
-	await asyncio.sleep(0.05)  # фоновые проверки после постановки — досидели
+	await queue.settle()  # фоновые проверки постановки — завершены (ADR-0020)
 	gateway.read_calls = 0  # изолируем замер от фоновых тиков постановки
 	await queue._release_slots()  # noqa: SLF001 — тик дозора напрямую
 	assert gateway.read_calls == 1  # после флуда — ни одного канала аккаунта больше
 	state = {item.id: item for item in await queue.state()}
 	assert state[a].status is QueueItemStatus.WAITING  # никто не в ошибке
 	assert state[b].status is QueueItemStatus.WAITING
-	await queue.shutdown()
+
+
+# --- разделение подготовки и передачи (ADR-0020) -----------------------------
+
+
+def _gate_prepare(queue: PublishQueue) -> tuple[asyncio.Event, asyncio.Event]:
+	"""Задерживает подготовку публикации: (началась, отмашка продолжить).
+
+	Моделирует окно, в котором отправляющийся элемент ещё не дошёл
+	до сети: раньше отмена в этом окне рвала запрос к БД (ADR-0020).
+	"""
+	posts = queue._posts  # noqa: SLF001 — точка подмены, как gateway.publish
+	original = posts.prepare_publish
+	started = asyncio.Event()
+	proceed = asyncio.Event()
+
+	async def slow_prepare(draft: PostDraft) -> PublishPlan:
+		started.set()
+		await proceed.wait()
+		return await original(draft)
+
+	posts.prepare_publish = slow_prepare  # type: ignore[method-assign]
+	return started, proceed
+
+
+async def test_cancel_during_prepare_skips_network(db: Database, make_queue: QueueFactory) -> None:
+	"""Отмена, пришедшая на подготовке: сеть не начинается, элемент отменён."""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	queue = make_queue(gateway)
+	started, proceed = _gate_prepare(queue)
+	channel_id = await _add_channel(db)
+	item = await queue.enqueue(PostDraft(channel_id, text="отменят на подготовке"))
+	await started.wait()  # воркер вошёл в подготовку, сети ещё нет
+	await queue.cancel(item)  # активной задачи нет — сработает только флаг
+	proceed.set()
+	cancelled = await _wait_status(queue, item, QueueItemStatus.CANCELLED)
+	assert cancelled.status is QueueItemStatus.CANCELLED
+	assert gateway.published == []  # до шлюза отправка не дошла
+
+
+async def test_shutdown_during_prepare_leaves_pending_row(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Остановка на подготовке: сети нет, строка pending уйдёт после рестарта."""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	queue = make_queue(gateway)
+	started, proceed = _gate_prepare(queue)
+	channel_id = await _add_channel(db)
+	await queue.enqueue(PostDraft(channel_id, text="переживёт рестарт"))
+	await started.wait()
+	shutdown = asyncio.create_task(queue.shutdown())
+	await asyncio.sleep(0)  # первый же шаг shutdown взводит событие остановки
+	proceed.set()
+	await shutdown
+	assert gateway.published == []  # сеть не начиналась
+	async with db.session_factory() as session:
+		rows = (await session.execute(select(PublishQueueItem))).scalars().all()
+	assert [row.status for row in rows] == ["pending"]  # уйдёт после перезапуска

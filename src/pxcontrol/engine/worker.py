@@ -57,8 +57,16 @@ class EngineWorker:
 		self._ready.set()
 		self._loop.run_forever()
 		try:
-			self._cancel_pending(self._loop)
-			self._loop.run_until_complete(self._engine.stop())
+			# порядок важен (ADR-0020): сначала штатная остановка — очереди
+			# гасят своих воркеров кооперативно, не обрывая запросов к БД;
+			# отмена всех задач до неё убивала бы воркеров жёстко, посреди
+			# запроса, и shutdown очередей доставался уже мёртвым задачам.
+			# Отмена уцелевших — в finally: даже при ошибке остановки
+			# задачи не должны быть уничтожены висящими
+			try:
+				self._loop.run_until_complete(self._engine.stop())
+			finally:
+				self._cancel_pending(self._loop)
 		except Exception:  # noqa: BLE001 — завершение не должно ронять поток
 			# ошибка остановки (сеть у Telethon, диск у БД) — в лог; цикл
 			# всё равно закрывается, иначе поток умрёт с сырой трассировкой
@@ -68,12 +76,15 @@ class EngineWorker:
 
 	@staticmethod
 	def _cancel_pending(loop: asyncio.AbstractEventLoop) -> None:
-		"""Отменяет задачи, не успевшие завершиться к остановке цикла.
+		"""Отменяет задачи, уцелевшие после остановки движка.
 
-		Очереди гасят своих воркеров сами (:meth:`Engine.stop`), но задачи,
-		поставленные из интерфейса через :meth:`submit` в момент закрытия,
-		остались бы висеть: asyncio написал бы «Task was destroyed but it
-		is pending», а их блоки ``finally`` не выполнились бы.
+		Очереди к этому моменту уже погасили своих воркеров
+		(:meth:`Engine.stop`, ADR-0020); здесь остаются только задачи,
+		поставленные из интерфейса через :meth:`submit` в момент
+		закрытия. Без отмены они бы висели: asyncio написал бы «Task was
+		destroyed but it is pending», а их блоки ``finally``
+		не выполнились бы. Запросов к БД у них в полёте нет — база уже
+		закрыта остановкой движка.
 		"""
 		pending = asyncio.all_tasks(loop)
 		for task in pending:
