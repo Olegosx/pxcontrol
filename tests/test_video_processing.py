@@ -752,3 +752,22 @@ def test_probe_swaps_dimensions_for_rotated_video(monkeypatch: pytest.MonkeyPatc
 		info = probe.probe_video("x.mp4")
 		expected = (1080, 1920) if swapped else (1920, 1080)
 		assert (info.width, info.height) == expected, extra
+
+
+def test_intro_source_protocol_locked_across_modules() -> None:
+	"""Замок протокола intro_source: сервис и модуль видео согласованы.
+
+	Строки видов живут в перечислении сервиса и литералах frames.py;
+	тест ловит их молчаливое расхождение (переименование значения enum
+	иначе прошло бы все тесты и сломалось только на живом конвейере).
+	"""
+	from pxcontrol.engine.services.video import IntroSourceKind, build_intro_source
+
+	for kind in IntroSourceKind:
+		source = build_intro_source(kind, "5.5")
+		if kind is IntroSourceKind.IMAGE:
+			# картинку обрабатывает prepare_still — по этому же префиксу
+			assert source.startswith("image:")
+			continue
+		moment = resolve_timestamp(source, INFO)  # неизвестный вид упал бы
+		assert 0.0 <= moment <= INFO.duration

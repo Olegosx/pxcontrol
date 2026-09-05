@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from pxcontrol.engine.services.video import (
 	PresetFields,
 	VideoError,
 	VideoService,
+	batch_subdir_name,
 	prune_empty_dirs,
 )
 from pxcontrol.engine.video import ProcessingOptions
@@ -684,3 +686,24 @@ async def test_scan_ready_lists_videos_without_probe(db: Database, tmp_path: Pat
 	]
 	with pytest.raises(VideoError, match="Папка не найдена"):
 		await service.scan_ready(str(tmp_path / "нет"))
+
+
+async def test_ready_from_paths_sorts_and_skips_missing(db: Database, tmp_path: Path) -> None:
+	"""Контракт пакета из списка: сортировка по имени, исчезнувший — пропуск."""
+	service = VideoService(db, "ffmpeg")
+	b = tmp_path / "Б-ролик.mp4"
+	a = tmp_path / "а-ролик.mp4"
+	b.write_bytes(b"bb")
+	a.write_bytes(b"a")
+	gone = tmp_path / "исчез.mp4"  # не создаём — файл «исчез» до сборки
+	files = await service.ready_from_paths([str(b), str(gone), str(a)])
+	# сортировка по имени без учёта регистра; исчезнувший пропущен без ошибки
+	assert [video.name for video in files] == ["а-ролик.mp4", "Б-ролик.mp4"]
+	assert [video.size_bytes for video in files] == [1, 2]
+
+
+def test_batch_subdir_name_stamps_and_keeps_folder_name() -> None:
+	"""Контракт имени подпапки пакета: «штамп_имя-папки-источника»."""
+	moment = datetime(2026, 9, 6, 12, 30, 45)
+	name = batch_subdir_name("/data/Мои исходники", now=moment)
+	assert name == "20260906-123045_Мои исходники"
