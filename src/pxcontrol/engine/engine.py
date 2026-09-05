@@ -84,6 +84,9 @@ class Engine:
 		# после userbot: восстановленной очереди (ADR-0016) сразу нужна
 		# проверка слотов, а она читает отложки канала через userbot
 		await self.publish_queue.load()
+		# после загрузки очереди: файлы живых элементов уже на местах,
+		# пустые папки её дерева — остатки отработанных пакетов
+		await self.posts.sweep_queue_dirs()
 		logger.info("Движок запущен.")
 
 	async def stop(self) -> None:

@@ -34,7 +34,7 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 	SettingsService,
 )
-from pxcontrol.engine.services.video import video_base_dir
+from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
 
 # лимит Bot API живёт в telegram/types.py; здесь — явный реэкспорт
@@ -436,7 +436,7 @@ class PostsService:
 		try:
 			# перенос между дисками — это копирование гигабайтов: в отдельном
 			# потоке, чтобы не останавливать цикл событий движка
-			await asyncio.to_thread(self._move_with_preview, source, target)
+			await asyncio.to_thread(self._move_with_preview_and_prune, source, target)
 			logger.info("Опубликованное видео перенесено: %s → %s", source, target)
 		except OSError:
 			logger.warning(
@@ -453,6 +453,36 @@ class PostsService:
 		preview = source.with_suffix(".png")
 		if preview.is_file():
 			shutil.move(str(preview), str(target.with_suffix(".png")))
+
+	def _move_with_preview_and_prune(self, source: Path, target: Path) -> None:
+		"""Перенос с уборкой опустевших папок за источником (в потоке).
+
+		Для постановки в очередь (``stash_for_queue``) не используется:
+		опустевшая папка результатов сохраняется, пока элементы очереди
+		могут вернуть в неё файлы (правила — ADR-0016).
+		"""
+		self._move_with_preview(source, target)
+		self._prune_source_dirs(source.parent)
+
+	def _prune_source_dirs(self, source_parent: Path) -> None:
+		"""Блокирующая уборка после ухода файла (правила — ADR-0016).
+
+		Уход из папки очереди (публикация, возврат при отмене): опустевшие
+		папки дерева очереди убираются безусловно, затем — их опустевшие
+		зеркала в результатах (файлы в них уже не вернутся). Уход
+		из результатов (публикация мимо очереди): уровень убирается,
+		только если его зеркало в очереди пусто или отсутствует — иначе
+		отмена элемента ещё может вернуть файлы.
+		"""
+		queued_root = video_base_dir(self._settings, VIDEO_QUEUED_DIR)
+		processed_root = video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
+		rel = self._relative_to_root(source_parent, VIDEO_QUEUED_DIR)
+		if rel is not None:
+			prune_empty_dirs(source_parent, queued_root)
+			prune_empty_dirs(processed_root / rel, processed_root, mirror_root=queued_root)
+			return
+		if self._relative_to_root(source_parent, VIDEO_PROCESSED_DIR) is not None:
+			prune_empty_dirs(source_parent, processed_root, mirror_root=queued_root)
 
 	def _relative_to_root(self, path: Path, key: SettingKey[str]) -> Path | None:
 		"""Путь относительно корня папки видео; None — файл вне корня."""
@@ -525,7 +555,7 @@ class PostsService:
 			return media_path
 		target = _free_name(video_base_dir(self._settings, VIDEO_PROCESSED_DIR) / rel)
 		try:
-			await asyncio.to_thread(self._move_with_preview, source, target)
+			await asyncio.to_thread(self._move_with_preview_and_prune, source, target)
 		except OSError:
 			logger.warning(
 				"Не удалось вернуть файл %s из папки очереди — он остался там.",
@@ -534,6 +564,44 @@ class PostsService:
 			)
 			return media_path
 		return str(target)
+
+	async def sweep_queue_dirs(self) -> None:
+		"""Разовая уборка при старте: пустые папки дерева очереди и зеркала.
+
+		Пустая папка в дереве очереди на старте не принадлежит ни одному
+		элементу — файлы ждущих лежат физически (ADR-0016), значит это
+		остатки отработанных пакетов. Вместе с каждой убранной убирается
+		и её опустевшее зеркало в результатах. Папка результатов сама
+		по себе не метётся: пустые подпапки там бывают законными
+		(рабочие папки пресетов, свои папки пользователя). Сбой уборки
+		не мешает запуску — предупреждение в лог.
+		"""
+		try:
+			await asyncio.to_thread(self._sweep_queue_dirs)
+		except OSError:
+			logger.warning("Уборка папки очереди при старте не удалась.", exc_info=True)
+
+	def _sweep_queue_dirs(self) -> None:
+		"""Блокирующий обход дерева очереди снизу вверх (в потоке)."""
+		queued_root = video_base_dir(self._settings, VIDEO_QUEUED_DIR)
+		processed_root = video_base_dir(self._settings, VIDEO_PROCESSED_DIR)
+		if not queued_root.is_dir():
+			return
+		removed = 0
+		# сортировка в обратном порядке ставит вложенные папки раньше
+		# родителей — родитель к своей очереди уже может опустеть
+		for path in sorted(queued_root.rglob("*"), reverse=True):
+			if not path.is_dir():
+				continue
+			try:
+				path.rmdir()
+			except OSError:
+				continue  # непуста — живёт своей жизнью
+			removed += 1
+			rel = path.relative_to(queued_root)
+			prune_empty_dirs(processed_root / rel, processed_root, mirror_root=queued_root)
+		if removed:
+			logger.info("Уборка при старте: удалено пустых папок очереди — %d.", removed)
 
 	@staticmethod
 	def _apply_rename(media_path: str, rename_to: str) -> str:

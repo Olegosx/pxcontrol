@@ -281,6 +281,40 @@ def video_base_dir(settings: SettingsService, key: SettingKey[str]) -> Path:
 	return Path(custom) if custom else media_dir() / VIDEO_DIR_DEFAULTS[key]
 
 
+def prune_empty_dirs(start: Path, root: Path, mirror_root: Path | None = None) -> None:
+	"""Удаляет опустевшие папки от ``start`` вверх до ``root`` (корень цел).
+
+	Уборка за ушедшим файлом (ADR-0016, «Уборка опустевших папок»):
+	каждая папка удаляется, только если она пуста — ``rmdir`` атомарно
+	отказывает непустой, поэтому гонка с параллельной записью безопасна,
+	а первая непустая папка останавливает подъём.
+
+	``mirror_root`` — корень зеркального дерева папки очереди: пока
+	в зеркале уровня лежат файлы, элементы очереди могут вернуть их
+	обратно (отмена, снятие ошибки), и уровень сохраняется. Любая ошибка
+	файловой системы просто прекращает уборку — папка остаётся, это
+	безопасный исход.
+	"""
+	try:
+		current = start.resolve()
+		resolved_root = root.resolve()
+	except OSError:
+		return
+	while current != resolved_root and resolved_root in current.parents:
+		if mirror_root is not None:
+			mirror = mirror_root / current.relative_to(resolved_root)
+			try:
+				if mirror.is_dir() and any(mirror.iterdir()):
+					return
+			except OSError:
+				return
+		try:
+			current.rmdir()
+		except OSError:
+			return  # непуста или занята — выше подниматься нет смысла
+		current = current.parent
+
+
 #: Символы, недопустимые в имени подпапки — единый перечень
 #: с очисткой имён файлов (``captions.FORBIDDEN_NAME_CHARS``).
 _SUBDIR_FORBIDDEN = FORBIDDEN_NAME_CHARS
@@ -687,7 +721,7 @@ class VideoService:
 			target.resolve().relative_to(root.resolve())
 		except ValueError as exc:
 			raise VideoError("Удалять можно только файлы из папки результатов обработки.") from exc
-		await asyncio.to_thread(self._remove_with_preview, target)
+		await asyncio.to_thread(self._remove_and_prune, target, root)
 		logger.info("Готовое видео удалено: %s", path)
 
 	@staticmethod
@@ -702,6 +736,17 @@ class VideoService:
 			target.with_suffix(".png").unlink(missing_ok=True)
 		except OSError as exc:
 			raise VideoError(f"Не удалось удалить файл: {exc.strerror or exc}") from exc
+
+	def _remove_and_prune(self, target: Path, root: Path) -> None:
+		"""Удаление с уборкой опустевших папок результатов (в потоке).
+
+		Уровень убирается, только если его зеркало в дереве очереди пусто
+		или отсутствует: элементы очереди могут вернуть файлы при отмене
+		(ADR-0016, «Уборка опустевших папок»).
+		"""
+		self._remove_with_preview(target)
+		queued_root = video_base_dir(self._settings, VIDEO_QUEUED_DIR)
+		prune_empty_dirs(target.parent, root, mirror_root=queued_root)
 
 	async def processed_dir_for_channel(self, channel_id: int) -> str:
 		"""Папка результатов канала: подпапка его пресета по умолчанию.

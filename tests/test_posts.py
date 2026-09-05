@@ -571,6 +571,81 @@ async def test_move_failure_does_not_break_publish(
 	assert len(gateway.published) == 1  # пост ушёл, несмотря на сбой переезда
 
 
+# --- уборка опустевших папок (ADR-0016, «Уборка опустевших папок») ------------
+
+
+async def test_publish_from_queue_prunes_emptied_batch_dirs(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Уход последнего файла пакета убирает его папки в очереди и результатах."""
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
+	processed = tmp_path / "media" / "processed" / "пакет"
+	processed.mkdir(parents=True)  # опустела при постановке: файл уже в очереди
+	queued = tmp_path / "media" / "queued" / "пакет"
+	queued.mkdir(parents=True)
+	video = queued / "ролик.mp4"
+	video.write_bytes(b"video")
+	service = PostsService(db, _FakeGateway())
+	channel_id = await _add_channel(db)
+	await service.publish(PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO))
+	assert (tmp_path / "media" / "published" / "пакет" / "ролик.mp4").is_file()
+	assert not queued.exists()  # очередь по папке отработана
+	assert not processed.exists()  # зеркало опустело — файлы уже не вернутся
+
+
+async def test_stash_keeps_emptied_processed_dir(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Постановка в очередь папку результатов не трогает: файл может вернуться."""
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
+	processed = tmp_path / "media" / "processed" / "пакет"
+	processed.mkdir(parents=True)
+	video = processed / "ролик.mp4"
+	video.write_bytes(b"video")
+	service = PostsService(db, _FakeGateway())
+	stashed = await service.stash_for_queue(str(video), MediaKind.VIDEO)
+	assert Path(stashed).is_file()
+	assert processed.is_dir()  # пустая, но стоит — ждёт возможного возврата
+
+
+async def test_unstash_prunes_emptied_queue_dir(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Возврат последнего файла при отмене убирает папку пакета в очереди."""
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
+	queued = tmp_path / "media" / "queued" / "пакет"
+	queued.mkdir(parents=True)
+	video = queued / "ролик.mp4"
+	video.write_bytes(b"video")
+	service = PostsService(db, _FakeGateway())
+	returned = await service.unstash_from_queue(str(video))
+	assert Path(returned) == tmp_path / "media" / "processed" / "пакет" / "ролик.mp4"
+	assert Path(returned).is_file()
+	assert not queued.exists()  # папка пакета в очереди опустела и убрана
+
+
+async def test_sweep_queue_dirs_removes_leftovers_only(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Уборка при старте метёт пустые папки очереди и зеркала, чужое не трогает."""
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
+	stale_queued = tmp_path / "media" / "queued" / "старый" / "вложенный"
+	stale_queued.mkdir(parents=True)
+	live_queued = tmp_path / "media" / "queued" / "живой"
+	live_queued.mkdir(parents=True)
+	(live_queued / "ждёт.mp4").write_bytes(b"video")
+	stale_processed = tmp_path / "media" / "processed" / "старый" / "вложенный"
+	stale_processed.mkdir(parents=True)
+	preset_dir = tmp_path / "media" / "processed" / "пресет"
+	preset_dir.mkdir(parents=True)  # рабочая папка без зеркала — не мусор
+	service = PostsService(db, _FakeGateway())
+	await service.sweep_queue_dirs()
+	assert not (tmp_path / "media" / "queued" / "старый").exists()
+	assert (live_queued / "ждёт.mp4").is_file()  # непустая папка живёт
+	assert not (tmp_path / "media" / "processed" / "старый").exists()
+	assert preset_dir.is_dir()  # папка результатов сама по себе не метётся
+
+
 def test_validate_draft_checks_rename_early(tmp_path: Path) -> None:
 	"""Негодное имя переименования ловится при постановке в очередь.
 

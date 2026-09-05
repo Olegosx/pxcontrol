@@ -12,9 +12,15 @@ from pxcontrol.engine.db.models import Channel
 from pxcontrol.engine.services.settings import (
 	CHANNEL_DEFAULT_PRESET,
 	VIDEO_PROCESSED_DIR,
+	VIDEO_QUEUED_DIR,
 	SettingsService,
 )
-from pxcontrol.engine.services.video import PresetFields, VideoError, VideoService
+from pxcontrol.engine.services.video import (
+	PresetFields,
+	VideoError,
+	VideoService,
+	prune_empty_dirs,
+)
 from pxcontrol.engine.video import ProcessingOptions
 from tests.conftest import FakeProcessor
 
@@ -183,6 +189,80 @@ async def test_delete_processed_removes_preview_and_guards_root(
 	with pytest.raises(VideoError, match="только файлы из папки результатов"):
 		await service.delete_processed(str(outsider))
 	assert outsider.exists()
+
+
+# --- уборка опустевших папок (ADR-0016, «Уборка опустевших папок») ------------
+
+
+def test_prune_empty_dirs_removes_chain_up_to_root(tmp_path: Path) -> None:
+	"""Цепочка пустых папок убирается снизу вверх, сам корень цел."""
+	root = tmp_path / "root"
+	(root / "a" / "b").mkdir(parents=True)
+	prune_empty_dirs(root / "a" / "b", root)
+	assert not (root / "a").exists()
+	assert root.is_dir()
+
+
+def test_prune_empty_dirs_stops_at_nonempty(tmp_path: Path) -> None:
+	"""Первая непустая папка останавливает подъём."""
+	root = tmp_path / "root"
+	(root / "a" / "b").mkdir(parents=True)
+	(root / "a" / "файл.txt").write_text("x")
+	prune_empty_dirs(root / "a" / "b", root)
+	assert not (root / "a" / "b").exists()
+	assert (root / "a").is_dir()
+
+
+def test_prune_empty_dirs_mirror_with_files_blocks(tmp_path: Path) -> None:
+	"""Файлы в зеркале очереди сохраняют уровень: они могут вернуться."""
+	root, mirror = tmp_path / "root", tmp_path / "mirror"
+	(root / "пакет").mkdir(parents=True)
+	(mirror / "пакет").mkdir(parents=True)
+	(mirror / "пакет" / "ждёт.mp4").write_bytes(b"video")
+	prune_empty_dirs(root / "пакет", root, mirror_root=mirror)
+	assert (root / "пакет").is_dir()
+
+
+def test_prune_empty_dirs_empty_mirror_allows(tmp_path: Path) -> None:
+	"""Пустое или отсутствующее зеркало уборке не мешает."""
+	root, mirror = tmp_path / "root", tmp_path / "mirror"
+	(root / "пакет").mkdir(parents=True)
+	(mirror / "пакет").mkdir(parents=True)  # пусто — возвращаться нечему
+	prune_empty_dirs(root / "пакет", root, mirror_root=mirror)
+	assert not (root / "пакет").exists()
+
+
+def test_prune_empty_dirs_outside_root_is_noop(tmp_path: Path) -> None:
+	"""Путь вне корня не трогается (страховка от промаха вызова)."""
+	root = tmp_path / "root"
+	root.mkdir()
+	outsider = tmp_path / "чужая"
+	outsider.mkdir()
+	prune_empty_dirs(outsider, root)
+	assert outsider.is_dir()
+
+
+async def test_delete_processed_prunes_empty_dir(db: Database, tmp_path: Path) -> None:
+	"""Удаление последнего файла пакета убирает папку — если очередь пуста."""
+	settings = SettingsService(db)
+	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "результаты"))
+	await settings.set(VIDEO_QUEUED_DIR, str(tmp_path / "очередь"))
+	service = VideoService(db, "ffmpeg", settings=settings, processor=FakeProcessor())
+	folder = tmp_path / "результаты" / "пакет"
+	folder.mkdir(parents=True)
+	video = folder / "ролик.mp4"
+	video.write_bytes(b"video")
+	await service.delete_processed(str(video))
+	assert not folder.exists()  # зеркала в очереди нет — папка убрана
+
+	blocked = tmp_path / "результаты" / "занятый"
+	blocked.mkdir(parents=True)
+	(tmp_path / "очередь" / "занятый").mkdir(parents=True)
+	(tmp_path / "очередь" / "занятый" / "ждёт.mp4").write_bytes(b"video")
+	video2 = blocked / "ролик.mp4"
+	video2.write_bytes(b"video")
+	await service.delete_processed(str(video2))
+	assert blocked.is_dir()  # файл может вернуться из очереди — папка стоит
 
 
 async def test_delete_preset_clears_channel_defaults(db: Database) -> None:
