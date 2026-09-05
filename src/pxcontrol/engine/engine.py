@@ -123,11 +123,28 @@ class Engine:
 		logger.info("Движок запущен.")
 
 	async def stop(self) -> None:
-		"""Останавливает компоненты в обратном порядке."""
+		"""Останавливает компоненты в обратном порядке.
+
+		Каждый шаг — под собственной защитой: сбой раннего (сеть
+		у Telethon, диск у очередей) не должен отменять остальные,
+		и прежде всего закрытие БД — его чистота возведена в инвариант
+		(ADR-0020). Первая ошибка поднимается после всех шагов.
+		"""
 		logger.info("Остановка движка…")
-		await self.publish_queue.shutdown()
-		await self.video_queue.shutdown()
-		await self.video.shutdown()
-		await self.gateway.stop()
-		await self.db.close()
+		first_error: BaseException | None = None
+		steps = (
+			self.publish_queue.shutdown,
+			self.video_queue.shutdown,
+			self.video.shutdown,
+			self.gateway.stop,
+			self.db.close,
+		)
+		for step in steps:
+			try:
+				await step()
+			except Exception as exc:  # noqa: BLE001 — остальные шаги важнее
+				logger.exception("Шаг остановки %s не удался.", step.__qualname__)
+				first_error = first_error or exc
+		if first_error is not None:
+			raise first_error
 		logger.info("Движок остановлен.")

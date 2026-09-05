@@ -118,7 +118,15 @@ class _Dispatcher(QObject):
 	# --- повторяющиеся события (прогресс) -------------------------------------------
 
 	def register_listener(self, owner: QObject, callback: Callable[..., None]) -> int:
-		"""Регистрирует подписку на повторяющиеся события; возвращает токен."""
+		"""Регистрирует подписку на повторяющиеся события; возвращает токен.
+
+		Попутно выметаются записи с удалёнными владельцами: подписка,
+		чьи события кончились до смерти владельца, иначе жила бы
+		в словаре (вместе с замыканием на диалог) до конца процесса.
+		"""
+		dead = [t for t, (own, _cb) in self._listeners.items() if not isValid(own)]
+		for stale in dead:
+			self._listeners.pop(stale, None)
 		token = next(self._tokens)
 		self._listeners[token] = (owner, callback)
 		return token

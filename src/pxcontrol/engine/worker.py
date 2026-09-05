@@ -52,6 +52,14 @@ class EngineWorker:
 		except BaseException as exc:  # noqa: BLE001 — ошибку пробрасываем в start()
 			self._error = exc
 			self._ready.set()
+			# частично стартовавшие компоненты (БД, транспорты) гасятся
+			# по возможности: шаги stop() защищены каждый по отдельности,
+			# а конструктор к этой точке уже отработал
+			if self._engine is not None:
+				try:
+					self._loop.run_until_complete(self._engine.stop())
+				except Exception:  # noqa: BLE001 — уборка не важнее исходной ошибки
+					logger.exception("Уборка после неудачного старта не удалась.")
 			self._loop.close()
 			return
 		self._ready.set()

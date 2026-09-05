@@ -155,6 +155,7 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			await session.execute(delete(Bot).where(Bot.id == bot_id))
 			await session.commit()
+		logger.info("Удалён бот id=%s.", bot_id)
 
 	async def bot_whereabouts(self, bot_id: int) -> list[str]:
 		"""Диагностика «где состоит бот»: события Telegram за 24 часа.
@@ -296,8 +297,10 @@ class AccountsService:
 			account = await session.get(TgAccount, account_id)
 			if account is None:
 				return
+			label = account.label
 			await session.delete(account)
 			await session.commit()
+		logger.info("Удалён userbot-аккаунт «%s» (id=%s).", label, account_id)
 		await self._gateway.deactivate_userbot(account_id)
 
 	async def activate_stored_userbots(self) -> None:
@@ -435,7 +438,16 @@ class AccountsService:
 			return [self._key_dto(k) for k in rows]
 
 	async def add_ai_key(self, label: str, api_key: str) -> AiKeyDto:
-		"""Сохраняет ключ провайдера ИИ (провайдер пока один — Anthropic)."""
+		"""Сохраняет ключ провайдера ИИ (провайдер пока один — Anthropic).
+
+		Raises:
+			AccountsError: Название или ключ пустые (валидация — правило
+				движка, не интерфейса).
+		"""
+		label = label.strip()
+		api_key = api_key.strip()
+		if not label or not api_key:
+			raise AccountsError("Укажите и название, и сам ключ ИИ.")
 		async with self._db.session_factory() as session:
 			cred = AiCredential(label=label, api_key=api_key)
 			session.add(cred)
@@ -449,6 +461,7 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			await session.execute(delete(AiCredential).where(AiCredential.id == key_id))
 			await session.commit()
+		logger.info("Удалён ключ ИИ id=%s.", key_id)
 
 	@staticmethod
 	def _key_dto(cred: AiCredential) -> AiKeyDto:

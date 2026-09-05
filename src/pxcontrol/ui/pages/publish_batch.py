@@ -52,6 +52,7 @@ from pxcontrol.engine.services.schedule_plan import (
 from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import ReadyVideo
 from pxcontrol.engine.telegram.types import MediaKind
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DEFAULT_SCHEDULE_OFFSET_S,
@@ -126,8 +127,10 @@ class _BatchRow:
 		self.video = video
 		self.card = CardWidget(dialog)
 		box = QVBoxLayout(self.card)
-		box.setContentsMargins(12, 8, 12, 8)
-		box.setSpacing(6)
+		# отступы — из механизма плотности: «Компактные отступы»
+		# действуют и на карточки строк пакета
+		box.setContentsMargins(*density.spacing().card_margins)
+		box.setSpacing(density.spacing().card_body_spacing)
 		head = QHBoxLayout()
 		self.check = CheckBox("", self.card)
 		self.check.setToolTip("Отправить пост в очередь («В очередь» берёт отмеченные)")

@@ -69,8 +69,6 @@ class Bot(TimestampMixin, Base):
 	token: Mapped[str] = mapped_column(EncryptedStr(512))
 	username: Mapped[str | None] = mapped_column(String(255), default=None)
 
-	channels: Mapped[list[Channel]] = relationship(back_populates="bot")
-
 
 class TgApiCredential(TimestampMixin, Base):
 	"""Ключ API Telegram с my.telegram.org — один на всё приложение (ADR-0018).
@@ -195,7 +193,7 @@ class Channel(TimestampMixin, Base):
 		ForeignKey("bots.id", ondelete="SET NULL"), default=None
 	)
 
-	bot: Mapped[Bot | None] = relationship(back_populates="channels")
+	bot: Mapped[Bot | None] = relationship()
 	tg_account: Mapped[TgAccount | None] = relationship()
 
 

@@ -186,6 +186,10 @@ class ProcessingQueue:
 		Raises:
 			VideoError: Список пуст, файл или ffmpeg не найдены.
 		"""
+		if self._closing:
+			# постановка в окно shutdown: элемент всё равно не начался бы
+			# (см. _run), а после перезапуска очередь пуста (ADR-0014)
+			raise VideoError("Движок останавливается — постановка отклонена.")
 		if not requests:
 			raise VideoError("Список файлов пуст — обрабатывать нечего.")
 		await self._video.ensure_ready([request.source_path for request in requests])
@@ -255,6 +259,8 @@ class ProcessingQueue:
 		Raises:
 			VideoError: Файл больше не годен — элемент остаётся в ошибке.
 		"""
+		if self._closing:
+			return  # движок останавливается — повтор не начнётся (см. _run)
 		for item in self._items:
 			if item.id != item_id or item.status is not VideoItemStatus.ERROR:
 				continue
@@ -311,8 +317,13 @@ class ProcessingQueue:
 			self._worker = asyncio.create_task(self._run())
 
 	async def _run(self) -> None:
-		"""Обрабатывает элементы по одному, пока очередь не опустеет."""
-		while (item := self._next_pending()) is not None:
+		"""Обрабатывает элементы по одному, пока очередь не опустеет.
+
+		Остановка (``_closing``) проверяется и между элементами — как
+		у очереди отправки (ADR-0020): элемент, дождавшийся своей
+		очереди в окно shutdown, не начинает подготовку и ffmpeg.
+		"""
+		while not self._closing and (item := self._next_pending()) is not None:
 			await self._process(item)
 
 	def _next_pending(self) -> _Item | None:

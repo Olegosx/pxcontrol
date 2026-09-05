@@ -217,6 +217,26 @@ async def test_render_filename(db: Database, monkeypatch: pytest.MonkeyPatch) ->
 	assert name == "Best, Lara Croft (action, drama) 1080 (@mych).mp4"
 
 
+async def test_render_filename_builtin_wins_over_field_namesake(
+	db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Поле-тёзка «video» не подменяет встроенный плейсхолдер названия."""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.captions.probe_video",
+		lambda _p, _b: VideoInfo(1920, 1080, 60.0, 25.0, True),
+	)
+	service = CaptionsService(db)
+	channel_id = await _add_channel(db, username="mych")
+	namesake = await service.add_field(channel_id, "video", hashtag=True, multiple=False)
+	template = await service.save_template(channel_id, "Тёзка", [namesake.id], "{video}")
+	name = await service.render_filename(
+		template.id, channel_id, "Название поста", {namesake.id: ["значение-поля"]}, "/x/в.mp4"
+	)
+	assert name == "Название поста.mp4"  # встроенный приоритетнее поля
+
+
 async def test_render_filename_fits_telegram_limit(
 	db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:

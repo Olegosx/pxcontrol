@@ -279,15 +279,22 @@ class MtprotoTransport:
 			client = self._client_factory(api_id, api_hash, session)
 			try:
 				await client.connect()
+				# оговорка: is_user_authorized глотает RPC-отказы Telethon
+				# и возвращает False — редкий флуд именно на этом шаге
+				# покажется отзывом сессии (окно узкое, принято)
 				authorized = bool(await client.is_user_authorized())
 			except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
 				await _safe_disconnect(client)
-				# текст без сырого исключения (контракт EngineError: сообщение
-				# показывается пользователю как есть); причина — в __cause__
-				raise UserbotNotConnectedError(
-					"Не удалось подключить userbot — нет связи с Telegram. "
-					"Проверьте сеть и попробуйте ещё раз."
-				) from exc
+				translated = _translate_error(exc)
+				if isinstance(translated, UserbotNotConnectedError):
+					# сетевой сбой — текст с советом именно для подключения
+					raise UserbotNotConnectedError(
+						"Не удалось подключить userbot — нет связи с Telegram. "
+						"Проверьте сеть и попробуйте ещё раз."
+					) from exc
+				# класс не зависит от момента ошибки: флуд остаётся флудом,
+				# отзыв сессии — отзывом, а не ложным «нет связи»
+				raise translated from exc
 			if not authorized:
 				await _safe_disconnect(client)
 				raise UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
@@ -350,12 +357,17 @@ class MtprotoTransport:
 			logger.info("Соединение MTProto потеряно — переподключаю…")
 			try:
 				await client.connect()
+				# та же оговорка про is_user_authorized, что и в start()
 				authorized = bool(await client.is_user_authorized())
 			except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
-				raise UserbotNotConnectedError(
-					"Нет связи с Telegram — переподключить userbot не удалось. "
-					"Проверьте сеть и повторите операцию."
-				) from exc
+				translated = _translate_error(exc)
+				if isinstance(translated, UserbotNotConnectedError):
+					raise UserbotNotConnectedError(
+						"Нет связи с Telegram — переподключить userbot не удалось. "
+						"Проверьте сеть и повторите операцию."
+					) from exc
+				# класс не зависит от момента ошибки (см. start())
+				raise translated from exc
 			if not authorized:
 				raise UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
 			# подписка могла кончиться/появиться за время простоя

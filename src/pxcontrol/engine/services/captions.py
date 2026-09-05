@@ -700,11 +700,9 @@ class CaptionsService:
 		return next(t for t in templates if t.id == saved_id)
 
 	async def delete_template(self, template_id: int) -> None:
-		"""Удаляет шаблон и его состав (словари полей не трогаются)."""
+		"""Удаляет шаблон; строки состава убирают каскады схемы
+		(внешние ключи включены) — как при удалении поля."""
 		async with self._db.session_factory() as session:
-			await session.execute(
-				delete(CaptionTemplateField).where(CaptionTemplateField.template_id == template_id)
-			)
 			await session.execute(delete(CaptionTemplate).where(CaptionTemplate.id == template_id))
 			await session.commit()
 
@@ -741,15 +739,17 @@ class CaptionsService:
 				raise CaptionsError("У шаблона не задан шаблон имени файла.")
 			pattern = template.filename_pattern
 			channel = await session.get(Channel, channel_id)
-		mapping = {
-			"video": title.strip(),
-			# ffprobe — блокирующий подпроцесс: в отдельном потоке,
-			# чтобы не останавливать цикл событий движка
-			"quality": await asyncio.to_thread(self._probe_quality, media_path),
-			"channel": (channel.username or "") if channel else "",
-		}
+		mapping: dict[str, str] = {}
 		for field in await self.list_fields(channel_id):
 			mapping[field.name] = ", ".join(used_values.get(field.id, []))
+		# встроенные плейсхолдеры — поверх полей: поле, названное «video»,
+		# не должно молча подменять название поста (приоритет закреплён
+		# тестом; сами имена перечисляет FILENAME_PLACEHOLDERS)
+		mapping["video"] = title.strip()
+		# ffprobe — блокирующий подпроцесс: в отдельном потоке,
+		# чтобы не останавливать цикл событий движка
+		mapping["quality"] = await asyncio.to_thread(self._probe_quality, media_path)
+		mapping["channel"] = (channel.username or "") if channel else ""
 		rendered = _PLACEHOLDER.sub(lambda m: mapping.get(m.group(1), m.group(0)), pattern)
 		# байтовый бюджет — предел ФС минус расширение (оно едет как есть);
 		# поверх — лимит Telegram: срез до законченного слова

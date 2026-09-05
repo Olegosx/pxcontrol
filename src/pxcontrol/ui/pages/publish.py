@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -597,7 +598,9 @@ class PublishPage(ScrollArea):
 		if not files:
 			self._show_error("Файлы не найдены на диске — публиковать нечего.")
 			return
-		root = str(Path(files[0].path).parent)
+		# файлы с «Видео» могут лежать в разных подпапках результатов:
+		# подписью идёт общий корень, а не папка первого файла
+		root = os.path.commonpath([str(Path(f.path).parent) for f in files])
 		self._on_batch_scanned(_BatchSetup(channel, root), files)
 
 	def _batch_channel(self, channel_id: int) -> ChannelDto | None:

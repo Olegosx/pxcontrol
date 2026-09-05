@@ -304,3 +304,13 @@ async def test_activate_stored_userbot_survives_wrong_secret_key(db: Database) -
 	service = AccountsService(db, gateway)
 	await service.activate_stored_userbots()  # не должно бросить исключение
 	assert gateway.activated == {}  # userbot не активирован, но и не упали
+
+
+async def test_add_ai_key_rejects_blank(db: Database) -> None:
+	"""Пустые название/ключ отклоняет движок, а не только диалог интерфейса."""
+	service = AccountsService(db, _FakeGateway())
+	with pytest.raises(AccountsError, match="название"):
+		await service.add_ai_key("   ", "sk-x")
+	with pytest.raises(AccountsError, match="ключ"):
+		await service.add_ai_key("Основной", "  ")
+	assert await service.list_ai_keys() == []

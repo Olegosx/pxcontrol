@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -382,8 +382,15 @@ class ChannelsService:
 		на каждом соединении.
 		"""
 		async with self._db.session_factory() as session:
-			await session.execute(delete(Channel).where(Channel.id == channel_id))
+			channel = await session.get(Channel, channel_id)
+			if channel is None:
+				# идемпотентность сознательная (повторный клик), но след нужен
+				logger.info("Канал id=%s уже отсутствует — удалять нечего.", channel_id)
+				return
+			title = channel.title
+			await session.delete(channel)
 			await session.commit()
+		logger.info("Канал «%s» (id=%s) удалён из приложения.", title, channel_id)
 
 	async def _fresh_dto(self, channel_id: int) -> ChannelDto:
 		"""Снимок канала из БД с подгруженными публикаторами и настройками.
