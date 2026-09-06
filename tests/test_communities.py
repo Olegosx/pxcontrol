@@ -41,6 +41,8 @@ class _FakeGateway:
 		self.kind = CommunityKind.CHANNEL  # вид, который «увидит» проверка
 		self.forum = False  # признак форума в ответе проверки
 		self.role = UserbotRole.ADMIN  # роль аккаунта в userbot-зонде
+		self.title = "Тестовый канал"  # название в ответе проверки
+		self.username: str | None = "testchan"  # @имя (None — приватное)
 
 	async def check_bot_token(self, token: str) -> str:
 		return "test_bot"
@@ -50,7 +52,7 @@ class _FakeGateway:
 			raise CommunityCheckError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_is_admin:
 			raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
-		return CommunityInfo("-1001234", "Тестовый канал", "testchan", self.kind, self.forum)
+		return CommunityInfo("-1001234", self.title, self.username, self.kind, self.forum)
 
 	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		if account_id not in self.userbot_admins:
@@ -59,7 +61,7 @@ class _FakeGateway:
 				"администратором с правом публиковать."
 			)
 		return CommunityInfo(
-			"-1001234", "Тестовый канал", "testchan", self.kind, self.forum, role=self.role
+			"-1001234", self.title, self.username, self.kind, self.forum, role=self.role
 		)
 
 
@@ -429,6 +431,25 @@ async def test_recheck_refreshes_forum_keeps_kind(db: Database) -> None:
 	gateway.kind = CommunityKind.CHANNEL
 	await service.recheck_community(dto.id)
 	assert (await _community_row(db, dto.id)).kind == "group"
+
+
+async def test_recheck_refreshes_title_and_username(db: Database) -> None:
+	"""Перепроверка актуализирует название и @имя (могли смениться в Telegram)."""
+	gateway = _FakeGateway()
+	account_id = await _make_account(db)
+	gateway.userbot_admins.add(account_id)
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
+	gateway.title = "Новое название"
+	gateway.username = "newchan"  # владелец сменил публичную ссылку t.me/newchan
+	await service.recheck_community(dto.id)
+	row = await _community_row(db, dto.id)
+	assert row.title == "Новое название"
+	assert row.username == "newchan"
+	# имя сняли — сообщество стало приватным: в записи честный None
+	gateway.username = None
+	await service.recheck_community(dto.id)
+	assert (await _community_row(db, dto.id)).username is None
 
 
 async def test_assign_bot_refreshes_forum(db: Database) -> None:

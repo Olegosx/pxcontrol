@@ -58,7 +58,8 @@ class _ProbeResult:
 			None — проверить не удалось (нет связи, аккаунт отключён):
 			это не знание о правах, менять привязку по нему нельзя.
 		info: свежие данные сообщества при ``ok is True`` — из них
-			обновляются изменчивые свойства (признак форума, ADR-0021).
+			обновляются изменчивые свойства: признак форума (ADR-0021),
+			название и @имя.
 	"""
 
 	ok: bool | None
@@ -327,7 +328,7 @@ class CommunitiesService:
 			bot_ok = bot_probe.ok
 			fresh_info = fresh_info or bot_probe.info
 		if fresh_info is not None:
-			await self._refresh_forum(community_id, fresh_info)
+			await self._refresh_mutable(community_id, fresh_info)
 		dto = await self._fresh_dto(community_id)
 		logger.info(
 			"Доступы «%s»: умолчание=%s (аккаунт %s), участников %s, бот=%s.",
@@ -439,7 +440,7 @@ class CommunitiesService:
 			(account_id, info.role or UserbotRole.MEMBER),
 			make_default=not had_members,
 		)
-		await self._refresh_forum(community_id, info)
+		await self._refresh_mutable(community_id, info)
 		logger.info("Сообществу id=%s добавлен участник «%s».", community_id, account.label)
 		return await self.list_members(community_id)
 
@@ -496,7 +497,7 @@ class CommunitiesService:
 			community_id, (account_id, info.role or UserbotRole.MEMBER), make_default=False
 		)
 		dto = await self.set_default(community_id, account_id)
-		await self._refresh_forum(community_id, info)
+		await self._refresh_mutable(community_id, info)
 		logger.info("«%s»: публикатор userbot «%s».", dto.title, account.label)
 		return await self._fresh_dto(community_id)
 
@@ -531,7 +532,7 @@ class CommunitiesService:
 			community = await self._community_in_session(session, community_id)
 			community.bot_id = bot.id
 			await session.commit()
-		await self._refresh_forum(community_id, info)
+		await self._refresh_mutable(community_id, info)
 		dto = await self._fresh_dto(community_id)
 		logger.info("Каналу «%s» назначен бот «%s».", dto.title, bot.label)
 		return dto
@@ -558,12 +559,15 @@ class CommunitiesService:
 			return _ProbeResult(ok=False)
 		return _ProbeResult(ok=True, info=info)
 
-	async def _refresh_forum(self, community_id: int, info: CommunityInfo) -> None:
+	async def _refresh_mutable(self, community_id: int, info: CommunityInfo) -> None:
 		"""Обновляет изменчивые свойства по свежей проверке (ADR-0021).
 
-		Сейчас изменчив только признак форума. Вид не трогается: он
-		определяется подключением; расхождение с Telegram — предупреждение
-		в лог (запись остаётся прежней, владелец переподключит).
+		Изменчивы признак форума, название и @имя (username; None —
+		имя сняли, сообщество стало приватным): владелец меняет их
+		в Telegram в любой момент, запись не должна застывать на момент
+		подключения. Вид не трогается: он определяется подключением;
+		расхождение с Telegram — предупреждение в лог (запись остаётся
+		прежней, владелец переподключит).
 		"""
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
@@ -574,10 +578,26 @@ class CommunitiesService:
 					info.kind,
 					community.kind,
 				)
+			changed = False
 			if community.forum != info.forum:
 				community.forum = info.forum
+				changed = True
+				logger.info("Сообщество «%s»: признак форума → %s.", info.title, info.forum)
+			if community.title != info.title:
+				logger.info("Сообщество «%s» переименовано → «%s».", community.title, info.title)
+				community.title = info.title
+				changed = True
+			if community.username != info.username:
+				logger.info(
+					"Сообщество «%s»: @имя %s → %s.",
+					info.title,
+					community.username or "—",
+					info.username or "— (стало приватным)",
+				)
+				community.username = info.username
+				changed = True
+			if changed:
 				await session.commit()
-				logger.info("Сообщество «%s»: признак форума → %s.", community.title, info.forum)
 
 	async def delete_community(self, community_id: int) -> None:
 		"""Удаляет канал со всем хозяйством (из приложения, не из Telegram).
