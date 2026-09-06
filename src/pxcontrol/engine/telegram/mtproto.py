@@ -26,6 +26,7 @@ from pxcontrol.engine.telegram.types import (
 	OutgoingPost,
 	ScheduledMessage,
 	TelegramFloodError,
+	UserbotRole,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,13 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 	if isinstance(exc, errors.FloodWaitError):
 		return UserbotFloodError(
 			f"Telegram просит подождать {exc.seconds} с.", retry_after_s=exc.seconds
+		)
+	if isinstance(exc, errors.SlowModeWaitError):
+		# медленный режим группы действует на участников (ADR-0022):
+		# по природе это «подожди и повтори» — очередь умеет сама
+		return UserbotFloodError(
+			f"Медленный режим группы: подождать {exc.seconds} с.",
+			retry_after_s=exc.seconds,
 		)
 	if isinstance(exc, errors.ScheduleTooMuchError):
 		return UserbotScheduleFullError(
@@ -530,6 +538,8 @@ class MtprotoTransport:
 			username=getattr(entity, "username", None),
 			kind=kind,
 			forum=bool(getattr(entity, "forum", False)),
+			# роль — бесплатный побочный продукт зонда (ADR-0022)
+			role=UserbotRole.ADMIN if perms.is_admin else UserbotRole.MEMBER,
 		)
 
 	async def get_forum_topics(self, chat_id: str) -> list[ForumTopicInfo]:
@@ -556,7 +566,11 @@ class MtprotoTransport:
 				)
 			)
 		topics = [
-			ForumTopicInfo(id=topic.id, title=topic.title)
+			ForumTopicInfo(
+				id=topic.id,
+				title=topic.title,
+				closed=bool(getattr(topic, "closed", False)),
+			)
 			for topic in result.topics
 			if getattr(topic, "title", None) is not None  # ForumTopicDeleted — без названия
 		]

@@ -16,6 +16,7 @@ EXPECTED_TABLES = {
 	"ai_credentials",
 	"video_presets",
 	"communities",
+	"community_members",
 	"publish_queue_items",
 	"caption_fields",
 	"caption_values",
@@ -106,7 +107,7 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 		)
 		await session.execute(
 			text(
-				"INSERT INTO communities (title, tg_chat_id, bot_id, tg_account_id,"
+				"INSERT INTO communities (title, tg_chat_id, bot_id, default_tg_account_id,"
 				" created_at, updated_at) VALUES ('c', '-1001', 1, 1,"
 				" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
 			)
@@ -144,7 +145,9 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 		await session.execute(text("DELETE FROM tg_accounts WHERE id = 1"))
 		await session.commit()
 		account_id = (
-			await session.execute(text("SELECT tg_account_id FROM communities WHERE id = 1"))
+			await session.execute(
+				text("SELECT default_tg_account_id FROM communities WHERE id = 1")
+			)
 		).scalar_one()
 		assert account_id is None  # удаление аккаунта отвязывает канал (ADR-0019)
 
@@ -204,8 +207,8 @@ def test_community_userbot_flag_becomes_binding_column(tmp_path: Path) -> None:
 	_upgrade(db_file, "head")
 	with sqlite3.connect(db_file) as conn:
 		columns = [row[1] for row in conn.execute("PRAGMA table_info(communities)")]
-		row = conn.execute("SELECT title, tg_account_id FROM communities").fetchone()
-	assert "userbot_admin" not in columns and "tg_account_id" in columns
+		row = conn.execute("SELECT title, default_tg_account_id FROM communities").fetchone()
+	assert "userbot_admin" not in columns and "default_tg_account_id" in columns
 	assert row == ("c", None)  # канал цел, привязка не переносится — ручная
 
 
@@ -256,6 +259,44 @@ def test_community_kind_defaults_for_existing_rows(tmp_path: Path) -> None:
 	with sqlite3.connect(db_file) as conn:
 		row = conn.execute("SELECT kind, forum FROM communities").fetchone()
 	assert row == ("channel", 0)
+
+
+def test_bindings_become_memberships(tmp_path: Path) -> None:
+	"""Миграция f8b3d67c1a49: привязка → членство + умолчание (ADR-0022).
+
+	Роль заполняется по виду: каналу — admin (инвариант проверки
+	подключения до ADR-0022), группе — member (наименьшие права,
+	фактическую роль поднимет перепроверка).
+	"""
+	db_file = tmp_path / "members.db"
+	_upgrade(db_file, "d6a9c48e2f57")  # состояние до членств
+	with sqlite3.connect(db_file) as conn:
+		conn.execute(
+			"INSERT INTO tg_accounts (label, phone, created_at, updated_at)"
+			" VALUES ('ub', '+7900', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		)
+		for title, chat_id, kind, account in (
+			("Канал", "-1001", "channel", 1),
+			("Группа", "-1002", "group", 1),
+			("Без привязки", "-1003", "channel", None),
+		):
+			conn.execute(
+				"INSERT INTO communities (title, tg_chat_id, kind, forum,"
+				" tg_account_id, created_at, updated_at)"
+				" VALUES (?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+				(title, chat_id, kind, account),
+			)
+		conn.commit()
+	_upgrade(db_file, "head")
+	with sqlite3.connect(db_file) as conn:
+		members = conn.execute(
+			"SELECT community_id, tg_account_id, role FROM community_members ORDER BY community_id"
+		).fetchall()
+		defaults = conn.execute(
+			"SELECT id, default_tg_account_id FROM communities ORDER BY id"
+		).fetchall()
+	assert members == [(1, 1, "admin"), (2, 1, "member")]
+	assert defaults == [(1, 1), (2, 1), (3, None)]
 
 
 async def test_backup_before_upgrade_copies_and_rotates(tmp_path: Path) -> None:

@@ -120,7 +120,7 @@ def _community_caps(community: CommunityDto) -> PublishCapabilities:
 	Правило «бот назначен» = ``bot_id is not None`` живёт здесь,
 	а не в трёх местах страницы.
 	"""
-	return publish_capabilities(community.bot_id is not None, community.userbot_admin)
+	return publish_capabilities(community.bot_id is not None, community.userbot_assigned)
 
 
 class PublishPage(ScrollArea):

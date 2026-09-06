@@ -1,8 +1,10 @@
-"""Сервис каналов: подключение (бот или userbot), привязки, список, удаление.
+"""Сервис сообществ: подключение, участники, публикаторы, список, удаление.
 
-Userbot-админ канала — конкретный аккаунт (``communities.tg_account_id``,
-ADR-0019): постинг идёт из его сессии. Бот — самостоятельная сущность
-(работает по токену, без пользовательской сессии) — ``communities.bot_id``.
+В сообществе состоит пул userbot-аккаунтов (``community_members``,
+ADR-0022) с ролями из зондов прав; публикует аккаунт-умолчание
+(``communities.default_tg_account_id``) — постинг идёт из его сессии.
+Бот — самостоятельная сущность (работает по токену, без пользовательской
+сессии) — ``communities.bot_id``.
 """
 
 from __future__ import annotations
@@ -16,17 +18,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Bot, Community, TgAccount
+from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
-from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind
+from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind, UserbotRole
 
 logger = logging.getLogger(__name__)
 
 
 class CommunityError(EngineError):
 	"""Ошибка операций с каналами (с понятным человеку текстом)."""
+
+
+#: Связи для снимка DTO: бот, аккаунт-умолчание, членства с аккаунтами.
+_REF_LOADERS = (
+	selectinload(Community.bot),
+	selectinload(Community.default_account),
+	selectinload(Community.members).selectinload(CommunityMember.tg_account),
+)
+
+
+@dataclass(frozen=True)
+class MemberDto:
+	"""Участник сообщества — userbot-аккаунт с ролью (ADR-0022)."""
+
+	account_id: int
+	label: str
+	role: UserbotRole
+	is_default: bool
 
 
 @dataclass(frozen=True)
@@ -64,15 +84,17 @@ class CommunityDto:
 	bot_id: int | None
 	bot_label: str | None
 	enabled: bool
-	tg_account_id: int | None = None
-	tg_account_label: str | None = None
+	default_account_id: int | None = None
+	default_account_label: str | None = None
+	default_role: UserbotRole | None = None
+	members_count: int = 0
 	kind: CommunityKind = CommunityKind.CHANNEL
 	forum: bool = False
 
 	@property
-	def userbot_admin(self) -> bool:
-		"""Есть ли у канала userbot-админ (выводится из привязки)."""
-		return self.tg_account_id is not None
+	def userbot_assigned(self) -> bool:
+		"""Назначен ли публикатор по умолчанию (ADR-0022)."""
+		return self.default_account_id is not None
 
 
 @dataclass(frozen=True)
@@ -115,9 +137,7 @@ class CommunitiesService:
 		async with self._db.session_factory() as session:
 			rows = (
 				await session.execute(
-					select(Community)
-					.options(selectinload(Community.bot), selectinload(Community.tg_account))
-					.order_by(Community.id)
+					select(Community).options(*_REF_LOADERS).order_by(Community.id)
 				)
 			).scalars()
 			return [
@@ -146,15 +166,15 @@ class CommunitiesService:
 			bot.id,
 		)
 		info = await self._gateway.check_community(bot.token, chat_ref)
-		# «не удалось проверить» при подключении равносильно «админа нет»:
-		# привязку добавит перепроверка доступов, когда аккаунт появится
-		account_id = await self._find_userbot_admin(info.chat_id)
-		community = await self._store_community(info, bot_id=bot.id, tg_account_id=account_id)
+		# «не удалось проверить» при подключении равносильно «публикатора
+		# нет»: участника добавит перепроверка, когда аккаунт появится
+		found = await self._find_userbot_publisher(info.chat_id)
+		community = await self._store_community(info, bot_id=bot.id, member=found)
 		logger.info(
-			"Подключён канал «%s» (бот %s, userbot-админ: %s).",
+			"Подключено «%s» (бот %s, userbot-публикатор: %s).",
 			info.title,
 			bot.label,
-			account_id or "нет",
+			found[0] if found else "нет",
 		)
 		return await self._fresh_dto(community.id)
 
@@ -172,7 +192,8 @@ class CommunitiesService:
 		account = await self._get_account(account_id)
 		logger.info("Подключаю канал через userbot «%s»: ввод %r.", account.label, chat_ref)
 		info = await self._gateway.check_community_userbot(account_id, chat_ref)
-		community = await self._store_community(info, bot_id=None, tg_account_id=account_id)
+		role = info.role or UserbotRole.MEMBER  # userbot-зонд всегда отдаёт роль
+		community = await self._store_community(info, bot_id=None, member=(account_id, role))
 		logger.info("Подключён канал «%s» (userbot «%s»).", info.title, account.label)
 		return await self._fresh_dto(community.id)
 
@@ -192,11 +213,11 @@ class CommunitiesService:
 			return _ProbeResult(ok=None)
 		return _ProbeResult(ok=True, info=info)
 
-	async def _find_userbot_admin(self, chat_id: str) -> int | None:
-		"""Ищет админа канала среди вошедших аккаунтов (первый подходящий).
+	async def _find_userbot_publisher(self, chat_id: str) -> tuple[int, UserbotRole] | None:
+		"""Ищет аккаунт, способный публиковать (первый подходящий), с ролью.
 
-		Для попутной привязки на бот-пути и перепроверки доступов канала
-		без привязки. Порядок — по id аккаунта; сбои проверок пропускаются.
+		Для попутного членства на бот-пути и перепроверки сообщества без
+		участников. Порядок — по id аккаунта; сбои проверок пропускаются.
 		"""
 		async with self._db.session_factory() as session:
 			account_ids = (
@@ -211,8 +232,9 @@ class CommunitiesService:
 				.all()
 			)
 		for account_id in account_ids:
-			if (await self._probe_userbot(account_id, chat_id)).ok is True:
-				return account_id
+			probe = await self._probe_userbot(account_id, chat_id)
+			if probe.ok is True and probe.info is not None:
+				return account_id, probe.info.role or UserbotRole.MEMBER
 		return None
 
 	async def _store_community(
@@ -220,12 +242,13 @@ class CommunitiesService:
 		info: CommunityInfo,
 		*,
 		bot_id: int | None,
-		tg_account_id: int | None,
+		member: tuple[int, UserbotRole] | None,
 	) -> Community:
 		"""Сохраняет сообщество из проверенных данных, отклоняя дубликат.
 
-		Вид и признак форума берутся из проверки транспорта (ADR-0021):
-		вид дальше не меняется, форум обновляют перепроверки.
+		Вид и признак форума берутся из проверки транспорта (ADR-0021).
+		``member`` — первый участник (id аккаунта, роль): он же становится
+		публикатором по умолчанию (ADR-0022); None — без участников.
 
 		Raises:
 			CommunityError: Сообщество уже подключено.
@@ -243,104 +266,253 @@ class CommunitiesService:
 				kind=info.kind,
 				forum=info.forum,
 				bot_id=bot_id,
-				tg_account_id=tg_account_id,
+				default_tg_account_id=member[0] if member else None,
 			)
 			session.add(community)
+			await session.flush()
+			if member is not None:
+				session.add(
+					CommunityMember(
+						community_id=community.id, tg_account_id=member[0], role=member[1]
+					)
+				)
 			await session.commit()
 			await session.refresh(community)
 		return community
 
 	async def recheck_community(self, community_id: int) -> CommunityAccess:
-		"""Перепроверяет оба способа администрирования канала.
+		"""Перепроверяет всех участников и бота сообщества (ADR-0022).
 
-		Привязка userbot обновляется в обе стороны, но только
-		по подтверждённому ответу Telegram: подтверждённый отказ
-		привязанного аккаунта снимает привязку (иначе публикация падала
-		бы), сбой связи — не повод её трогать (канал молча терял бы
-		отложенные посты и большие файлы). У канала без привязки админ
-		ищется среди вошедших аккаунтов. Потеря прав бота его
-		не отвязывает — только сообщается: бота могут вернуть.
+		Каждому участнику — свой зонд: подтверждённое право обновляет
+		роль, подтверждённый отказ удаляет членство (участник-умолчание
+		при этом теряет и умолчание — публикация останавливается честно,
+		а не падала бы), сбой связи ничего не трогает. Сообщество совсем
+		без участников — публикатор ищется среди вошедших аккаунтов
+		(авто-восстановление, как раньше); при живых участниках без
+		умолчания авто-выбора нет — выбор лица за пользователем.
+		Потеря прав бота его не отвязывает — только сообщается.
 
 		Raises:
-			CommunityError: Канал не найден.
+			CommunityError: Сообщество не найдено.
 		"""
-		# сессии короткие, сетевые зонды — между ними (образец — assign_bot):
-		# открытая транзакция чтения на время походов в Telegram держала бы
-		# SQLite занятым для параллельных задач движка
+		# сессии короткие, сетевые зонды — между ними: открытая транзакция
+		# чтения на время походов в Telegram держала бы SQLite занятым
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id, with_refs=True)
 			tg_chat_id = community.tg_chat_id
-			bound_account_id = community.tg_account_id
+			default_id = community.default_tg_account_id
+			member_ids = [member.tg_account_id for member in community.members]
 			bot_token = community.bot.token if community.bot is not None else None
-		userbot_ok: bool | None
+		userbot_ok: bool | None = None
 		fresh_info: CommunityInfo | None = None
-		new_account_id = bound_account_id
-		if bound_account_id is not None:
-			probe = await self._probe_userbot(bound_account_id, tg_chat_id)
-			userbot_ok = probe.ok
-			fresh_info = probe.info
-			if userbot_ok is False:
-				new_account_id = None  # подтверждённый отказ — привязка снимается
-		else:
-			found = await self._find_userbot_admin(tg_chat_id)
-			new_account_id = found
+		for account_id in member_ids:
+			probe = await self._probe_userbot(account_id, tg_chat_id)
+			if account_id == default_id:
+				userbot_ok = probe.ok
+				fresh_info = probe.info or fresh_info
+			if probe.ok is True and probe.info is not None:
+				await self._update_member_role(
+					community_id, account_id, probe.info.role or UserbotRole.MEMBER
+				)
+			elif probe.ok is False:
+				await self._drop_member(community_id, account_id)
+		if not member_ids:
+			found = await self._find_userbot_publisher(tg_chat_id)
+			if found is not None:
+				await self._adopt_member(community_id, found, make_default=True)
 			userbot_ok = True if found is not None else None
 		bot_ok: bool | None = None
 		if bot_token is not None:
 			bot_probe = await self._probe_bot(bot_token, tg_chat_id)
 			bot_ok = bot_probe.ok
 			fresh_info = fresh_info or bot_probe.info
-		if new_account_id != bound_account_id:
-			async with self._db.session_factory() as session:
-				community = await self._community_in_session(session, community_id)
-				community.tg_account_id = new_account_id
-				await session.commit()
 		if fresh_info is not None:
 			await self._refresh_forum(community_id, fresh_info)
 		dto = await self._fresh_dto(community_id)
 		logger.info(
-			"Доступы канала «%s»: userbot=%s (аккаунт %s), бот=%s.",
+			"Доступы «%s»: умолчание=%s (аккаунт %s), участников %s, бот=%s.",
 			dto.title,
 			userbot_ok,
-			new_account_id or "—",
+			dto.default_account_id or "—",
+			dto.members_count,
 			bot_ok,
 		)
 		return CommunityAccess(dto, userbot_ok, bot_ok)
 
-	async def assign_userbot(self, community_id: int, account_id: int) -> CommunityDto:
-		"""Привязывает к каналу userbot-аккаунт (с проверкой его прав).
+	async def _update_member_role(
+		self, community_id: int, account_id: int, role: UserbotRole
+	) -> None:
+		"""Обновляет роль членства по подтверждённому зонду (ADR-0022)."""
+		async with self._db.session_factory() as session:
+			member = await session.get(CommunityMember, (community_id, account_id))
+			if member is not None and member.role != role:
+				member.role = role
+				await session.commit()
+				logger.info(
+					"Роль аккаунта id=%s в сообществе id=%s: %s.",
+					account_id,
+					community_id,
+					role,
+				)
+
+	async def _drop_member(self, community_id: int, account_id: int) -> None:
+		"""Удаляет членство по подтверждённому отказу Telegram.
+
+		Участник-умолчание теряет и умолчание (инвариант ADR-0022:
+		умолчание — действующий участник); авто-замены нет.
+		"""
+		async with self._db.session_factory() as session:
+			member = await session.get(CommunityMember, (community_id, account_id))
+			if member is None:
+				return
+			await session.delete(member)
+			community = await self._community_in_session(session, community_id)
+			if community.default_tg_account_id == account_id:
+				community.default_tg_account_id = None
+			await session.commit()
+		logger.info(
+			"Аккаунт id=%s исключён из сообщества id=%s (подтверждённый отказ прав).",
+			account_id,
+			community_id,
+		)
+
+	async def _adopt_member(
+		self, community_id: int, member: tuple[int, UserbotRole], *, make_default: bool
+	) -> None:
+		"""Добавляет найденного публикатора (авто-восстановление)."""
+		account_id, role = member
+		async with self._db.session_factory() as session:
+			if await session.get(CommunityMember, (community_id, account_id)) is None:
+				session.add(
+					CommunityMember(community_id=community_id, tg_account_id=account_id, role=role)
+				)
+			community = await self._community_in_session(session, community_id)
+			if make_default and community.default_tg_account_id is None:
+				community.default_tg_account_id = account_id
+			await session.commit()
+		logger.info(
+			"Аккаунт id=%s принят участником сообщества id=%s (%s).",
+			account_id,
+			community_id,
+			role,
+		)
+
+	async def list_members(self, community_id: int) -> list[MemberDto]:
+		"""Участники сообщества с ролями; умолчание помечено (ADR-0022).
 
 		Raises:
-			CommunityError: Канал или аккаунт не найдены.
-			UserbotUnavailableError: Аккаунт не подключён, не админ или без
-				права публиковать.
+			CommunityError: Сообщество не найдено.
+		"""
+		async with self._db.session_factory() as session:
+			community = await self._community_in_session(session, community_id, with_refs=True)
+			return [
+				MemberDto(
+					account_id=member.tg_account_id,
+					label=member.tg_account.label,
+					role=UserbotRole(member.role),
+					is_default=member.tg_account_id == community.default_tg_account_id,
+				)
+				for member in sorted(community.members, key=lambda m: m.tg_account_id)
+			]
+
+	async def add_member(self, community_id: int, account_id: int) -> list[MemberDto]:
+		"""Добавляет аккаунт участником (с проверкой его прав и ролью).
+
+		Первый участник сообщества автоматически становится публикатором
+		по умолчанию (иначе публикация так и осталась бы недоступной);
+		дальше умолчание меняется только явно (:meth:`set_default`).
+
+		Raises:
+			CommunityError: Сообщество/аккаунт не найдены или уже участник.
+			UserbotUnavailableError: Аккаунт не подключён или прав нет.
+		"""
+		account = await self._get_account(account_id)
+		async with self._db.session_factory() as session:
+			community = await self._community_in_session(session, community_id, with_refs=True)
+			chat_id = community.tg_chat_id
+			if await session.get(CommunityMember, (community_id, account_id)) is not None:
+				raise CommunityError(f"«{account.label}» уже участник этого сообщества.")
+			had_members = bool(community.members)
+		info = await self._gateway.check_community_userbot(account_id, chat_id)
+		await self._adopt_member(
+			community_id,
+			(account_id, info.role or UserbotRole.MEMBER),
+			make_default=not had_members,
+		)
+		await self._refresh_forum(community_id, info)
+		logger.info("Сообществу id=%s добавлен участник «%s».", community_id, account.label)
+		return await self.list_members(community_id)
+
+	async def remove_member(self, community_id: int, account_id: int) -> list[MemberDto]:
+		"""Удаляет участника; умолчание при этом сбрасывается (ADR-0022).
+
+		Авто-выбора нового умолчания нет: смена «от чьего имени» — явное
+		решение пользователя.
+
+		Raises:
+			CommunityError: Сообщество не найдено или аккаунт не участник.
+		"""
+		async with self._db.session_factory() as session:
+			await self._community_in_session(session, community_id)
+			if await session.get(CommunityMember, (community_id, account_id)) is None:
+				raise CommunityError("Аккаунт не участник этого сообщества.")
+		await self._drop_member(community_id, account_id)
+		return await self.list_members(community_id)
+
+	async def set_default(self, community_id: int, account_id: int) -> CommunityDto:
+		"""Назначает публикатора по умолчанию из участников (ADR-0022).
+
+		Raises:
+			CommunityError: Сообщество не найдено или аккаунт не участник.
+		"""
+		async with self._db.session_factory() as session:
+			community = await self._community_in_session(session, community_id)
+			if await session.get(CommunityMember, (community_id, account_id)) is None:
+				raise CommunityError(
+					"Публикатором может стать только участник — сначала добавьте аккаунт."
+				)
+			community.default_tg_account_id = account_id
+			await session.commit()
+		dto = await self._fresh_dto(community_id)
+		logger.info("Публикатор «%s» по умолчанию: аккаунт id=%s.", dto.title, account_id)
+		return dto
+
+	async def assign_userbot(self, community_id: int, account_id: int) -> CommunityDto:
+		"""Мост прежнего интерфейса: участник + умолчание одним действием.
+
+		Страница этапа B заменит его диалогом «Участники…»; до тех пор
+		кнопка «Привязать userbot…» работает через членства честно.
+
+		Raises:
+			CommunityError: Сообщество/аккаунт не найдены.
+			UserbotUnavailableError: Аккаунт не подключён или прав нет.
 		"""
 		account = await self._get_account(account_id)
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			chat_id = community.tg_chat_id
 		info = await self._gateway.check_community_userbot(account_id, chat_id)
-		async with self._db.session_factory() as session:
-			community = await self._community_in_session(session, community_id)
-			community.tg_account_id = account_id
-			await session.commit()
+		await self._adopt_member(
+			community_id, (account_id, info.role or UserbotRole.MEMBER), make_default=False
+		)
+		dto = await self.set_default(community_id, account_id)
 		await self._refresh_forum(community_id, info)
-		dto = await self._fresh_dto(community_id)
-		logger.info("Каналу «%s» привязан userbot «%s».", dto.title, account.label)
-		return dto
+		logger.info("«%s»: публикатор userbot «%s».", dto.title, account.label)
+		return await self._fresh_dto(community_id)
 
 	async def unassign_userbot(self, community_id: int) -> CommunityDto:
-		"""Отвязывает userbot от канала (сам аккаунт остаётся в приложении).
+		"""Мост прежнего интерфейса: убирает умолчание вместе с членством.
 
 		Raises:
-			CommunityError: Канал не найден.
+			CommunityError: Сообщество не найдено.
 		"""
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
-			community.tg_account_id = None
-			await session.commit()
+			default_id = community.default_tg_account_id
+		if default_id is not None:
+			await self._drop_member(community_id, default_id)
 		dto = await self._fresh_dto(community_id)
-		logger.info("От канала «%s» отвязан userbot.", dto.title)
+		logger.info("У «%s» снят публикатор userbot.", dto.title)
 		return dto
 
 	async def assign_bot(self, community_id: int, bot_id: int) -> CommunityDto:
@@ -449,9 +621,7 @@ class CommunitiesService:
 		if with_refs:
 			community = (
 				await session.execute(
-					select(Community)
-					.options(selectinload(Community.bot), selectinload(Community.tg_account))
-					.where(Community.id == community_id)
+					select(Community).options(*_REF_LOADERS).where(Community.id == community_id)
 				)
 			).scalar_one_or_none()
 		else:
@@ -478,7 +648,16 @@ class CommunitiesService:
 
 	@staticmethod
 	def _dto(community: Community, enabled: bool = True) -> CommunityDto:
-		"""Снимок канала; связи должны быть подгружены (with_refs)."""
+		"""Снимок сообщества; связи должны быть подгружены (with_refs)."""
+		default = community.default_account
+		default_role = next(
+			(
+				UserbotRole(member.role)
+				for member in community.members
+				if member.tg_account_id == community.default_tg_account_id
+			),
+			None,
+		)
 		return CommunityDto(
 			community.id,
 			community.title,
@@ -487,8 +666,10 @@ class CommunitiesService:
 			community.bot_id,
 			community.bot.label if community.bot is not None else None,
 			enabled,
-			community.tg_account_id,
-			community.tg_account.label if community.tg_account is not None else None,
+			community.default_tg_account_id,
+			default.label if default is not None else None,
+			default_role=default_role,
+			members_count=len(community.members),
 			kind=CommunityKind(community.kind),
 			forum=community.forum,
 		)

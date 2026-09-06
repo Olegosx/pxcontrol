@@ -121,8 +121,20 @@
 | `username` | str? | @имя, если есть |
 | `kind` | str | вид: `channel` (канал) или `group` (супергруппа); миграция `b3e7d51f9a24` |
 | `forum` | bool | темы (форум) включены; обновляется перепроверками; миграция `b3e7d51f9a24` |
-| `tg_account_id` | FK→tg_accounts?, ON DELETE SET NULL | userbot-аккаунт-публикатор (NULL — нет; миграция `e6b9d43a7f21`, заменила флаг `userbot_admin`) |
+| `default_tg_account_id` | FK→tg_accounts?, ON DELETE SET NULL | публикатор по умолчанию (ADR-0022; NULL — не выбран; наследница привязки `e6b9d43a7f21`, переименована `f8b3d67c1a49`) |
 | `bot_id` | FK→bots?, ON DELETE SET NULL | бот-публикатор (NULL — не назначен или бот удалён) |
+
+### `community_members` — участники сообщества (ADR-0022, миграция `f8b3d67c1a49`)
+
+Пул userbot-аккаунтов сообщества: публикует умолчание, остальные —
+фундамент будущего модуля соцактивности. Роль — снимок из зондов прав,
+обновляется подключением, добавлением участника и перепроверкой.
+
+| Поле | Тип | Назначение |
+|---|---|---|
+| `community_id` | PK, FK→communities, ON DELETE CASCADE | сообщество |
+| `tg_account_id` | PK, FK→tg_accounts, ON DELETE CASCADE | аккаунт-участник |
+| `role` | str | `admin` / `member` (значения `UserbotRole`) |
 
 ### `publish_queue_items` — очередь отправки (ADR-0016, миграция `b7f3d92c5a41`)
 

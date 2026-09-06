@@ -346,7 +346,7 @@ class AccountsPage(ScrollArea):
 		self, account: TgAccountDto, communities: list[CommunityDto]
 	) -> None:
 		"""Подтверждение с перечнем каналов, привязанных к аккаунту (ADR-0019)."""
-		bound = [ch.title for ch in communities if ch.tg_account_id == account.id]
+		bound = [ch.title for ch in communities if ch.default_account_id == account.id]
 		text = f"Удалить аккаунт «{account.label}»?"
 		if bound:
 			names = ", ".join(f"«{title}»" for title in bound)

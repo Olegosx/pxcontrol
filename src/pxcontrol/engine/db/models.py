@@ -203,8 +203,10 @@ class Community(TimestampMixin, Base):
 	# темы (форум) включены; изменчивое свойство группы — обновляется
 	# при подключении и перепроверке доступов (потому не часть kind)
 	forum: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
-	# userbot-аккаунт-админ; аккаунт удаляется — канал остаётся без него
-	tg_account_id: Mapped[int | None] = mapped_column(
+	# публикатор по умолчанию (ADR-0022): его сессией идут публикация,
+	# отложки и темы; инвариант «умолчание — действующий участник»
+	# держит сервис; удаление аккаунта отвязывает (SET NULL)
+	default_tg_account_id: Mapped[int | None] = mapped_column(
 		ForeignKey("tg_accounts.id", ondelete="SET NULL"), default=None
 	)
 	# бот удаляется — канал остаётся без бота (проверку ключей включает Database)
@@ -213,7 +215,36 @@ class Community(TimestampMixin, Base):
 	)
 
 	bot: Mapped[Bot | None] = relationship()
-	tg_account: Mapped[TgAccount | None] = relationship()
+	default_account: Mapped[TgAccount | None] = relationship()
+	# членства (ADR-0022): каскад БД дублируется ORM-каскадом, чтобы
+	# удаление сообщества через сессию не пыталось занулить ключи
+	members: Mapped[list[CommunityMember]] = relationship(
+		cascade="all, delete-orphan", passive_deletes=True
+	)
+
+
+class CommunityMember(TimestampMixin, Base):
+	"""Членство userbot-аккаунта в сообществе (ADR-0022).
+
+	Пул аккаунтов сообщества: публикует умолчание
+	(``Community.default_tg_account_id``), остальные — фундамент
+	будущего модуля соцактивности. Роль — снимок из зондов прав
+	(значения ``UserbotRole``), обновляется подключением, добавлением
+	участника и перепроверкой доступов. Членство живёт и умирает
+	вместе с сообществом и с аккаунтом (CASCADE с обеих сторон).
+	"""
+
+	__tablename__ = "community_members"
+
+	community_id: Mapped[int] = mapped_column(
+		ForeignKey("communities.id", ondelete="CASCADE"), primary_key=True
+	)
+	tg_account_id: Mapped[int] = mapped_column(
+		ForeignKey("tg_accounts.id", ondelete="CASCADE"), primary_key=True
+	)
+	role: Mapped[str] = mapped_column(String(16))
+
+	tg_account: Mapped[TgAccount] = relationship()
 
 
 class PublishQueueItem(TimestampMixin, Base):

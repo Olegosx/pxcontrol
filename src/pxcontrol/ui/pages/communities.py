@@ -347,8 +347,8 @@ class CommunitiesPage(ScrollArea):
 	def _community_row(self, community: CommunityDto) -> CardWidget:
 		"""Карточка сообщества: вид, название, публикаторы, действия."""
 		ways = []
-		if community.tg_account_label:
-			ways.append(f"userbot {community.tg_account_label}")
+		if community.default_account_label:
+			ways.append(f"userbot {community.default_account_label}")
 		if community.bot_label:
 			ways.append(f"бот {community.bot_label}")
 		subtitle = (
@@ -370,7 +370,7 @@ class CommunitiesPage(ScrollArea):
 		prefs_action.setToolTip("Пресет видео по умолчанию и времена публикации")
 		prefs_action.clicked.connect(bind(self._on_open_prefs, community))
 		row.addWidget(prefs_action)
-		if community.tg_account_id is None:
+		if community.default_account_id is None:
 			userbot_action = PushButton("Привязать userbot…", buttons)
 			userbot_action.setToolTip("Постинг пойдёт из сессии привязанного аккаунта")
 			userbot_action.clicked.connect(bind(self._on_assign_userbot, community))
@@ -488,7 +488,7 @@ class CommunitiesPage(ScrollArea):
 		if access.userbot_ok is None:
 			userbot_text = "не удалось проверить (нет связи или аккаунт не подключён)"
 		elif access.userbot_ok:
-			userbot_text = f"админ — {access.community.tg_account_label or '—'}"
+			userbot_text = f"публикатор — {access.community.default_account_label or '—'}"
 		else:
 			userbot_text = "не админ — привязка снята"
 		parts = [f"userbot: {userbot_text}"]

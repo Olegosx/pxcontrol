@@ -106,7 +106,7 @@ async def _add_account(db: Database, label: str = "@ub") -> int:
 async def _add_community(
 	db: Database,
 	with_bot: bool = True,
-	userbot_admin: bool = True,
+	userbot_assigned: bool = True,
 	forum: bool = False,
 	tg_chat_id: str = "-1001",
 ) -> int:
@@ -119,7 +119,7 @@ async def _add_community(
 			await session.flush()
 			bot_id = bot.id
 		account_id = None
-		if userbot_admin:
+		if userbot_assigned:
 			account = TgAccount(label="@ub", phone="+7900", session="s")
 			session.add(account)
 			await session.flush()
@@ -130,7 +130,7 @@ async def _add_community(
 			kind="group" if forum else "channel",
 			forum=forum,
 			bot_id=bot_id,
-			tg_account_id=account_id,
+			default_tg_account_id=account_id,
 		)
 		session.add(community)
 		await session.commit()
@@ -346,11 +346,11 @@ def test_publish_capabilities() -> None:
 	"""Возможности из способов администрирования; userbot — приоритет."""
 	from pxcontrol.engine.services.posts import publish_capabilities
 
-	both = publish_capabilities(bot_assigned=True, userbot_admin=True)
+	both = publish_capabilities(bot_assigned=True, userbot_assigned=True)
 	assert both.userbot and both.bot
-	bot_only = publish_capabilities(bot_assigned=True, userbot_admin=False)
+	bot_only = publish_capabilities(bot_assigned=True, userbot_assigned=False)
 	assert not bot_only.userbot and bot_only.bot
-	none = publish_capabilities(bot_assigned=False, userbot_admin=False)
+	none = publish_capabilities(bot_assigned=False, userbot_assigned=False)
 	assert not none.userbot and not none.bot
 
 
@@ -358,7 +358,7 @@ async def test_publish_bot_fallback_text_and_media(db: Database, tmp_path: Path)
 	"""Канал «только бот»: текст и медиа ≤50 МБ уходят через Bot API."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	community_id = await _add_community(db, userbot_admin=False)
+	community_id = await _add_community(db, userbot_assigned=False)
 	await service.publish(PostDraft(community_id, text="через бота"))
 	assert gateway.sent == [("123:AAA", "-1001", "через бота")]
 	photo = tmp_path / "фото.jpg"
@@ -379,7 +379,7 @@ async def test_publish_bot_limits(db: Database, tmp_path: Path) -> None:
 	"""Канал «только бот»: отложка и файлы >50 МБ — ошибки до отправки."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	community_id = await _add_community(db, userbot_admin=False)
+	community_id = await _add_community(db, userbot_assigned=False)
 	when = datetime.now(UTC) + timedelta(hours=1)
 	with pytest.raises(PostError, match="userbot-админа"):
 		await service.publish(PostDraft(community_id, text="x", when=when))
@@ -400,7 +400,7 @@ async def test_publish_bot_limits(db: Database, tmp_path: Path) -> None:
 async def test_publish_without_any_way(db: Database) -> None:
 	"""Канал без способов публикации — понятная ошибка."""
 	service = PostsService(db, _FakeGateway())
-	community_id = await _add_community(db, with_bot=False, userbot_admin=False)
+	community_id = await _add_community(db, with_bot=False, userbot_assigned=False)
 	with pytest.raises(PostError, match="нет способа публикации"):
 		await service.publish(PostDraft(community_id, text="x"))
 
@@ -445,7 +445,7 @@ async def test_list_scheduled_skips_bot_only_community(db: Database) -> None:
 	Раньше такой канал ронял всю страницу «Расписание» ошибкой userbot.
 	"""
 	service = PostsService(db, _FakeGateway())
-	await _add_community(db, with_bot=True, userbot_admin=False)
+	await _add_community(db, with_bot=True, userbot_assigned=False)
 	assert await service.list_scheduled() == []
 
 
@@ -467,7 +467,7 @@ async def test_list_scheduled_isolates_community_failure(db: Database) -> None:
 				title="Второй",
 				tg_chat_id="-1002",
 				bot_id=None,
-				tg_account_id=other_account,
+				default_tg_account_id=other_account,
 			)
 		)
 		await session.commit()
@@ -703,7 +703,7 @@ async def test_scheduled_times_for_batch_planning(db: Database) -> None:
 	assert await service.scheduled_times(community_id) == [datetime(2026, 7, 13, 12, 0, tzinfo=UTC)]
 	# канал без userbot-админа отложек иметь не может — пустой список
 	async with db.session_factory() as session:
-		other = Community(title="Бот-канал", tg_chat_id="-1002", tg_account_id=None)
+		other = Community(title="Бот-канал", tg_chat_id="-1002", default_tg_account_id=None)
 		session.add(other)
 		await session.commit()
 		await session.refresh(other)
@@ -733,7 +733,7 @@ async def test_list_scheduled_flood_skips_rest_of_account(db: Database) -> None:
 				title="Второй",
 				tg_chat_id="-1002",
 				bot_id=None,
-				tg_account_id=community.tg_account_id,
+				default_tg_account_id=community.default_tg_account_id,
 			)
 		)
 		await session.commit()
@@ -764,7 +764,7 @@ async def test_topic_passes_to_bot(db: Database) -> None:
 	"""Бот умеет отправлять в тему (message_thread_id) — тема доезжает."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	community_id = await _add_community(db, userbot_admin=False, forum=True)
+	community_id = await _add_community(db, userbot_assigned=False, forum=True)
 	await service.publish(PostDraft(community_id, text="в тему", topic_id=7))
 	assert gateway.sent_topics == [7]
 
@@ -778,7 +778,7 @@ async def test_list_topics_guards_and_reads(db: Database) -> None:
 	with pytest.raises(PostError, match="не включены"):
 		await service.list_topics(plain)
 	# сообщество-форум только с ботом: перечислить темы нечем (Bot API не умеет)
-	bot_only = await _add_community(db, userbot_admin=False, forum=True, tg_chat_id="-1002")
+	bot_only = await _add_community(db, userbot_assigned=False, forum=True, tg_chat_id="-1002")
 	with pytest.raises(PostError, match="userbot"):
 		await service.list_topics(bot_only)
 

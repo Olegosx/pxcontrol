@@ -23,7 +23,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.refs import ChatRefError, normalize_chat_ref
-from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind
+from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind, UserbotRole
 
 
 class _FakeGateway:
@@ -40,6 +40,7 @@ class _FakeGateway:
 		self.bot_is_admin = True  # ответ проверки прав бота
 		self.kind = CommunityKind.CHANNEL  # вид, который «увидит» проверка
 		self.forum = False  # признак форума в ответе проверки
+		self.role = UserbotRole.ADMIN  # роль аккаунта в userbot-зонде
 
 	async def check_bot_token(self, token: str) -> str:
 		return "test_bot"
@@ -57,7 +58,9 @@ class _FakeGateway:
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
-		return CommunityInfo("-1001234", "Тестовый канал", "testchan", self.kind, self.forum)
+		return CommunityInfo(
+			"-1001234", "Тестовый канал", "testchan", self.kind, self.forum, role=self.role
+		)
 
 
 async def _make_bot(db: Database) -> int:
@@ -120,12 +123,12 @@ async def test_bot_connect_probes_userbot(db: Database) -> None:
 	gateway.userbot_admins = {account_id}
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.userbot_admin is True
-	assert dto.tg_account_id == account_id and dto.tg_account_label == "@ub"
+	assert dto.userbot_assigned is True
+	assert dto.default_account_id == account_id and dto.default_account_label == "@ub"
 	await service.delete_community(dto.id)
 	gateway.userbot_admins = set()  # аккаунт есть, но не админ канала
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.userbot_admin is False and dto.tg_account_id is None
+	assert dto.userbot_assigned is False and dto.default_account_id is None
 
 
 async def test_connect_via_userbot(db: Database) -> None:
@@ -136,9 +139,9 @@ async def test_connect_via_userbot(db: Database) -> None:
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community_via_userbot(account_id, "@testchan")
 	assert dto.bot_id is None and dto.bot_label is None
-	assert dto.tg_account_id == account_id and dto.userbot_admin is True
+	assert dto.default_account_id == account_id and dto.userbot_assigned is True
 	listed = await service.list_communities()
-	assert listed[0].tg_account_label == "@ub"
+	assert listed[0].default_account_label == "@ub"
 	with pytest.raises(CommunityError, match="уже подключено"):
 		await service.add_community_via_userbot(account_id, "@testchan")
 	await service.delete_community(dto.id)
@@ -157,24 +160,24 @@ async def test_recheck_updates_binding_both_ways(db: Database) -> None:
 	gateway = _FakeGateway()
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")  # аккаунт пока не админ
-	assert dto.tg_account_id is None
+	assert dto.default_account_id is None
 	# аккаунт стал админом (например, добавили после подключения)
 	gateway.userbot_admins = {account_id}
 	access = await service.recheck_community(dto.id)
-	assert access.userbot_ok and access.community.tg_account_id == account_id
+	assert access.userbot_ok and access.community.default_account_id == account_id
 	assert access.bot_ok is True
 	# бота выгнали: бот — только предупреждение, привязка userbot цела
 	gateway.bot_is_admin = False
 	access = await service.recheck_community(dto.id)
 	assert access.bot_ok is False
 	assert access.community.bot_id is not None  # бот не отвязан молча
-	assert access.community.tg_account_id == account_id
+	assert access.community.default_account_id == account_id
 	# аккаунт потерял права (подтверждённый отказ) — привязка снимается
 	gateway.userbot_admins = set()
 	gateway.bot_is_admin = True
 	access = await service.recheck_community(dto.id)
 	assert access.userbot_ok is False
-	assert access.community.tg_account_id is None
+	assert access.community.default_account_id is None
 
 
 async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> None:
@@ -194,11 +197,11 @@ async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> N
 	gateway.userbot_admins = {account_id}
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.tg_account_id == account_id
+	assert dto.default_account_id == account_id
 	offline = CommunitiesService(db, _OfflineGateway())
 	access = await offline.recheck_community(dto.id)
 	assert access.userbot_ok is None  # «не удалось проверить», не «не админ»
-	assert access.community.tg_account_id == account_id  # привязка не тронута
+	assert access.community.default_account_id == account_id  # привязка не тронута
 
 
 async def test_assign_and_unassign_userbot(db: Database) -> None:
@@ -208,17 +211,17 @@ async def test_assign_and_unassign_userbot(db: Database) -> None:
 	gateway = _FakeGateway()
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.tg_account_id is None
+	assert dto.default_account_id is None
 	# без прав — не привязывается
 	with pytest.raises(UserbotUnavailableError, match="не администратор"):
 		await service.assign_userbot(dto.id, account_id)
 	# с правами — привязывается
 	gateway.userbot_admins = {account_id}
 	updated = await service.assign_userbot(dto.id, account_id)
-	assert updated.tg_account_id == account_id and updated.tg_account_label == "@ub"
+	assert updated.default_account_id == account_id and updated.default_account_label == "@ub"
 	# отвязка: аккаунт исчезает из канала, но остаётся в приложении
 	updated = await service.unassign_userbot(dto.id)
-	assert updated.tg_account_id is None and updated.userbot_admin is False
+	assert updated.default_account_id is None and updated.userbot_assigned is False
 	with pytest.raises(CommunityError, match="Аккаунт не найден"):
 		await service.assign_userbot(dto.id, 999)
 
@@ -242,7 +245,7 @@ async def test_assign_and_unassign_bot(db: Database) -> None:
 	assert updated.bot_id == bot_id and updated.bot_label == "Публикатор"
 	# отвязка: бот исчезает, привязка userbot не трогается
 	updated = await service.unassign_bot(dto.id)
-	assert updated.bot_id is None and updated.tg_account_id == account_id
+	assert updated.bot_id is None and updated.default_account_id == account_id
 
 
 async def test_unknown_bot_rejected(db: Database) -> None:
@@ -440,3 +443,77 @@ async def test_assign_bot_refreshes_forum(db: Database) -> None:
 	gateway.forum = True
 	await service.assign_bot(dto.id, bot_id)
 	assert (await _community_row(db, dto.id)).forum is True
+
+
+async def _member_service(db: Database) -> tuple[CommunitiesService, _FakeGateway, int, int]:
+	"""Сообщество с одним участником-умолчанием и второй вошедший аккаунт."""
+	gateway = _FakeGateway()
+	first = await _make_account(db, "@first")
+	second = await _make_account(db, "@second")
+	gateway.userbot_admins = {first, second}
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(first, "@testchan")
+	return service, gateway, dto.id, second
+
+
+async def test_membership_crud_and_default(db: Database) -> None:
+	"""Участники: добавление с ролью из зонда, умолчание, явная смена."""
+	service, gateway, community_id, second = await _member_service(db)
+	members = await service.list_members(community_id)
+	assert [(m.label, m.role, m.is_default) for m in members] == [
+		("@first", UserbotRole.ADMIN, True)
+	]
+	gateway.role = UserbotRole.MEMBER  # второй аккаунт — простой участник
+	members = await service.add_member(community_id, second)
+	assert [(m.label, m.role, m.is_default) for m in members] == [
+		("@first", UserbotRole.ADMIN, True),
+		("@second", UserbotRole.MEMBER, False),
+	]
+	with pytest.raises(CommunityError, match="уже участник"):
+		await service.add_member(community_id, second)
+	dto = await service.set_default(community_id, second)
+	assert dto.default_account_id == second
+	assert dto.default_role is UserbotRole.MEMBER
+	assert dto.members_count == 2
+
+
+async def test_remove_default_member_resets_default(db: Database) -> None:
+	"""Удаление участника-умолчания сбрасывает умолчание без авто-замены."""
+	service, gateway, community_id, second = await _member_service(db)
+	members = await service.add_member(community_id, second)
+	assert len(members) == 2
+	first_id = next(m.account_id for m in members if m.is_default)
+	remaining = await service.remove_member(community_id, first_id)
+	assert [m.label for m in remaining] == ["@second"]
+	dto = next(c for c in await service.list_communities() if c.id == community_id)
+	assert dto.default_account_id is None  # авто-выбора нет (ADR-0022)
+	assert dto.userbot_assigned is False
+	with pytest.raises(CommunityError, match="не участник"):
+		await service.remove_member(community_id, first_id)
+
+
+async def test_set_default_requires_membership(db: Database) -> None:
+	"""Умолчанием может стать только участник сообщества."""
+	service, _gateway, community_id, second = await _member_service(db)
+	with pytest.raises(CommunityError, match="только участник"):
+		await service.set_default(community_id, second)
+
+
+async def test_recheck_updates_roles_and_drops_refused(db: Database) -> None:
+	"""Перепроверка: роль обновляется, отказник исключается, умолчание падает."""
+	service, gateway, community_id, second = await _member_service(db)
+	gateway.role = UserbotRole.MEMBER
+	await service.add_member(community_id, second)
+	# админа разжаловали в участники — роль обновится по зонду
+	await service.recheck_community(community_id)
+	members = await service.list_members(community_id)
+	assert [(m.label, m.role) for m in members] == [
+		("@first", UserbotRole.MEMBER),
+		("@second", UserbotRole.MEMBER),
+	]
+	# умолчание выгнали из сообщества: членство и умолчание снимаются
+	gateway.userbot_admins = {second}
+	access = await service.recheck_community(community_id)
+	assert access.userbot_ok is False
+	assert [m.label for m in await service.list_members(community_id)] == ["@second"]
+	assert access.community.default_account_id is None

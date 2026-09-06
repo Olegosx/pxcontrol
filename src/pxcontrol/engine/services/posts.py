@@ -83,13 +83,14 @@ class PublishCapabilities:
 	bot: bool
 
 
-def publish_capabilities(bot_assigned: bool, userbot_admin: bool) -> PublishCapabilities:
-	"""Возможности публикации по способам администрирования канала.
+def publish_capabilities(bot_assigned: bool, userbot_assigned: bool) -> PublishCapabilities:
+	"""Возможности публикации по публикаторам сообщества.
 
 	Единственный источник правды для движка и интерфейса; приоритет
-	транспорта — MTProto (ADR-0011).
+	транспорта — MTProto (ADR-0011), userbot-путь доступен при
+	назначенном публикаторе по умолчанию (ADR-0022).
 	"""
-	return PublishCapabilities(userbot=userbot_admin, bot=bot_assigned)
+	return PublishCapabilities(userbot=userbot_assigned, bot=bot_assigned)
 
 
 class PostError(EngineError):
@@ -296,8 +297,10 @@ class PostsService:
 				f"У «{community.title}» нет тем (форум выключен) — "
 				"обновите выбор темы или перепроверьте доступы."
 			)
-		caps = publish_capabilities(community.bot is not None, community.tg_account_id is not None)
-		self._check_transport(caps, draft, community.tg_account_id)
+		caps = publish_capabilities(
+			community.bot is not None, community.default_tg_account_id is not None
+		)
+		self._check_transport(caps, draft, community.default_tg_account_id)
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
 			media_path = self._apply_rename(media_path, draft.rename_to)
@@ -397,8 +400,8 @@ class PostsService:
 		Лимит размера файла проверен раньше (:meth:`_check_transport`);
 		сюда канал приходит только с привязкой (маршрутизация ``publish``).
 		"""
-		if community.tg_account_id is None:  # publish() сюда без привязки не приводит
-			raise PostError("У канала нет userbot-админа — проверьте доступы.")
+		if community.default_tg_account_id is None:  # publish() сюда без умолчания не приводит
+			raise PostError("У сообщества нет userbot-публикатора — проверьте доступы.")
 		with tempfile.TemporaryDirectory() as tmp:
 			thumb: str | None = None
 			if draft.media_kind is MediaKind.VIDEO and media_path:
@@ -412,7 +415,7 @@ class PostsService:
 				topic_id=draft.topic_id,
 			)
 			await self._gateway.publish(
-				community.tg_account_id, community.tg_chat_id, post, on_progress
+				community.default_tg_account_id, community.tg_chat_id, post, on_progress
 			)
 
 	async def _publish_bot(
@@ -455,12 +458,14 @@ class PostsService:
 		community = await self._get_community(community_id)
 		if not community.forum:
 			raise PostError(f"У «{community.title}» темы (форум) не включены.")
-		if community.tg_account_id is None:
+		if community.default_tg_account_id is None:
 			raise PostError(
 				f"Темы «{community.title}» может прочитать только userbot — "
 				"привяжите аккаунт на странице «Каналы»."
 			)
-		return await self._gateway.get_forum_topics(community.tg_account_id, community.tg_chat_id)
+		return await self._gateway.get_forum_topics(
+			community.default_tg_account_id, community.tg_chat_id
+		)
 
 	async def _move_to_published(self, media_path: str) -> None:
 		"""Переносит опубликованное видео из результатов в опубликованные.
@@ -742,7 +747,9 @@ class PostsService:
 			PostError: Канал не найден.
 		"""
 		community = await self._get_community(community_id)
-		return userbot_max_file_bytes(self._gateway.userbot_premium(community.tg_account_id))
+		return userbot_max_file_bytes(
+			self._gateway.userbot_premium(community.default_tg_account_id)
+		)
 
 	async def community_title(self, community_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).
@@ -804,7 +811,7 @@ class PostsService:
 				(
 					await session.execute(
 						select(Community)
-						.where(Community.tg_account_id.is_not(None))
+						.where(Community.default_tg_account_id.is_not(None))
 						.order_by(Community.id)
 					)
 				)
@@ -816,23 +823,23 @@ class PostsService:
 		for community in communities:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
-			if community.tg_account_id is None:  # для mypy: выборка отфильтровала
+			if community.default_tg_account_id is None:  # для mypy: выборка отфильтровала
 				continue
-			if community.tg_account_id in flooded:
+			if community.default_tg_account_id in flooded:
 				continue
 			try:
 				messages = await self._gateway.get_scheduled(
-					community.tg_account_id, community.tg_chat_id
+					community.default_tg_account_id, community.tg_chat_id
 				)
 			except TelegramFloodError as exc:
 				# флуд-лимит — на весь аккаунт (ADR-0017): стучаться в его
 				# остальные каналы значит удлинять срок, который ждёт
 				# и очередь отправки; пропускаем их до конца прохода
 				# (та же дисциплина, что у дозора слотов)
-				flooded.add(community.tg_account_id)
+				flooded.add(community.default_tg_account_id)
 				logger.warning(
 					"Отложенные: флуд-лимит аккаунта id=%s (%s) — его каналы пропущены.",
-					community.tg_account_id,
+					community.default_tg_account_id,
 					exc,
 				)
 				continue
@@ -858,22 +865,24 @@ class PostsService:
 				вызывающая сторона решает, продолжать ли без них.
 		"""
 		community = await self._get_community(community_id)
-		if community.tg_account_id is None:
+		if community.default_tg_account_id is None:
 			return []
-		messages = await self._gateway.get_scheduled(community.tg_account_id, community.tg_chat_id)
+		messages = await self._gateway.get_scheduled(
+			community.default_tg_account_id, community.tg_chat_id
+		)
 		return [message.scheduled_at for message in messages]
 
 	async def account_for_community(self, community_id: int) -> int | None:
-		"""Привязанный userbot-аккаунт канала (None — привязки нет).
+		"""Аккаунт-публикатор сообщества по умолчанию (None — не назначен).
 
-		Нужен дозору слотов очереди отправки (ADR-0016/0019): флуд-лимит
-		действует на аккаунт, и тик прекращает опрос только каналов
-		провинившегося аккаунта.
+		Нужен дозору слотов очереди отправки (ADR-0016/0019/0022):
+		флуд-лимит действует на аккаунт, и тик прекращает опрос только
+		сообществ провинившегося аккаунта.
 
 		Raises:
-			PostError: Канал не найден.
+			PostError: Сообщество не найдено.
 		"""
-		return (await self._get_community(community_id)).tg_account_id
+		return (await self._get_community(community_id)).default_tg_account_id
 
 	async def _get_community(self, community_id: int) -> Community:
 		"""Возвращает канал с ботом или объясняет, что канал не найден."""

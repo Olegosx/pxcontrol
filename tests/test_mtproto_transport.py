@@ -18,7 +18,12 @@ from pxcontrol.engine.telegram.mtproto import (
 	ensure_userbot_can_post,
 	ensure_userbot_can_send,
 )
-from pxcontrol.engine.telegram.types import CommunityKind, MediaKind, OutgoingPost
+from pxcontrol.engine.telegram.types import (
+	CommunityKind,
+	MediaKind,
+	OutgoingPost,
+	UserbotRole,
+)
 
 
 class _FakeClient:
@@ -75,11 +80,12 @@ class _FakeClient:
 		if type(request).__name__ == "GetForumTopicsRequest":
 			return SimpleNamespace(
 				topics=[
-					SimpleNamespace(id=1, title="General"),
-					SimpleNamespace(id=7, title="Новости"),
+					SimpleNamespace(id=1, title="General", closed=False),
+					SimpleNamespace(id=7, title="Новости", closed=False),
+					SimpleNamespace(id=8, title="Архив", closed=True),
 					SimpleNamespace(id=9, title=None),  # ForumTopicDeleted
 				],
-				count=3,
+				count=4,
 			)
 		return SimpleNamespace(
 			messages=[
@@ -579,4 +585,44 @@ async def test_get_forum_topics_skips_deleted() -> None:
 	transport = _transport(fake)
 	await transport.start()
 	topics = await transport.get_forum_topics("-1001234")
-	assert [(t.id, t.title) for t in topics] == [(1, "General"), (7, "Новости")]
+	assert [(t.id, t.title, t.closed) for t in topics] == [
+		(1, "General", False),
+		(7, "Новости", False),
+		(8, "Архив", True),
+	]
+
+
+def test_translate_slow_mode_into_flood() -> None:
+	"""Медленный режим группы — «подожди и повтори», не ошибка элемента.
+
+	ADR-0022: участник группы подчиняется slow mode; очередь отправки
+	уже умеет ждать по UserbotFloodError — перевод обязан попасть
+	именно в этот класс с сроком от сервера.
+	"""
+	from telethon import errors
+
+	from pxcontrol.engine.telegram.mtproto import UserbotFloodError, _translate_error
+
+	exc = errors.SlowModeWaitError(request=None)
+	exc.seconds = 30
+	translated = _translate_error(exc)
+	assert isinstance(translated, UserbotFloodError)
+	assert translated.retry_after_s == 30
+
+
+async def test_check_community_reports_role() -> None:
+	"""Зонд отдаёт роль аккаунта: участник и админ различимы (ADR-0022)."""
+	from telethon.tl.types import Channel
+
+	client = _FakeClient()
+	client.entity = Channel(
+		id=125, title="Группа", photo=None, date=None, megagroup=True, username="grp2"
+	)
+	client.permissions = _group_member()
+	transport = _transport(client)
+	await transport.start()
+	info = await transport.check_community("@grp2")
+	assert info.role is UserbotRole.MEMBER
+	client.permissions = _group_member(admin=True)
+	info = await transport.check_community("@grp2")
+	assert info.role is UserbotRole.ADMIN

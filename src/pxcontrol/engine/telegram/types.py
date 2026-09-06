@@ -58,6 +58,18 @@ class MediaKind(StrEnum):
 	DOCUMENT = "document"  # любой файл «как документ»
 
 
+class UserbotRole(StrEnum):
+	"""Роль userbot-аккаунта в сообществе (ADR-0022): снимок из зондов.
+
+	Владелец — тоже ``ADMIN`` (надмножество прав). Роль обновляется
+	подключением, добавлением участника и перепроверкой доступов;
+	истина — Telegram, публикация роли слепо не доверяет.
+	"""
+
+	ADMIN = "admin"  # админ/владелец: без медленного режима, пишет в закрытые темы
+	MEMBER = "member"  # участник: медленный режим, закрытые темы недоступны
+
+
 class CommunityKind(StrEnum):
 	"""Вид сообщества (ADR-0021): определяется при подключении по сущности
 	из API и не меняется жизнью записи. Малые (не супер-) группы
@@ -78,6 +90,8 @@ class CommunityInfo:
 		kind: вид сообщества (канал или группа), определён по сущности API.
 		forum: включены ли темы (форум); изменчивое свойство группы —
 			обновляется при подключении и перепроверке доступов.
+		role: роль проверявшего userbot-аккаунта (ADR-0022);
+			None — проверка шла бот-путём, роли userbot он не знает.
 	"""
 
 	chat_id: str
@@ -85,6 +99,7 @@ class CommunityInfo:
 	username: str | None
 	kind: CommunityKind
 	forum: bool = False
+	role: UserbotRole | None = None
 
 
 @dataclass(frozen=True)
@@ -128,10 +143,13 @@ class ForumTopicInfo:
 	Attributes:
 		id: идентификатор темы (id корневого сообщения; «General» — 1).
 		title: название темы.
+		closed: тема закрыта — писать в неё может только админ
+			(ADR-0022: участнику выбор блокируется в интерфейсе).
 	"""
 
 	id: int
 	title: str
+	closed: bool = False
 
 
 @dataclass(frozen=True)
