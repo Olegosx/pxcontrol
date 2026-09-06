@@ -7,18 +7,23 @@ from types import SimpleNamespace
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import TgAccount
+from pxcontrol.engine.db.models import Community, TgAccount
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.communities import CommunitiesService, CommunityError
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
-from pxcontrol.engine.telegram.bot_api import CommunityCheckError, ensure_bot_can_post
+from pxcontrol.engine.telegram.bot_api import (
+	CommunityCheckError,
+	community_kind_from_chat_type,
+	ensure_bot_can_post,
+	ensure_bot_can_send_in_group,
+)
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotNotConnectedError,
 	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.refs import ChatRefError, normalize_chat_ref
-from pxcontrol.engine.telegram.types import CommunityInfo
+from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind
 
 
 class _FakeGateway:
@@ -33,6 +38,8 @@ class _FakeGateway:
 	def __init__(self) -> None:
 		self.userbot_admins: set[int] = set()
 		self.bot_is_admin = True  # ответ проверки прав бота
+		self.kind = CommunityKind.CHANNEL  # вид, который «увидит» проверка
+		self.forum = False  # признак форума в ответе проверки
 
 	async def check_bot_token(self, token: str) -> str:
 		return "test_bot"
@@ -42,7 +49,7 @@ class _FakeGateway:
 			raise CommunityCheckError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_is_admin:
 			raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
-		return CommunityInfo("-1001234", "Тестовый канал", "testchan")
+		return CommunityInfo("-1001234", "Тестовый канал", "testchan", self.kind, self.forum)
 
 	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		if account_id not in self.userbot_admins:
@@ -50,7 +57,7 @@ class _FakeGateway:
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
-		return CommunityInfo("-1001234", "Тестовый канал", "testchan")
+		return CommunityInfo("-1001234", "Тестовый канал", "testchan", self.kind, self.forum)
 
 
 async def _make_bot(db: Database) -> int:
@@ -101,7 +108,7 @@ async def test_duplicate_community_rejected(db: Database) -> None:
 	bot_id = await _make_bot(db)
 	service = CommunitiesService(db, _FakeGateway())
 	await service.add_community(bot_id, "@testchan")
-	with pytest.raises(CommunityError, match="уже подключён"):
+	with pytest.raises(CommunityError, match="уже подключено"):
 		await service.add_community(bot_id, "@testchan")
 
 
@@ -132,7 +139,7 @@ async def test_connect_via_userbot(db: Database) -> None:
 	assert dto.tg_account_id == account_id and dto.userbot_admin is True
 	listed = await service.list_communities()
 	assert listed[0].tg_account_label == "@ub"
-	with pytest.raises(CommunityError, match="уже подключён"):
+	with pytest.raises(CommunityError, match="уже подключено"):
 		await service.add_community_via_userbot(account_id, "@testchan")
 	await service.delete_community(dto.id)
 	gateway.userbot_admins = set()
@@ -337,3 +344,95 @@ def test_bot_caption_markup_to_html() -> None:
 	assert to_html("код: `x = 1`") == "код: <code>x = 1</code>"
 	assert to_html("без разметки") == "без разметки"
 	assert to_html("непарные 2**3") == "непарные 2**3"
+
+
+def test_community_kind_from_chat_type() -> None:
+	"""Вид по типу чата Bot API; малая группа и личный чат — отказ."""
+	assert community_kind_from_chat_type("channel") is CommunityKind.CHANNEL
+	assert community_kind_from_chat_type("supergroup") is CommunityKind.GROUP
+	with pytest.raises(CommunityCheckError, match="супергруппу"):
+		community_kind_from_chat_type("group")
+	with pytest.raises(CommunityCheckError, match="личный чат"):
+		community_kind_from_chat_type("private")
+
+
+def test_ensure_bot_can_send_in_group() -> None:
+	"""Права бота в группе: участник без ограничений; админа они не касаются."""
+	allow = SimpleNamespace(can_send_messages=True)
+	deny = SimpleNamespace(can_send_messages=False)
+	# админу и создателю общие ограничения группы не мешают
+	ensure_bot_can_send_in_group(SimpleNamespace(status="administrator"), deny)
+	ensure_bot_can_send_in_group(SimpleNamespace(status="creator"), deny)
+	ensure_bot_can_send_in_group(SimpleNamespace(status="member"), allow)
+	# Bot API может не отдать права — отсутствие запрета не считается запретом
+	ensure_bot_can_send_in_group(SimpleNamespace(status="member"), None)
+	ensure_bot_can_send_in_group(
+		SimpleNamespace(status="restricted", is_member=True, can_send_messages=True), allow
+	)
+	with pytest.raises(CommunityCheckError, match="только администраторы"):
+		ensure_bot_can_send_in_group(SimpleNamespace(status="member"), deny)
+	with pytest.raises(CommunityCheckError, match="не участник"):
+		ensure_bot_can_send_in_group(SimpleNamespace(status="left"), allow)
+	with pytest.raises(CommunityCheckError, match="не участник"):
+		ensure_bot_can_send_in_group(
+			SimpleNamespace(status="restricted", is_member=False, can_send_messages=True), allow
+		)
+	with pytest.raises(CommunityCheckError, match="ограничен в отправке"):
+		ensure_bot_can_send_in_group(
+			SimpleNamespace(status="restricted", is_member=True, can_send_messages=False), allow
+		)
+
+
+async def _community_row(db: Database, community_id: int) -> Community:
+	"""Читает строку сообщества напрямую (проверка хранимых полей)."""
+	async with db.session_factory() as session:
+		row = await session.get(Community, community_id)
+		assert row is not None
+		return row
+
+
+async def test_group_connect_stores_kind_and_forum(db: Database) -> None:
+	"""Подключение группы сохраняет вид и признак форума (ADR-0021)."""
+	gateway = _FakeGateway()
+	gateway.kind = CommunityKind.GROUP
+	gateway.forum = True
+	account_id = await _make_account(db)
+	gateway.userbot_admins.add(account_id)
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
+	row = await _community_row(db, dto.id)
+	assert row.kind == "group"
+	assert row.forum is True
+
+
+async def test_recheck_refreshes_forum_keeps_kind(db: Database) -> None:
+	"""Перепроверка обновляет признак форума; вид записи не меняется."""
+	gateway = _FakeGateway()
+	gateway.kind = CommunityKind.GROUP
+	account_id = await _make_account(db)
+	gateway.userbot_admins.add(account_id)
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
+	assert (await _community_row(db, dto.id)).forum is False
+	gateway.forum = True  # владелец включил темы в группе
+	await service.recheck_community(dto.id)
+	row = await _community_row(db, dto.id)
+	assert row.forum is True
+	# вид определяется подключением: даже если Telegram вдруг ответил иначе
+	gateway.kind = CommunityKind.CHANNEL
+	await service.recheck_community(dto.id)
+	assert (await _community_row(db, dto.id)).kind == "group"
+
+
+async def test_assign_bot_refreshes_forum(db: Database) -> None:
+	"""Назначение бота тоже освежает признак форума (данные уже получены)."""
+	gateway = _FakeGateway()
+	gateway.kind = CommunityKind.GROUP
+	account_id = await _make_account(db)
+	gateway.userbot_admins.add(account_id)
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
+	bot_id = await _make_bot(db)
+	gateway.forum = True
+	await service.assign_bot(dto.id, bot_id)
+	assert (await _community_row(db, dto.id)).forum is True

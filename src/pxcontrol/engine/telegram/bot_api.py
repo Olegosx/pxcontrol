@@ -22,6 +22,7 @@ from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityInfo,
+	CommunityKind,
 	MediaKind,
 	TelegramFloodError,
 )
@@ -141,6 +142,26 @@ def _chat_id(chat_id: str) -> int:
 	return numeric_chat_id(chat_id, CommunityCheckError)
 
 
+def community_kind_from_chat_type(chat_type: str) -> CommunityKind:
+	"""Вид сообщества по типу чата Bot API (ADR-0021).
+
+	Raises:
+		CommunityCheckError: Тип не подключается: малая группа —
+			с подсказкой преобразовать в супергруппу, личный чат — с
+			объяснением, что нужен канал или группа.
+	"""
+	if chat_type == "channel":
+		return CommunityKind.CHANNEL
+	if chat_type == "supergroup":
+		return CommunityKind.GROUP
+	if chat_type == "group":
+		raise CommunityCheckError(
+			"Малые группы не подключаются — преобразуйте группу "
+			"в супергруппу (в настройках группы) и повторите."
+		)
+	raise CommunityCheckError("Это личный чат — укажите канал или группу.")
+
+
 def ensure_bot_can_post(member: Any) -> None:
 	"""Проверяет, что бот — администратор канала с правом публиковать.
 
@@ -154,6 +175,37 @@ def ensure_bot_can_post(member: Any) -> None:
 		raise CommunityCheckError("Бот не администратор канала — добавьте его администратором.")
 	if getattr(member, "can_post_messages", None) is not True:
 		raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
+
+
+def ensure_bot_can_send_in_group(member: Any, default_permissions: Any) -> None:
+	"""Проверяет, что бот может писать в группе (ADR-0021).
+
+	В группах права ``post_messages`` нет: писать может любой участник,
+	которого не ограничили. Админам (и создателю) ограничения группы
+	не мешают; обычный участник упирается в общие права группы
+	(``chat.permissions``), ограниченный — ещё и в свои.
+
+	Args:
+		member: ответ ``getChatMember`` для самого бота.
+		default_permissions: общие права группы (``chat.permissions``).
+
+	Raises:
+		CommunityCheckError: Бот не участник или не может писать.
+	"""
+	status = getattr(member, "status", "")
+	if status in ("creator", "administrator"):
+		return
+	if status == "restricted":
+		if getattr(member, "is_member", None) is not True:
+			raise CommunityCheckError("Бот не участник группы — добавьте его в группу.")
+		if getattr(member, "can_send_messages", None) is not True:
+			raise CommunityCheckError("Бот ограничен в отправке сообщений в этой группе.")
+	elif status != "member":
+		raise CommunityCheckError("Бот не участник группы — добавьте его в группу.")
+	if getattr(default_permissions, "can_send_messages", None) is False:
+		raise CommunityCheckError(
+			"В группе писать могут только администраторы — назначьте бота администратором."
+		)
 
 
 async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, caption: str) -> int:
@@ -281,29 +333,45 @@ async def get_bot_events(token: str) -> list[str]:
 
 
 async def check_community(token: str, chat_ref: str) -> CommunityInfo:
-	"""Проверяет канал: существует, бот в нём админ с правом публиковать.
+	"""Проверяет сообщество и права бота по его виду (ADR-0021).
+
+	Канал: бот — админ с правом публиковать. Группа (супергруппа):
+	бот — участник, не ограниченный в отправке. Малая группа и личный
+	чат не подключаются. Вид и признак форума возвращаются в
+	:class:`CommunityInfo`.
 
 	Raises:
 		ChatRefError: Введённую ссылку/имя не удалось разобрать.
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Канал не найден / бот не добавлен / нет прав.
+		CommunityCheckError: Сообщество не найдено / бот не добавлен /
+			нет прав / вид не подключается (малая группа, личный чат).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	ref = normalize_chat_ref(chat_ref)
-	logger.info("Проверка канала: ввод %r распознан как %r.", chat_ref, ref)
+	logger.info("Проверка сообщества: ввод %r распознан как %r.", chat_ref, ref)
 	bot = _make_bot(token)
 	try:
 		async with _bot_errors(
-			"Бот не добавлен в канал — добавьте его администратором.",
-			"Канал не найден — проверьте @имя или ID; приватный канал "
-			"виден боту только после добавления его администратором.",
+			"Бот не добавлен в сообщество — добавьте его (в канал — администратором).",
+			"Канал или группа не найдены — проверьте @имя или ID; приватное "
+			"сообщество видно боту только после добавления его участником.",
 		):
 			chat = await bot.get_chat(ref)
+			kind = community_kind_from_chat_type(str(chat.type))
 			me = await bot.get_me()
 			member = await bot.get_chat_member(chat.id, me.id)
-			ensure_bot_can_post(member)
-			return CommunityInfo(str(chat.id), chat.title or str(ref), chat.username)
+			if kind is CommunityKind.CHANNEL:
+				ensure_bot_can_post(member)
+			else:
+				ensure_bot_can_send_in_group(member, chat.permissions)
+			return CommunityInfo(
+				str(chat.id),
+				chat.title or str(ref),
+				chat.username,
+				kind=kind,
+				forum=bool(chat.is_forum),
+			)
 	finally:
 		await bot.session.close()
 

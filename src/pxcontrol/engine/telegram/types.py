@@ -58,19 +58,33 @@ class MediaKind(StrEnum):
 	DOCUMENT = "document"  # любой файл «как документ»
 
 
+class CommunityKind(StrEnum):
+	"""Вид сообщества (ADR-0021): определяется при подключении по сущности
+	из API и не меняется жизнью записи. Малые (не супер-) группы
+	не подключаются вовсе — вида для них нет."""
+
+	CHANNEL = "channel"  # канал-вещалка: публикует админ с правом post_messages
+	GROUP = "group"  # супергруппа: публикует участник, не ограниченный в отправке
+
+
 @dataclass(frozen=True)
 class CommunityInfo:
-	"""Канал, проверенный любым транспортом (бот или userbot).
+	"""Сообщество, проверенное любым транспортом (бот или userbot).
 
 	Attributes:
-		chat_id: идентификатор канала в формате Bot API (-100…).
-		title: название канала.
-		username: @имя без собаки (None — приватный).
+		chat_id: идентификатор чата в формате Bot API (-100…).
+		title: название сообщества.
+		username: @имя без собаки (None — приватное).
+		kind: вид сообщества (канал или группа), определён по сущности API.
+		forum: включены ли темы (форум); изменчивое свойство группы —
+			обновляется при подключении и перепроверке доступов.
 	"""
 
 	chat_id: str
 	title: str
 	username: str | None
+	kind: CommunityKind
+	forum: bool = False
 
 
 @dataclass(frozen=True)

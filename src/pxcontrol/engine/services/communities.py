@@ -29,6 +29,22 @@ class CommunityError(EngineError):
 	"""Ошибка операций с каналами (с понятным человеку текстом)."""
 
 
+@dataclass(frozen=True)
+class _ProbeResult:
+	"""Итог сетевого зонда прав публикатора.
+
+	Attributes:
+		ok: True/False — Telegram подтвердил наличие/отсутствие прав;
+			None — проверить не удалось (нет связи, аккаунт отключён):
+			это не знание о правах, менять привязку по нему нельзя.
+		info: свежие данные сообщества при ``ok is True`` — из них
+			обновляются изменчивые свойства (признак форума, ADR-0021).
+	"""
+
+	ok: bool | None
+	info: CommunityInfo | None = None
+
+
 class _CommunityChecker(Protocol):
 	"""Часть шлюза Telegram, нужная сервису (для подмены в тестах)."""
 
@@ -131,13 +147,7 @@ class CommunitiesService:
 		# «не удалось проверить» при подключении равносильно «админа нет»:
 		# привязку добавит перепроверка доступов, когда аккаунт появится
 		account_id = await self._find_userbot_admin(info.chat_id)
-		community = await self._store_community(
-			title=info.title,
-			tg_chat_id=info.chat_id,
-			username=info.username,
-			bot_id=bot.id,
-			tg_account_id=account_id,
-		)
+		community = await self._store_community(info, bot_id=bot.id, tg_account_id=account_id)
 		logger.info(
 			"Подключён канал «%s» (бот %s, userbot-админ: %s).",
 			info.title,
@@ -160,37 +170,25 @@ class CommunitiesService:
 		account = await self._get_account(account_id)
 		logger.info("Подключаю канал через userbot «%s»: ввод %r.", account.label, chat_ref)
 		info = await self._gateway.check_community_userbot(account_id, chat_ref)
-		community = await self._store_community(
-			title=info.title,
-			tg_chat_id=info.chat_id,
-			username=info.username,
-			bot_id=None,
-			tg_account_id=account_id,
-		)
+		community = await self._store_community(info, bot_id=None, tg_account_id=account_id)
 		logger.info("Подключён канал «%s» (userbot «%s»).", info.title, account.label)
 		return await self._fresh_dto(community.id)
 
-	async def _probe_userbot(self, account_id: int, chat_id: str) -> bool | None:
-		"""Проверяет права одного аккаунта (сбой не мешает операции).
-
-		Returns:
-			True/False — Telegram подтвердил наличие/отсутствие прав;
-			None — проверить не удалось (нет связи, аккаунт отключён):
-			это не знание о правах, менять привязку по нему нельзя.
-		"""
+	async def _probe_userbot(self, account_id: int, chat_id: str) -> _ProbeResult:
+		"""Проверяет права одного аккаунта (сбой не мешает операции)."""
 		try:
-			await self._gateway.check_community_userbot(account_id, chat_id)
+			info = await self._gateway.check_community_userbot(account_id, chat_id)
 		except UserbotAccessError:
-			logger.info("Аккаунт id=%s не админ канала %s.", account_id, chat_id)
-			return False
+			logger.info("Аккаунт id=%s не может публиковать в сообществе %s.", account_id, chat_id)
+			return _ProbeResult(ok=False)
 		except Exception:  # noqa: BLE001 — вспомогательная проверка
 			logger.info(
-				"Проверка аккаунта id=%s в канале %s не удалась (сеть или подключение).",
+				"Проверка аккаунта id=%s в сообществе %s не удалась (сеть или подключение).",
 				account_id,
 				chat_id,
 			)
-			return None
-		return True
+			return _ProbeResult(ok=None)
+		return _ProbeResult(ok=True, info=info)
 
 	async def _find_userbot_admin(self, chat_id: str) -> int | None:
 		"""Ищет админа канала среди вошедших аккаунтов (первый подходящий).
@@ -211,34 +209,37 @@ class CommunitiesService:
 				.all()
 			)
 		for account_id in account_ids:
-			if await self._probe_userbot(account_id, chat_id) is True:
+			if (await self._probe_userbot(account_id, chat_id)).ok is True:
 				return account_id
 		return None
 
 	async def _store_community(
 		self,
+		info: CommunityInfo,
 		*,
-		title: str,
-		tg_chat_id: str,
-		username: str | None,
 		bot_id: int | None,
 		tg_account_id: int | None,
 	) -> Community:
-		"""Сохраняет канал, отклоняя дубликат.
+		"""Сохраняет сообщество из проверенных данных, отклоняя дубликат.
+
+		Вид и признак форума берутся из проверки транспорта (ADR-0021):
+		вид дальше не меняется, форум обновляют перепроверки.
 
 		Raises:
-			CommunityError: Канал уже подключён.
+			CommunityError: Сообщество уже подключено.
 		"""
 		async with self._db.session_factory() as session:
 			existing = await session.execute(
-				select(Community.id).where(Community.tg_chat_id == tg_chat_id)
+				select(Community.id).where(Community.tg_chat_id == info.chat_id)
 			)
 			if existing.scalar_one_or_none() is not None:
-				raise CommunityError(f"Канал «{title}» уже подключён.")
+				raise CommunityError(f"«{info.title}» уже подключено.")
 			community = Community(
-				title=title,
-				tg_chat_id=tg_chat_id,
-				username=username,
+				title=info.title,
+				tg_chat_id=info.chat_id,
+				username=info.username,
+				kind=info.kind,
+				forum=info.forum,
 				bot_id=bot_id,
 				tg_account_id=tg_account_id,
 			)
@@ -270,9 +271,12 @@ class CommunitiesService:
 			bound_account_id = community.tg_account_id
 			bot_token = community.bot.token if community.bot is not None else None
 		userbot_ok: bool | None
+		fresh_info: CommunityInfo | None = None
 		new_account_id = bound_account_id
 		if bound_account_id is not None:
-			userbot_ok = await self._probe_userbot(bound_account_id, tg_chat_id)
+			probe = await self._probe_userbot(bound_account_id, tg_chat_id)
+			userbot_ok = probe.ok
+			fresh_info = probe.info
 			if userbot_ok is False:
 				new_account_id = None  # подтверждённый отказ — привязка снимается
 		else:
@@ -281,12 +285,16 @@ class CommunitiesService:
 			userbot_ok = True if found is not None else None
 		bot_ok: bool | None = None
 		if bot_token is not None:
-			bot_ok = await self._probe_bot(bot_token, tg_chat_id)
+			bot_probe = await self._probe_bot(bot_token, tg_chat_id)
+			bot_ok = bot_probe.ok
+			fresh_info = fresh_info or bot_probe.info
 		if new_account_id != bound_account_id:
 			async with self._db.session_factory() as session:
 				community = await self._community_in_session(session, community_id)
 				community.tg_account_id = new_account_id
 				await session.commit()
+		if fresh_info is not None:
+			await self._refresh_forum(community_id, fresh_info)
 		dto = await self._fresh_dto(community_id)
 		logger.info(
 			"Доступы канала «%s»: userbot=%s (аккаунт %s), бот=%s.",
@@ -309,11 +317,12 @@ class CommunitiesService:
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			chat_id = community.tg_chat_id
-		await self._gateway.check_community_userbot(account_id, chat_id)
+		info = await self._gateway.check_community_userbot(account_id, chat_id)
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			community.tg_account_id = account_id
 			await session.commit()
+		await self._refresh_forum(community_id, info)
 		dto = await self._fresh_dto(community_id)
 		logger.info("Каналу «%s» привязан userbot «%s».", dto.title, account.label)
 		return dto
@@ -343,11 +352,12 @@ class CommunitiesService:
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			chat_id = community.tg_chat_id
-		await self._gateway.check_community(bot.token, chat_id)
+		info = await self._gateway.check_community(bot.token, chat_id)
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			community.bot_id = bot.id
 			await session.commit()
+		await self._refresh_forum(community_id, info)
 		dto = await self._fresh_dto(community_id)
 		logger.info("Каналу «%s» назначен бот «%s».", dto.title, bot.label)
 		return dto
@@ -366,13 +376,34 @@ class CommunitiesService:
 		logger.info("От канала «%s» отвязан бот.", dto.title)
 		return dto
 
-	async def _probe_bot(self, token: str, chat_id: str) -> bool:
+	async def _probe_bot(self, token: str, chat_id: str) -> _ProbeResult:
 		"""Проверяет права бота, не роняя перепроверку."""
 		try:
-			await self._gateway.check_community(token, chat_id)
+			info = await self._gateway.check_community(token, chat_id)
 		except Exception:  # noqa: BLE001 — итог отражается в ответе
-			return False
-		return True
+			return _ProbeResult(ok=False)
+		return _ProbeResult(ok=True, info=info)
+
+	async def _refresh_forum(self, community_id: int, info: CommunityInfo) -> None:
+		"""Обновляет изменчивые свойства по свежей проверке (ADR-0021).
+
+		Сейчас изменчив только признак форума. Вид не трогается: он
+		определяется подключением; расхождение с Telegram — предупреждение
+		в лог (запись остаётся прежней, владелец переподключит).
+		"""
+		async with self._db.session_factory() as session:
+			community = await self._community_in_session(session, community_id)
+			if community.kind != info.kind:
+				logger.warning(
+					"Вид сообщества «%s» по Telegram (%s) расходится с записью (%s) — не меняю.",
+					community.title,
+					info.kind,
+					community.kind,
+				)
+			if community.forum != info.forum:
+				community.forum = info.forum
+				await session.commit()
+				logger.info("Сообщество «%s»: признак форума → %s.", community.title, info.forum)
 
 	async def delete_community(self, community_id: int) -> None:
 		"""Удаляет канал со всем хозяйством (из приложения, не из Telegram).

@@ -14,9 +14,11 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotSessionExpiredError,
 	UserbotUnavailableError,
+	community_kind_from_entity,
 	ensure_userbot_can_post,
+	ensure_userbot_can_send,
 )
-from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost
+from pxcontrol.engine.telegram.types import CommunityKind, MediaKind, OutgoingPost
 
 
 class _FakeClient:
@@ -28,6 +30,9 @@ class _FakeClient:
 		self.me_premium = False
 		self.sent: list[tuple[Any, str, Any]] = []
 		self.files: list[dict[str, Any]] = []
+		# сущность и права для check_community (тесты задают под сценарий)
+		self.entity: Any = None
+		self.permissions: Any = None
 
 	async def connect(self) -> None:
 		self.connect_calls += 1
@@ -57,6 +62,12 @@ class _FakeClient:
 
 	async def get_input_entity(self, entity_id: Any) -> str:
 		return f"entity:{entity_id}"
+
+	async def get_entity(self, ref: Any) -> Any:
+		return self.entity
+
+	async def get_permissions(self, entity: Any, user: Any) -> Any:
+		return self.permissions
 
 	async def __call__(self, request: Any) -> Any:
 		return SimpleNamespace(
@@ -451,3 +462,88 @@ async def test_bot_errors_translate_flood_and_server_failures() -> None:
 		await _raise_inside(TelegramEntityTooLarge(GetMe(), "too large"))
 	with pytest.raises(CommunityCheckError, match="отклонил операцию"):
 		await _raise_inside(TelegramServerError(GetMe(), "internal"))
+
+
+def test_community_kind_from_entity() -> None:
+	"""Вид по сущности Telethon; малая группа и личный чат — отказ."""
+	from telethon.tl.types import Chat
+
+	channel = SimpleNamespace(broadcast=True, megagroup=False)
+	assert community_kind_from_entity(channel) is CommunityKind.CHANNEL
+	megagroup = SimpleNamespace(broadcast=False, megagroup=True)
+	assert community_kind_from_entity(megagroup) is CommunityKind.GROUP
+	gigagroup = SimpleNamespace(broadcast=False, megagroup=False, gigagroup=True)
+	assert community_kind_from_entity(gigagroup) is CommunityKind.GROUP
+	small = Chat(id=1, title="Малая", photo=None, participants_count=2, date=None, version=1)
+	with pytest.raises(UserbotUnavailableError, match="супергруппу"):
+		community_kind_from_entity(small)
+	with pytest.raises(UserbotUnavailableError, match="личный чат"):
+		community_kind_from_entity(SimpleNamespace(broadcast=False, megagroup=False))
+
+
+def _group_member(
+	*, admin: bool = False, left: bool = False, banned: bool = False, banned_rights: Any = None
+) -> SimpleNamespace:
+	"""Права участника группы для ensure_userbot_can_send."""
+	return SimpleNamespace(
+		is_admin=admin,
+		has_left=left,
+		is_banned=banned,
+		participant=SimpleNamespace(banned_rights=banned_rights),
+	)
+
+
+def test_ensure_userbot_can_send() -> None:
+	"""Права в группе: писать может любой не ограниченный участник."""
+	deny_all = SimpleNamespace(send_messages=True, send_plain=False)
+	deny_text = SimpleNamespace(send_messages=False, send_plain=True)
+	allow = SimpleNamespace(send_messages=False, send_plain=False)
+	# админу общие ограничения группы не мешают (гигагруппа — тот же случай)
+	ensure_userbot_can_send(_group_member(admin=True), deny_all)
+	ensure_userbot_can_send(_group_member(), None)
+	ensure_userbot_can_send(_group_member(), allow)
+	# ограниченный, но с правом писать — годится
+	ensure_userbot_can_send(_group_member(banned=True, banned_rights=allow), None)
+	with pytest.raises(UserbotUnavailableError, match="не участник"):
+		ensure_userbot_can_send(_group_member(left=True), None)
+	with pytest.raises(UserbotUnavailableError, match="ограничен в отправке"):
+		ensure_userbot_can_send(_group_member(banned=True, banned_rights=deny_all), None)
+	# гранулярный запрет текста (send_plain) — тоже запрет
+	with pytest.raises(UserbotUnavailableError, match="ограничен в отправке"):
+		ensure_userbot_can_send(_group_member(banned=True, banned_rights=deny_text), None)
+	with pytest.raises(UserbotUnavailableError, match="только администраторы"):
+		ensure_userbot_can_send(_group_member(), deny_all)
+
+
+async def test_check_community_group_returns_kind_and_forum() -> None:
+	"""check_community: группа-форум проходит и отдаёт вид и признак тем."""
+	from telethon.tl.types import Channel
+
+	client = _FakeClient()
+	client.entity = Channel(
+		id=123, title="Группа", photo=None, date=None, megagroup=True, forum=True, username="grp"
+	)
+	client.permissions = _group_member()
+	transport = _transport(client)
+	await transport.start()
+	info = await transport.check_community("@grp")
+	assert info.kind is CommunityKind.GROUP
+	assert info.forum is True
+	assert info.title == "Группа"
+
+
+async def test_check_community_channel_requires_admin() -> None:
+	"""check_community: канал по-прежнему требует админа с правом постить."""
+	from telethon.tl.types import Channel
+
+	client = _FakeClient()
+	client.entity = Channel(
+		id=124, title="Канал", photo=None, date=None, broadcast=True, username="chan"
+	)
+	client.permissions = SimpleNamespace(
+		is_admin=False, is_creator=False, participant=SimpleNamespace()
+	)
+	transport = _transport(client)
+	await transport.start()
+	with pytest.raises(UserbotUnavailableError, match="не администратор"):
+		await transport.check_community("@chan")

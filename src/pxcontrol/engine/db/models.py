@@ -10,7 +10,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+	JSON,
+	Boolean,
+	DateTime,
+	Float,
+	ForeignKey,
+	Integer,
+	String,
+	Text,
+	func,
+	text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from pxcontrol.engine.db.types import EncryptedStr
@@ -167,8 +178,10 @@ class VideoPreset(TimestampMixin, Base):
 
 
 class Community(TimestampMixin, Base):
-	"""Подключённый Telegram-канал.
+	"""Подключённое сообщество: канал или группа Telegram (ADR-0021).
 
+	Вид (канал или группа) — колонка ``kind`` со значениями
+	``CommunityKind`` (ADR-0021); признак форума — изменчивый флаг.
 	Два возможных публикатора — ссылками (оба необязательны, ADR-0019):
 	``tg_account_id`` — userbot-аккаунт-админ (постинг идёт из его
 	сессии, приоритетный путь по ADR-0011), ``bot_id`` — бот-публикатор
@@ -184,6 +197,12 @@ class Community(TimestampMixin, Base):
 	title: Mapped[str] = mapped_column(String(255))
 	tg_chat_id: Mapped[str] = mapped_column(String(64), unique=True)
 	username: Mapped[str | None] = mapped_column(String(255), default=None)
+	# вид сообщества (ADR-0021): значения CommunityKind («channel»/«group»),
+	# определяется при подключении и не меняется жизнью записи
+	kind: Mapped[str] = mapped_column(String(16), default="channel", server_default="channel")
+	# темы (форум) включены; изменчивое свойство группы — обновляется
+	# при подключении и перепроверке доступов (потому не часть kind)
+	forum: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
 	# userbot-аккаунт-админ; аккаунт удаляется — канал остаётся без него
 	tg_account_id: Mapped[int | None] = mapped_column(
 		ForeignKey("tg_accounts.id", ondelete="SET NULL"), default=None

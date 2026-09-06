@@ -20,6 +20,7 @@ from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.types import (
 	TELEGRAM_MAX_SCHEDULED,
 	CommunityInfo,
+	CommunityKind,
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
@@ -198,6 +199,78 @@ def ensure_userbot_can_post(perms: Any) -> None:
 	rights = getattr(perms.participant, "admin_rights", None)
 	if not perms.is_creator and not getattr(rights, "post_messages", False):
 		raise UserbotAccessError("У userbot нет права публиковать сообщения в канале.")
+
+
+def _forbids_sending(banned_rights: Any) -> bool:
+	"""Запрещает ли набор ограничений отправку сообщений.
+
+	Проверяются общий флаг ``send_messages`` и текстовый ``send_plain``
+	(гранулярные права 2023 года). Медиа-права (``send_media``
+	и подробнее) сознательно не проверяются: их сочетаний много,
+	а отказ по конкретному типу вложения честно вернёт сама отправка.
+	"""
+	return bool(
+		getattr(banned_rights, "send_messages", False)
+		or getattr(banned_rights, "send_plain", False)
+	)
+
+
+def ensure_userbot_can_send(perms: Any, default_banned_rights: Any) -> None:
+	"""Требует возможность писать в группе (ADR-0021).
+
+	Групповая пара ``ensure_userbot_can_post``: права ``post_messages``
+	в группах нет. Админам (и создателю) ограничения не мешают;
+	ограниченный участник упирается в свои ограничения, обычный —
+	в общие ограничения группы (в том числе гигагруппы: там писать
+	могут только админы, что выражено теми же общими ограничениями).
+
+	Args:
+		perms: ``ParticipantPermissions`` самого аккаунта.
+		default_banned_rights: общие ограничения группы
+			(``entity.default_banned_rights``).
+
+	Raises:
+		UserbotAccessError: Аккаунт не участник или не может писать
+			(подтверждённый отказ — основание менять привязку, ADR-0019).
+	"""
+	if perms.is_admin:
+		return
+	if perms.has_left:
+		raise UserbotAccessError("Userbot не участник группы — вступите в неё с этого аккаунта.")
+	if perms.is_banned and _forbids_sending(getattr(perms.participant, "banned_rights", None)):
+		raise UserbotAccessError("Userbot ограничен в отправке сообщений в этой группе.")
+	if _forbids_sending(default_banned_rights):
+		raise UserbotAccessError(
+			"В группе писать могут только администраторы — назначьте аккаунт администратором."
+		)
+
+
+def community_kind_from_entity(entity: Any) -> CommunityKind:
+	"""Вид сообщества по сущности Telethon (ADR-0021).
+
+	Каналы и супергруппы Telegram — один тип ``Channel`` с флагами:
+	``broadcast`` — канал-вещалка, ``megagroup`` — супергруппа,
+	``gigagroup`` — вещательная группа (считается группой: постинг
+	в ней ограничен общими правами, а не правом ``post_messages``).
+	Тип ``Chat`` — малая группа, всё прочее (пользователь) — не чат.
+
+	Raises:
+		UserbotAccessError: Сущность не подключается: малая группа —
+			с подсказкой преобразовать в супергруппу, личный чат —
+			с объяснением.
+	"""
+	if getattr(entity, "broadcast", False):
+		return CommunityKind.CHANNEL
+	if getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False):
+		return CommunityKind.GROUP
+	from telethon.tl.types import Chat
+
+	if isinstance(entity, Chat):
+		raise UserbotAccessError(
+			"Малые группы не подключаются — преобразуйте группу "
+			"в супергруппу (в настройках группы) и повторите."
+		)
+	raise UserbotAccessError("Это личный чат — укажите канал или группу.")
 
 
 def _peer_id(chat_id: str) -> int:
@@ -419,15 +492,20 @@ class MtprotoTransport:
 		)
 
 	async def check_community(self, chat_ref: str) -> CommunityInfo:
-		"""Проверяет канал и права userbot: админ с правом публиковать.
+		"""Проверяет сообщество и права userbot по его виду (ADR-0021).
 
-		Принимает @имя, ссылку t.me/… или ID -100… (разбор общий
-		с бот-путём — ``normalize_chat_ref``).
+		Канал: аккаунт — админ с правом публиковать. Группа
+		(супергруппа): участник, не ограниченный в отправке. Малая
+		группа и личный чат не подключаются. Принимает @имя, ссылку
+		t.me/… или ID -100… (разбор общий с бот-путём —
+		``normalize_chat_ref``).
 
 		Raises:
 			ChatRefError: Введённую ссылку/имя не удалось разобрать.
-			UserbotUnavailableError: Userbot не подключён, канал не найден,
-				userbot не админ или без права публиковать.
+			UserbotAccessError: Прав не хватает или вид не подключается
+				(малая группа, личный чат) — подтверждённый отказ.
+			UserbotUnavailableError: Userbot не подключён или сообщество
+				не найдено.
 		"""
 		from telethon import utils
 
@@ -436,11 +514,17 @@ class MtprotoTransport:
 		async with _mtproto_errors():
 			entity = await client.get_entity(ref)
 			perms = await client.get_permissions(entity, "me")
-		ensure_userbot_can_post(perms)
+		kind = community_kind_from_entity(entity)
+		if kind is CommunityKind.CHANNEL:
+			ensure_userbot_can_post(perms)
+		else:
+			ensure_userbot_can_send(perms, getattr(entity, "default_banned_rights", None))
 		return CommunityInfo(
 			chat_id=str(utils.get_peer_id(entity)),
 			title=str(getattr(entity, "title", "") or chat_ref),
 			username=getattr(entity, "username", None),
+			kind=kind,
+			forum=bool(getattr(entity, "forum", False)),
 		)
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:

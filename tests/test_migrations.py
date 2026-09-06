@@ -237,6 +237,27 @@ def test_community_enabled_moves_to_settings(tmp_path: Path) -> None:
 	assert "enabled" not in columns
 
 
+def test_community_kind_defaults_for_existing_rows(tmp_path: Path) -> None:
+	"""Миграция b3e7d51f9a24: существующие сообщества — каналы без форума.
+
+	Валидация до ADR-0021 пропускала только каналы, поэтому умолчание
+	``kind = channel`` для старых строк честное; ``forum`` появляется
+	выключенным и дальше живёт перепроверками доступов.
+	"""
+	db_file = tmp_path / "kind.db"
+	_upgrade(db_file, "a9d4c37e8b15")  # состояние до вида и форума
+	with sqlite3.connect(db_file) as conn:
+		conn.execute(
+			"INSERT INTO communities (title, tg_chat_id, created_at, updated_at)"
+			" VALUES ('c', '-1001', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		)
+		conn.commit()
+	_upgrade(db_file, "head")
+	with sqlite3.connect(db_file) as conn:
+		row = conn.execute("SELECT kind, forum FROM communities").fetchone()
+	assert row == ("channel", 0)
+
+
 async def test_backup_before_upgrade_copies_and_rotates(tmp_path: Path) -> None:
 	"""Автокопия БД: делается при непримененных ревизиях, ротация — только своих."""
 	from sqlalchemy.engine import make_url
