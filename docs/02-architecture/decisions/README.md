@@ -40,6 +40,7 @@
 | [0018](0018-telegram-api-key-per-app.md) | Ключ API Telegram — один на приложение | accepted |
 | [0019](0019-channel-userbot-binding.md) | Привязка userbot-аккаунта к каналу; пул клиентов MTProto | accepted |
 | [0020](0020-cooperative-background-shutdown.md) | Кооперативная остановка фоновых задач движка | accepted |
+| [0021](0021-communities-channels-and-groups.md) | Сообщества: канал и группа — виды одной сущности | accepted |
 
 ## Как добавить запись
 
