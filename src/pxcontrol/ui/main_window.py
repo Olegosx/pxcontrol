@@ -58,7 +58,9 @@ class MainWindow(FluentWindow):
 
 	def _build_navigation(self) -> None:
 		"""Наполняет боковую навигацию разделами приложения."""
-		self.addSubInterface(CommunitiesPage(self._worker, self), FluentIcon.HOME, "Каналы")
+		self.addSubInterface(
+			CommunitiesPage(self._worker, self), FluentIcon.HOME, "Каналы и группы"
+		)
 		self._video_page = VideoPage(self._worker, self)
 		self.addSubInterface(self._video_page, FluentIcon.VIDEO, "Видео")
 		self._publish_page = PublishPage(self._worker, self)

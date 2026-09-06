@@ -40,6 +40,8 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.telegram.types import CommunityKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 
@@ -94,6 +96,20 @@ DEFAULT_SCHEDULE_OFFSET_S = 3600
 def bot_caption(label: str, username: str | None) -> str:
 	"""Единая метка бота в списках и диалогах: «Имя (@username)»."""
 	return f"{label} (@{username or '—'})"
+
+
+def community_kind_caption(community: CommunityDto) -> str:
+	"""Человеческая метка вида сообщества (карточки, подсказки)."""
+	if community.kind is CommunityKind.GROUP:
+		return "Группа-форум" if community.forum else "Группа"
+	return "Канал"
+
+
+def community_combo_label(community: CommunityDto) -> str:
+	"""Подпись сообщества в выпадающих списках: группам — пометка вида."""
+	if community.kind is CommunityKind.GROUP:
+		return f"{community.title} — группа"
+	return community.title
 
 
 def account_caption(label: str, phone: str | None) -> str:

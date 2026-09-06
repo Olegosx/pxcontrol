@@ -112,6 +112,11 @@ class OutgoingPost:
 	topic_id: int | None = None
 
 
+#: Тема «General» форума: её id всегда 1, публикация в неё — обычная
+#: отправка без адресации темы (страница показывает её «Общей лентой»).
+GENERAL_TOPIC_ID = 1
+
+
 @dataclass(frozen=True)
 class ForumTopicInfo:
 	"""Тема форума, прочитанная транспортом из Telegram (ADR-0021).

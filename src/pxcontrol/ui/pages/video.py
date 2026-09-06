@@ -66,6 +66,7 @@ from pxcontrol.ui.pages.common import (
 	QueuePanel,
 	bind,
 	clear_layout,
+	community_combo_label,
 	confirm_delete,
 	error_reporter,
 	exec_dialog,
@@ -376,7 +377,7 @@ class VideoPage(ScrollArea):
 		"""Наполняет список каналов (выбор сохраняется по id канала)."""
 		self._community_combo.set_items(
 			communities,
-			label=lambda community: community.title,
+			label=community_combo_label,
 			key=lambda community: community.id,
 		)
 

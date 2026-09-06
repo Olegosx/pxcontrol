@@ -18,6 +18,7 @@ from pathlib import Path
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
+	BodyLabel,
 	CaptionLabel,
 	CheckBox,
 	FluentIcon,
@@ -51,7 +52,12 @@ from pxcontrol.engine.services.settings import (
 	TITLE_PARSE_RULES,
 )
 from pxcontrol.engine.services.video import ReadyVideo, VideoDirs, video_dialog_filter
-from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES, MediaKind
+from pxcontrol.engine.telegram.types import (
+	BOT_MAX_FILE_BYTES,
+	GENERAL_TOPIC_ID,
+	ForumTopicInfo,
+	MediaKind,
+)
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
@@ -59,6 +65,7 @@ from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	QueuePanel,
 	WhenRow,
+	community_combo_label,
 	error_reporter,
 	exec_dialog,
 	noop,
@@ -147,6 +154,7 @@ class PublishPage(ScrollArea):
 		layout.addWidget(self._community_combo)
 		self._caps_hint = CaptionLabel("", self)
 		layout.addWidget(self._caps_hint)
+		self._build_topic_row(layout)
 		self._text = TextEdit(self)
 		self._text.setPlaceholderText("Текст поста…")
 		self._text.setMinimumHeight(120)
@@ -158,6 +166,23 @@ class PublishPage(ScrollArea):
 		layout.addStretch()
 		# после сборки всех полей — сегмент по умолчанию (сигнал трогает форму)
 		self._segments.setCurrentItem(MediaKind.NONE.value)
+
+	def _build_topic_row(self, layout: QVBoxLayout) -> None:
+		"""Ряд выбора темы форума (виден только форумам с userbot)."""
+		self._topic_box = QWidget(self)
+		row = QHBoxLayout(self._topic_box)
+		row.setContentsMargins(0, 0, 0, 0)
+		row.addWidget(BodyLabel("Тема форума:", self._topic_box))
+		self._topic_combo: DtoComboBox[ForumTopicInfo] = DtoComboBox(
+			self._topic_box, placeholder="Общая лента"
+		)
+		self._topic_combo.setToolTip(
+			"Тема, в которую уйдёт пост; «Общая лента» — General. "
+			"Список читается из Telegram при выборе сообщества."
+		)
+		row.addWidget(self._topic_combo, stretch=1)
+		layout.addWidget(self._topic_box)
+		self._topic_box.setVisible(False)
 
 	def _build_kind_segments(self, layout: QVBoxLayout) -> None:
 		"""Сегментный переключатель типа контента."""
@@ -296,7 +321,7 @@ class PublishPage(ScrollArea):
 		"""
 		self._community_combo.set_items(
 			[community for community in communities if community.enabled],
-			label=lambda community: community.title,
+			label=community_combo_label,
 			key=lambda community: community.id,
 		)
 		# успешное восстановление само запускает обработчик смены (сигнал
@@ -348,6 +373,7 @@ class PublishPage(ScrollArea):
 			noop,
 		)
 		caps = _community_caps(community)
+		self._update_topic_row(community, caps)
 		if caps.userbot:
 			# лимит зависит от Premium userbot — узнаём у движка
 			self._caps_hint.setText(
@@ -372,6 +398,54 @@ class PublishPage(ScrollArea):
 				"⚠ Нет способа публикации — проверьте доступы на странице «Каналы»."
 			)
 			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
+
+	def _update_topic_row(self, community: CommunityDto, caps: PublishCapabilities) -> None:
+		"""Показывает и наполняет выбор темы форума (ADR-0021).
+
+		Темы читает только userbot (у Bot API метода нет): форум лишь
+		с ботом публикует в общую ленту — ряд темы скрыт, о причине
+		скажет подсказка возможностей.
+		"""
+		if not community.forum or not caps.userbot:
+			self._topic_box.setVisible(False)
+			self._topic_combo.set_items([], label=lambda topic: topic.title)
+			return
+		self._topic_box.setVisible(True)
+		self._topic_combo.set_items([], label=lambda topic: topic.title)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.posts.list_topics(community.id),
+			self,
+			partial(self._show_topics, community.id),
+			partial(self._on_topics_failed, community.id),
+		)
+
+	def _show_topics(self, community_id: int, topics: list[ForumTopicInfo]) -> None:
+		"""Наполняет список тем (General не дублируем — он «Общая лента»)."""
+		if self._is_stale(community_id):
+			return
+		self._topic_combo.set_items(
+			[topic for topic in topics if topic.id != GENERAL_TOPIC_ID],
+			label=lambda topic: topic.title,
+			key=lambda topic: topic.id,
+		)
+
+	def _on_topics_failed(self, community_id: int, message: str) -> None:
+		"""Темы не прочитались — публикуем в общую ленту, честно предупредив."""
+		if self._is_stale(community_id):
+			return
+		self._topic_box.setVisible(False)
+		self._caps_hint.setText(
+			f"{self._caps_hint.text()} Темы форума не загрузились ({message}) — "
+			"пост уйдёт в общую ленту."
+		)
+
+	def _selected_topic_id(self) -> int | None:
+		"""Тема из видимого ряда; скрыт или «Общая лента» — None."""
+		if not self._topic_box.isVisibleTo(self):
+			return None
+		topic = self._topic_combo.selected()
+		return topic.id if topic is not None else None
 
 	def _is_stale(self, community_id: int) -> bool:
 		"""Пришёл ли ответ движка для уже переключённого канала.
@@ -748,7 +822,7 @@ class PublishPage(ScrollArea):
 		if not exec_dialog(dialog):
 			return
 		try:
-			drafts = dialog.drafts(setup.community.id)
+			drafts = dialog.drafts(setup.community.id, self._selected_topic_id())
 		except ValueError as exc:  # страховка: validate диалога это уже проверил
 			self._show_error(str(exc))
 			return
@@ -816,6 +890,7 @@ class PublishPage(ScrollArea):
 			media_kind=MediaKind.NONE if is_text else self._kind,
 			when=self._when_row.when(),
 			rename_to=self._rename_to(),
+			topic_id=self._selected_topic_id(),
 		)
 
 	def _rename_to(self) -> str | None:

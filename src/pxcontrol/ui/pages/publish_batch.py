@@ -226,8 +226,11 @@ class PublishBatchDialog(MessageBoxBase):
 		self._request_renames()
 		self._apply_initial_plan()
 
-	def drafts(self, community_id: int) -> list[PostDraft]:
+	def drafts(self, community_id: int, topic_id: int | None = None) -> list[PostDraft]:
 		"""Черновики отмеченных строк (время — в UTC, как у формы).
+
+		``topic_id`` — тема форума для всего пакета (пакет идёт в одно
+		сообщество; выбор темы живёт на «Публикации», ADR-0021).
 
 		Raises:
 			ValueError: Время какой-то строки не разобралось (сначала
@@ -244,6 +247,7 @@ class PublishBatchDialog(MessageBoxBase):
 					media_kind=MediaKind.VIDEO,
 					when=when_local.astimezone(UTC) if when_local else None,
 					rename_to=str(row.rename.text()).strip() or None,
+					topic_id=topic_id,
 				)
 			)
 		return result

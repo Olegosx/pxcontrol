@@ -1,7 +1,8 @@
-"""Страница «Каналы»: подключение каналов и их список."""
+"""Страница «Каналы и группы»: подключение сообществ и их список."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -33,6 +34,7 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 )
 from pxcontrol.engine.services.video import PresetDto
+from pxcontrol.engine.telegram.types import CommunityKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -42,6 +44,7 @@ from pxcontrol.ui.pages.common import (
 	bind,
 	bot_caption,
 	clear_layout,
+	community_kind_caption,
 	confirm_delete,
 	error_reporter,
 	exec_dialog,
@@ -51,6 +54,13 @@ from pxcontrol.ui.pages.common import (
 	row_card,
 	show_warning,
 )
+
+#: Фильтр списка по виду: подпись пункта → правило показа.
+_KIND_FILTERS: list[tuple[str, Callable[[CommunityDto], bool]]] = [
+	("Все", lambda community: True),
+	("Каналы", lambda community: community.kind is CommunityKind.CHANNEL),
+	("Группы", lambda community: community.kind is CommunityKind.GROUP),
+]
 
 
 class _ConnectDialog(MessageBoxBase):
@@ -62,21 +72,21 @@ class _ConnectDialog(MessageBoxBase):
 
 	_HINTS = {
 		"userbot": (
-			"Выбранный аккаунт должен быть администратором канала\n"
-			"с правом публиковать сообщения (бот не нужен)."
+			"Каналу аккаунт нужен администратором с правом публиковать;\n"
+			"группе достаточно участника без ограничений (бот не нужен)."
 		),
 		"bot": (
-			"Перед подключением добавьте бота администратором канала\n"
-			"с правом публиковать сообщения."
+			"В канал добавьте бота администратором с правом публиковать;\n"
+			"в группу — участником (админство не требуется)."
 		),
 	}
 
 	def __init__(self, bots: list[BotDto], accounts: list[TgAccountDto], parent: QWidget) -> None:
 		"""``accounts`` — вошедшие userbot-аккаунты (кандидаты в админы)."""
 		super().__init__(parent)
-		self.viewLayout.addWidget(SubtitleLabel("Подключить канал", self))
+		self.viewLayout.addWidget(SubtitleLabel("Подключить канал или группу", self))
 		self._way = ComboBox(self)
-		self._way.addItem("Через userbot (аккаунт — админ канала)")
+		self._way.addItem("Через userbot (приоритетный способ)")
 		self._way.addItem("Через бота")
 		self._way.currentIndexChanged.connect(self._on_way_changed)
 		self.viewLayout.addWidget(self._way)
@@ -91,7 +101,7 @@ class _ConnectDialog(MessageBoxBase):
 		self._combo.set_items(bots, label=lambda bot: bot_caption(bot.label, bot.username))
 		self.viewLayout.addWidget(self._combo)
 		self._ref = LineEdit(self)
-		self._ref.setPlaceholderText("@имя, ссылка t.me/… или ID -100… (приватный канал)")
+		self._ref.setPlaceholderText("@имя, ссылка t.me/… или ID -100…")
 		self._ref.setClearButtonEnabled(True)
 		self.viewLayout.addWidget(self._ref)
 		self._error = ErrorLabel(self)
@@ -105,7 +115,7 @@ class _ConnectDialog(MessageBoxBase):
 		"""Крючок MessageBoxBase: при ошибке диалог не закрывается —
 		введённая ссылка не пропадает."""
 		if not self.chat_ref():
-			return self._error.fail("Укажите @имя, ссылку или ID канала.")
+			return self._error.fail("Укажите @имя, ссылку или ID канала либо группы.")
 		if self.way() == "bot" and self.bot_id() is None:
 			return self._error.fail("Сначала добавьте бота: Настройки → Аккаунты.")
 		if self.way() == "userbot" and self.account_id() is None:
@@ -135,7 +145,7 @@ class _ConnectDialog(MessageBoxBase):
 		return account.id if account is not None else None
 
 	def chat_ref(self) -> str:
-		"""Введённая ссылка на канал."""
+		"""Введённая ссылка на сообщество."""
 		return str(self._ref.text()).strip()
 
 
@@ -147,7 +157,7 @@ class _AssignBotDialog(MessageBoxBase):
 		self.viewLayout.addWidget(SubtitleLabel("Назначить бота", self))
 		self.viewLayout.addWidget(
 			BodyLabel(
-				"Бот должен быть администратором канала\nс правом публиковать сообщения.",
+				"Каналу бот нужен администратором с правом публиковать;\nгруппе — участником.",
 				self,
 			)
 		)
@@ -172,8 +182,8 @@ class _AssignUserbotDialog(MessageBoxBase):
 		self.viewLayout.addWidget(SubtitleLabel("Привязать userbot", self))
 		self.viewLayout.addWidget(
 			BodyLabel(
-				"Аккаунт должен быть администратором канала с правом\n"
-				"публиковать — посты пойдут из его сессии.",
+				"Каналу аккаунт нужен админом с правом публиковать,\n"
+				"группе — участником; посты пойдут из его сессии.",
 				self,
 			)
 		)
@@ -191,7 +201,7 @@ class _AssignUserbotDialog(MessageBoxBase):
 
 
 class _CommunityPrefsDialog(MessageBoxBase):
-	"""Настройки канала: пресет видео по умолчанию и времена публикации."""
+	"""Настройки сообщества: пресет видео по умолчанию и времена публикации."""
 
 	_TIMES_HINT = "Через запятую, первое — по умолчанию; пусто — без стандартных."
 
@@ -204,7 +214,7 @@ class _CommunityPrefsDialog(MessageBoxBase):
 		parent: QWidget,
 	) -> None:
 		super().__init__(parent)
-		self.viewLayout.addWidget(SubtitleLabel("Настройки канала", self))
+		self.viewLayout.addWidget(SubtitleLabel("Настройки", self))
 		self.viewLayout.addWidget(BodyLabel(f"«{community_title}»", self))
 		self.viewLayout.addWidget(BodyLabel("Пресет видео по умолчанию:", self))
 		self._combo: DtoComboBox[PresetDto] = DtoComboBox(self, placeholder="(не задан)")
@@ -257,7 +267,7 @@ class _CommunityPrefsDialog(MessageBoxBase):
 
 
 class CommunitiesPage(ScrollArea):
-	"""Список подключённых каналов; подключение через проверку прав бота."""
+	"""Каналы и группы: список с фильтром вида, подключение и привязки."""
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
@@ -268,15 +278,21 @@ class CommunitiesPage(ScrollArea):
 		self._reload()
 
 	def _build(self) -> None:
-		"""Собирает шапку с кнопкой и область списка."""
+		"""Собирает шапку с фильтром вида, кнопкой и областью списка."""
 		layout = page_layout(self)
 		header = QHBoxLayout()
-		header.addWidget(SubtitleLabel("Подключённые каналы", self))
+		header.addWidget(SubtitleLabel("Каналы и группы", self))
 		header.addStretch()
-		connect_button = PrimaryPushButton(FluentIcon.ADD, "Подключить канал", self)
+		self._kind_filter = ComboBox(self)
+		self._kind_filter.addItems([label for label, _pred in _KIND_FILTERS])
+		self._kind_filter.setToolTip("Показывать все сообщества или только один вид")
+		self._kind_filter.currentIndexChanged.connect(lambda _i: self._render())
+		header.addWidget(self._kind_filter)
+		connect_button = PrimaryPushButton(FluentIcon.ADD, "Подключить…", self)
 		connect_button.clicked.connect(self._on_connect)
 		header.addWidget(connect_button)
 		layout.addLayout(header)
+		self._communities: list[CommunityDto] = []
 		self._list = QVBoxLayout()
 		self._list.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._list)
@@ -294,43 +310,57 @@ class CommunitiesPage(ScrollArea):
 		)
 
 	def _show_communities(self, communities: list[CommunityDto]) -> None:
+		self._communities = communities
+		self._render()
+
+	def _render(self) -> None:
+		"""Перерисовывает список по текущему фильтру вида."""
 		clear_layout(self._list)
-		if not communities:
-			self._list.addWidget(self._empty_state())
+		_label, predicate = _KIND_FILTERS[int(self._kind_filter.currentIndex())]
+		shown = [community for community in self._communities if predicate(community)]
+		if not shown:
+			self._list.addWidget(self._empty_state(filtered=bool(self._communities)))
 			return
-		for community in communities:
+		for community in shown:
 			self._list.addWidget(self._community_row(community))
 
-	def _empty_state(self) -> QWidget:
-		"""Пустое состояние с подсказкой."""
+	def _empty_state(self, filtered: bool = False) -> QWidget:
+		"""Пустое состояние: ничего не подключено или фильтр всё скрыл."""
 		box = QWidget(self)
 		layout = QVBoxLayout(box)
 		layout.setContentsMargins(0, 48, 0, 0)
-		title = SubtitleLabel("Пока нет подключённых каналов", box)
+		if filtered:
+			title = SubtitleLabel("Под фильтр ничего не попало", box)
+			hint = BodyLabel("Выберите «Все» в фильтре справа вверху.", box)
+		else:
+			title = SubtitleLabel("Пока нет подключённых каналов и групп", box)
+			hint = BodyLabel(
+				"Нажмите «Подключить…»: через userbot или через бота.",
+				box,
+			)
 		title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-		hint = BodyLabel(
-			"Нажмите «Подключить канал»: через userbot (аккаунт — админ) или через бота.",
-			box,
-		)
 		hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
 		layout.addWidget(title)
 		layout.addWidget(hint)
 		return box
 
 	def _community_row(self, community: CommunityDto) -> CardWidget:
-		"""Карточка канала: название, публикаторы, действия."""
+		"""Карточка сообщества: вид, название, публикаторы, действия."""
 		ways = []
 		if community.tg_account_label:
 			ways.append(f"userbot {community.tg_account_label}")
 		if community.bot_label:
 			ways.append(f"бот {community.bot_label}")
-		subtitle = f"@{community.username or '—'} · админ: {' + '.join(ways) or '—'}"
+		subtitle = (
+			f"{community_kind_caption(community)} · @{community.username or '—'} "
+			f"· публикатор: {' + '.join(ways) or '—'}"
+		)
 		buttons = QWidget(self)
 		row = QHBoxLayout(buttons)
 		row.setContentsMargins(0, 0, 0, 0)
 		enabled_switch = SwitchButton(buttons)
 		enabled_switch.setChecked(community.enabled)
-		enabled_switch.setToolTip("Канал активен: участвует в публикации и опросе расписания")
+		enabled_switch.setToolTip("Активно: участвует в публикации и опросе расписания")
 		enabled_switch.checkedChanged.connect(partial(self._on_toggle_enabled, community))
 		row.addWidget(enabled_switch)
 		recheck = PushButton("Проверить доступы", buttons)
@@ -438,7 +468,7 @@ class CommunitiesPage(ScrollArea):
 		)
 
 	def _on_prefs_saved(self, community: CommunityDto, _result: object = None) -> None:
-		InfoBar.success("Готово", f"Настройки канала «{community.title}» сохранены.", parent=self)
+		InfoBar.success("Готово", f"Настройки «{community.title}» сохранены.", parent=self)
 
 	# --- доступы и бот -----------------------------------------------------------
 
@@ -492,7 +522,7 @@ class CommunitiesPage(ScrollArea):
 		bot_id = dialog.bot_id()
 		if bot_id is None:
 			return
-		InfoBar.info("Проверка", "Проверяю права бота в канале…", parent=self)
+		InfoBar.info("Проверка", "Проверяю права бота…", parent=self)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.assign_bot(community.id, bot_id),
@@ -504,7 +534,7 @@ class CommunitiesPage(ScrollArea):
 	def _on_unassign_bot(self, community: CommunityDto) -> None:
 		if not confirm_delete(
 			self,
-			f"Отвязать бота от канала «{community.title}»?",
+			f"Отвязать бота от «{community.title}»?",
 			accept_text="Отвязать",
 		):
 			return
@@ -546,7 +576,7 @@ class CommunitiesPage(ScrollArea):
 		account_id = dialog.account_id()
 		if account_id is None:
 			return
-		InfoBar.info("Проверка", "Проверяю права аккаунта в канале…", parent=self)
+		InfoBar.info("Проверка", "Проверяю права аккаунта…", parent=self)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.assign_userbot(community.id, account_id),
@@ -558,7 +588,7 @@ class CommunitiesPage(ScrollArea):
 	def _on_unassign_userbot(self, community: CommunityDto) -> None:
 		if not confirm_delete(
 			self,
-			f"Отвязать userbot от канала «{community.title}»? Отложенные посты "
+			f"Отвязать userbot от «{community.title}»? Отложенные посты "
 			"и большие файлы станут ему недоступны.",
 			accept_text="Отвязать",
 		):
@@ -613,7 +643,7 @@ class CommunitiesPage(ScrollArea):
 			coro = self._worker.engine.communities.add_community_via_userbot(
 				account_id, dialog.chat_ref()
 			)
-		InfoBar.info("Проверка", "Проверяю канал и права…", parent=self)
+		InfoBar.info("Проверка", "Проверяю сообщество и права…", parent=self)
 		run_in_engine(self._worker, coro, self, self._on_connected, self._show_error)
 
 	def _on_connected(self, community: CommunityDto) -> None:
@@ -621,7 +651,7 @@ class CommunitiesPage(ScrollArea):
 		self._reload()
 
 	def _delete_community(self, community: CommunityDto) -> None:
-		if not confirm_delete(self, f"Удалить канал «{community.title}» из приложения?"):
+		if not confirm_delete(self, f"Удалить «{community.title}» из приложения?"):
 			return
 		run_in_engine(
 			self._worker,

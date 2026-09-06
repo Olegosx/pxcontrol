@@ -150,7 +150,7 @@ class SchedulePage(ScrollArea):
 		if not visible:
 			self._list.addWidget(
 				CaptionLabel(
-					"Все каналы скрыты фильтром — включите хотя бы один.",
+					"Всё скрыто фильтром — включите хотя бы одно сообщество.",
 					self,
 				)
 			)

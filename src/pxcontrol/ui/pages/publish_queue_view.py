@@ -24,8 +24,8 @@ from pxcontrol.ui.pages.common import DtoComboBox, QueuePanel, fixed_list_area, 
 #: Высота списка элементов (прокрутка внутри, а не рост диалога).
 _LIST_HEIGHT = 480
 
-#: Служебный первый пункт фильтра по каналу.
-_ALL_COMMUNITIES = "Все каналы"
+#: Служебный первый пункт фильтра по сообществу.
+_ALL_COMMUNITIES = "Все сообщества"
 
 
 class QueueSort(StrEnum):
@@ -33,7 +33,7 @@ class QueueSort(StrEnum):
 
 	NEAREST = "Ближайшие сначала"  # по дате публикации; «сейчас» — первыми
 	ENQUEUED = "Порядок постановки"
-	COMMUNITY = "По каналам"  # каналы по алфавиту, внутри — по дате
+	COMMUNITY = "По сообществам"  # по алфавиту, внутри — по дате
 
 
 class QueueFilter(StrEnum):
