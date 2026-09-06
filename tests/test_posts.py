@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Bot, Community, TgAccount
+from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
@@ -22,6 +22,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
+	TelegramFloodError,
 )
 
 
@@ -791,3 +792,111 @@ async def test_list_topics_returns_from_gateway(db: Database) -> None:
 	community_id = await _add_community(db, with_bot=False, forum=True)
 	topics = await service.list_topics(community_id)
 	assert [(t.id, t.title) for t in topics] == [(1, "General"), (7, "Новости")]
+
+
+async def _add_group_with_members(db: Database, count: int = 2) -> tuple[int, list[int]]:
+	"""Группа с пулом участников (первый — умолчание); id группы и аккаунтов."""
+	async with db.session_factory() as session:
+		accounts = [TgAccount(label=f"@ub{i}", phone=f"+790{i}", session="s") for i in range(count)]
+		session.add_all(accounts)
+		await session.flush()
+		community = Community(
+			title="Группа",
+			tg_chat_id="-1005",
+			kind="group",
+			forum=False,
+			default_tg_account_id=accounts[0].id,
+		)
+		session.add(community)
+		await session.flush()
+		session.add_all(
+			CommunityMember(
+				community_id=community.id,
+				tg_account_id=account.id,
+				role="admin" if account is accounts[0] else "member",
+			)
+			for account in accounts
+		)
+		await session.commit()
+		return community.id, [account.id for account in accounts]
+
+
+class _PerAccountGateway(_FakeGateway):
+	"""Отложки — свои у каждого аккаунта (как в группах Telegram)."""
+
+	def __init__(self) -> None:
+		super().__init__()
+		self.per_account: dict[int, list[ScheduledMessage]] = {}
+		self.polled: list[int] = []
+		self.flooded_accounts: set[int] = set()
+
+	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+		self.polled.append(account_id)
+		if account_id in self.flooded_accounts:
+			raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+		return self.per_account.get(account_id, [])
+
+
+async def test_list_scheduled_group_reads_all_members(db: Database) -> None:
+	"""Отложки группы собираются всеми участниками (ADR-0022).
+
+	Живой прогон 2026-09-06 подтвердил: отложку в группе видит только
+	её создатель — опрос одним умолчанием терял бы записи остальных.
+	"""
+	gateway = _PerAccountGateway()
+	service = PostsService(db, gateway)
+	_community_id, (first, second) = await _add_group_with_members(db)
+	gateway.per_account = {
+		first: [ScheduledMessage("от первого", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))],
+		second: [ScheduledMessage("от второго", datetime(2026, 7, 13, 11, 0, tzinfo=UTC))],
+	}
+	items = await service.list_scheduled()
+	assert [item.text_preview for item in items] == ["от второго", "от первого"]
+	assert sorted(gateway.polled) == sorted([first, second])
+
+
+async def test_list_scheduled_channel_polls_only_default(db: Database) -> None:
+	"""Отложки канала читает только умолчание: у админов они общие."""
+	gateway = _PerAccountGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, tg_chat_id="-1006")
+	async with db.session_factory() as session:
+		community = await session.get(Community, community_id)
+		assert community is not None
+		default_id = community.default_tg_account_id
+		assert default_id is not None
+		# второй админ-участник канала: опрос обоих дал бы дубли
+		extra = TgAccount(label="@extra", phone="+7999", session="s")
+		session.add(extra)
+		await session.flush()
+		session.add_all(
+			CommunityMember(community_id=community_id, tg_account_id=acc_id, role="admin")
+			for acc_id in (default_id, extra.id)
+		)
+		await session.commit()
+	await service.list_scheduled()
+	assert gateway.polled == [default_id]
+
+
+async def test_list_scheduled_flood_of_member_spares_others(db: Database) -> None:
+	"""Флуд-лимит одного участника не мешает опросу остальных."""
+	gateway = _PerAccountGateway()
+	service = PostsService(db, gateway)
+	_community_id, (first, second) = await _add_group_with_members(db)
+	gateway.flooded_accounts = {first}
+	gateway.per_account = {
+		second: [ScheduledMessage("живой", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))],
+	}
+	items = await service.list_scheduled()
+	assert [item.text_preview for item in items] == ["живой"]
+
+
+async def test_list_scheduled_dedups_identical(db: Database) -> None:
+	"""Одинаковая запись от двух читателей показывается один раз."""
+	gateway = _PerAccountGateway()
+	service = PostsService(db, gateway)
+	_community_id, (first, second) = await _add_group_with_members(db)
+	same = ScheduledMessage("общая", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))
+	gateway.per_account = {first: [same], second: [same]}
+	items = await service.list_scheduled()
+	assert [item.text_preview for item in items] == ["общая"]

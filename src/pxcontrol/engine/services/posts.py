@@ -93,6 +93,23 @@ def publish_capabilities(bot_assigned: bool, userbot_assigned: bool) -> PublishC
 	return PublishCapabilities(userbot=userbot_assigned, bot=bot_assigned)
 
 
+def _dedup_scheduled(items: list[ScheduledPostDto]) -> list[ScheduledPostDto]:
+	"""Схлопывает дубли отложек (страховка ADR-0022).
+
+	Ожидаемо каждый аккаунт группы видит только свои отложки и дублей
+	нет; если видимость окажется шире (например, у админов), одна
+	запись пришла бы от нескольких читателей.
+	"""
+	seen: set[tuple[int, str, datetime]] = set()
+	result: list[ScheduledPostDto] = []
+	for item in items:
+		key = (item.community_id, item.text_preview, item.scheduled_at)
+		if key not in seen:
+			seen.add(key)
+			result.append(item)
+	return result
+
+
 class PostError(EngineError):
 	"""Ошибка создания/отправки поста (с понятным человеку текстом)."""
 
@@ -795,15 +812,16 @@ class PostsService:
 			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
 
 	async def list_scheduled(self) -> list[ScheduledPostDto]:
-		"""Собирает отложенные записи активных userbot-каналов из Telegram.
+		"""Собирает отложенные записи активных userbot-сообществ из Telegram.
 
-		Опрашиваются только каналы с привязанным userbot-аккаунтом —
-		каждый своим аккаунтом (ADR-0019): у бот-канала отложенных быть
-		не может (Bot API их не умеет, ADR-0010/0011). Выключенные каналы
-		(настройка ``enabled`` = False) не опрашиваются. Ошибка одного
-		канала не роняет весь список — канал пропускается
-		с предупреждением в логе (включая «его аккаунт не подключён»:
-		другие аккаунты могут быть живы).
+		Канал опрашивается аккаунтом-умолчанием (все админы видят одни
+		и те же отложки), группа — **всеми участниками** (ADR-0022:
+		отложку в группе видит только её создатель — подтверждено живым
+		прогоном 2026-09-06; запрос на аккаунт, флуд-бюджет ADR-0017).
+		У бот-сообщества отложенных быть не может (Bot API их не умеет,
+		ADR-0010/0011). Выключенные (``enabled`` = False)
+		не опрашиваются. Ошибка одного опроса не роняет весь список —
+		пропуск с предупреждением в логе.
 		"""
 		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
 		async with self._db.session_factory() as session:
@@ -811,7 +829,7 @@ class PostsService:
 				(
 					await session.execute(
 						select(Community)
-						.where(Community.default_tg_account_id.is_not(None))
+						.options(selectinload(Community.members))
 						.order_by(Community.id)
 					)
 				)
@@ -823,33 +841,53 @@ class PostsService:
 		for community in communities:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
-			if community.default_tg_account_id is None:  # для mypy: выборка отфильтровала
-				continue
-			if community.default_tg_account_id in flooded:
-				continue
-			try:
-				messages = await self._gateway.get_scheduled(
-					community.default_tg_account_id, community.tg_chat_id
-				)
-			except TelegramFloodError as exc:
-				# флуд-лимит — на весь аккаунт (ADR-0017): стучаться в его
-				# остальные каналы значит удлинять срок, который ждёт
-				# и очередь отправки; пропускаем их до конца прохода
-				# (та же дисциплина, что у дозора слотов)
-				flooded.add(community.default_tg_account_id)
-				logger.warning(
-					"Отложенные: флуд-лимит аккаунта id=%s (%s) — его каналы пропущены.",
-					community.default_tg_account_id,
-					exc,
-				)
-				continue
-			except UserbotUnavailableError as exc:
-				logger.warning("Отложенные канала «%s» не прочитаны: %s", community.title, exc)
-				continue
-			for message in messages:
-				items.append(self._dto(community, message))
+			for account_id in self._scheduled_readers(community):
+				if account_id in flooded:
+					continue
+				try:
+					messages = await self._gateway.get_scheduled(account_id, community.tg_chat_id)
+				except TelegramFloodError as exc:
+					# флуд-лимит — на весь аккаунт (ADR-0017): стучаться в его
+					# остальные сообщества значит удлинять срок, который ждёт
+					# и очередь отправки; пропускаем их до конца прохода
+					# (та же дисциплина, что у дозора слотов)
+					flooded.add(account_id)
+					logger.warning(
+						"Отложенные: флуд-лимит аккаунта id=%s (%s) — его опросы пропущены.",
+						account_id,
+						exc,
+					)
+					continue
+				except UserbotUnavailableError as exc:
+					logger.warning(
+						"Отложенные «%s» не прочитаны аккаунтом id=%s: %s",
+						community.title,
+						account_id,
+						exc,
+					)
+					continue
+				for message in messages:
+					items.append(self._dto(community, message))
+		items = _dedup_scheduled(items)
 		items.sort(key=lambda item: item.scheduled_at)
 		return items
+
+	@staticmethod
+	def _scheduled_readers(community: Community) -> list[int]:
+		"""Аккаунты для чтения отложек сообщества (ADR-0022).
+
+		Канал — только умолчание: отложки канала общие для админов,
+		опрос каждого дал бы одни и те же записи. Группа — все участники
+		(отложку видит создатель) плюс умолчание, если оно вне списка
+		(страховка рассинхрона инварианта).
+		"""
+		default = community.default_tg_account_id
+		if community.kind != "group":
+			return [default] if default is not None else []
+		readers = [member.tg_account_id for member in community.members]
+		if default is not None and default not in readers:
+			readers.append(default)
+		return readers
 
 	async def scheduled_times(self, community_id: int) -> list[datetime]:
 		"""Моменты существующих отложек канала (для раскладки пакета).
