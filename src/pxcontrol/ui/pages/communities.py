@@ -26,7 +26,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
-from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto
+from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto, MemberDto
 from pxcontrol.engine.services.settings import (
 	COMMUNITY_DEFAULT_PRESET,
 	COMMUNITY_ENABLED,
@@ -51,6 +51,7 @@ from pxcontrol.ui.pages.common import (
 	noop,
 	page_layout,
 	parse_hhmm,
+	role_caption,
 	row_card,
 	show_warning,
 )
@@ -174,30 +175,138 @@ class _AssignBotDialog(MessageBoxBase):
 		return bot.id if bot is not None else None
 
 
-class _AssignUserbotDialog(MessageBoxBase):
-	"""Выбор userbot-аккаунта для привязки к каналу (ADR-0019)."""
+class _MembersDialog(MessageBoxBase):
+	"""Участники сообщества (ADR-0022): роли, умолчание, состав.
 
-	def __init__(self, accounts: list[TgAccountDto], parent: QWidget) -> None:
+	Живой диалог: операции выполняются сразу (движком), список
+	перечитывается после каждой; страница перегружает карточки
+	по закрытии.
+	"""
+
+	def __init__(
+		self,
+		worker: EngineWorker,
+		community: CommunityDto,
+		accounts: list[TgAccountDto],
+		parent: QWidget,
+	) -> None:
+		"""``accounts`` — вошедшие userbot-аккаунты (кандидаты)."""
 		super().__init__(parent)
-		self.viewLayout.addWidget(SubtitleLabel("Привязать userbot", self))
+		self._worker = worker
+		self._community = community
+		self._accounts = accounts
+		self._show_error = error_reporter(self)
+		self.viewLayout.addWidget(SubtitleLabel(f"Участники — {community.title}", self))
 		self.viewLayout.addWidget(
 			BodyLabel(
-				"Каналу аккаунт нужен админом с правом публиковать,\n"
-				"группе — участником; посты пойдут из его сессии.",
+				"Публикует аккаунт по умолчанию; остальные — пул сообщества.\n"
+				"Каналу нужен админ с правом публиковать, группе — участник.",
 				self,
 			)
 		)
-		self._combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
-		self._combo.set_items(accounts, label=lambda acc: account_caption(acc.label, acc.phone))
-		self.viewLayout.addWidget(self._combo)
-		self.yesButton.setText("Привязать")
-		self.cancelButton.setText("Отмена")
-		self.widget.setMinimumWidth(420)
+		self._rows = QVBoxLayout()
+		self._rows.setSpacing(density.spacing().list_spacing)
+		self.viewLayout.addLayout(self._rows)
+		add_row = QHBoxLayout()
+		self._add_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
+		add_row.addWidget(self._add_combo, stretch=1)
+		add_button = PushButton("Добавить", self)
+		add_button.clicked.connect(self._on_add)
+		add_row.addWidget(add_button)
+		self.viewLayout.addLayout(add_row)
+		self._error = ErrorLabel(self)
+		self.viewLayout.addWidget(self._error)
+		self.yesButton.setText("Готово")
+		self.cancelButton.hide()
+		self.widget.setMinimumWidth(520)
+		self._members: list[MemberDto] = []
+		self._reload()
 
-	def account_id(self) -> int | None:
-		"""Идентификатор выбранного аккаунта (None — вошедших нет)."""
-		account = self._combo.selected()
-		return account.id if account is not None else None
+	def _reload(self) -> None:
+		run_in_engine(
+			self._worker,
+			self._worker.engine.communities.list_members(self._community.id),
+			self,
+			self._show_members,
+			self._show_error,
+		)
+
+	def _show_members(self, members: list[MemberDto]) -> None:
+		"""Перестраивает строки участников и список кандидатов."""
+		self._members = members
+		clear_layout(self._rows)
+		if not members:
+			self._rows.addWidget(BodyLabel("Участников нет — добавьте вошедший аккаунт.", self))
+		for member in members:
+			self._rows.addWidget(self._member_row(member))
+		taken = {member.account_id for member in members}
+		self._add_combo.set_items(
+			[account for account in self._accounts if account.id not in taken],
+			label=lambda acc: account_caption(acc.label, acc.phone),
+			key=lambda acc: acc.id,
+		)
+
+	def _member_row(self, member: MemberDto) -> QWidget:
+		"""Строка участника: имя, роль, умолчание, удаление."""
+		box = QWidget(self)
+		row = QHBoxLayout(box)
+		row.setContentsMargins(0, 0, 0, 0)
+		row.addWidget(BodyLabel(f"{member.label} — {role_caption(member.role)}", box))
+		row.addStretch()
+		if member.is_default:
+			row.addWidget(CaptionLabel("публикатор по умолчанию", box))
+		else:
+			make_default = PushButton("Сделать публикатором", box)
+			make_default.clicked.connect(bind(self._on_set_default, member))
+			row.addWidget(make_default)
+		remove = PushButton("Удалить", box)
+		remove.clicked.connect(bind(self._on_remove, member))
+		row.addWidget(remove)
+		return box
+
+	def _on_add(self) -> None:
+		account = self._add_combo.selected()
+		if account is None:
+			self._error.fail("Нет свободных вошедших аккаунтов — войдите: Настройки → Аккаунты.")
+			return
+		self._error.succeed()
+		InfoBar.info("Проверка", "Проверяю права аккаунта…", parent=self)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.communities.add_member(self._community.id, account.id),
+			self,
+			self._show_members,
+			self._show_error,
+		)
+
+	def _on_set_default(self, member: MemberDto) -> None:
+		run_in_engine(
+			self._worker,
+			self._worker.engine.communities.set_default(self._community.id, member.account_id),
+			self,
+			lambda _dto: self._reload(),
+			self._show_error,
+		)
+
+	def _on_remove(self, member: MemberDto) -> None:
+		warning = (
+			" Это публикатор по умолчанию: публикация через userbot остановится до выбора нового."
+			if member.is_default
+			else ""
+		)
+		if not confirm_delete(
+			self,
+			f"Удалить «{member.label}» из участников?{warning}",
+			accept_text="Удалить",
+		):
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.communities.remove_member(self._community.id, member.account_id),
+			self,
+			self._show_members,
+			self._show_error,
+		)
 
 
 class _CommunityPrefsDialog(MessageBoxBase):
@@ -348,12 +457,15 @@ class CommunitiesPage(ScrollArea):
 		"""Карточка сообщества: вид, название, публикаторы, действия."""
 		ways = []
 		if community.default_account_label:
-			ways.append(f"userbot {community.default_account_label}")
+			role = f" ({role_caption(community.default_role)})" if community.default_role else ""
+			ways.append(f"userbot {community.default_account_label}{role}")
 		if community.bot_label:
 			ways.append(f"бот {community.bot_label}")
+		extras = max(community.members_count - (1 if community.default_account_id else 0), 0)
+		members_note = f" · ещё участников: {extras}" if extras else ""
 		subtitle = (
 			f"{community_kind_caption(community)} · @{community.username or '—'} "
-			f"· публикатор: {' + '.join(ways) or '—'}"
+			f"· публикатор: {' + '.join(ways) or '—'}{members_note}"
 		)
 		buttons = QWidget(self)
 		row = QHBoxLayout(buttons)
@@ -370,14 +482,12 @@ class CommunitiesPage(ScrollArea):
 		prefs_action.setToolTip("Пресет видео по умолчанию и времена публикации")
 		prefs_action.clicked.connect(bind(self._on_open_prefs, community))
 		row.addWidget(prefs_action)
-		if community.default_account_id is None:
-			userbot_action = PushButton("Привязать userbot…", buttons)
-			userbot_action.setToolTip("Постинг пойдёт из сессии привязанного аккаунта")
-			userbot_action.clicked.connect(bind(self._on_assign_userbot, community))
-		else:
-			userbot_action = PushButton("Отвязать userbot", buttons)
-			userbot_action.clicked.connect(bind(self._on_unassign_userbot, community))
-		row.addWidget(userbot_action)
+		members_action = PushButton("Участники…", buttons)
+		members_action.setToolTip(
+			"Пул userbot-аккаунтов сообщества: роли и публикатор по умолчанию"
+		)
+		members_action.clicked.connect(bind(self._on_open_members, community))
+		row.addWidget(members_action)
 		if community.bot_id is None:
 			bot_action = PushButton("Назначить бота…", buttons)
 			bot_action.clicked.connect(bind(self._on_assign_bot, community))
@@ -550,56 +660,24 @@ class CommunitiesPage(ScrollArea):
 		InfoBar.success("Готово", community.title, parent=self)
 		self._reload()
 
-	# --- привязка userbot (ADR-0019) --------------------------------------------
+	# --- участники (ADR-0022) ----------------------------------------------------
 
-	def _on_assign_userbot(self, community: CommunityDto) -> None:
-		"""Открывает выбор аккаунта для привязки к каналу."""
+	def _on_open_members(self, community: CommunityDto) -> None:
+		"""Открывает диалог участников (нужны вошедшие аккаунты-кандидаты)."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.accounts.list_tg_accounts(),
 			self,
-			partial(self._open_assign_userbot_dialog, community),
+			partial(self._open_members_dialog, community),
 			self._show_error,
 		)
 
-	def _open_assign_userbot_dialog(
-		self, community: CommunityDto, accounts: list[TgAccountDto]
-	) -> None:
-		"""Диалог выбора аккаунта; после выбора — проверка его прав в канале."""
+	def _open_members_dialog(self, community: CommunityDto, accounts: list[TgAccountDto]) -> None:
+		"""Живой диалог участников; по закрытии — перезагрузка карточек."""
 		logged_in = [account for account in accounts if account.logged_in]
-		if not logged_in:
-			self._show_error("Нет вошедших userbot-аккаунтов — войдите: Настройки → Аккаунты.")
-			return
-		dialog = _AssignUserbotDialog(logged_in, self.window())
-		if not exec_dialog(dialog):
-			return
-		account_id = dialog.account_id()
-		if account_id is None:
-			return
-		InfoBar.info("Проверка", "Проверяю права аккаунта…", parent=self)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.assign_userbot(community.id, account_id),
-			self,
-			self._on_publisher_changed,
-			self._show_error,
-		)
-
-	def _on_unassign_userbot(self, community: CommunityDto) -> None:
-		if not confirm_delete(
-			self,
-			f"Отвязать userbot от «{community.title}»? Отложенные посты "
-			"и большие файлы станут ему недоступны.",
-			accept_text="Отвязать",
-		):
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.unassign_userbot(community.id),
-			self,
-			self._on_publisher_changed,
-			self._show_error,
-		)
+		dialog = _MembersDialog(self._worker, community, logged_in, self.window())
+		exec_dialog(dialog)
+		self._reload()
 
 	# --- подключение -----------------------------------------------------------
 

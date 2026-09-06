@@ -41,7 +41,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.telegram.types import CommunityKind
+from pxcontrol.engine.telegram.types import CommunityKind, UserbotRole
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 
@@ -96,6 +96,11 @@ DEFAULT_SCHEDULE_OFFSET_S = 3600
 def bot_caption(label: str, username: str | None) -> str:
 	"""Единая метка бота в списках и диалогах: «Имя (@username)»."""
 	return f"{label} (@{username or '—'})"
+
+
+def role_caption(role: UserbotRole) -> str:
+	"""Человеческая метка роли userbot-аккаунта (ADR-0022)."""
+	return "админ" if role is UserbotRole.ADMIN else "участник"
 
 
 def community_kind_caption(community: CommunityDto) -> str:

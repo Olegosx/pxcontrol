@@ -55,8 +55,10 @@ from pxcontrol.engine.services.video import ReadyVideo, VideoDirs, video_dialog_
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	GENERAL_TOPIC_ID,
+	CommunityKind,
 	ForumTopicInfo,
 	MediaKind,
+	UserbotRole,
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -112,6 +114,17 @@ _KINDS: list[tuple[str, MediaKind, str]] = [
 	("Аудио", MediaKind.AUDIO, "Аудио (*.mp3 *.m4a *.flac *.ogg *.wav)"),
 	("Файл", MediaKind.DOCUMENT, "Все файлы (*)"),
 ]
+
+
+def _actor_note(community: CommunityDto) -> str:
+	"""Приписка «от чьего имени» для групп (ADR-0022): в группе пост
+	выходит от имени аккаунта, участнику действует медленный режим."""
+	if community.kind is not CommunityKind.GROUP or not community.default_account_label:
+		return ""
+	actor = community.default_account_label
+	if community.default_role is UserbotRole.MEMBER:
+		return f" Пост уйдёт от имени {actor} (участник) — действует медленный режим группы."
+	return f" Пост уйдёт от имени {actor} (админ)."
 
 
 def _community_caps(community: CommunityDto) -> PublishCapabilities:
@@ -182,6 +195,8 @@ class PublishPage(ScrollArea):
 		)
 		row.addWidget(self._topic_combo, stretch=1)
 		layout.addWidget(self._topic_box)
+		self._topic_hint = CaptionLabel("", self._topic_box)
+		row.addWidget(self._topic_hint)
 		self._topic_box.setVisible(False)
 
 	def _build_kind_segments(self, layout: QVBoxLayout) -> None:
@@ -378,6 +393,7 @@ class PublishPage(ScrollArea):
 			# лимит зависит от Premium userbot — узнаём у движка
 			self._caps_hint.setText(
 				"Публикация через userbot: все типы контента, «сейчас» и отложенные."
+				+ _actor_note(community)
 			)
 			run_in_engine(
 				self._worker,
@@ -411,22 +427,36 @@ class PublishPage(ScrollArea):
 			self._topic_combo.set_items([], label=lambda topic: topic.title)
 			return
 		self._topic_box.setVisible(True)
+		self._topic_hint.setText("")
 		self._topic_combo.set_items([], label=lambda topic: topic.title)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.posts.list_topics(community.id),
 			self,
-			partial(self._show_topics, community.id),
+			partial(self._show_topics, community),
 			partial(self._on_topics_failed, community.id),
 		)
 
-	def _show_topics(self, community_id: int, topics: list[ForumTopicInfo]) -> None:
-		"""Наполняет список тем (General не дублируем — он «Общая лента»)."""
-		if self._is_stale(community_id):
+	def _show_topics(self, community: CommunityDto, topics: list[ForumTopicInfo]) -> None:
+		"""Наполняет список тем с учётом роли публикатора (ADR-0022).
+
+		General не дублируем — он «Общая лента». В закрытую тему пишет
+		только админ: участнику такие темы недоступны для выбора
+		(скрываются, причина — в подписи ряда), админу — помечаются.
+		"""
+		if self._is_stale(community.id):
 			return
+		shown = [topic for topic in topics if topic.id != GENERAL_TOPIC_ID]
+		if community.default_role is not UserbotRole.ADMIN:
+			closed = sum(1 for topic in shown if topic.closed)
+			shown = [topic for topic in shown if not topic.closed]
+			if closed:
+				self._topic_hint.setText(
+					f"Закрытых тем скрыто: {closed} — в них пишет только админ."
+				)
 		self._topic_combo.set_items(
-			[topic for topic in topics if topic.id != GENERAL_TOPIC_ID],
-			label=lambda topic: topic.title,
+			shown,
+			label=lambda topic: f"{topic.title} (закрыта)" if topic.closed else topic.title,
 			key=lambda topic: topic.id,
 		)
 
@@ -466,9 +496,11 @@ class PublishPage(ScrollArea):
 		if self._is_stale(community_id):
 			return
 		premium = " (Premium)" if limit_gb >= 4 else ""
+		community = self._community_or_none()
 		self._caps_hint.setText(
 			"Публикация через userbot: все типы контента, файлы "
 			f"до {limit_gb} ГБ{premium}, «сейчас» и отложенные."
+			+ (_actor_note(community) if community is not None else "")
 		)
 
 	def _on_kind_changed(self, kind_key: str) -> None:
