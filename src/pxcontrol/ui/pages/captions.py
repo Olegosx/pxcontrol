@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Sequence
+from functools import partial
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -313,7 +314,7 @@ class CaptionDialog(MessageBoxBase):
 		файла (:func:`build_caption` с другим ``title``).
 		"""
 		return [
-			CaptionLine(row.field.name, row.field.hashtag, row.values())
+			CaptionLine(row.field.name, row.field.hashtag, row.values(), row.field.show_name)
 			for row in self._rows
 			if row.check.isChecked()
 		]
@@ -524,6 +525,13 @@ class FieldsDialog(MessageBoxBase):
 		row.addWidget(CaptionLabel("несколько", self))
 		self._field_multiple = SwitchButton(self)
 		row.addWidget(self._field_multiple)
+		row.addWidget(CaptionLabel("имя", self))
+		self._field_show_name = SwitchButton(self)
+		self._field_show_name.setChecked(True)
+		self._field_show_name.setToolTip(
+			"Вставлять название поля в подпись («Имя: значения»); выключено — только значения"
+		)
+		row.addWidget(self._field_show_name)
 		add = PushButton("Добавить", self)
 		add.clicked.connect(self._on_add_field)
 		row.addWidget(add)
@@ -534,7 +542,11 @@ class FieldsDialog(MessageBoxBase):
 		self._fields = fields
 		clear_layout(self._fields_box)
 		for field in fields:
-			flags = ("#" if field.hashtag else "текст") + (", несколько" if field.multiple else "")
+			flags = (
+				("#" if field.hashtag else "текст")
+				+ (", несколько" if field.multiple else "")
+				+ ("" if field.show_name else ", без имени")
+			)
 			dictionary = PushButton("Словарь…", self)
 			dictionary.clicked.connect(bind(self._open_dictionary, field))
 			self._fields_box.addWidget(
@@ -543,7 +555,7 @@ class FieldsDialog(MessageBoxBase):
 					f"{field.name} ({flags})",
 					f"словарь: {len(field.values)}",
 					bind(self._on_delete_field, field),
-					[self._parent_field_combo(field), dictionary],
+					[self._show_name_switch(field), self._parent_field_combo(field), dictionary],
 				)
 			)
 		# перерисовка не сбрасывает правку: состав правящегося шаблона
@@ -551,6 +563,32 @@ class FieldsDialog(MessageBoxBase):
 		self._fill_template_list(self._editing)
 		self._update_pattern_hint(fields)
 		self.widget.adjustSize()  # данные пришли после показа окна
+
+	def _show_name_switch(self, field: FieldDto) -> QWidget:
+		"""Переключатель «имя в подписи»: уходит ли название поля в подпись.
+
+		Действует на будущие сборки; словарь и состав шаблонов
+		не затрагивает — поле пересоздавать не нужно.
+		"""
+		switch = SwitchButton(self)
+		switch.setChecked(field.show_name)
+		switch.setToolTip(
+			"Вставлять название поля в подпись («Имя: значения»); выключено — только значения"
+		)
+		# сигнал — после setChecked: предустановка не должна писать в БД
+		switch.checkedChanged.connect(partial(self._on_toggle_show_name, field))
+		widget: QWidget = switch
+		return widget
+
+	def _on_toggle_show_name(self, field: FieldDto, checked: bool) -> None:
+		"""Сохраняет флаг «имя в подписи» и обновляет пометки списка."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.captions.set_field_show_name(field.id, checked),
+			self,
+			lambda *_a: self._reload(),
+			self._show_error,
+		)
 
 	def _parent_field_combo(self, field: FieldDto) -> QWidget:
 		"""Выбор родительского поля: внутри чьих значений живёт словарь.
@@ -612,6 +650,7 @@ class FieldsDialog(MessageBoxBase):
 				str(self._field_name.text()),
 				self._field_hashtag.isChecked(),
 				self._field_multiple.isChecked(),
+				self._field_show_name.isChecked(),
 			),
 			self,
 			self._on_field_added,

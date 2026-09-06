@@ -261,6 +261,9 @@ class CaptionField(TimestampMixin, Base):
 	name: Mapped[str] = mapped_column(String(64))
 	hashtag: Mapped[bool] = mapped_column(Boolean, default=True)
 	multiple: Mapped[bool] = mapped_column(Boolean, default=False)
+	# выключен — строка подписи собирается без префикса «Имя: »,
+	# в подпись уходят только значения
+	show_name: Mapped[bool] = mapped_column(Boolean, default=True)
 	# поле зависит от другого поля канала: его значения живут внутри
 	# значений родителя («Character» внутри «Title»); родительское поле
 	# удалили — зависимое становится независимым (SET NULL)

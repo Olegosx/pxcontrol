@@ -52,6 +52,19 @@ def test_build_caption_without_title() -> None:
 	assert text == "Year: 2026"
 
 
+def test_build_caption_without_field_name() -> None:
+	"""show_name=False — строка из одних значений, без префикса «Имя: »."""
+	text = build_caption(
+		"Lara Croft",
+		[
+			CaptionLine("Genre", hashtag=True, values=["action", "sci-fi"], show_name=False),
+			CaptionLine("Year", hashtag=False, values=["2026"]),
+			CaptionLine("Tags", hashtag=True, values=[""], show_name=False),  # пусто — пропуск
+		],
+	)
+	assert text == ("**Lara Croft**\n#Action, #SciFi\nYear: 2026")
+
+
 def test_title_from_filename_matches_pipeline_stamp() -> None:
 	"""Связка форматов: суффикс с штампом PIPELINE_STAMP_FORMAT вырезается.
 
@@ -166,6 +179,28 @@ async def test_fields_crud_and_duplicates(db: Database) -> None:
 		await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
 	await service.delete_field(field.id)
 	assert await service.list_fields(community_id) == []
+
+
+async def test_field_show_name_flag(db: Database) -> None:
+	"""Флаг «имя в подписи»: включён по умолчанию, переключается без пересоздания."""
+	service = CaptionsService(db)
+	community_id = await _add_community(db)
+	genre = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
+	assert genre.show_name is True
+	tags = await service.add_field(
+		community_id, "Tags", hashtag=True, multiple=True, show_name=False
+	)
+	assert tags.show_name is False
+
+	# выключение у существующего поля сохраняет словарь
+	await service.add_values(genre.id, ["action"])
+	updated = await service.set_field_show_name(genre.id, False)
+	assert updated.show_name is False and updated.names() == ["action"]
+	fields = {f.name: f for f in await service.list_fields(community_id)}
+	assert fields["Genre"].show_name is False and fields["Tags"].show_name is False
+
+	with pytest.raises(CaptionsError, match="не найдено"):
+		await service.set_field_show_name(999_999, True)
 
 
 async def test_template_roundtrip_and_shared_dictionary(db: Database) -> None:

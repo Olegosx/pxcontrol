@@ -103,6 +103,8 @@ class FieldDto:
 
 	``parent_field_id`` — поле, от которого зависит это поле: его значения
 	живут внутри значений родителя; None — поле независимое.
+	``show_name`` — вставлять ли имя поля в подпись: при False строка
+	собирается без префикса «Имя: », только из значений.
 	"""
 
 	id: int
@@ -111,6 +113,7 @@ class FieldDto:
 	multiple: bool
 	values: list[ValueDto]
 	parent_field_id: int | None = None
+	show_name: bool = True
 
 	def names(self) -> list[str]:
 		"""Тексты значений словаря (в порядке словаря)."""
@@ -151,11 +154,16 @@ class TemplateDto:
 
 @dataclass(frozen=True)
 class CaptionLine:
-	"""Строка подписи для сборки: имя поля, оформление, значения."""
+	"""Строка подписи для сборки: имя поля, оформление, значения.
+
+	``show_name=False`` — имя поля в подпись не вставляется, строка
+	состоит только из значений.
+	"""
 
 	name: str
 	hashtag: bool
 	values: list[str]
+	show_name: bool = True
 
 
 # --- чистые функции сборки ---------------------------------------------------
@@ -174,7 +182,8 @@ def hashtag(value: str) -> str:
 def build_caption(title: str, lines: list[CaptionLine]) -> str:
 	"""Собирает текст подписи: жирное название + строки полей.
 
-	Строки без значений пропускаются. Разметка — Markdown
+	Строки без значений пропускаются. Строка поля — «Имя: значения»;
+	при выключенном ``show_name`` — только значения. Разметка — Markdown
 	(``**название**``), Telethon применяет её по умолчанию.
 	"""
 	rows = [f"**{title.strip()}**"] if title.strip() else []
@@ -183,7 +192,7 @@ def build_caption(title: str, lines: list[CaptionLine]) -> str:
 		if not values:
 			continue
 		rendered = ", ".join(hashtag(v) if line.hashtag else v for v in values)
-		rows.append(f"{line.name}: {rendered}")
+		rows.append(f"{line.name}: {rendered}" if line.show_name else rendered)
 	return "\n".join(rows)
 
 
@@ -417,10 +426,12 @@ class CaptionsService:
 			return [self._field_dto(f) for f in rows]
 
 	async def add_field(
-		self, community_id: int, name: str, hashtag: bool, multiple: bool
+		self, community_id: int, name: str, hashtag: bool, multiple: bool, show_name: bool = True
 	) -> FieldDto:
 		"""Добавляет поле в пул канала.
 
+		``show_name`` — вставлять ли имя поля в подпись (см. :class:`FieldDto`);
+		позже флаг переключается через :meth:`set_field_show_name`.
 		Связь с родительским полем задаётся отдельно
 		(:meth:`set_field_parent`): её выбирают уже среди существующих
 		полей канала.
@@ -447,12 +458,36 @@ class CaptionsService:
 				name=name,
 				hashtag=hashtag,
 				multiple=multiple,
+				show_name=show_name,
 			)
 			session.add(field)
 			await session.commit()
 			await session.refresh(field)
 		logger.info("Поле подписи «%s» добавлено (канал id=%s).", name, community_id)
-		return FieldDto(field.id, field.name, field.hashtag, field.multiple, [])
+		return FieldDto(
+			field.id, field.name, field.hashtag, field.multiple, [], show_name=field.show_name
+		)
+
+	async def set_field_show_name(self, field_id: int, show_name: bool) -> FieldDto:
+		"""Включает или выключает вставку имени поля в подпись.
+
+		Флаг действует на все будущие сборки подписи (у существующего
+		поля переключается без пересоздания — словарь сохраняется).
+
+		Returns:
+			Поле с обновлённым флагом и словарём.
+
+		Raises:
+			CaptionsError: Поле не найдено.
+		"""
+		async with self._db.session_factory() as session:
+			field = await session.get(CaptionField, field_id)
+			if field is None:
+				raise CaptionsError("Поле не найдено — обновите список.")
+			field.show_name = show_name
+			await session.commit()
+		logger.info("Поле id=%s: имя в подписи — %s.", field_id, "да" if show_name else "нет")
+		return await self._get_field(field_id)
 
 	async def set_field_parent(self, field_id: int, parent_field_id: int | None) -> FieldDto:
 		"""Объявляет поле зависимым от другого поля канала (None — снимает связь).
@@ -928,6 +963,7 @@ class CaptionsService:
 			field.multiple,
 			[ValueDto(v.id, v.value, v.parent_value_id) for v in field.values],
 			field.parent_field_id,
+			field.show_name,
 		)
 
 	@classmethod
