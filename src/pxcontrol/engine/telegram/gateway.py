@@ -34,6 +34,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
+	UserbotProfile,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,16 @@ class TelegramGateway:
 		return await send_media(token, chat_id, kind, path, caption, topic_id)
 
 	# --- MTProto (userbot) -------------------------------------------------------
+
+	async def userbot_me(self, account_id: int) -> UserbotProfile:
+		"""Профиль владельца сессии аккаунта: @имя и имя (живой запрос).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotUnavailableError: Прочие отказы Telegram (включая флуд).
+		"""
+		return await self._userbot(account_id).me()
 
 	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		"""Проверяет канал и права аккаунта (админ + право публиковать).

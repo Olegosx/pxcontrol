@@ -39,7 +39,12 @@ class Engine:
 		self.settings = SettingsService(self.db)
 		self.gateway = TelegramGateway()
 		self.accounts = AccountsService(self.db, self.gateway)
-		self.communities = CommunitiesService(self.db, self.gateway, self.settings)
+		# зонды прав попутно актуализируют профиль аккаунта (имя, @имя):
+		# связка через крючок — сервис сообществ не зависит от сервиса
+		# аккаунтов напрямую
+		self.communities = CommunitiesService(
+			self.db, self.gateway, self.settings, profile_sync=self.accounts.sync_profile
+		)
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
 		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)

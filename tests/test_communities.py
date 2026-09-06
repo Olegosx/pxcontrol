@@ -433,6 +433,34 @@ async def test_recheck_refreshes_forum_keeps_kind(db: Database) -> None:
 	assert (await _community_row(db, dto.id)).kind == "group"
 
 
+async def test_confirmed_checks_call_profile_sync_hook(db: Database) -> None:
+	"""Живая проверка прав дёргает крючок актуализации профиля аккаунта.
+
+	Подтверждённый отказ крючок не дёргает: связь с аккаунтом
+	не подтверждена, актуализировать профиль не по чему.
+	"""
+	gateway = _FakeGateway()
+	admin = await _make_account(db, "@admin")
+	other = await _make_account(db, "@other")
+	gateway.userbot_admins = {admin, other}
+	synced: list[int] = []
+
+	async def hook(account_id: int) -> None:
+		synced.append(account_id)
+
+	service = CommunitiesService(db, gateway, profile_sync=hook)
+	dto = await service.add_community_via_userbot(admin, "@testchan")
+	assert synced == [admin], "подключение подтвердило права — профиль актуализирован"
+	synced.clear()
+	await service.add_member(dto.id, other)
+	assert other in synced, "добавление участника тоже проверяет права живьём"
+	gateway.userbot_admins = {admin}  # второй аккаунт потерял права
+	synced.clear()
+	await service.recheck_community(dto.id)
+	assert admin in synced, "перепроверка актуализирует профиль живого участника"
+	assert other not in synced, "подтверждённый отказ — без актуализации"
+
+
 async def test_recheck_refreshes_title_and_username(db: Database) -> None:
 	"""Перепроверка актуализирует название и @имя (могли смениться в Telegram)."""
 	gateway = _FakeGateway()

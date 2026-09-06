@@ -18,6 +18,7 @@ from pxcontrol.engine.db.models import AiCredential, Bot, TgAccount, TgApiCreden
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.security.secrets import SecretDecryptionError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
+from pxcontrol.engine.telegram.types import UserbotProfile
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,26 @@ class _TelegramPort(Protocol):
 	async def deactivate_userbot(self, account_id: int) -> None: ...
 
 	def userbot_premium(self, account_id: int | None) -> bool: ...
+
+	async def userbot_me(self, account_id: int) -> UserbotProfile: ...
+
+
+def account_display(
+	label: str | None,
+	username: str | None,
+	first_name: str | None,
+	last_name: str | None,
+	phone: str | None,
+) -> str:
+	"""Отображаемое имя userbot-аккаунта — единая точка истины.
+
+	Первое непустое: ручная пометка → «Имя Фамилия» из Telegram →
+	@имя → телефон. Телефон — последний рубеж: он обязателен при
+	создании, безымянным аккаунт не остаётся.
+	"""
+	full_name = " ".join(part for part in (first_name, last_name) if part)
+	at_name = f"@{username}" if username else None
+	return label or full_name or at_name or phone or "аккаунт"
 
 
 def mask_secret(secret: str) -> str:
@@ -94,15 +115,23 @@ class TgApiDto:
 class TgAccountDto:
 	"""Userbot-аккаунт для показа в интерфейсе.
 
-	``premium`` — статус подписки подключённого аккаунта (True только
-	у активного: от него зависит лимит файла 2/4 ГБ).
+	``label`` — необязательная ручная пометка; ``username`` и имя —
+	профиль из Telegram (актуализируется автоматически). ``display`` —
+	готовое отображаемое имя (:func:`account_display`): интерфейс
+	не собирает его сам. ``premium`` — статус подписки подключённого
+	аккаунта (True только у активного: от него зависит лимит файла
+	2/4 ГБ).
 	"""
 
 	id: int
-	label: str
+	label: str | None
 	phone: str | None
 	logged_in: bool
 	premium: bool = False
+	username: str | None = None
+	first_name: str | None = None
+	last_name: str | None = None
+	display: str = ""
 
 
 @dataclass(frozen=True)
@@ -260,28 +289,78 @@ class AccountsService:
 		return [self._acc_dto(a, premium=self._gateway.userbot_premium(a.id)) for a in rows]
 
 	async def add_tg_account(self, label: str, phone: str) -> TgAccountDto:
-		"""Сохраняет userbot-аккаунт: название и телефон (вход — отдельным шагом).
+		"""Сохраняет userbot-аккаунт: телефон и необязательную пометку.
 
 		Ключ API у аккаунта не спрашивается — он один на приложение
 		(ADR-0018) и задаётся в «Настройки → Общие». Телефон обязателен:
-		аккаунт без телефона — тупик, в него нельзя войти.
+		аккаунт без телефона — тупик, в него нельзя войти. Пометка —
+		для себя («рабочий», «запасной»); имя и @имя заполнит Telegram
+		после входа (:meth:`sync_profile`).
 
 		Raises:
-			AccountsError: Пустое название или телефон.
+			AccountsError: Пустой телефон.
 		"""
-		label = label.strip()
 		phone = phone.strip()
-		if not label:
-			raise AccountsError("У аккаунта должно быть название.")
 		if not phone:
 			raise AccountsError("Укажите телефон аккаунта — на него придёт код входа.")
 		async with self._db.session_factory() as session:
-			acc = TgAccount(label=label, phone=phone)
+			acc = TgAccount(label=label.strip() or None, phone=phone)
 			session.add(acc)
 			await session.commit()
 			await session.refresh(acc)
-		logger.info("Добавлен userbot-аккаунт «%s».", label)
-		return self._acc_dto(acc)
+		dto = self._acc_dto(acc)
+		logger.info("Добавлен userbot-аккаунт «%s».", dto.display)
+		return dto
+
+	async def set_account_label(self, account_id: int, label: str) -> TgAccountDto:
+		"""Переназначает ручную пометку аккаунта (пустая строка — снимает).
+
+		Пометка меняется в любой момент и не трогает профиль
+		из Telegram — карточку тогда подписывают имя и @имя.
+
+		Raises:
+			AccountsError: Аккаунт не найден.
+		"""
+		async with self._db.session_factory() as session:
+			account = await session.get(TgAccount, account_id)
+			if account is None:
+				raise AccountsError("Аккаунт не найден — обновите список.")
+			account.label = label.strip() or None
+			await session.commit()
+			await session.refresh(account)
+		dto = self._acc_dto(account)
+		logger.info("Аккаунт id=%s: пометка — %s.", account_id, dto.label or "снята")
+		return dto
+
+	async def sync_profile(self, account_id: int) -> None:
+		"""Актуализирует профиль аккаунта из Telegram (живой запрос «кто я»).
+
+		Вызывается там, где соединение аккаунта заведомо живое: после
+		входа, при активации сессий на старте и из зондов прав (крючок
+		сервиса сообществ). Сбой запроса — не ошибка вызывающей
+		операции: профиль остаётся прежним, в лог — след. NULL в полях
+		пишется только по явному ответу Telegram (имени/@имени нет).
+		"""
+		try:
+			profile = await self._gateway.userbot_me(account_id)
+		except Exception:  # noqa: BLE001 — актуализация вспомогательная
+			logger.info("Профиль аккаунта id=%s не обновлён (нет связи или сессии).", account_id)
+			return
+		async with self._db.session_factory() as session:
+			account = await session.get(TgAccount, account_id)
+			if account is None:
+				return  # аккаунт удалили за время запроса
+			fresh = (profile.username, profile.first_name, profile.last_name)
+			if (account.username, account.first_name, account.last_name) == fresh:
+				return
+			account.username, account.first_name, account.last_name = fresh
+			await session.commit()
+		logger.info(
+			"Аккаунт id=%s: профиль обновлён — %s (@%s).",
+			account_id,
+			" ".join(p for p in (profile.first_name, profile.last_name) if p) or "без имени",
+			profile.username or "—",
+		)
 
 	async def delete_tg_account(self, account_id: int) -> None:
 		"""Удаляет userbot-аккаунт и отключает его транспорт.
@@ -297,10 +376,16 @@ class AccountsService:
 			account = await session.get(TgAccount, account_id)
 			if account is None:
 				return
-			label = account.label
+			display = account_display(
+				account.label,
+				account.username,
+				account.first_name,
+				account.last_name,
+				account.phone,
+			)
 			await session.delete(account)
 			await session.commit()
-		logger.info("Удалён userbot-аккаунт «%s» (id=%s).", label, account_id)
+		logger.info("Удалён userbot-аккаунт «%s» (id=%s).", display, account_id)
 		await self._gateway.deactivate_userbot(account_id)
 
 	async def activate_stored_userbots(self) -> None:
@@ -338,14 +423,23 @@ class AccountsService:
 		for account in accounts:
 			if account.session is None:  # для mypy: выборка уже отфильтровала
 				continue
+			display = account_display(
+				account.label,
+				account.username,
+				account.first_name,
+				account.last_name,
+				account.phone,
+			)
 			try:
 				await self._gateway.activate_userbot(
 					account.id, credential.api_id, credential.api_hash, account.session
 				)
 			except UserbotUnavailableError as exc:
-				logger.warning("Userbot «%s» не подключён: %s", account.label, exc)
+				logger.warning("Userbot «%s» не подключён: %s", display, exc)
 				continue
-			logger.info("Userbot «%s» подключён.", account.label)
+			logger.info("Userbot «%s» подключён.", display)
+			# соединение только что установлено — момент актуализации
+			await self.sync_profile(account.id)
 
 	@staticmethod
 	def _acc_dto(acc: TgAccount, premium: bool = False) -> TgAccountDto:
@@ -355,6 +449,12 @@ class AccountsService:
 			acc.phone,
 			logged_in=acc.session is not None,
 			premium=premium,
+			username=acc.username,
+			first_name=acc.first_name,
+			last_name=acc.last_name,
+			display=account_display(
+				acc.label, acc.username, acc.first_name, acc.last_name, acc.phone
+			),
 		)
 
 	# --- вход userbot ---------------------------------------------------------
@@ -428,6 +528,9 @@ class AccountsService:
 			)
 		except Exception:  # noqa: BLE001 — вход удался, подключение не критично
 			logger.exception("Не удалось подключить userbot сразу после входа.")
+			return
+		# вход завершён, соединение живое — заполняем имя и @имя из Telegram
+		await self.sync_profile(account_id)
 
 	# --- ключи ИИ -----------------------------------------------------------
 

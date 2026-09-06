@@ -117,9 +117,16 @@ def community_combo_label(community: CommunityDto) -> str:
 	return community.title
 
 
-def account_caption(label: str, phone: str | None) -> str:
-	"""Единая метка userbot-аккаунта в списках и диалогах: «Имя (телефон)»."""
-	return f"{label} ({phone or '—'})"
+def account_caption(display: str, phone: str | None) -> str:
+	"""Единая метка userbot-аккаунта в списках и диалогах: «Имя (телефон)».
+
+	``display`` — отображаемое имя из движка (``TgAccountDto.display``:
+	пометка → имя из Telegram → @имя → телефон). Если имя и есть телефон
+	(аккаунт без пометки до первого входа) — телефон не дублируется.
+	"""
+	if phone and phone != display:
+		return f"{display} ({phone})"
+	return display
 
 
 def bind(action: Callable[[_T], None], item: _T) -> Callable[[], None]:
@@ -946,7 +953,8 @@ class FormDialog(MessageBoxBase):
 	«ключ поля → текст», возвращает текст ошибки или None («всё годно»).
 	При ошибке диалог показывает её и НЕ закрывается — введённое
 	не пропадает (крючок ``validate`` библиотеки, как в диалоге
-	настроек канала).
+	настроек канала). ``initial`` — начальные значения полей
+	(для диалогов правки существующего: например, пометки аккаунта).
 	"""
 
 	def __init__(
@@ -957,6 +965,7 @@ class FormDialog(MessageBoxBase):
 		accept_text: str = "Добавить",
 		password_fields: tuple[str, ...] = (),
 		validator: Callable[[dict[str, str]], str | None] | None = None,
+		initial: dict[str, str] | None = None,
 	) -> None:
 		super().__init__(parent)
 		self.viewLayout.addWidget(SubtitleLabel(title, self))
@@ -967,6 +976,8 @@ class FormDialog(MessageBoxBase):
 			edit = LineEdit(self)
 			edit.setPlaceholderText(placeholder)
 			edit.setClearButtonEnabled(True)
+			if initial and key in initial:
+				edit.setText(initial[key])
 			if key in password_fields:
 				edit.setEchoMode(LineEdit.EchoMode.Password)
 			self.viewLayout.addWidget(edit)

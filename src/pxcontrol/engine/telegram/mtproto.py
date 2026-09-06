@@ -26,6 +26,7 @@ from pxcontrol.engine.telegram.types import (
 	OutgoingPost,
 	ScheduledMessage,
 	TelegramFloodError,
+	UserbotProfile,
 	UserbotRole,
 )
 
@@ -502,6 +503,27 @@ class MtprotoTransport:
 			chat_id,
 			post.media_kind if post.media_path else "текст",
 			f"отложено на {post.when}" if post.when else "сразу",
+		)
+
+	async def me(self) -> UserbotProfile:
+		"""Профиль владельца сессии: @имя и имя (живой запрос «кто я»).
+
+		Из него актуализируются данные аккаунта в БД — владелец мог
+		сменить имя или @имя в Telegram. Пустые строки Telethon
+		нормализуются в None: полей у аккаунта просто нет.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotUnavailableError: Прочие отказы Telegram (включая флуд).
+		"""
+		client = await self._connected_client()
+		async with _mtproto_errors():
+			me = await client.get_me()
+		return UserbotProfile(
+			username=getattr(me, "username", None) or None,
+			first_name=getattr(me, "first_name", None) or None,
+			last_name=getattr(me, "last_name", None) or None,
 		)
 
 	async def check_community(self, chat_ref: str) -> CommunityInfo:

@@ -10,6 +10,7 @@ ADR-0022) с ролями из зондов прав; публикует акк�
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -20,6 +21,7 @@ from sqlalchemy.orm import selectinload
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.services.accounts import account_display
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
 from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind, UserbotRole
@@ -124,13 +126,18 @@ class CommunitiesService:
 		db: Database,
 		gateway: _CommunityChecker,
 		settings: SettingsService | None = None,
+		profile_sync: Callable[[int], Awaitable[None]] | None = None,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
 		экземпляр поверх той же БД (для тестов это эквивалентно:
-		настройки каналов не кэшируются)."""
+		настройки каналов не кэшируются). ``profile_sync`` — крючок
+		актуализации профиля аккаунта (движок передаёт
+		``AccountsService.sync_profile``): зонд прав дёргает его при
+		живом ответе — сервис аккаунтов сервису сообществ не нужен."""
 		self._db = db
 		self._gateway = gateway
 		self._settings = settings if settings is not None else SettingsService(db)
+		self._profile_sync = profile_sync
 
 	async def list_communities(self) -> list[CommunityDto]:
 		"""Возвращает все подключённые каналы (с именами публикаторов)."""
@@ -191,11 +198,18 @@ class CommunitiesService:
 				права публиковать.
 		"""
 		account = await self._get_account(account_id)
-		logger.info("Подключаю канал через userbot «%s»: ввод %r.", account.label, chat_ref)
+		logger.info(
+			"Подключаю канал через userbot «%s»: ввод %r.",
+			self._account_display(account),
+			chat_ref,
+		)
 		info = await self._gateway.check_community_userbot(account_id, chat_ref)
+		await self._sync_profile(account_id)
 		role = info.role or UserbotRole.MEMBER  # userbot-зонд всегда отдаёт роль
 		community = await self._store_community(info, bot_id=None, member=(account_id, role))
-		logger.info("Подключён канал «%s» (userbot «%s»).", info.title, account.label)
+		logger.info(
+			"Подключён канал «%s» (userbot «%s»).", info.title, self._account_display(account)
+		)
 		return await self._fresh_dto(community.id)
 
 	async def _probe_userbot(self, account_id: int, chat_id: str) -> _ProbeResult:
@@ -212,7 +226,19 @@ class CommunitiesService:
 				chat_id,
 			)
 			return _ProbeResult(ok=None)
+		await self._sync_profile(account_id)
 		return _ProbeResult(ok=True, info=info)
+
+	async def _sync_profile(self, account_id: int) -> None:
+		"""Актуализирует профиль аккаунта после живого ответа Telegram.
+
+		Крючок движка (``AccountsService.sync_profile``): зовётся везде,
+		где проверка прав аккаунта подтвердилась — соединение живое,
+		имя и @имя можно спросить. Свой сбой крючок гасит сам,
+		операцию-носителя он не портит.
+		"""
+		if self._profile_sync is not None:
+			await self._profile_sync(account_id)
 
 	async def _find_userbot_publisher(self, chat_id: str) -> tuple[int, UserbotRole] | None:
 		"""Ищет аккаунт, способный публиковать (первый подходящий), с ролью.
@@ -409,7 +435,7 @@ class CommunitiesService:
 			return [
 				MemberDto(
 					account_id=member.tg_account_id,
-					label=member.tg_account.label,
+					label=self._account_display(member.tg_account),
 					role=UserbotRole(member.role),
 					is_default=member.tg_account_id == community.default_tg_account_id,
 				)
@@ -432,16 +458,23 @@ class CommunitiesService:
 			community = await self._community_in_session(session, community_id, with_refs=True)
 			chat_id = community.tg_chat_id
 			if await session.get(CommunityMember, (community_id, account_id)) is not None:
-				raise CommunityError(f"«{account.label}» уже участник этого сообщества.")
+				raise CommunityError(
+					f"«{self._account_display(account)}» уже участник этого сообщества."
+				)
 			had_members = bool(community.members)
 		info = await self._gateway.check_community_userbot(account_id, chat_id)
+		await self._sync_profile(account_id)
 		await self._adopt_member(
 			community_id,
 			(account_id, info.role or UserbotRole.MEMBER),
 			make_default=not had_members,
 		)
 		await self._refresh_mutable(community_id, info)
-		logger.info("Сообществу id=%s добавлен участник «%s».", community_id, account.label)
+		logger.info(
+			"Сообществу id=%s добавлен участник «%s».",
+			community_id,
+			self._account_display(account),
+		)
 		return await self.list_members(community_id)
 
 	async def remove_member(self, community_id: int, account_id: int) -> list[MemberDto]:
@@ -498,7 +531,7 @@ class CommunitiesService:
 		)
 		dto = await self.set_default(community_id, account_id)
 		await self._refresh_mutable(community_id, info)
-		logger.info("«%s»: публикатор userbot «%s».", dto.title, account.label)
+		logger.info("«%s»: публикатор userbot «%s».", dto.title, self._account_display(account))
 		return await self._fresh_dto(community_id)
 
 	async def unassign_userbot(self, community_id: int) -> CommunityDto:
@@ -667,6 +700,13 @@ class CommunitiesService:
 		return account
 
 	@staticmethod
+	def _account_display(account: TgAccount) -> str:
+		"""Отображаемое имя аккаунта (единая точка — :func:`account_display`)."""
+		return account_display(
+			account.label, account.username, account.first_name, account.last_name, account.phone
+		)
+
+	@staticmethod
 	def _dto(community: Community, enabled: bool = True) -> CommunityDto:
 		"""Снимок сообщества; связи должны быть подгружены (with_refs)."""
 		default = community.default_account
@@ -687,7 +727,7 @@ class CommunitiesService:
 			community.bot.label if community.bot is not None else None,
 			enabled,
 			community.default_tg_account_id,
-			default.label if default is not None else None,
+			CommunitiesService._account_display(default) if default is not None else None,
 			default_role=default_role,
 			members_count=len(community.members),
 			kind=CommunityKind(community.kind),

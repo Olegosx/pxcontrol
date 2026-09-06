@@ -200,27 +200,63 @@ class AccountsPage(ScrollArea):
 		rows = [self._account_row(account) for account in accounts]
 		self._accounts.set_rows(
 			rows,
-			"Пока нет аккаунтов — добавьте название и телефон "
+			"Пока нет аккаунтов — добавьте телефон, пометка — по желанию "
 			"(ключ API приложения задаётся в «Настройки → Общие»).",
 		)
 
 	def _account_row(self, account: TgAccountDto) -> CardWidget:
-		"""Карточка userbot-аккаунта: статус входа и кнопка «Войти»."""
+		"""Карточка userbot-аккаунта: профиль, статус входа, действия.
+
+		Название — отображаемое имя из движка (пометка или профиль
+		Telegram); в подписи — @имя и имя/фамилия из Telegram (кроме
+		совпадающих с названием: не дублировать же его строкой ниже).
+		"""
 		status = "вход выполнен ✓" if account.logged_in else "вход не выполнен"
 		if account.premium:
 			status += " · Premium (файлы до 4 ГБ)"
-		trailing: QWidget | None = None
+		full_name = " ".join(part for part in (account.first_name, account.last_name) if part)
+		parts: list[str] = []
+		if account.username and f"@{account.username}" != account.display:
+			parts.append(f"@{account.username}")
+		if full_name and full_name != account.display:
+			parts.append(full_name)
+		parts.extend([account.phone or "без телефона", status])
+		buttons = QWidget(self)
+		row = QHBoxLayout(buttons)
+		row.setContentsMargins(0, 0, 0, 0)
+		label_button = PushButton("Пометка…", buttons)
+		label_button.setToolTip("Своя пометка вместо имени из Telegram (пусто — снять)")
+		label_button.clicked.connect(bind(self._rename_account, account))
+		row.addWidget(label_button)
 		if not account.logged_in:
-			login_button = PushButton("Войти", self)
+			login_button = PushButton("Войти", buttons)
 			login_button.clicked.connect(bind(self._start_login, account))
-			trailing = login_button
-		subtitle = f"{account.phone or 'без телефона'} · {status}"
+			row.addWidget(login_button)
 		return row_card(
 			self,
-			account.label,
-			subtitle,
-			trailing=trailing,
+			account.display,
+			" · ".join(parts),
+			trailing=buttons,
 			on_delete=bind(self._delete_account, account),
+		)
+
+	def _rename_account(self, account: TgAccountDto) -> None:
+		"""Переназначение ручной пометки (в любой момент; пусто — снять)."""
+		dialog = FormDialog(
+			"Пометка аккаунта",
+			[("label", "Пометка (пусто — имя из Telegram)")],
+			self.window(),
+			accept_text="Сохранить",
+			initial={"label": account.label or ""},
+		)
+		if not exec_dialog(dialog):
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.accounts.set_account_label(account.id, dialog.value("label")),
+			self,
+			lambda *_a: self._reload_accounts(),
+			self._show_error,
 		)
 
 	# --- вход userbot: телефон → код → (пароль 2FA) ---------------------------
@@ -262,7 +298,7 @@ class AccountsPage(ScrollArea):
 	def _after_code(self, account: TgAccountDto, done: bool) -> None:
 		"""После кода: вход завершён (``done``) или нужен пароль 2FA."""
 		if done:
-			InfoBar.success("Вход выполнен", account.label, parent=self)
+			InfoBar.success("Вход выполнен", account.display, parent=self)
 			self._reload_accounts()
 			return
 		self._ask_password(account)
@@ -291,7 +327,7 @@ class AccountsPage(ScrollArea):
 
 	def _after_password(self, account: TgAccountDto) -> None:
 		"""Пароль принят — вход завершён."""
-		InfoBar.success("Вход выполнен", account.label, parent=self)
+		InfoBar.success("Вход выполнен", account.display, parent=self)
 		self._reload_accounts()
 
 	def _cancel_login(self, account: TgAccountDto) -> None:
@@ -305,20 +341,21 @@ class AccountsPage(ScrollArea):
 		)
 
 	def _on_add_account(self) -> None:
-		"""Диалог нового аккаунта: только название и телефон.
+		"""Диалог нового аккаунта: телефон и необязательная пометка.
 
 		Ключ API (api_id/api_hash) у аккаунта не спрашивается — он один
 		на всё приложение и задаётся в «Настройки → Общие» (ADR-0018).
+		Имя и @имя заполнит Telegram после входа.
 		"""
 		fields = [
-			("label", "Название (для себя)"),
 			("phone", "Телефон — на него придёт код входа"),
+			("label", "Пометка (необязательно, например «рабочий»)"),
 		]
 		dialog = FormDialog(
 			"Новый userbot-аккаунт",
 			fields,
 			self.window(),
-			validator=require_filled("label", "phone", message="Заполните оба поля."),
+			validator=require_filled("phone", message="Укажите телефон."),
 		)
 		if not exec_dialog(dialog):
 			return
@@ -329,7 +366,7 @@ class AccountsPage(ScrollArea):
 		run_in_engine(self._worker, coro, self, self._on_account_added, self._show_error)
 
 	def _on_account_added(self, account: TgAccountDto) -> None:
-		InfoBar.success("Аккаунт сохранён", account.label, parent=self)
+		InfoBar.success("Аккаунт сохранён", account.display, parent=self)
 		self._reload_accounts()
 
 	def _delete_account(self, account: TgAccountDto) -> None:
@@ -347,7 +384,7 @@ class AccountsPage(ScrollArea):
 	) -> None:
 		"""Подтверждение с перечнем каналов, привязанных к аккаунту (ADR-0019)."""
 		bound = [ch.title for ch in communities if ch.default_account_id == account.id]
-		text = f"Удалить аккаунт «{account.label}»?"
+		text = f"Удалить аккаунт «{account.display}»?"
 		if bound:
 			names = ", ".join(f"«{title}»" for title in bound)
 			text += (

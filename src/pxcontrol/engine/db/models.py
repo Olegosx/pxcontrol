@@ -100,18 +100,24 @@ class TgApiCredential(TimestampMixin, Base):
 class TgAccount(TimestampMixin, Base):
 	"""Userbot-аккаунт MTProto (отдельный аккаунт, ADR-0007).
 
-	Только реквизиты самого аккаунта: название, телефон и ``session`` —
-	строка сессии, секрет уровня пароля (шифруется), заполняется после
-	входа по номеру телефона. Ключ API приложения — общий,
-	в ``tg_api_credentials`` (ADR-0018).
+	Реквизиты самого аккаунта: телефон и ``session`` — строка сессии,
+	секрет уровня пароля (шифруется), заполняется после входа по номеру
+	телефона. ``label`` — необязательная ручная пометка («рабочий»,
+	«запасной»); @имя и имя (``username``/``first_name``/``last_name``,
+	раздельно — как отдаёт Telegram) заполняются и актуализируются
+	автоматически: вход, старт приложения, зонды прав. Ключ API
+	приложения — общий, в ``tg_api_credentials`` (ADR-0018).
 	"""
 
 	__tablename__ = "tg_accounts"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	label: Mapped[str] = mapped_column(String(128))
+	label: Mapped[str | None] = mapped_column(String(128), default=None)
 	phone: Mapped[str | None] = mapped_column(String(32), default=None)
 	session: Mapped[str | None] = mapped_column(EncryptedStr(2048), default=None)
+	username: Mapped[str | None] = mapped_column(String(255), default=None)
+	first_name: Mapped[str | None] = mapped_column(String(255), default=None)
+	last_name: Mapped[str | None] = mapped_column(String(255), default=None)
 
 
 class AiCredential(TimestampMixin, Base):

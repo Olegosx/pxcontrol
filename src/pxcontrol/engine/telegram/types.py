@@ -103,6 +103,24 @@ class CommunityInfo:
 
 
 @dataclass(frozen=True)
+class UserbotProfile:
+	"""Профиль владельца userbot-сессии (ответ Telegram «кто я»).
+
+	Поля раздельные, как отдаёт Telegram; None — не заполнено
+	у самого аккаунта (@имени может не быть, фамилия необязательна).
+
+	Attributes:
+		username: @имя без собаки.
+		first_name: имя.
+		last_name: фамилия.
+	"""
+
+	username: str | None
+	first_name: str | None
+	last_name: str | None
+
+
+@dataclass(frozen=True)
 class OutgoingPost:
 	"""Исходящий пост для транспорта: текст или медиа с подписью.
 

@@ -8,10 +8,12 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.services.accounts import (
 	AccountsError,
 	AccountsService,
+	account_display,
 	mask_secret,
 )
 from pxcontrol.engine.telegram.bot_api import InvalidBotTokenError
-from pxcontrol.engine.telegram.mtproto import LoginError
+from pxcontrol.engine.telegram.mtproto import LoginError, UserbotNotConnectedError
+from pxcontrol.engine.telegram.types import UserbotProfile
 
 
 class _FakeLogin:
@@ -49,9 +51,17 @@ class _FakeGateway:
 		self.activated: dict[int, tuple[int, str]] = {}
 		self.deactivations: list[int] = []
 		self.premium_ids: set[int] = set()
+		# профиль «кто я» аккаунта; нет в словаре — «не подключён»
+		self.profiles: dict[int, UserbotProfile] = {}
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return account_id in self.premium_ids
+
+	async def userbot_me(self, account_id: int) -> UserbotProfile:
+		profile = self.profiles.get(account_id)
+		if profile is None:
+			raise UserbotNotConnectedError("Userbot не подключён.")
+		return profile
 
 	async def activate_userbot(
 		self, account_id: int, api_id: int, api_hash: str, session: str
@@ -130,14 +140,76 @@ async def test_tg_api_key_validation(db: Database) -> None:
 	assert await service.get_tg_api() is None
 
 
-async def test_add_tg_account_requires_label_and_phone(db: Database) -> None:
-	"""Аккаунт без названия или телефона — понятная ошибка (тупик входа)."""
+async def test_add_tg_account_requires_phone_label_optional(db: Database) -> None:
+	"""Телефон обязателен (тупик входа); пометка — по желанию."""
 	service = AccountsService(db, _FakeGateway())
-	with pytest.raises(AccountsError, match="название"):
-		await service.add_tg_account("  ", "+7900")
 	with pytest.raises(AccountsError, match="телефон"):
 		await service.add_tg_account("Личный", "  ")
 	assert await service.list_tg_accounts() == []
+	account = await service.add_tg_account("  ", "+7900")
+	assert account.label is None
+	assert account.display == "+7900", "до входа и без пометки аккаунт подписан телефоном"
+
+
+async def test_account_label_reassign_and_clear(db: Database) -> None:
+	"""Пометка переназначается в любой момент; пустая строка — снимает."""
+	service = AccountsService(db, _FakeGateway())
+	account = await service.add_tg_account("Старая", "+7900")
+	renamed = await service.set_account_label(account.id, "Новая")
+	assert renamed.label == "Новая" and renamed.display == "Новая"
+	cleared = await service.set_account_label(account.id, "  ")
+	assert cleared.label is None and cleared.display == "+7900"
+	with pytest.raises(AccountsError, match="не найден"):
+		await service.set_account_label(999_999, "x")
+
+
+def test_account_display_fallbacks() -> None:
+	"""Цепочка отображаемого имени: пометка → имя → @имя → телефон."""
+	assert account_display("метка", "lara", "Lara", "Croft", "+7900") == "метка"
+	assert account_display(None, "lara", "Lara", "Croft", "+7900") == "Lara Croft"
+	assert account_display(None, "lara", "Lara", None, "+7900") == "Lara"
+	assert account_display(None, "lara", None, None, "+7900") == "@lara"
+	assert account_display(None, None, None, None, "+7900") == "+7900"
+
+
+async def test_login_fills_profile_from_telegram(db: Database) -> None:
+	"""После входа @имя и имя заполняются из Telegram (sync_profile)."""
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	await service.set_tg_api(123, "app-hash-app-hash")
+	account = await service.add_tg_account("", "+79000000000")
+	gateway.profiles[account.id] = UserbotProfile("lara", "Lara", "Croft")
+	await service.start_login(account.id)
+	assert await service.confirm_login_code(account.id, "12345") is True
+	updated = (await service.list_tg_accounts())[0]
+	assert (updated.username, updated.first_name, updated.last_name) == ("lara", "Lara", "Croft")
+	assert updated.display == "Lara Croft"
+
+
+async def test_sync_profile_failure_keeps_data(db: Database) -> None:
+	"""Сбой запроса «кто я» не затирает сохранённый профиль."""
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	account = await service.add_tg_account("", "+7900")
+	gateway.profiles[account.id] = UserbotProfile("lara", "Lara", None)
+	await service.sync_profile(account.id)
+	del gateway.profiles[account.id]  # «нет связи»
+	await service.sync_profile(account.id)
+	updated = (await service.list_tg_accounts())[0]
+	assert (updated.username, updated.first_name) == ("lara", "Lara")
+
+
+async def test_sync_profile_writes_explicit_nulls(db: Database) -> None:
+	"""Явный ответ Telegram «имени нет» пишет NULL (сняли @имя/фамилию)."""
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	account = await service.add_tg_account("", "+7900")
+	gateway.profiles[account.id] = UserbotProfile("lara", "Lara", "Croft")
+	await service.sync_profile(account.id)
+	gateway.profiles[account.id] = UserbotProfile(None, "Lara", None)
+	await service.sync_profile(account.id)
+	updated = (await service.list_tg_accounts())[0]
+	assert (updated.username, updated.first_name, updated.last_name) == (None, "Lara", None)
 
 
 async def test_login_requires_app_api_key(db: Database) -> None:
@@ -169,6 +241,24 @@ async def test_activate_stored_userbots_needs_api_key(db: Database) -> None:
 	await service.activate_stored_userbots()
 	# подключены оба вошедших, каждый своей сессией, общим ключом
 	assert gateway.activated == {one.id: (777, "s1"), two.id: (777, "s2")}
+
+
+async def test_activation_on_start_syncs_profiles(db: Database) -> None:
+	"""Активация сессий на старте актуализирует профили из Telegram."""
+	from pxcontrol.engine.db.models import TgAccount
+
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	await service.set_tg_api(777, "hash-hash-hash-hash")
+	async with db.session_factory() as session:
+		account = TgAccount(label=None, phone="+7900", session="s1")
+		session.add(account)
+		await session.commit()
+		await session.refresh(account)
+	gateway.profiles[account.id] = UserbotProfile("lara", "Lara", "Croft")
+	await service.activate_stored_userbots()
+	updated = (await service.list_tg_accounts())[0]
+	assert updated.username == "lara" and updated.display == "Lara Croft"
 
 
 async def test_delete_tg_account_deactivates_only_it(db: Database) -> None:

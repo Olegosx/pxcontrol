@@ -95,7 +95,7 @@ class _ConnectDialog(MessageBoxBase):
 		self.viewLayout.addWidget(self._hint)
 		self._account_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
 		self._account_combo.set_items(
-			accounts, label=lambda acc: account_caption(acc.label, acc.phone)
+			accounts, label=lambda acc: account_caption(acc.display, acc.phone)
 		)
 		self.viewLayout.addWidget(self._account_combo)
 		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
@@ -242,7 +242,7 @@ class _MembersDialog(MessageBoxBase):
 		taken = {member.account_id for member in members}
 		self._add_combo.set_items(
 			[account for account in self._accounts if account.id not in taken],
-			label=lambda acc: account_caption(acc.label, acc.phone),
+			label=lambda acc: account_caption(acc.display, acc.phone),
 			key=lambda acc: acc.id,
 		)
 
