@@ -37,8 +37,8 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.errors import user_message
-from pxcontrol.engine.services.channels import ChannelDto
-from pxcontrol.engine.services.settings import CHANNEL_DEFAULT_PRESET
+from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.settings import COMMUNITY_DEFAULT_PRESET
 from pxcontrol.engine.services.video import (
 	BitrateAdvice,
 	IntroSourceKind,
@@ -176,7 +176,7 @@ class VideoPage(ScrollArea):
 		(после отправки поста) или измениться мимо приложения.
 		"""
 		super().showEvent(event)
-		self._reload_channels()
+		self._reload_communities()
 		self._reload_processed()
 
 	# --- сборка страницы ---------------------------------------------------------
@@ -185,7 +185,7 @@ class VideoPage(ScrollArea):
 		layout = page_layout(self)
 		layout.addWidget(SubtitleLabel("Подготовка видео", self))
 		self._build_source_row(layout)
-		self._build_channel_row(layout)
+		self._build_community_row(layout)
 		self._build_preset_row(layout)
 		self._build_template_card(layout)
 		layout.addSpacing(8)
@@ -292,17 +292,19 @@ class VideoPage(ScrollArea):
 		src_row.addStretch()
 		layout.addLayout(src_row)
 
-	def _build_channel_row(self, layout: QVBoxLayout) -> None:
+	def _build_community_row(self, layout: QVBoxLayout) -> None:
 		"""Канал: выбор подставляет его пресет по умолчанию (настройка канала)."""
 		row = QHBoxLayout()
 		row.addWidget(BodyLabel("Канал:", self))
-		self._channel_combo: DtoComboBox[ChannelDto] = DtoComboBox(self, placeholder="(не выбран)")
-		self._channel_combo.setToolTip(
+		self._community_combo: DtoComboBox[CommunityDto] = DtoComboBox(
+			self, placeholder="(не выбран)"
+		)
+		self._community_combo.setToolTip(
 			"Выбор канала загружает его пресет по умолчанию "
 			"(задаётся на странице «Каналы» → «Пресет…»)"
 		)
-		self._channel_combo.currentIndexChanged.connect(self._on_channel_selected)
-		row.addWidget(self._channel_combo, stretch=1)
+		self._community_combo.currentIndexChanged.connect(self._on_community_selected)
+		row.addWidget(self._community_combo, stretch=1)
 		layout.addLayout(row)
 
 	def _build_preset_row(self, layout: QVBoxLayout) -> None:
@@ -361,59 +363,59 @@ class VideoPage(ScrollArea):
 
 	# --- канал и его пресет по умолчанию -------------------------------------------
 
-	def _reload_channels(self) -> None:
+	def _reload_communities(self) -> None:
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.list_channels(),
+			self._worker.engine.communities.list_communities(),
 			self,
-			self._show_channels,
+			self._show_communities,
 			self._show_error,
 		)
 
-	def _show_channels(self, channels: list[ChannelDto]) -> None:
+	def _show_communities(self, communities: list[CommunityDto]) -> None:
 		"""Наполняет список каналов (выбор сохраняется по id канала)."""
-		self._channel_combo.set_items(
-			channels,
-			label=lambda channel: channel.title,
-			key=lambda channel: channel.id,
+		self._community_combo.set_items(
+			communities,
+			label=lambda community: community.title,
+			key=lambda community: community.id,
 		)
 
-	def _on_channel_selected(self, _index: int) -> None:
+	def _on_community_selected(self, _index: int) -> None:
 		"""Выбор канала — загрузка его пресета по умолчанию в панель."""
-		channel = self._channel_combo.selected()
-		if channel is None:
+		community = self._community_combo.selected()
+		if community is None:
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id),
+			self._worker.engine.settings.get_for(COMMUNITY_DEFAULT_PRESET, community.id),
 			self,
-			partial(self._apply_channel_preset, channel),
+			partial(self._apply_community_preset, community),
 			self._show_error,
 		)
 
-	def _is_stale_channel(self, channel_id: int) -> bool:
+	def _is_stale_community(self, community_id: int) -> bool:
 		"""Пришёл ли ответ движка для уже переключённого канала.
 
 		Пока движок занят, ответы задерживаются (та же гонка, что
 		``_is_stale`` на «Публикации»): без проверки пресет канала A
 		лёг бы в шаблон уже выбранного канала B.
 		"""
-		return not self._channel_combo.is_current_id(channel_id)
+		return not self._community_combo.is_current_id(community_id)
 
-	def _apply_channel_preset(self, channel: ChannelDto, preset_id: int | None) -> None:
+	def _apply_community_preset(self, community: CommunityDto, preset_id: int | None) -> None:
 		"""Подставляет пресет канала; нет пресета — форма не трогается.
 
 		Выбор в списке вызывает ``_on_preset_selected`` — панель заполнится.
 		Ссылка на удалённый пресет равнозначна «не задан».
 		"""
-		if self._is_stale_channel(channel.id):
+		if self._is_stale_community(community.id):
 			return
 		if preset_id is None or not self._preset_combo.select(
 			lambda preset: preset.id == preset_id
 		):
 			InfoBar.info(
 				"Пресет не задан",
-				f"У канала «{channel.title}» нет пресета по умолчанию — "
+				f"У канала «{community.title}» нет пресета по умолчанию — "
 				"задайте его на странице «Каналы» → «Пресет…».",
 				parent=self,
 			)
@@ -884,12 +886,12 @@ class VideoPage(ScrollArea):
 
 	# --- массовая публикация готовых видео (ADR-0015) -------------------------------
 
-	def _current_channel(self) -> ChannelDto | None:
+	def _current_community(self) -> CommunityDto | None:
 		"""Выбранный канал или подсказка (имя — как на «Публикации»)."""
-		channel = self._channel_combo.selected()
-		if channel is None:
+		community = self._community_combo.selected()
+		if community is None:
 			self._show_error("Выберите канал (список над пресетом) — пакет публикуется в него.")
-		return channel
+		return community
 
 	def _publish_all_processed(self) -> None:
 		"""Все видео списка — пакетом на «Публикацию»."""
@@ -911,24 +913,24 @@ class VideoPage(ScrollArea):
 		if not items:
 			self._show_error("Готовых видео нет — публиковать нечего.")
 			return
-		channel = self._current_channel()
-		if channel is None:
+		community = self._current_community()
+		if community is None:
 			return
 		if len(items) == 1:
 			# один файл — не пакет: обычная форма публикации,
 			# как у кнопки «Опубликовать…» на карточке
-			self.publish_requested.emit(items[0].path, channel.id)
+			self.publish_requested.emit(items[0].path, community.id)
 			return
-		self.publish_files_requested.emit([item.path for item in items], channel.id)
+		self.publish_files_requested.emit([item.path for item in items], community.id)
 
 	def _publish_processed_folder(self) -> None:
 		"""Выбор подпапки в обработанных — вся она пакетом на «Публикацию»."""
-		channel = self._current_channel()
-		if channel is None:
+		community = self._current_community()
+		if community is None:
 			return
 		root = pick_dir(self, "Папка готовых видео", start_dir=self._processed_dir)
 		if root:
-			self.publish_folder_requested.emit(root, channel.id)
+			self.publish_folder_requested.emit(root, community.id)
 
 	def _on_delete_processed(self, item: ProcessedVideo) -> None:
 		"""Удаляет готовое видео с диска (вместе с кадром-превью)."""
@@ -948,5 +950,5 @@ class VideoPage(ScrollArea):
 
 	def _request_publish(self, path: str) -> None:
 		"""Передаёт файл на «Публикацию» вместе с выбранным каналом."""
-		channel = self._channel_combo.selected()
-		self.publish_requested.emit(path, channel.id if channel else 0)
+		community = self._community_combo.selected()
+		self.publish_requested.emit(path, community.id if community else 0)

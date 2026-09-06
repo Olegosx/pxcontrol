@@ -146,7 +146,7 @@ yuv420p: у штрихов в 1–2 пикселя цветность части
 совпадения размеров входов. Своя картинка-заставка с иными пропорциями
 вписывается с чёрными полями по центру (letterbox), а не валит обработку.
 Пресет по умолчанию для канала реализован настройкой канала
-`default_video_preset` (ADR-0013, см. [channels.md](channels.md)
+`default_video_preset` (ADR-0013, см. [communities.md](communities.md)
 и [configuration.md](../06-config/configuration.md)) — колонки в таблице
 каналов под это нет.
 

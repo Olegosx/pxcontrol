@@ -102,7 +102,7 @@ async def test_queued_dir_change_blocked_while_queue_live(tmp_path: Path) -> Non
 	await engine.db.init()
 	# живой элемент в очереди (постановка напрямую — сети не нужно)
 	engine.publish_queue._items.append(  # noqa: SLF001 — смоделировать живую очередь
-		_Item(1, PostDraft(channel_id=1, text="ждёт"), "Канал")
+		_Item(1, PostDraft(community_id=1, text="ждёт"), "Канал")
 	)
 	with pytest.raises(EngineError, match="нельзя менять"):
 		await engine.update_video_folders([(VIDEO_QUEUED_DIR, str(tmp_path / "new"))])

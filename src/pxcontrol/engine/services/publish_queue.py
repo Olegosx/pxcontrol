@@ -79,9 +79,9 @@ class QueueItemDto:
 	Attributes:
 		id: идентификатор элемента (для отмены и снятия с показа).
 		title: человекочитаемо: имя файла или начало текста.
-		channel_id: id канала-получателя (фильтры и группировки: названия
+		community_id: id канала-получателя (фильтры и группировки: названия
 			каналов не уникальны, идентичность — только по id).
-		channel_title: название канала-получателя.
+		community_title: название канала-получателя.
 		when: момент публикации (UTC); None — «сейчас». Задан — пост
 			отложенный: после отправки станет записью в канале.
 		status: текущий статус.
@@ -92,8 +92,8 @@ class QueueItemDto:
 
 	id: int
 	title: str
-	channel_id: int
-	channel_title: str
+	community_id: int
+	community_title: str
 	when: datetime | None
 	status: QueueItemStatus
 	progress: float
@@ -109,10 +109,10 @@ class QueueItemDto:
 class _Item:
 	"""Внутреннее состояние элемента очереди (изменяемое)."""
 
-	def __init__(self, item_id: int, draft: PostDraft, channel_title: str) -> None:
+	def __init__(self, item_id: int, draft: PostDraft, community_title: str) -> None:
 		self.id = item_id
 		self.draft = draft
-		self.channel_title = channel_title
+		self.community_title = community_title
 		self.status = QueueItemStatus.PENDING
 		self.progress = 0.0
 		self.error: str | None = None
@@ -127,8 +127,8 @@ class _Item:
 		return QueueItemDto(
 			id=self.id,
 			title=_draft_title(self.draft),
-			channel_id=self.draft.channel_id,
-			channel_title=self.channel_title,
+			community_id=self.draft.community_id,
+			community_title=self.community_title,
 			when=self.draft.when,
 			status=self.status,
 			progress=self.progress,
@@ -215,11 +215,11 @@ class PublishQueue:
 			)
 		titles: dict[int, str] = {}
 		for row in rows:
-			if row.channel_id not in titles:
-				titles[row.channel_id] = await self._posts.channel_title(row.channel_id)
+			if row.community_id not in titles:
+				titles[row.community_id] = await self._posts.community_title(row.community_id)
 			draft = refresh_draft_media(
 				PostDraft(
-					channel_id=row.channel_id,
+					community_id=row.community_id,
 					text=row.text,
 					media_path=row.media_path,
 					media_kind=MediaKind(row.media_kind),
@@ -227,7 +227,7 @@ class PublishQueue:
 					rename_to=row.rename_to,
 				)
 			)
-			item = _Item(row.id, draft, titles[row.channel_id])
+			item = _Item(row.id, draft, titles[row.community_id])
 			item.status = QueueItemStatus(row.status)
 			item.error = row.error
 			self._items.append(item)
@@ -269,13 +269,13 @@ class PublishQueue:
 		titles: dict[int, str] = {}
 		for draft in drafts:
 			self._posts.validate_draft(draft)
-			if draft.channel_id not in titles:
-				titles[draft.channel_id] = await self._posts.channel_title(draft.channel_id)
+			if draft.community_id not in titles:
+				titles[draft.community_id] = await self._posts.community_title(draft.community_id)
 		stashed, moved = await self._stash_all(drafts)
 		try:
 			rows = [
 				PublishQueueItem(
-					channel_id=draft.channel_id,
+					community_id=draft.community_id,
 					text=draft.text,
 					media_path=draft.media_path,
 					media_kind=str(draft.media_kind),
@@ -293,14 +293,14 @@ class PublishQueue:
 			raise
 		ids: list[int] = []
 		for row, draft in zip(rows, stashed, strict=True):
-			item = _Item(row.id, draft, titles[draft.channel_id])
+			item = _Item(row.id, draft, titles[draft.community_id])
 			item.status = QueueItemStatus(row.status)
 			self._items.append(item)
 			ids.append(item.id)
 			logger.info(
 				"Пост «%s» → «%s»: %s (id=%s).",
 				_draft_title(draft),
-				item.channel_title,
+				item.community_title,
 				"ждёт слота отложек" if item.status is QueueItemStatus.WAITING else "в очереди",
 				item.id,
 			)
@@ -313,7 +313,7 @@ class PublishQueue:
 
 		Сеть обрывается отменой задачи; если идёт ещё подготовка
 		(задачи нет — ADR-0020), флаг увидит сам ``_send`` сразу
-		после неё. Общая точка для «Отмены» и ``drop_channel``.
+		после неё. Общая точка для «Отмены» и ``drop_community``.
 		"""
 		item.cancel_requested = True
 		if self._active is not None and self._active[0] == item.id:
@@ -371,7 +371,7 @@ class PublishQueue:
 			logger.info("Элемент id=%s возвращён в очередь на повтор.", item_id)
 			return
 
-	async def drop_channel(self, channel_id: int) -> None:
+	async def drop_community(self, community_id: int) -> None:
 		"""Снимает все элементы канала из очереди (канал удаляется).
 
 		Живая очередь сама не узнаёт об удалении канала: каскад БД
@@ -382,7 +382,7 @@ class PublishQueue:
 		уходят с показа.
 		"""
 		for item in list(self._items):
-			if item.draft.channel_id != channel_id:
+			if item.draft.community_id != community_id:
 				continue
 			if item.status is QueueItemStatus.SENDING:
 				# исход запишет _send: CANCELLED, файл вернётся в результаты;
@@ -395,7 +395,7 @@ class PublishQueue:
 				item.status = QueueItemStatus.CANCELLED
 				await self._leave_queue(item)
 			self._items.remove(item)
-		logger.info("Элементы канала id=%s сняты из очереди перед удалением.", channel_id)
+		logger.info("Элементы канала id=%s сняты из очереди перед удалением.", community_id)
 
 	async def dismiss(self, item_id: int) -> None:
 		"""Убирает завершённый элемент из списка (живые не трогаются).
@@ -526,22 +526,24 @@ class PublishQueue:
 		"""
 		now = datetime.now(UTC)
 		fallback = datetime.max.replace(tzinfo=UTC)
-		channels = {
-			item.draft.channel_id for item in self._items if item.status is QueueItemStatus.WAITING
+		communities = {
+			item.draft.community_id
+			for item in self._items
+			if item.status is QueueItemStatus.WAITING
 		}
 		# флуд-лимит действует на аккаунт (ADR-0017/0019): каналы разных
 		# аккаунтов независимы, флуд одного не должен глушить остальные
 		flooded_accounts: set[int | None] = set()
-		for channel_id in channels:
+		for community_id in communities:
 			if self._stop.is_set():
 				# остановка движка: недопроверенные каналы подождут запуска —
 				# дозор перепроверит слоты при восстановлении очереди
 				return
 			try:
-				account_id = await self._posts.account_for_channel(channel_id)
+				account_id = await self._posts.account_for_community(community_id)
 				if account_id in flooded_accounts:
 					continue
-				taken = len(await self._posts.scheduled_times(channel_id))
+				taken = len(await self._posts.scheduled_times(community_id))
 			except TelegramFloodError as exc:
 				# стучаться в другие каналы того же аккаунта — усугублять
 				# лимит (Telegram растит сроки за настойчивость); каналы
@@ -554,15 +556,15 @@ class PublishQueue:
 				flooded_accounts.add(account_id)
 				continue
 			except (PostError, UserbotUnavailableError) as exc:
-				logger.warning("Слоты канала id=%s не прочитаны: %s", channel_id, exc)
+				logger.warning("Слоты канала id=%s не прочитаны: %s", community_id, exc)
 				continue
 			except Exception:  # noqa: BLE001 — дозор не должен умирать
-				logger.exception("Проверка слотов канала id=%s не удалась.", channel_id)
+				logger.exception("Проверка слотов канала id=%s не удалась.", community_id)
 				continue
 			in_flight = sum(
 				1
 				for item in self._items
-				if item.draft.channel_id == channel_id
+				if item.draft.community_id == community_id
 				and item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
 				and item.draft.when is not None
 				and not _expired(item.draft.when, now)
@@ -573,7 +575,7 @@ class PublishQueue:
 					item
 					for item in self._items
 					if item.status is QueueItemStatus.WAITING
-					and item.draft.channel_id == channel_id
+					and item.draft.community_id == community_id
 				),
 				key=lambda item: item.draft.when or fallback,
 			)
@@ -589,7 +591,7 @@ class PublishQueue:
 			if released:
 				logger.info(
 					"Канал id=%s: выпущено из ожидания %d (занято слотов %d).",
-					channel_id,
+					community_id,
 					released,
 					taken,
 				)
@@ -751,7 +753,7 @@ class PublishQueue:
 		except Exception as exc:  # noqa: BLE001 — исход элемента, не очереди
 			if item.cancel_requested:
 				# ошибка на фоне взведённой отмены — типовой случай:
-				# drop_channel уже удалил канал, и подготовка падает
+				# drop_community уже удалил канал, и подготовка падает
 				# «Канал не найден». Честный исход — отмена, не ошибка:
 				# иначе файл застрял бы в папке очереди, а «Повторить»
 				# вечно падал тем же текстом
@@ -782,7 +784,7 @@ class PublishQueue:
 		finally:
 			self._active = None
 			if item.drop_on_finish and item.status.finished():
-				# канал удалён (drop_channel): исход записан — элемент
+				# канал удалён (drop_community): исход записан — элемент
 				# уходит и с показа, без участия панели интерфейса
 				with suppress(ValueError):
 					self._items.remove(item)

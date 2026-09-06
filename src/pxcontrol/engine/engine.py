@@ -9,7 +9,7 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.captions import CaptionsService
-from pxcontrol.engine.services.channels import ChannelsService
+from pxcontrol.engine.services.communities import CommunitiesService
 from pxcontrol.engine.services.posts import PostsService
 from pxcontrol.engine.services.publish_queue import PublishQueue, QueueItemStatus
 from pxcontrol.engine.services.settings import (
@@ -39,7 +39,7 @@ class Engine:
 		self.settings = SettingsService(self.db)
 		self.gateway = TelegramGateway()
 		self.accounts = AccountsService(self.db, self.gateway)
-		self.channels = ChannelsService(self.db, self.gateway, self.settings)
+		self.communities = CommunitiesService(self.db, self.gateway, self.settings)
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
 		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)
@@ -83,16 +83,16 @@ class Engine:
 				)
 		await self.settings.set_many(items)
 
-	async def delete_channel(self, channel_id: int) -> None:
+	async def delete_community(self, community_id: int) -> None:
 		"""Удаляет канал вместе с его элементами в очереди отправки.
 
 		Порядок: сначала очередь (ожидающие снимаются с возвратом файлов
 		в результаты, активная отправка обрывается), затем строка канала —
 		каскад БД подчищает настройки и остатки строк очереди. Связка
-		живёт здесь, чтобы ``ChannelsService`` не зависел от очереди.
+		живёт здесь, чтобы ``CommunitiesService`` не зависел от очереди.
 		"""
-		await self.publish_queue.drop_channel(channel_id)
-		await self.channels.delete_channel(channel_id)
+		await self.publish_queue.drop_community(community_id)
+		await self.communities.delete_community(community_id)
 
 	def _ffmpeg_path(self) -> str:
 		"""Действующий путь к ffmpeg: настройка из БД или бутстрап .env."""

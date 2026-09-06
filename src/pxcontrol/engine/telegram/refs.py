@@ -20,12 +20,12 @@ CHANNEL_ID_PREFIX = "-100"
 
 
 def numeric_chat_id(chat_id: str, error: type[Exception]) -> int:
-	"""Числовой ID канала из строки БД (контракт ``ChannelInfo.chat_id``).
+	"""Числовой ID канала из строки БД (контракт ``CommunityInfo.chat_id``).
 
 	Общий помощник обоих транспортов: нечисловая строка — повреждённая
 	запись БД, а не сетевой сбой, и заслуживает понятного текста. Класс
 	ошибки — параметр, потому что таксономии транспортов разные
-	(бот — ``ChannelCheckError``, userbot — ``UserbotUnavailableError``).
+	(бот — ``CommunityCheckError``, userbot — ``UserbotUnavailableError``).
 
 	Raises:
 		error: В БД оказался нечисловой ID.

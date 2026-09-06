@@ -83,9 +83,9 @@ def test_every_hours_validation() -> None:
 		plan_times(zero, 1, NOW)
 
 
-def test_channel_times_skips_passed_and_rolls_days() -> None:
+def test_community_times_skips_passed_and_rolls_days() -> None:
 	"""Слоты — по временам канала вперёд по дням, прошедшие — мимо."""
-	plan = SchedulePlan(PlanKind.CHANNEL_TIMES, channel_times=("18:00", "09:00", "12:00"))
+	plan = SchedulePlan(PlanKind.COMMUNITY_TIMES, community_times=("18:00", "09:00", "12:00"))
 	# 09:00 сегодня прошло; порядок слотов — по времени, не по списку
 	assert plan_times(plan, 4, NOW) == [
 		datetime(2026, 8, 15, 12, 0),
@@ -95,11 +95,11 @@ def test_channel_times_skips_passed_and_rolls_days() -> None:
 	]
 
 
-def test_channel_times_ignores_broken_and_duplicate_items() -> None:
+def test_community_times_ignores_broken_and_duplicate_items() -> None:
 	"""Битые элементы настройки пропускаются, дубликаты не удваивают слот."""
 	plan = SchedulePlan(
-		PlanKind.CHANNEL_TIMES,
-		channel_times=("12:00", "мусор", "25:99", "12:00"),
+		PlanKind.COMMUNITY_TIMES,
+		community_times=("12:00", "мусор", "25:99", "12:00"),
 	)
 	assert plan_times(plan, 2, NOW) == [
 		datetime(2026, 8, 15, 12, 0),
@@ -107,16 +107,16 @@ def test_channel_times_ignores_broken_and_duplicate_items() -> None:
 	]
 
 
-def test_channel_times_requires_valid_times() -> None:
+def test_community_times_requires_valid_times() -> None:
 	"""Пустой (или целиком битый) список времён — понятная ошибка."""
 	with pytest.raises(PlanError, match="стандартных времён"):
-		plan_times(SchedulePlan(PlanKind.CHANNEL_TIMES), 1, NOW)
-	broken = SchedulePlan(PlanKind.CHANNEL_TIMES, channel_times=("мусор",))
+		plan_times(SchedulePlan(PlanKind.COMMUNITY_TIMES), 1, NOW)
+	broken = SchedulePlan(PlanKind.COMMUNITY_TIMES, community_times=("мусор",))
 	with pytest.raises(PlanError, match="стандартных времён"):
 		plan_times(broken, 1, NOW)
 
 
-def test_start_date_for_daily_and_channel_times() -> None:
+def test_start_date_for_daily_and_community_times() -> None:
 	"""Будущая дата начала соблюдается; прошедшая равнозначна сегодняшней."""
 	future = SchedulePlan(PlanKind.DAILY, at=(9, 0), start_date=date(2026, 8, 20))
 	assert plan_times(future, 2, NOW) == [
@@ -126,7 +126,7 @@ def test_start_date_for_daily_and_channel_times() -> None:
 	past = SchedulePlan(PlanKind.DAILY, at=(18, 0), start_date=date(2026, 8, 1))
 	assert plan_times(past, 1, NOW)[0] == datetime(2026, 8, 15, 18, 0)
 	times = SchedulePlan(
-		PlanKind.CHANNEL_TIMES, channel_times=("12:00",), start_date=date(2026, 8, 18)
+		PlanKind.COMMUNITY_TIMES, community_times=("12:00",), start_date=date(2026, 8, 18)
 	)
 	assert plan_times(times, 2, NOW) == [
 		datetime(2026, 8, 18, 12, 0),
@@ -142,7 +142,7 @@ def test_busy_slots_are_skipped() -> None:
 		datetime(2026, 8, 15, 12, 0),
 		datetime(2026, 8, 17, 12, 0),
 	]
-	times = SchedulePlan(PlanKind.CHANNEL_TIMES, channel_times=("12:00", "18:00"))
+	times = SchedulePlan(PlanKind.COMMUNITY_TIMES, community_times=("12:00", "18:00"))
 	assert plan_times(times, 2, NOW, busy=[datetime(2026, 8, 15, 18, 0)]) == [
 		datetime(2026, 8, 15, 12, 0),
 		datetime(2026, 8, 16, 12, 0),

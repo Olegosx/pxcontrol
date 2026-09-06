@@ -21,7 +21,7 @@ from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
-	ChannelInfo,
+	CommunityInfo,
 	MediaKind,
 	TelegramFloodError,
 )
@@ -33,7 +33,7 @@ class InvalidBotTokenError(EngineError):
 	"""Telegram отклонил токен бота (или токен неправильного формата)."""
 
 
-class ChannelCheckError(EngineError):
+class CommunityCheckError(EngineError):
 	"""Канал не прошёл проверку подключения (с понятным текстом)."""
 
 
@@ -49,7 +49,7 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен (Unauthorized).
 		TelegramFloodError: Флуд-лимит — подождать и повторить.
-		ChannelCheckError: Telegram отклонил операцию (права, запрос).
+		CommunityCheckError: Telegram отклонил операцию (права, запрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.exceptions import (
@@ -67,7 +67,7 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	except TelegramUnauthorizedError as exc:
 		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
 	except TelegramForbiddenError as exc:
-		raise ChannelCheckError(f"{forbidden} (Telegram: {exc.message})") from exc
+		raise CommunityCheckError(f"{forbidden} (Telegram: {exc.message})") from exc
 	except TelegramRetryAfter as exc:
 		# флуд-лимит (429) — временное состояние: очередь отправки ждёт
 		# и повторяет (парный перевод — FloodWaitError в mtproto)
@@ -75,18 +75,18 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 			f"Telegram просит подождать {exc.retry_after} с.", retry_after_s=exc.retry_after
 		) from exc
 	except TelegramBadRequest as exc:
-		raise ChannelCheckError(f"{bad_request} (Telegram: {exc.message})") from exc
+		raise CommunityCheckError(f"{bad_request} (Telegram: {exc.message})") from exc
 	except TelegramEntityTooLarge as exc:
 		# наследует сетевую ошибку — ветка обязана стоять раньше неё,
 		# иначе «файл велик» превратился бы в ложное «нет связи»
-		raise ChannelCheckError(
+		raise CommunityCheckError(
 			f"Файл больше лимита Bot API ({BOT_MAX_FILE_BYTES // 2**20} МБ) — уменьшите файл."
 		) from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
 	except TelegramAPIError as exc:
 		# запасная ветка: серверные сбои (5xx) и прочие отказы API
-		raise ChannelCheckError(f"Telegram отклонил операцию: {exc}") from exc
+		raise CommunityCheckError(f"Telegram отклонил операцию: {exc}") from exc
 
 
 #: Разметка поля текста поста (её разбирает Telethon) → HTML-теги Bot API.
@@ -138,22 +138,22 @@ def _make_bot(token: str) -> Bot:
 
 def _chat_id(chat_id: str) -> int:
 	"""Числовой ID из строки БД (:func:`refs.numeric_chat_id` с нашим классом)."""
-	return numeric_chat_id(chat_id, ChannelCheckError)
+	return numeric_chat_id(chat_id, CommunityCheckError)
 
 
 def ensure_bot_can_post(member: Any) -> None:
 	"""Проверяет, что бот — администратор канала с правом публиковать.
 
 	Raises:
-		ChannelCheckError: Бот не админ или без права публикации.
+		CommunityCheckError: Бот не админ или без права публикации.
 	"""
 	status = getattr(member, "status", "")
 	if status == "creator":
 		return
 	if status != "administrator":
-		raise ChannelCheckError("Бот не администратор канала — добавьте его администратором.")
+		raise CommunityCheckError("Бот не администратор канала — добавьте его администратором.")
 	if getattr(member, "can_post_messages", None) is not True:
-		raise ChannelCheckError("У бота нет права публиковать сообщения в канале.")
+		raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
 
 
 async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, caption: str) -> int:
@@ -165,7 +165,7 @@ async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, capti
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		ChannelCheckError: Telegram отклонил отправку (нет прав, размер и т.п.).
+		CommunityCheckError: Telegram отклонил отправку (нет прав, размер и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.types import FSInputFile
@@ -206,7 +206,7 @@ async def send_text(token: str, chat_id: str, text: str) -> int:
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		ChannelCheckError: Telegram отклонил отправку (нет прав и т.п.).
+		CommunityCheckError: Telegram отклонил отправку (нет прав и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	bot = _make_bot(token)
@@ -255,7 +255,7 @@ async def get_bot_events(token: str) -> list[str]:
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен.
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		ChannelCheckError: Telegram отклонил запрос (вебхук, параллельный опрос).
+		CommunityCheckError: Telegram отклонил запрос (вебхук, параллельный опрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.exceptions import TelegramConflictError
@@ -271,7 +271,7 @@ async def get_bot_events(token: str) -> list[str]:
 				updates = await bot.get_updates(timeout=1)
 			except TelegramConflictError as exc:
 				# точный совет ценнее запасной ветки единого маппера
-				raise ChannelCheckError(
+				raise CommunityCheckError(
 					"События недоступны: у бота включён вебхук или его "
 					"опрашивает другое приложение."
 				) from exc
@@ -280,14 +280,14 @@ async def get_bot_events(token: str) -> list[str]:
 	return [line for update in updates if (line := describe_update(update))]
 
 
-async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
+async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 	"""Проверяет канал: существует, бот в нём админ с правом публиковать.
 
 	Raises:
 		ChatRefError: Введённую ссылку/имя не удалось разобрать.
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		ChannelCheckError: Канал не найден / бот не добавлен / нет прав.
+		CommunityCheckError: Канал не найден / бот не добавлен / нет прав.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	ref = normalize_chat_ref(chat_ref)
@@ -303,7 +303,7 @@ async def check_channel(token: str, chat_ref: str) -> ChannelInfo:
 			me = await bot.get_me()
 			member = await bot.get_chat_member(chat.id, me.id)
 			ensure_bot_can_post(member)
-			return ChannelInfo(str(chat.id), chat.title or str(ref), chat.username)
+			return CommunityInfo(str(chat.id), chat.title or str(ref), chat.username)
 	finally:
 		await bot.session.close()
 
@@ -314,7 +314,7 @@ async def check_token(token: str) -> str:
 	Raises:
 		InvalidBotTokenError: Токен неверного формата или отклонён Telegram.
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		ChannelCheckError: Telegram отклонил запрос getMe (практически
+		CommunityCheckError: Telegram отклонил запрос getMe (практически
 			не случается — запасные ветки единого маппера).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""

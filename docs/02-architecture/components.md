@@ -39,7 +39,7 @@
   диалогов (`SelectionRow`, `fixed_list_area`).
 
 ### Движок (engine)
-- UI-независимый пакет: сервисы (`accounts`, `channels`, `posts`,
+- UI-независимый пакет: сервисы (`accounts`, `communities`, `posts`,
   `video`, `captions`, `settings` — реестр ключей и хранение настроек
   ([ADR-0013](decisions/0013-settings-storage.md)), `publish_queue` —
   персистентная очередь отправки со слотами отложек

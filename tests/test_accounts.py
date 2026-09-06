@@ -68,7 +68,7 @@ class _FakeGateway:
 		return "test_bot"
 
 	async def bot_events(self, token: str) -> list[str]:
-		return ["01.07 12:00 — «Канал» (channel, id=-1001): статус бота «administrator»"]
+		return ["01.07 12:00 — «Канал» (community, id=-1001): статус бота «administrator»"]
 
 
 async def test_bot_lifecycle(db: Database) -> None:

@@ -487,18 +487,18 @@ class FieldsDialog(MessageBoxBase):
 	def __init__(
 		self,
 		worker: EngineWorker,
-		channel_id: int,
-		channel_title: str,
+		community_id: int,
+		community_title: str,
 		parent: QWidget,
 	) -> None:
 		super().__init__(parent)
 		self._worker = worker
-		self._channel_id = channel_id
+		self._community_id = community_id
 		self._show_error = error_reporter(self)
 		self._fields: list[FieldDto] = []
 		# шаблон, который сейчас правится (None — форма собирает новый)
 		self._editing: TemplateDto | None = None
-		self.viewLayout.addWidget(SubtitleLabel(f"Подписи канала «{channel_title}»", self))
+		self.viewLayout.addWidget(SubtitleLabel(f"Подписи канала «{community_title}»", self))
 		self._build_fields_block()
 		self._build_templates_block()
 		self.yesButton.setText("Готово")
@@ -608,7 +608,7 @@ class FieldsDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.add_field(
-				self._channel_id,
+				self._community_id,
 				str(self._field_name.text()),
 				self._field_hashtag.isChecked(),
 				self._field_multiple.isChecked(),
@@ -759,7 +759,7 @@ class FieldsDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.captions.save_template(
-				self._channel_id,
+				self._community_id,
 				str(self._template_name.text()),
 				self._checked_field_ids(),
 				str(self._template_pattern.text()).strip() or None,
@@ -792,14 +792,14 @@ class FieldsDialog(MessageBoxBase):
 	def _reload(self) -> None:
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.list_fields(self._channel_id),
+			self._worker.engine.captions.list_fields(self._community_id),
 			self,
 			self._show_fields,
 			self._show_error,
 		)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.list_templates(self._channel_id),
+			self._worker.engine.captions.list_templates(self._community_id),
 			self,
 			self._show_templates,
 			self._show_error,

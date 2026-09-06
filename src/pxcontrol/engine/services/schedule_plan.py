@@ -46,7 +46,7 @@ class PlanKind(StrEnum):
 	NOW = "now"  # все посты — «сейчас», без отложки
 	DAILY = "daily"  # раз в N дней в ЧЧ:ММ (N=1 — каждый день)
 	EVERY_HOURS = "every-hours"  # каждые N часов от стартового момента
-	CHANNEL_TIMES = "channel-times"  # по стандартным временам канала
+	COMMUNITY_TIMES = "community-times"  # по стандартным временам канала
 
 
 @dataclass(frozen=True)
@@ -59,9 +59,9 @@ class SchedulePlan:
 		every_days: шаг в днях для DAILY (1 — каждый день).
 		every_hours: шаг в часах для EVERY_HOURS.
 		start: стартовый момент для EVERY_HOURS (местное время).
-		start_date: дата начала для DAILY и CHANNEL_TIMES; None или
+		start_date: дата начала для DAILY и COMMUNITY_TIMES; None или
 			прошедшая дата равнозначны «с сегодняшнего дня».
-		channel_times: стандартные времена канала «ЧЧ:ММ» для CHANNEL_TIMES.
+		community_times: стандартные времена канала «ЧЧ:ММ» для COMMUNITY_TIMES.
 	"""
 
 	kind: PlanKind
@@ -70,7 +70,7 @@ class SchedulePlan:
 	every_hours: int = 3
 	start: datetime | None = None
 	start_date: date | None = None
-	channel_times: tuple[str, ...] = ()
+	community_times: tuple[str, ...] = ()
 
 
 def _try_hhmm(text: str) -> tuple[int, int] | None:
@@ -154,7 +154,7 @@ def plan_times(
 		return list(_take_free(_daily(plan, now), count, keys))
 	if plan.kind is PlanKind.EVERY_HOURS:
 		return list(_take_free(_every_hours(plan, now), count, keys))
-	return list(_take_free(_channel_times(plan, now), count, keys))
+	return list(_take_free(_community_times(plan, now), count, keys))
 
 
 def _daily(plan: SchedulePlan, now: datetime) -> Iterator[datetime]:
@@ -192,14 +192,16 @@ def _every_hours(plan: SchedulePlan, now: datetime) -> Iterator[datetime]:
 		slot += step
 
 
-def _channel_times(plan: SchedulePlan, now: datetime) -> Iterator[datetime]:
+def _community_times(plan: SchedulePlan, now: datetime) -> Iterator[datetime]:
 	"""Кандидаты по стандартным временам канала вперёд по дням.
 
 	Битые элементы списка пропускаются (как в форме одиночной
 	публикации); слоты идут по дням начиная с даты начала (не раньше
 	сегодняшней), прошедшие отбрасываются.
 	"""
-	slots = [parsed for item in plan.channel_times if (parsed := _try_hhmm(str(item))) is not None]
+	slots = [
+		parsed for item in plan.community_times if (parsed := _try_hhmm(str(item))) is not None
+	]
 	if not slots:
 		raise PlanError(
 			"У канала нет стандартных времён публикации — задайте их "

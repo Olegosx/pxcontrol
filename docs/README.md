@@ -30,7 +30,7 @@
 | Документ | Назначение | Статус |
 |---|---|---|
 | [README.md](03-modules/README.md) | Карта модулей | 🟡 |
-| [channels.md](03-modules/channels.md) | Управление каналами | 🟢 |
+| [communities.md](03-modules/communities.md) | Управление каналами | 🟢 |
 | [telegram-gateway.md](03-modules/telegram-gateway.md) | Шлюз Telegram (Bot API + MTProto) | 🟢 |
 | [telegram-filenames.md](03-modules/telegram-filenames.md) | Правила Telegram для имён файлов (опыт) | 🟢 |
 | [scheduler.md](03-modules/scheduler.md) | Расписание: отложенные записи из Telegram | 🟢 |

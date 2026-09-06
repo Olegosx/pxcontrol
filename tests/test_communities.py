@@ -9,16 +9,16 @@ import pytest
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import TgAccount
 from pxcontrol.engine.services.accounts import AccountsService
-from pxcontrol.engine.services.channels import ChannelError, ChannelsService
-from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
-from pxcontrol.engine.telegram.bot_api import ChannelCheckError, ensure_bot_can_post
+from pxcontrol.engine.services.communities import CommunitiesService, CommunityError
+from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
+from pxcontrol.engine.telegram.bot_api import CommunityCheckError, ensure_bot_can_post
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotNotConnectedError,
 	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.refs import ChatRefError, normalize_chat_ref
-from pxcontrol.engine.telegram.types import ChannelInfo
+from pxcontrol.engine.telegram.types import CommunityInfo
 
 
 class _FakeGateway:
@@ -37,20 +37,20 @@ class _FakeGateway:
 	async def check_bot_token(self, token: str) -> str:
 		return "test_bot"
 
-	async def check_channel(self, token: str, chat_ref: str) -> ChannelInfo:
+	async def check_community(self, token: str, chat_ref: str) -> CommunityInfo:
 		if chat_ref == "@notfound":
-			raise ChannelCheckError("Канал не найден — проверьте @имя или ID.")
+			raise CommunityCheckError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_is_admin:
-			raise ChannelCheckError("У бота нет права публиковать сообщения в канале.")
-		return ChannelInfo("-1001234", "Тестовый канал", "testchan")
+			raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
+		return CommunityInfo("-1001234", "Тестовый канал", "testchan")
 
-	async def check_channel_userbot(self, account_id: int, chat_ref: str) -> ChannelInfo:
+	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		if account_id not in self.userbot_admins:
 			raise UserbotAccessError(
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
-		return ChannelInfo("-1001234", "Тестовый канал", "testchan")
+		return CommunityInfo("-1001234", "Тестовый канал", "testchan")
 
 
 async def _make_bot(db: Database) -> int:
@@ -70,39 +70,39 @@ async def _make_account(db: Database, label: str = "@ub") -> int:
 		return account.id
 
 
-async def test_channel_lifecycle(db: Database) -> None:
+async def test_community_lifecycle(db: Database) -> None:
 	"""Канал подключается с проверкой, виден в списке, удаляется."""
 	bot_id = await _make_bot(db)
-	service = ChannelsService(db, _FakeGateway())
-	dto = await service.add_channel(bot_id, "@testchan")
+	service = CommunitiesService(db, _FakeGateway())
+	dto = await service.add_community(bot_id, "@testchan")
 	assert dto.title == "Тестовый канал"
 	assert dto.tg_chat_id == "-1001234"
 	assert dto.bot_label == "Публикатор"
-	listed = await service.list_channels()
+	listed = await service.list_communities()
 	assert [c.title for c in listed] == ["Тестовый канал"]
 	assert listed[0].bot_label == "Публикатор"
-	await service.delete_channel(dto.id)
-	assert await service.list_channels() == []
+	await service.delete_community(dto.id)
+	assert await service.list_communities() == []
 
 
 async def test_failed_check_not_saved(db: Database) -> None:
 	"""Не прошедший проверку канал не сохраняется."""
 	bot_id = await _make_bot(db)
-	service = ChannelsService(db, _FakeGateway())
-	with pytest.raises(ChannelCheckError, match="не найден"):
-		await service.add_channel(bot_id, "@notfound")
-	with pytest.raises(ChannelCheckError, match="нет права"):
-		await service.add_channel(bot_id, "@noperm")
-	assert await service.list_channels() == []
+	service = CommunitiesService(db, _FakeGateway())
+	with pytest.raises(CommunityCheckError, match="не найден"):
+		await service.add_community(bot_id, "@notfound")
+	with pytest.raises(CommunityCheckError, match="нет права"):
+		await service.add_community(bot_id, "@noperm")
+	assert await service.list_communities() == []
 
 
-async def test_duplicate_channel_rejected(db: Database) -> None:
+async def test_duplicate_community_rejected(db: Database) -> None:
 	"""Повторное подключение того же канала — понятная ошибка."""
 	bot_id = await _make_bot(db)
-	service = ChannelsService(db, _FakeGateway())
-	await service.add_channel(bot_id, "@testchan")
-	with pytest.raises(ChannelError, match="уже подключён"):
-		await service.add_channel(bot_id, "@testchan")
+	service = CommunitiesService(db, _FakeGateway())
+	await service.add_community(bot_id, "@testchan")
+	with pytest.raises(CommunityError, match="уже подключён"):
+		await service.add_community(bot_id, "@testchan")
 
 
 async def test_bot_connect_probes_userbot(db: Database) -> None:
@@ -111,13 +111,13 @@ async def test_bot_connect_probes_userbot(db: Database) -> None:
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
 	gateway.userbot_admins = {account_id}
-	service = ChannelsService(db, gateway)
-	dto = await service.add_channel(bot_id, "@testchan")
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
 	assert dto.userbot_admin is True
 	assert dto.tg_account_id == account_id and dto.tg_account_label == "@ub"
-	await service.delete_channel(dto.id)
+	await service.delete_community(dto.id)
 	gateway.userbot_admins = set()  # аккаунт есть, но не админ канала
-	dto = await service.add_channel(bot_id, "@testchan")
+	dto = await service.add_community(bot_id, "@testchan")
 	assert dto.userbot_admin is False and dto.tg_account_id is None
 
 
@@ -126,21 +126,21 @@ async def test_connect_via_userbot(db: Database) -> None:
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
 	gateway.userbot_admins = {account_id}
-	service = ChannelsService(db, gateway)
-	dto = await service.add_channel_via_userbot(account_id, "@testchan")
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
 	assert dto.bot_id is None and dto.bot_label is None
 	assert dto.tg_account_id == account_id and dto.userbot_admin is True
-	listed = await service.list_channels()
+	listed = await service.list_communities()
 	assert listed[0].tg_account_label == "@ub"
-	with pytest.raises(ChannelError, match="уже подключён"):
-		await service.add_channel_via_userbot(account_id, "@testchan")
-	await service.delete_channel(dto.id)
+	with pytest.raises(CommunityError, match="уже подключён"):
+		await service.add_community_via_userbot(account_id, "@testchan")
+	await service.delete_community(dto.id)
 	gateway.userbot_admins = set()
 	with pytest.raises(UserbotUnavailableError, match="не администратор"):
-		await service.add_channel_via_userbot(account_id, "@testchan")
-	assert await service.list_channels() == []
-	with pytest.raises(ChannelError, match="Аккаунт не найден"):
-		await service.add_channel_via_userbot(999, "@testchan")
+		await service.add_community_via_userbot(account_id, "@testchan")
+	assert await service.list_communities() == []
+	with pytest.raises(CommunityError, match="Аккаунт не найден"):
+		await service.add_community_via_userbot(999, "@testchan")
 
 
 async def test_recheck_updates_binding_both_ways(db: Database) -> None:
@@ -148,26 +148,26 @@ async def test_recheck_updates_binding_both_ways(db: Database) -> None:
 	bot_id = await _make_bot(db)
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
-	service = ChannelsService(db, gateway)
-	dto = await service.add_channel(bot_id, "@testchan")  # аккаунт пока не админ
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")  # аккаунт пока не админ
 	assert dto.tg_account_id is None
 	# аккаунт стал админом (например, добавили после подключения)
 	gateway.userbot_admins = {account_id}
-	access = await service.recheck_channel(dto.id)
-	assert access.userbot_ok and access.channel.tg_account_id == account_id
+	access = await service.recheck_community(dto.id)
+	assert access.userbot_ok and access.community.tg_account_id == account_id
 	assert access.bot_ok is True
 	# бота выгнали: бот — только предупреждение, привязка userbot цела
 	gateway.bot_is_admin = False
-	access = await service.recheck_channel(dto.id)
+	access = await service.recheck_community(dto.id)
 	assert access.bot_ok is False
-	assert access.channel.bot_id is not None  # бот не отвязан молча
-	assert access.channel.tg_account_id == account_id
+	assert access.community.bot_id is not None  # бот не отвязан молча
+	assert access.community.tg_account_id == account_id
 	# аккаунт потерял права (подтверждённый отказ) — привязка снимается
 	gateway.userbot_admins = set()
 	gateway.bot_is_admin = True
-	access = await service.recheck_channel(dto.id)
+	access = await service.recheck_community(dto.id)
 	assert access.userbot_ok is False
-	assert access.channel.tg_account_id is None
+	assert access.community.tg_account_id is None
 
 
 async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> None:
@@ -178,20 +178,20 @@ async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> N
 	"""
 
 	class _OfflineGateway(_FakeGateway):
-		async def check_channel_userbot(self, account_id: int, chat_ref: str) -> ChannelInfo:
+		async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
 			raise UserbotNotConnectedError("Userbot не подключён — войдите.")
 
 	bot_id = await _make_bot(db)
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
 	gateway.userbot_admins = {account_id}
-	service = ChannelsService(db, gateway)
-	dto = await service.add_channel(bot_id, "@testchan")
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
 	assert dto.tg_account_id == account_id
-	offline = ChannelsService(db, _OfflineGateway())
-	access = await offline.recheck_channel(dto.id)
+	offline = CommunitiesService(db, _OfflineGateway())
+	access = await offline.recheck_community(dto.id)
 	assert access.userbot_ok is None  # «не удалось проверить», не «не админ»
-	assert access.channel.tg_account_id == account_id  # привязка не тронута
+	assert access.community.tg_account_id == account_id  # привязка не тронута
 
 
 async def test_assign_and_unassign_userbot(db: Database) -> None:
@@ -199,8 +199,8 @@ async def test_assign_and_unassign_userbot(db: Database) -> None:
 	bot_id = await _make_bot(db)
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
-	service = ChannelsService(db, gateway)
-	dto = await service.add_channel(bot_id, "@testchan")
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
 	assert dto.tg_account_id is None
 	# без прав — не привязывается
 	with pytest.raises(UserbotUnavailableError, match="не администратор"):
@@ -212,7 +212,7 @@ async def test_assign_and_unassign_userbot(db: Database) -> None:
 	# отвязка: аккаунт исчезает из канала, но остаётся в приложении
 	updated = await service.unassign_userbot(dto.id)
 	assert updated.tg_account_id is None and updated.userbot_admin is False
-	with pytest.raises(ChannelError, match="Аккаунт не найден"):
+	with pytest.raises(CommunityError, match="Аккаунт не найден"):
 		await service.assign_userbot(dto.id, 999)
 
 
@@ -222,12 +222,12 @@ async def test_assign_and_unassign_bot(db: Database) -> None:
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
 	gateway.userbot_admins = {account_id}
-	service = ChannelsService(db, gateway)
-	dto = await service.add_channel_via_userbot(account_id, "@testchan")
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
 	assert dto.bot_id is None
 	# без прав — не назначается
 	gateway.bot_is_admin = False
-	with pytest.raises(ChannelCheckError, match="нет права"):
+	with pytest.raises(CommunityCheckError, match="нет права"):
 		await service.assign_bot(dto.id, bot_id)
 	# с правами — назначается
 	gateway.bot_is_admin = True
@@ -240,9 +240,9 @@ async def test_assign_and_unassign_bot(db: Database) -> None:
 
 async def test_unknown_bot_rejected(db: Database) -> None:
 	"""Подключение с несуществующим ботом — понятная ошибка."""
-	service = ChannelsService(db, _FakeGateway())
-	with pytest.raises(ChannelError, match="Бот не найден"):
-		await service.add_channel(999, "@testchan")
+	service = CommunitiesService(db, _FakeGateway())
+	with pytest.raises(CommunityError, match="Бот не найден"):
+		await service.add_community(999, "@testchan")
 
 
 def test_normalize_chat_ref() -> None:
@@ -299,16 +299,16 @@ def test_describe_update() -> None:
 	assert describe_update(SimpleNamespace(my_chat_member=None, channel_post=None)) is None
 
 
-async def test_channel_enabled_comes_from_settings(db: Database) -> None:
+async def test_community_enabled_comes_from_settings(db: Database) -> None:
 	"""Флаг активности канала в DTO читается из настроек (умолчание — True)."""
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
 	gateway.userbot_admins = {account_id}
-	service = ChannelsService(db, gateway)
-	channel = await service.add_channel_via_userbot(account_id, "@chan")
-	assert channel.enabled is True
-	await SettingsService(db).set_for(CHANNEL_ENABLED, channel.id, False)
-	listed = await service.list_channels()
+	service = CommunitiesService(db, gateway)
+	community = await service.add_community_via_userbot(account_id, "@chan")
+	assert community.enabled is True
+	await SettingsService(db).set_for(COMMUNITY_ENABLED, community.id, False)
+	listed = await service.list_communities()
 	assert [ch.enabled for ch in listed] == [False]
 
 
@@ -316,9 +316,9 @@ def test_ensure_bot_can_post() -> None:
 	"""Право публиковать: владелец и админ с правом проходят, прочие — нет."""
 	ensure_bot_can_post(SimpleNamespace(status="creator"))
 	ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=True))
-	with pytest.raises(ChannelCheckError, match="не администратор"):
+	with pytest.raises(CommunityCheckError, match="не администратор"):
 		ensure_bot_can_post(SimpleNamespace(status="member"))
-	with pytest.raises(ChannelCheckError, match="нет права"):
+	with pytest.raises(CommunityCheckError, match="нет права"):
 		ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=False))
 
 

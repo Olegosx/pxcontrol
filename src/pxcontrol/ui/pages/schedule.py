@@ -112,25 +112,25 @@ class SchedulePage(ScrollArea):
 		списка; канал, исчезнувший из списка, пропадает и из фильтра.
 		"""
 		clear_layout(self._filter_box)
-		channels: dict[int, str] = {}
+		communities: dict[int, str] = {}
 		for item in self._items:
-			channels.setdefault(item.channel_id, item.channel_title)
-		if not channels:
+			communities.setdefault(item.community_id, item.community_title)
+		if not communities:
 			return
 		self._filter_box.addWidget(CaptionLabel("Показывать:", self))
-		for channel_id, title in channels.items():
+		for community_id, title in communities.items():
 			box = CheckBox(title, self)
-			box.setChecked(channel_id not in self._unchecked)
-			box.toggled.connect(partial(self._on_filter_toggled, channel_id))
+			box.setChecked(community_id not in self._unchecked)
+			box.toggled.connect(partial(self._on_filter_toggled, community_id))
 			self._filter_box.addWidget(box)
 		self._filter_box.addStretch()
 
-	def _on_filter_toggled(self, channel_id: int, checked: bool) -> None:
+	def _on_filter_toggled(self, community_id: int, checked: bool) -> None:
 		"""Галка канала: показывает/скрывает его карточки (без перезагрузки)."""
 		if checked:
-			self._unchecked.discard(channel_id)
+			self._unchecked.discard(community_id)
 		else:
-			self._unchecked.add(channel_id)
+			self._unchecked.add(community_id)
 		self._render()
 
 	# --- карточки ----------------------------------------------------------------
@@ -146,7 +146,7 @@ class SchedulePage(ScrollArea):
 				)
 			)
 			return
-		visible = [item for item in self._items if item.channel_id not in self._unchecked]
+		visible = [item for item in self._items if item.community_id not in self._unchecked]
 		if not visible:
 			self._list.addWidget(
 				CaptionLabel(
@@ -175,5 +175,5 @@ class SchedulePage(ScrollArea):
 		text = BodyLabel(item.text_preview, card)
 		text.setWordWrap(True)
 		box.addWidget(text)
-		box.addWidget(CaptionLabel(item.channel_title, card))
+		box.addWidget(CaptionLabel(item.community_title, card))
 		return card

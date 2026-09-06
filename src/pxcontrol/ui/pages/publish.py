@@ -38,7 +38,7 @@ from pxcontrol.engine.services.captions import (
 	TitleParseRules,
 	title_from_filename,
 )
-from pxcontrol.engine.services.channels import ChannelDto
+from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PublishCapabilities,
@@ -46,7 +46,7 @@ from pxcontrol.engine.services.posts import (
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
 from pxcontrol.engine.services.settings import (
-	PUBLISH_LAST_CHANNEL_ID,
+	PUBLISH_LAST_COMMUNITY_ID,
 	PUBLISH_TIMES,
 	TITLE_PARSE_RULES,
 )
@@ -86,7 +86,7 @@ class _BatchSetup:
 	не таскать длинный список аргументов через каждую функцию.
 	"""
 
-	channel: ChannelDto
+	community: CommunityDto
 	root: str
 	files: list[ReadyVideo] = field(default_factory=list)
 	caption_lines: list[CaptionLine] | None = None
@@ -107,13 +107,13 @@ _KINDS: list[tuple[str, MediaKind, str]] = [
 ]
 
 
-def _channel_caps(channel: ChannelDto) -> PublishCapabilities:
+def _community_caps(community: CommunityDto) -> PublishCapabilities:
 	"""Возможности публикации канала из DTO — одна точка перевода.
 
 	Правило «бот назначен» = ``bot_id is not None`` живёт здесь,
 	а не в трёх местах страницы.
 	"""
-	return publish_capabilities(channel.bot_id is not None, channel.userbot_admin)
+	return publish_capabilities(community.bot_id is not None, community.userbot_admin)
 
 
 class PublishPage(ScrollArea):
@@ -125,14 +125,14 @@ class PublishPage(ScrollArea):
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		# канал прошлой публикации: предвыбор после загрузки списка
-		self._restore_channel_id: int | None = None
+		self._restore_community_id: int | None = None
 		self._kind = MediaKind.NONE
 		self._build()
 		run_in_engine(
 			worker,
-			worker.engine.settings.get(PUBLISH_LAST_CHANNEL_ID),
+			worker.engine.settings.get(PUBLISH_LAST_COMMUNITY_ID),
 			self,
-			self._on_last_channel_loaded,
+			self._on_last_community_loaded,
 			noop,
 		)
 
@@ -142,9 +142,9 @@ class PublishPage(ScrollArea):
 		layout = page_layout(self)
 		layout.addWidget(SubtitleLabel("Публикация", self))
 		self._build_kind_segments(layout)
-		self._channel_combo: DtoComboBox[ChannelDto] = DtoComboBox(self)
-		self._channel_combo.currentIndexChanged.connect(self._on_channel_changed)
-		layout.addWidget(self._channel_combo)
+		self._community_combo: DtoComboBox[CommunityDto] = DtoComboBox(self)
+		self._community_combo.currentIndexChanged.connect(self._on_community_changed)
+		layout.addWidget(self._community_combo)
 		self._caps_hint = CaptionLabel("", self)
 		layout.addWidget(self._caps_hint)
 		self._text = TextEdit(self)
@@ -263,91 +263,91 @@ class PublishPage(ScrollArea):
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
 		"""Обновляет список каналов при каждом открытии страницы."""
 		super().showEvent(event)
-		self._reload_channels()
+		self._reload_communities()
 
-	def prefill_media(self, kind: MediaKind, path: str, channel_id: int | None = None) -> None:
+	def prefill_media(self, kind: MediaKind, path: str, community_id: int | None = None) -> None:
 		"""Подставляет вложение (переход с других страниц, например «Видео»).
 
-		``channel_id`` — предвыбор канала (например, выбранного на «Видео»);
+		``community_id`` — предвыбор канала (например, выбранного на «Видео»);
 		применяется тем же механизмом, что и канал прошлой публикации.
 		"""
 		self._segments.setCurrentItem(kind.value)
 		self._on_kind_changed(kind.value)
 		self._file_edit.setText(path)
-		if channel_id is not None:
-			self._restore_channel_id = channel_id
-			self._apply_channel_restore()
+		if community_id is not None:
+			self._restore_community_id = community_id
+			self._apply_community_restore()
 
-	def _reload_channels(self) -> None:
+	def _reload_communities(self) -> None:
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.list_channels(),
+			self._worker.engine.communities.list_communities(),
 			self,
-			self._show_channels,
+			self._show_communities,
 			self._show_error,
 		)
 
-	def _show_channels(self, channels: list[ChannelDto]) -> None:
+	def _show_communities(self, communities: list[CommunityDto]) -> None:
 		"""Обновляет список каналов, сохраняя выбор по id канала.
 
 		Выключенные каналы (настройка ``enabled``) в списке не показываются —
 		фильтр презентационный, само правило держит движок (PostsService
 		откажет выключенному каналу).
 		"""
-		self._channel_combo.set_items(
-			[channel for channel in channels if channel.enabled],
-			label=lambda channel: channel.title,
-			key=lambda channel: channel.id,
+		self._community_combo.set_items(
+			[community for community in communities if community.enabled],
+			label=lambda community: community.title,
+			key=lambda community: community.id,
 		)
 		# успешное восстановление само запускает обработчик смены (сигнал
 		# select); явный вызов нужен только когда восстанавливать нечего.
 		# Неудача на свежем списке означает устаревший id (канал выключен
 		# или удалён) — забываем его, иначе предвыбор «выстрелил» бы позже,
 		# при следующей загрузке списка, внезапной сменой канала
-		if not self._apply_channel_restore():
-			self._restore_channel_id = None
-			self._on_channel_changed()
+		if not self._apply_community_restore():
+			self._restore_community_id = None
+			self._on_community_changed()
 
-	def _on_last_channel_loaded(self, channel_id: int | None) -> None:
+	def _on_last_community_loaded(self, community_id: int | None) -> None:
 		"""Пришёл канал прошлой публикации — применяем, если список готов."""
-		self._restore_channel_id = channel_id
-		self._apply_channel_restore()
+		self._restore_community_id = community_id
+		self._apply_community_restore()
 
-	def _apply_channel_restore(self) -> bool:
+	def _apply_community_restore(self) -> bool:
 		"""Предвыбирает канал прошлой публикации (один раз).
 
 		Returns:
 			True — выбор применён; обработчик смены уже запущен сигналом
 			``select`` (см. контракт DtoComboBox.select), звать его не нужно.
 		"""
-		wanted = self._restore_channel_id
+		wanted = self._restore_community_id
 		if wanted is None:
 			return False
-		if self._channel_combo.select(lambda channel: channel.id == wanted):
-			self._restore_channel_id = None
+		if self._community_combo.select(lambda community: community.id == wanted):
+			self._restore_community_id = None
 			return True
 		return False
 
-	def _channel_or_none(self) -> ChannelDto | None:
+	def _community_or_none(self) -> CommunityDto | None:
 		"""Выбранный канал без показа ошибок (для адаптации формы)."""
-		return self._channel_combo.selected()
+		return self._community_combo.selected()
 
-	def _on_channel_changed(self, _index: int = 0) -> None:
+	def _on_community_changed(self, _index: int = 0) -> None:
 		"""Адаптирует форму под возможности и времена выбранного канала."""
-		channel = self._channel_or_none()
-		if channel is None:
+		community = self._community_or_none()
+		if community is None:
 			self._caps_hint.setText("")
 			self._when_row.set_schedule_allowed(True)
 			self._when_row.set_times([])
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.get_for(PUBLISH_TIMES, channel.id),
+			self._worker.engine.settings.get_for(PUBLISH_TIMES, community.id),
 			self,
-			partial(self._apply_times, channel.id),
+			partial(self._apply_times, community.id),
 			noop,
 		)
-		caps = _channel_caps(channel)
+		caps = _community_caps(community)
 		if caps.userbot:
 			# лимит зависит от Premium userbot — узнаём у движка
 			self._caps_hint.setText(
@@ -355,9 +355,9 @@ class PublishPage(ScrollArea):
 			)
 			run_in_engine(
 				self._worker,
-				self._worker.engine.posts.userbot_limit_gb(channel.id),
+				self._worker.engine.posts.userbot_limit_gb(community.id),
 				self,
-				partial(self._show_userbot_limit, channel.id),
+				partial(self._show_userbot_limit, community.id),
 				noop,
 			)
 			self._when_row.set_schedule_allowed(True)
@@ -373,23 +373,23 @@ class PublishPage(ScrollArea):
 			)
 			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
 
-	def _is_stale(self, channel_id: int) -> bool:
+	def _is_stale(self, community_id: int) -> bool:
 		"""Пришёл ли ответ движка для уже переключённого канала.
 
 		Пока движок занят (очередь отправки в том же цикле, ADR-0016),
 		ответы задерживаются: без проверки подсказка и времена канала A
 		перезаписали бы уже показанные данные канала B.
 		"""
-		return not self._channel_combo.is_current_id(channel_id)
+		return not self._community_combo.is_current_id(community_id)
 
-	def _apply_times(self, channel_id: int, times: list[str]) -> None:
+	def _apply_times(self, community_id: int, times: list[str]) -> None:
 		"""Подставляет времена канала, если он всё ещё выбран."""
-		if not self._is_stale(channel_id):
+		if not self._is_stale(community_id):
 			self._when_row.set_times(times)
 
-	def _show_userbot_limit(self, channel_id: int, limit_gb: int) -> None:
+	def _show_userbot_limit(self, community_id: int, limit_gb: int) -> None:
 		"""Дописывает лимит файла в подсказку (2 ГБ; 4 — с Premium)."""
-		if self._is_stale(channel_id):
+		if self._is_stale(community_id):
 			return
 		premium = " (Premium)" if limit_gb >= 4 else ""
 		self._caps_hint.setText(
@@ -414,11 +414,11 @@ class PublishPage(ScrollArea):
 		остальных типов стартовая папка — на усмотрение Qt (позже).
 		"""
 		if self._kind is MediaKind.VIDEO:
-			channel = self._channel_or_none()
-			if channel is not None:
+			community = self._community_or_none()
+			if community is not None:
 				run_in_engine(
 					self._worker,
-					self._worker.engine.video.processed_dir_for_channel(channel.id),
+					self._worker.engine.video.processed_dir_for_community(community.id),
 					self,
 					self._open_file_dialog,
 					self._show_error,
@@ -444,27 +444,27 @@ class PublishPage(ScrollArea):
 
 	# --- подпись по шаблону -----------------------------------------------------
 
-	def _current_channel(self) -> ChannelDto | None:
+	def _current_community(self) -> CommunityDto | None:
 		"""Выбранный канал или None (с показом подсказки)."""
-		channel = self._channel_or_none()
-		if channel is None:
+		community = self._community_or_none()
+		if community is None:
 			self._show_error("Сначала подключите и выберите канал.")
-		return channel
+		return community
 
 	def _on_setup_fields(self) -> None:
 		"""Открывает настройку полей и шаблонов подписи канала."""
-		channel = self._current_channel()
-		if channel is not None:
-			exec_dialog(FieldsDialog(self._worker, channel.id, channel.title, self.window()))
+		community = self._current_community()
+		if community is not None:
+			exec_dialog(FieldsDialog(self._worker, community.id, community.title, self.window()))
 
 	def _on_compose_caption(self) -> None:
 		"""Загружает шаблоны канала и открывает диалог сборки."""
-		channel = self._current_channel()
-		if channel is None:
+		community = self._current_community()
+		if community is None:
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.list_templates(channel.id),
+			self._worker.engine.captions.list_templates(community.id),
 			self,
 			self._open_caption_dialog,
 			self._show_error,
@@ -504,8 +504,8 @@ class PublishPage(ScrollArea):
 	) -> None:
 		"""Предлагает имя файла по шаблону имени (если он задан)."""
 		template = next(t for t in templates if t.id == dialog.template_id())
-		channel = self._current_channel()
-		if not (template.filename_pattern and media and channel):
+		community = self._current_community()
+		if not (template.filename_pattern and media and community):
 			return
 		if self._kind is MediaKind.NONE:
 			return
@@ -513,7 +513,7 @@ class PublishPage(ScrollArea):
 			self._worker,
 			self._worker.engine.captions.render_filename(
 				template.id,
-				channel.id,
+				community.id,
 				dialog.title(),
 				dialog.used_values(),
 				media,
@@ -533,30 +533,30 @@ class PublishPage(ScrollArea):
 
 	def _on_batch(self) -> None:
 		"""Пакетная отправка: канал → папка → сканирование → черновики."""
-		channel = self._current_channel()
-		if channel is None:
+		community = self._current_community()
+		if community is None:
 			return
-		caps = _channel_caps(channel)
+		caps = _community_caps(community)
 		if not (caps.userbot or caps.bot):
 			self._show_error("Нет способа публикации — проверьте доступы на странице «Каналы».")
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.video.processed_dir_for_channel(channel.id),
+			self._worker.engine.video.processed_dir_for_community(community.id),
 			self,
-			partial(self._pick_batch_dir, channel),
+			partial(self._pick_batch_dir, community),
 			self._show_error,
 		)
 
-	def _pick_batch_dir(self, channel: ChannelDto, start_dir: str) -> None:
+	def _pick_batch_dir(self, community: CommunityDto, start_dir: str) -> None:
 		"""Выбор готовой папки (по умолчанию — папка результатов канала)."""
 		root = pick_dir(self, "Готовая папка с видео", start_dir=start_dir)
 		if root:
-			self._scan_batch_root(channel, root)
+			self._scan_batch_root(community, root)
 
-	def _scan_batch_root(self, channel: ChannelDto, root: str) -> None:
+	def _scan_batch_root(self, community: CommunityDto, root: str) -> None:
 		"""Сканирует готовую папку и продолжает цепочку пакета."""
-		setup = _BatchSetup(channel, root)
+		setup = _BatchSetup(community, root)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.scan_ready(root),
@@ -565,35 +565,35 @@ class PublishPage(ScrollArea):
 			self._show_error,
 		)
 
-	def start_batch_with_folder(self, root: str, channel_id: int) -> None:
+	def start_batch_with_folder(self, root: str, community_id: int) -> None:
 		"""Пакет из папки, выбранной на другой странице («Видео»).
 
 		Вход с чужой страницы: канал приходит её id (0 — не выбран)
 		и предвыбирается в списке каналов этой страницы.
 		"""
-		channel = self._batch_channel(channel_id)
-		if channel is not None:
-			self._scan_batch_root(channel, root)
+		community = self._batch_community(community_id)
+		if community is not None:
+			self._scan_batch_root(community, root)
 
-	def start_batch_with_files(self, paths: list[str], channel_id: int) -> None:
+	def start_batch_with_files(self, paths: list[str], community_id: int) -> None:
 		"""Пакет из готового списка файлов (выбор на странице «Видео»).
 
 		Сборку списка (размеры, пропуск исчезнувших, порядок) делает
 		движок — источник пакета держит он (ADR-0015), страница только
 		показывает результат.
 		"""
-		channel = self._batch_channel(channel_id)
-		if channel is None:
+		community = self._batch_community(community_id)
+		if community is None:
 			return
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.ready_from_paths(paths),
 			self,
-			partial(self._on_batch_files_ready, channel),
+			partial(self._on_batch_files_ready, community),
 			self._show_error,
 		)
 
-	def _on_batch_files_ready(self, channel: ChannelDto, files: list[ReadyVideo]) -> None:
+	def _on_batch_files_ready(self, community: CommunityDto, files: list[ReadyVideo]) -> None:
 		"""Список собран движком — дальше обычная цепочка пакета."""
 		if not files:
 			self._show_error("Файлы не найдены на диске — публиковать нечего.")
@@ -601,9 +601,9 @@ class PublishPage(ScrollArea):
 		# файлы с «Видео» могут лежать в разных подпапках результатов:
 		# подписью идёт общий корень, а не папка первого файла
 		root = os.path.commonpath([str(Path(f.path).parent) for f in files])
-		self._on_batch_scanned(_BatchSetup(channel, root), files)
+		self._on_batch_scanned(_BatchSetup(community, root), files)
 
-	def _batch_channel(self, channel_id: int) -> ChannelDto | None:
+	def _batch_community(self, community_id: int) -> CommunityDto | None:
 		"""Канал пакета по id с другой страницы (с предвыбором в списке).
 
 		Страница «Видео» показывает все каналы, а этот список — только
@@ -611,18 +611,20 @@ class PublishPage(ScrollArea):
 		для публикации, и пакет отменяется. Иначе выбор молча остался бы
 		на прежнем канале и пакет ушёл бы не туда.
 		"""
-		if channel_id and not self._channel_combo.select(lambda channel: channel.id == channel_id):
+		if community_id and not self._community_combo.select(
+			lambda community: community.id == community_id
+		):
 			self._show_error(
 				"Канал недоступен для публикации (выключен или список каналов "
 				"ещё загружается) — проверьте настройки канала и повторите."
 			)
 			return None
-		channel = self._channel_or_none()
-		if channel is None:
+		community = self._community_or_none()
+		if community is None:
 			self._show_error(
 				"Канал не выбран (или список каналов ещё загружается) — выберите канал и повторите."
 			)
-		return channel
+		return community
 
 	def _on_batch_scanned(self, setup: _BatchSetup, files: list[ReadyVideo]) -> None:
 		"""Файлы найдены — общий шаблон подписи (если шаблоны настроены)."""
@@ -636,7 +638,7 @@ class PublishPage(ScrollArea):
 		setup.files = files
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.list_templates(setup.channel.id),
+			self._worker.engine.captions.list_templates(setup.community.id),
 			self,
 			partial(self._batch_caption_pass, setup),
 			self._show_error,
@@ -661,7 +663,7 @@ class PublishPage(ScrollArea):
 				self._record_template_usage(template.id, setup.used_values)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.get_for(PUBLISH_TIMES, setup.channel.id),
+			self._worker.engine.settings.get_for(PUBLISH_TIMES, setup.community.id),
 			self,
 			partial(self._batch_times_loaded, setup),
 			self._show_error,
@@ -676,7 +678,7 @@ class PublishPage(ScrollArea):
 		setup.times = times
 		run_in_engine(
 			self._worker,
-			self._worker.engine.posts.scheduled_times(setup.channel.id),
+			self._worker.engine.posts.scheduled_times(setup.community.id),
 			self,
 			partial(self._batch_scheduled_loaded, setup),
 			partial(self._batch_scheduled_failed, setup),
@@ -700,7 +702,7 @@ class PublishPage(ScrollArea):
 		setup.busy = scheduled
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.get_for(TITLE_PARSE_RULES, setup.channel.id),
+			self._worker.engine.settings.get_for(TITLE_PARSE_RULES, setup.community.id),
 			self,
 			partial(self._batch_rules_loaded, setup),
 			self._show_error,
@@ -709,11 +711,11 @@ class PublishPage(ScrollArea):
 	def _batch_rules_loaded(self, setup: _BatchSetup, tokens: list[str]) -> None:
 		"""Правила разбора получены — осталась граница размера файла."""
 		setup.title_rules = TitleParseRules.from_tokens(tokens)
-		caps = _channel_caps(setup.channel)
+		caps = _community_caps(setup.community)
 		if caps.userbot:
 			run_in_engine(
 				self._worker,
-				self._worker.engine.posts.userbot_limit_bytes(setup.channel.id),
+				self._worker.engine.posts.userbot_limit_bytes(setup.community.id),
 				self,
 				partial(self._open_batch_dialog, setup, True),
 				self._show_error,
@@ -728,14 +730,14 @@ class PublishPage(ScrollArea):
 		"""Показывает черновики пакета; принятые ставит в очередь отправки."""
 		dialog = PublishBatchDialog(
 			self._worker,
-			setup.channel,
+			setup.community,
 			setup.root,
 			setup.files,
 			self.window(),
 			caption_lines=setup.caption_lines,
 			filename_template_id=setup.filename_template_id,
 			used_values=setup.used_values,
-			channel_times=setup.times,
+			community_times=setup.times,
 			limit_bytes=limit_bytes,
 			schedule_allowed=schedule_allowed,
 			title_rules=setup.title_rules,
@@ -746,7 +748,7 @@ class PublishPage(ScrollArea):
 		if not exec_dialog(dialog):
 			return
 		try:
-			drafts = dialog.drafts(setup.channel.id)
+			drafts = dialog.drafts(setup.community.id)
 		except ValueError as exc:  # страховка: validate диалога это уже проверил
 			self._show_error(str(exc))
 			return
@@ -769,11 +771,11 @@ class PublishPage(ScrollArea):
 
 	def _on_send(self) -> None:
 		"""Ставит черновик в очередь отправки; форма сразу свободна."""
-		channel = self._current_channel()
-		if channel is None:
+		community = self._current_community()
+		if community is None:
 			return
 		try:
-			draft = self._draft(channel.id)
+			draft = self._draft(community.id)
 		except ValueError as exc:  # поля формы не согласованы (файл, время)
 			self._show_error(str(exc))
 			return
@@ -786,13 +788,13 @@ class PublishPage(ScrollArea):
 		)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.set(PUBLISH_LAST_CHANNEL_ID, channel.id),
+			self._worker.engine.settings.set(PUBLISH_LAST_COMMUNITY_ID, community.id),
 			self,
 			noop,
 			noop,
 		)
 
-	def _draft(self, channel_id: int) -> PostDraft:
+	def _draft(self, community_id: int) -> PostDraft:
 		"""Собирает черновик публикации из полей формы.
 
 		Raises:
@@ -808,7 +810,7 @@ class PublishPage(ScrollArea):
 				"выберите файл или переключитесь на «Текст»."
 			)
 		return PostDraft(
-			channel_id=channel_id,
+			community_id=community_id,
 			text=str(self._text.toPlainText()).strip(),
 			media_path=None if is_text else media,
 			media_kind=MediaKind.NONE if is_text else self._kind,

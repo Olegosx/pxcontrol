@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Bot, Channel, TgAccount
+from pxcontrol.engine.db.models import Bot, Community, TgAccount
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
 	PostsService,
 	ScheduledPostDto,
 )
-from pxcontrol.engine.services.settings import CHANNEL_ENABLED, SettingsService
+from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotFloodError, UserbotUnavailableError
 from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
 
@@ -82,7 +82,7 @@ async def _add_account(db: Database, label: str = "@ub") -> int:
 		return account.id
 
 
-async def _add_channel(db: Database, with_bot: bool = True, userbot_admin: bool = True) -> int:
+async def _add_community(db: Database, with_bot: bool = True, userbot_admin: bool = True) -> int:
 	"""Создаёт канал (при нужде — бота и userbot-аккаунт), возвращает id."""
 	async with db.session_factory() as session:
 		bot_id = None
@@ -97,32 +97,32 @@ async def _add_channel(db: Database, with_bot: bool = True, userbot_admin: bool 
 			session.add(account)
 			await session.flush()
 			account_id = account.id
-		channel = Channel(
+		community = Community(
 			title="Канал",
 			tg_chat_id="-1001",
 			bot_id=bot_id,
 			tg_account_id=account_id,
 		)
-		session.add(channel)
+		session.add(community)
 		await session.commit()
-		await session.refresh(channel)
-		return channel.id
+		await session.refresh(community)
+		return community.id
 
 
 async def test_publish_text_now_and_scheduled(db: Database) -> None:
 	"""Текст уходит через userbot: сразу (when=None) и отложенно."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
-	await service.publish(PostDraft(channel_id, text="сразу"))
+	community_id = await _add_community(db)
+	await service.publish(PostDraft(community_id, text="сразу"))
 	when = datetime.now(UTC) + timedelta(hours=1)
-	await service.publish(PostDraft(channel_id, text="позже", when=when))
+	await service.publish(PostDraft(community_id, text="позже", when=when))
 	assert gateway.sent_posts() == [
 		("-1001", OutgoingPost(text="сразу")),
 		("-1001", OutgoingPost(text="позже", when=when)),
 	]
 	# публикация адресована аккаунту, привязанному к каналу (ADR-0019)
-	bound = await service.account_for_channel(channel_id)
+	bound = await service.account_for_community(community_id)
 	assert [acc for acc, _chat, _post in gateway.published] == [bound, bound]
 
 
@@ -130,12 +130,12 @@ async def test_publish_media_with_progress(db: Database, tmp_path: Path) -> None
 	"""Медиа уходит с типом и подписью, прогресс пробрасывается."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	video = tmp_path / "ролик.mp4"
 	video.write_bytes(b"video")
 	received: list[float] = []
 	draft = PostDraft(
-		channel_id,
+		community_id,
 		text="подпись",
 		media_path=str(video),
 		media_kind=MediaKind.VIDEO,
@@ -151,21 +151,21 @@ async def test_publish_validations(db: Database, tmp_path: Path) -> None:
 	"""Пустой черновик, битый путь, тип, «почти сейчас» — до похода в Telegram."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	with pytest.raises(PostError, match="пуст"):
-		await service.publish(PostDraft(channel_id))
+		await service.publish(PostDraft(community_id))
 	with pytest.raises(PostError, match="не указан тип"):
-		await service.publish(PostDraft(channel_id, media_path="x.bin"))
+		await service.publish(PostDraft(community_id, media_path="x.bin"))
 	with pytest.raises(PostError, match="не найден"):
 		await service.publish(
 			PostDraft(
-				channel_id,
+				community_id,
 				media_path=str(tmp_path / "нет.jpg"),
 				media_kind=MediaKind.PHOTO,
 			)
 		)
 	with pytest.raises(PostError, match="в будущем"):
-		await service.publish(PostDraft(channel_id, text="x", when=datetime.now(UTC)))
+		await service.publish(PostDraft(community_id, text="x", when=datetime.now(UTC)))
 	assert gateway.published == []
 
 
@@ -182,13 +182,13 @@ async def test_video_thumbnail_from_neighbor_preview(
 	monkeypatch.setattr("pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	video = tmp_path / "ролик.mp4"
 	video.write_bytes(b"video")
 	(tmp_path / "ролик.png").write_bytes(b"png")
 	await service.publish(
 		PostDraft(
-			channel_id,
+			community_id,
 			media_path=str(video),
 			media_kind=MediaKind.VIDEO,
 		)
@@ -215,12 +215,12 @@ async def test_video_thumbnail_random_middle_without_preview(
 	)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	video = tmp_path / "чужой.mp4"
 	video.write_bytes(b"video")
 	await service.publish(
 		PostDraft(
-			channel_id,
+			community_id,
 			media_path=str(video),
 			media_kind=MediaKind.VIDEO,
 		)
@@ -239,13 +239,13 @@ async def test_video_thumbnail_failure_does_not_block_publish(
 	monkeypatch.setattr("pxcontrol.engine.services.posts._make_thumbnail", _boom)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	video = tmp_path / "ролик.mp4"
 	video.write_bytes(b"video")
 	(tmp_path / "ролик.png").write_bytes(b"png")
 	await service.publish(
 		PostDraft(
-			channel_id,
+			community_id,
 			media_path=str(video),
 			media_kind=MediaKind.VIDEO,
 		)
@@ -265,13 +265,13 @@ async def test_publish_renames_file_and_preview(
 	monkeypatch.setattr("pxcontrol.engine.services.posts._make_thumbnail", _fake_thumb)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	video = tmp_path / "старое_test_20260714-000000.mp4"
 	video.write_bytes(b"video")
 	(tmp_path / "старое_test_20260714-000000.png").write_bytes(b"png")
 	await service.publish(
 		PostDraft(
-			channel_id,
+			community_id,
 			media_path=str(video),
 			media_kind=MediaKind.VIDEO,
 			rename_to="Новое имя.mp4",
@@ -288,13 +288,13 @@ async def test_publish_rename_validations(db: Database, tmp_path: Path) -> None:
 	"""Имя с путём или занятое имя — ошибка до отправки."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	video = tmp_path / "в.mp4"
 	video.write_bytes(b"video")
 	with pytest.raises(PostError, match="не должно содержать путь"):
 		await service.publish(
 			PostDraft(
-				channel_id,
+				community_id,
 				media_path=str(video),
 				media_kind=MediaKind.VIDEO,
 				rename_to="a/b.mp4",
@@ -304,7 +304,7 @@ async def test_publish_rename_validations(db: Database, tmp_path: Path) -> None:
 	with pytest.raises(PostError, match="уже существует"):
 		await service.publish(
 			PostDraft(
-				channel_id,
+				community_id,
 				media_path=str(video),
 				media_kind=MediaKind.VIDEO,
 				rename_to="занято.mp4",
@@ -329,14 +329,14 @@ async def test_publish_bot_fallback_text_and_media(db: Database, tmp_path: Path)
 	"""Канал «только бот»: текст и медиа ≤50 МБ уходят через Bot API."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db, userbot_admin=False)
-	await service.publish(PostDraft(channel_id, text="через бота"))
+	community_id = await _add_community(db, userbot_admin=False)
+	await service.publish(PostDraft(community_id, text="через бота"))
 	assert gateway.sent == [("123:AAA", "-1001", "через бота")]
 	photo = tmp_path / "фото.jpg"
 	photo.write_bytes(b"jpg")
 	await service.publish(
 		PostDraft(
-			channel_id,
+			community_id,
 			text="подпись",
 			media_path=str(photo),
 			media_kind=MediaKind.PHOTO,
@@ -350,17 +350,17 @@ async def test_publish_bot_limits(db: Database, tmp_path: Path) -> None:
 	"""Канал «только бот»: отложка и файлы >50 МБ — ошибки до отправки."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db, userbot_admin=False)
+	community_id = await _add_community(db, userbot_admin=False)
 	when = datetime.now(UTC) + timedelta(hours=1)
 	with pytest.raises(PostError, match="userbot-админа"):
-		await service.publish(PostDraft(channel_id, text="x", when=when))
+		await service.publish(PostDraft(community_id, text="x", when=when))
 	big = tmp_path / "большой.mp4"
 	with big.open("wb") as handle:
 		handle.truncate(51 * 1024 * 1024)  # разрежённый файл, диск не страдает
 	with pytest.raises(PostError, match="50 МБ"):
 		await service.publish(
 			PostDraft(
-				channel_id,
+				community_id,
 				media_path=str(big),
 				media_kind=MediaKind.VIDEO,
 			)
@@ -371,9 +371,9 @@ async def test_publish_bot_limits(db: Database, tmp_path: Path) -> None:
 async def test_publish_without_any_way(db: Database) -> None:
 	"""Канал без способов публикации — понятная ошибка."""
 	service = PostsService(db, _FakeGateway())
-	channel_id = await _add_channel(db, with_bot=False, userbot_admin=False)
+	community_id = await _add_community(db, with_bot=False, userbot_admin=False)
 	with pytest.raises(PostError, match="нет способа публикации"):
-		await service.publish(PostDraft(channel_id, text="x"))
+		await service.publish(PostDraft(community_id, text="x"))
 
 
 async def test_publish_userbot_unavailable(db: Database) -> None:
@@ -381,19 +381,19 @@ async def test_publish_userbot_unavailable(db: Database) -> None:
 	gateway = _FakeGateway()
 	gateway.userbot_ok = False
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	with pytest.raises(UserbotUnavailableError, match="войдите"):
-		await service.publish(PostDraft(channel_id, text="x"))
+		await service.publish(PostDraft(community_id, text="x"))
 
 
 async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
 	"""Список отложенных собирается из Telegram по активным каналам."""
 	service = PostsService(db, _FakeGateway())
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	items = await service.list_scheduled()
 	assert items == [
 		ScheduledPostDto(
-			channel_id,
+			community_id,
 			"Канал",
 			"Отложенный текст",
 			datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
@@ -401,26 +401,26 @@ async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
 	]
 
 
-async def test_list_scheduled_skips_disabled_channel(db: Database) -> None:
+async def test_list_scheduled_skips_disabled_community(db: Database) -> None:
 	"""Выключенный канал (настройка enabled = False) не опрашивается."""
 	service = PostsService(db, _FakeGateway())
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	assert len(await service.list_scheduled()) == 1
-	await SettingsService(db).set_for(CHANNEL_ENABLED, channel_id, False)
+	await SettingsService(db).set_for(COMMUNITY_ENABLED, community_id, False)
 	assert await service.list_scheduled() == []
 
 
-async def test_list_scheduled_skips_bot_only_channel(db: Database) -> None:
+async def test_list_scheduled_skips_bot_only_community(db: Database) -> None:
 	"""Бот-канал не опрашивается: Bot API отложенных не умеет.
 
 	Раньше такой канал ронял всю страницу «Расписание» ошибкой userbot.
 	"""
 	service = PostsService(db, _FakeGateway())
-	await _add_channel(db, with_bot=True, userbot_admin=False)
+	await _add_community(db, with_bot=True, userbot_admin=False)
 	assert await service.list_scheduled() == []
 
 
-async def test_list_scheduled_isolates_channel_failure(db: Database) -> None:
+async def test_list_scheduled_isolates_community_failure(db: Database) -> None:
 	"""Ошибка одного канала не роняет список: канал пропускается."""
 
 	class _FlakyGateway(_FakeGateway):
@@ -430,11 +430,11 @@ async def test_list_scheduled_isolates_channel_failure(db: Database) -> None:
 			return await super().get_scheduled(account_id, chat_id)
 
 	service = PostsService(db, _FlakyGateway())
-	await _add_channel(db)  # tg_chat_id="-1001" — упадёт
+	await _add_community(db)  # tg_chat_id="-1001" — упадёт
 	other_account = await _add_account(db, "@второй")
 	async with db.session_factory() as session:
 		session.add(
-			Channel(
+			Community(
 				title="Второй",
 				tg_chat_id="-1002",
 				bot_id=None,
@@ -443,17 +443,17 @@ async def test_list_scheduled_isolates_channel_failure(db: Database) -> None:
 		)
 		await session.commit()
 	items = await service.list_scheduled()
-	assert [item.channel_title for item in items] == ["Второй"]
+	assert [item.community_title for item in items] == ["Второй"]
 
 
-async def test_publish_rejects_disabled_channel(db: Database) -> None:
+async def test_publish_rejects_disabled_community(db: Database) -> None:
 	"""Выключенный канал не публикует — правило движка, не интерфейса."""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
-	await SettingsService(db).set_for(CHANNEL_ENABLED, channel_id, False)
+	community_id = await _add_community(db)
+	await SettingsService(db).set_for(COMMUNITY_ENABLED, community_id, False)
 	with pytest.raises(PostError, match="выключен"):
-		await service.publish(PostDraft(channel_id, text="x"))
+		await service.publish(PostDraft(community_id, text="x"))
 	assert gateway.published == []
 
 
@@ -469,9 +469,9 @@ async def test_publish_userbot_rejects_oversized_file(
 	big.write_bytes(b"x" * 11)
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	draft = PostDraft(
-		channel_id,
+		community_id,
 		media_path=str(big),
 		media_kind=MediaKind.DOCUMENT,
 	)
@@ -479,7 +479,7 @@ async def test_publish_userbot_rejects_oversized_file(
 		await service.publish(draft)
 	assert gateway.published == []
 	# тот же файл у Premium-аккаунта канала проходит (лимит выше)
-	bound = await service.account_for_channel(channel_id)
+	bound = await service.account_for_community(community_id)
 	assert bound is not None
 	gateway.premium_ids = {bound}
 	await service.publish(draft)
@@ -511,10 +511,10 @@ async def test_published_video_moves_to_published_dir(
 	video.write_bytes(b"video")
 	(processed / "ролик.png").write_bytes(b"png")
 	service = PostsService(db, _FakeGateway())
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	await service.publish(
 		PostDraft(
-			channel_id,
+			community_id,
 			media_path=str(video),
 			media_kind=MediaKind.VIDEO,
 		)
@@ -533,10 +533,10 @@ async def test_video_outside_processed_dir_stays(
 	video = tmp_path / "чужое.mp4"
 	video.write_bytes(b"video")
 	service = PostsService(db, _FakeGateway())
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	await service.publish(
 		PostDraft(
-			channel_id,
+			community_id,
 			media_path=str(video),
 			media_kind=MediaKind.VIDEO,
 		)
@@ -560,10 +560,10 @@ async def test_move_failure_does_not_break_publish(
 	video.write_bytes(b"video")
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	await service.publish(
 		PostDraft(
-			channel_id,
+			community_id,
 			media_path=str(video),
 			media_kind=MediaKind.VIDEO,
 		)
@@ -586,8 +586,10 @@ async def test_publish_from_queue_prunes_emptied_batch_dirs(
 	video = queued / "ролик.mp4"
 	video.write_bytes(b"video")
 	service = PostsService(db, _FakeGateway())
-	channel_id = await _add_channel(db)
-	await service.publish(PostDraft(channel_id, media_path=str(video), media_kind=MediaKind.VIDEO))
+	community_id = await _add_community(db)
+	await service.publish(
+		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO)
+	)
 	assert (tmp_path / "media" / "published" / "пакет" / "ролик.mp4").is_file()
 	assert not queued.exists()  # очередь по папке отработана
 	assert not processed.exists()  # зеркало опустело — файлы уже не вернутся
@@ -668,11 +670,11 @@ def test_validate_draft_checks_rename_early(tmp_path: Path) -> None:
 async def test_scheduled_times_for_batch_planning(db: Database) -> None:
 	"""Времена отложек канала — для пропуска занятых слотов (ADR-0015)."""
 	service = PostsService(db, _FakeGateway())
-	channel_id = await _add_channel(db)
-	assert await service.scheduled_times(channel_id) == [datetime(2026, 7, 13, 12, 0, tzinfo=UTC)]
+	community_id = await _add_community(db)
+	assert await service.scheduled_times(community_id) == [datetime(2026, 7, 13, 12, 0, tzinfo=UTC)]
 	# канал без userbot-админа отложек иметь не может — пустой список
 	async with db.session_factory() as session:
-		other = Channel(title="Бот-канал", tg_chat_id="-1002", tg_account_id=None)
+		other = Community(title="Бот-канал", tg_chat_id="-1002", tg_account_id=None)
 		session.add(other)
 		await session.commit()
 		await session.refresh(other)
@@ -693,16 +695,16 @@ async def test_list_scheduled_flood_skips_rest_of_account(db: Database) -> None:
 			raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
 
 	service = PostsService(db, _FloodedGateway())
-	first_account = await _add_channel(db)  # канал «-1001», аккаунт 1
+	first_account = await _add_community(db)  # канал «-1001», аккаунт 1
 	async with db.session_factory() as session:  # второй канал того же аккаунта
-		channel = (await session.get(Channel, first_account)) or None
-		assert channel is not None
+		community = (await session.get(Community, first_account)) or None
+		assert community is not None
 		session.add(
-			Channel(
+			Community(
 				title="Второй",
 				tg_chat_id="-1002",
 				bot_id=None,
-				tg_account_id=channel.tg_account_id,
+				tg_account_id=community.tg_account_id,
 			)
 		)
 		await session.commit()

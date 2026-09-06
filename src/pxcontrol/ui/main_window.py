@@ -11,8 +11,8 @@ from qfluentwidgets import FluentIcon, FluentWindow, MessageBox, NavigationItemP
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.settings import WINDOW_GEOMETRY
 from pxcontrol.engine.telegram.types import MediaKind
-from pxcontrol.ui.pages.channels import ChannelsPage
 from pxcontrol.ui.pages.common import exec_dialog
+from pxcontrol.ui.pages.communities import CommunitiesPage
 from pxcontrol.ui.pages.publish import PublishPage
 from pxcontrol.ui.pages.schedule import SchedulePage
 from pxcontrol.ui.pages.settings import SettingsPage
@@ -58,7 +58,7 @@ class MainWindow(FluentWindow):
 
 	def _build_navigation(self) -> None:
 		"""Наполняет боковую навигацию разделами приложения."""
-		self.addSubInterface(ChannelsPage(self._worker, self), FluentIcon.HOME, "Каналы")
+		self.addSubInterface(CommunitiesPage(self._worker, self), FluentIcon.HOME, "Каналы")
 		self._video_page = VideoPage(self._worker, self)
 		self.addSubInterface(self._video_page, FluentIcon.VIDEO, "Видео")
 		self._publish_page = PublishPage(self._worker, self)
@@ -75,20 +75,20 @@ class MainWindow(FluentWindow):
 			NavigationItemPosition.BOTTOM,
 		)
 
-	def _open_publish_with_video(self, path: str, channel_id: int) -> None:
+	def _open_publish_with_video(self, path: str, community_id: int) -> None:
 		"""Переходит на «Публикацию» с видеофайлом и каналом со страницы «Видео»."""
-		self._publish_page.prefill_media(MediaKind.VIDEO, path, channel_id=channel_id or None)
+		self._publish_page.prefill_media(MediaKind.VIDEO, path, community_id=community_id or None)
 		self.switchTo(self._publish_page)
 
-	def _open_publish_batch_files(self, paths: list[str], channel_id: int) -> None:
+	def _open_publish_batch_files(self, paths: list[str], community_id: int) -> None:
 		"""Пакет из готовых видео, выбранных на «Видео» (ADR-0015)."""
 		self.switchTo(self._publish_page)
-		self._publish_page.start_batch_with_files(list(paths), channel_id)
+		self._publish_page.start_batch_with_files(list(paths), community_id)
 
-	def _open_publish_batch_folder(self, root: str, channel_id: int) -> None:
+	def _open_publish_batch_folder(self, root: str, community_id: int) -> None:
 		"""Пакет из папки готовых видео, выбранной на «Видео» (ADR-0015)."""
 		self.switchTo(self._publish_page)
-		self._publish_page.start_batch_with_folder(root, channel_id)
+		self._publish_page.start_batch_with_folder(root, community_id)
 
 	def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — API Qt
 		"""Подтверждает выход при активной отправке или непустой обработке.

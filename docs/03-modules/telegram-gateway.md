@@ -70,7 +70,7 @@
 - `UserbotAccessError` — подтверждённый отказ Telegram: нет прав
   или канал не виден. **Только** этот класс — основание менять
   привязку userbot-аккаунта к каналу при перепроверке доступов
-  (`channels.tg_account_id`, ADR-0019; сбой сети — нет; хранимый флаг
+  (`communities.tg_account_id`, ADR-0019; сбой сети — нет; хранимый флаг
   `userbot_admin` упразднён — осталось вычисляемое свойство DTO).
   Сюда переводятся и «userbot не участник канала» / «канал закрыт
   от него» / «писать запрещено» (`UserNotParticipant`, `ChannelPrivate`,
@@ -109,7 +109,7 @@ MTProto — `FloodWaitError`. Очередь отправки по этому к
 
 ## Связи
 
-- [Каналы](channels.md) · [Расписание](scheduler.md) · [Подписи](captions.md)
+- [Каналы](communities.md) · [Расписание](scheduler.md) · [Подписи](captions.md)
 - [Правила Telegram для имён файлов](telegram-filenames.md) — как сервер
   меняет имя при загрузке (порог 78 символов стема, обрезка и чистка).
 

@@ -499,7 +499,7 @@ class _FoldersSettings(QWidget):
 		"""Сохраняет все пути папок видео (пусто — стандартная папка).
 
 		Одна операция — одна транзакция (set_many): успех сообщается
-		по факту записи, а не до неё (образец честной плашки — channels).
+		по факту записи, а не до неё (образец честной плашки — communities).
 		"""
 		items = [(key, str(self._edits[key.name].text()).strip()) for _label, key in _VIDEO_FOLDERS]
 		run_in_engine(

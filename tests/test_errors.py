@@ -17,11 +17,11 @@ from pxcontrol.engine.security.secrets import (
 )
 from pxcontrol.engine.services.accounts import AccountsError
 from pxcontrol.engine.services.captions import CaptionsError
-from pxcontrol.engine.services.channels import ChannelError
+from pxcontrol.engine.services.communities import CommunityError
 from pxcontrol.engine.services.posts import PostError
 from pxcontrol.engine.services.settings import SettingsError
 from pxcontrol.engine.services.video import VideoError
-from pxcontrol.engine.telegram.bot_api import ChannelCheckError, InvalidBotTokenError
+from pxcontrol.engine.telegram.bot_api import CommunityCheckError, InvalidBotTokenError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
 from pxcontrol.engine.telegram.refs import ChatRefError
 
@@ -29,8 +29,8 @@ from pxcontrol.engine.telegram.refs import ChatRefError
 DOMAIN_ERRORS = [
 	AccountsError,
 	CaptionsError,
-	ChannelCheckError,
-	ChannelError,
+	CommunityCheckError,
+	CommunityError,
 	ChatRefError,
 	InvalidBotTokenError,
 	LoginError,
@@ -52,7 +52,7 @@ def test_domain_errors_inherit_engine_error(error_class: type) -> None:
 def test_user_message_passes_domain_text_verbatim() -> None:
 	"""Текст доменной ошибки уходит пользователю без изменений."""
 	text = "Канал не найден — обновите список."
-	assert user_message(ChannelError(text)) == text
+	assert user_message(CommunityError(text)) == text
 	# сетевые ошибки на границах транспортов тоже несут наш текст
 	assert user_message(ConnectionError("Нет связи с Telegram.")) == ("Нет связи с Telegram.")
 
@@ -61,7 +61,7 @@ def test_user_message_collapses_dump() -> None:
 	"""Многострочный дамп (стиль ошибок СУБД) сворачивается в одну строку."""
 	dump = (
 		"(sqlite3.IntegrityError) FOREIGN KEY constraint failed\n"
-		"[SQL: INSERT INTO caption_fields (channel_id, name) VALUES (?, ?)]\n"
+		"[SQL: INSERT INTO caption_fields (community_id, name) VALUES (?, ?)]\n"
 		"[parameters: (99, 'Genre')]\n"
 		"(Background on this error at: https://sqlalche.me/e/20/gkpj)"
 	)

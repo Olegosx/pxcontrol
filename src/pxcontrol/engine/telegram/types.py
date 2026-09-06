@@ -59,7 +59,7 @@ class MediaKind(StrEnum):
 
 
 @dataclass(frozen=True)
-class ChannelInfo:
+class CommunityInfo:
 	"""Канал, проверенный любым транспортом (бот или userbot).
 
 	Attributes:

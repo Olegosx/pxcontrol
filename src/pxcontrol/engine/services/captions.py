@@ -33,7 +33,7 @@ from pxcontrol.engine.db.models import (
 	CaptionTemplate,
 	CaptionTemplateField,
 	CaptionValue,
-	Channel,
+	Community,
 )
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
@@ -399,7 +399,7 @@ class CaptionsService:
 
 	# --- поля и словари ---------------------------------------------------
 
-	async def list_fields(self, channel_id: int) -> list[FieldDto]:
+	async def list_fields(self, community_id: int) -> list[FieldDto]:
 		"""Возвращает поля канала со словарями значений."""
 		async with self._db.session_factory() as session:
 			rows = (
@@ -407,7 +407,7 @@ class CaptionsService:
 					await session.execute(
 						select(CaptionField)
 						.options(selectinload(CaptionField.values))
-						.where(CaptionField.channel_id == channel_id)
+						.where(CaptionField.community_id == community_id)
 						.order_by(CaptionField.id)
 					)
 				)
@@ -417,7 +417,7 @@ class CaptionsService:
 			return [self._field_dto(f) for f in rows]
 
 	async def add_field(
-		self, channel_id: int, name: str, hashtag: bool, multiple: bool
+		self, community_id: int, name: str, hashtag: bool, multiple: bool
 	) -> FieldDto:
 		"""Добавляет поле в пул канала.
 
@@ -435,7 +435,7 @@ class CaptionsService:
 			exists = (
 				await session.execute(
 					select(CaptionField).where(
-						CaptionField.channel_id == channel_id,
+						CaptionField.community_id == community_id,
 						CaptionField.name == name,
 					)
 				)
@@ -443,7 +443,7 @@ class CaptionsService:
 			if exists is not None:
 				raise CaptionsError(f"Поле «{name}» уже есть у канала.")
 			field = CaptionField(
-				channel_id=channel_id,
+				community_id=community_id,
 				name=name,
 				hashtag=hashtag,
 				multiple=multiple,
@@ -451,7 +451,7 @@ class CaptionsService:
 			session.add(field)
 			await session.commit()
 			await session.refresh(field)
-		logger.info("Поле подписи «%s» добавлено (канал id=%s).", name, channel_id)
+		logger.info("Поле подписи «%s» добавлено (канал id=%s).", name, community_id)
 		return FieldDto(field.id, field.name, field.hashtag, field.multiple, [])
 
 	async def set_field_parent(self, field_id: int, parent_field_id: int | None) -> FieldDto:
@@ -497,7 +497,7 @@ class CaptionsService:
 		if parent_field_id == field.id:
 			raise CaptionsError("Поле не может зависеть само от себя.")
 		parent = await session.get(CaptionField, parent_field_id)
-		if parent is None or parent.channel_id != field.channel_id:
+		if parent is None or parent.community_id != field.community_id:
 			raise CaptionsError("Родительское поле не найдено у этого канала.")
 		ancestor: CaptionField | None = parent
 		while ancestor is not None and ancestor.parent_field_id is not None:
@@ -620,7 +620,7 @@ class CaptionsService:
 
 	# --- шаблоны -----------------------------------------------------------
 
-	async def list_templates(self, channel_id: int) -> list[TemplateDto]:
+	async def list_templates(self, community_id: int) -> list[TemplateDto]:
 		"""Возвращает шаблоны канала с полным составом полей."""
 		async with self._db.session_factory() as session:
 			rows = (
@@ -632,7 +632,7 @@ class CaptionsService:
 							.selectinload(CaptionTemplateField.field)
 							.selectinload(CaptionField.values)
 						)
-						.where(CaptionTemplate.channel_id == channel_id)
+						.where(CaptionTemplate.community_id == community_id)
 						.order_by(CaptionTemplate.id)
 					)
 				)
@@ -643,7 +643,7 @@ class CaptionsService:
 
 	async def save_template(
 		self,
-		channel_id: int,
+		community_id: int,
 		name: str,
 		field_ids: list[int],
 		filename_pattern: str | None = None,
@@ -671,7 +671,7 @@ class CaptionsService:
 				(
 					await session.execute(
 						select(CaptionField.id).where(
-							CaptionField.channel_id == channel_id,
+							CaptionField.community_id == community_id,
 							CaptionField.id.in_(field_ids),
 						)
 					)
@@ -679,7 +679,7 @@ class CaptionsService:
 			)
 			if any(field_id not in owned for field_id in field_ids):
 				raise CaptionsError("В составе шаблона поле другого канала — обновите список.")
-			template = await self._get_or_create_template(session, channel_id, name, template_id)
+			template = await self._get_or_create_template(session, community_id, name, template_id)
 			template.filename_pattern = (filename_pattern or "").strip() or None
 			saved_id = template.id
 			await session.execute(
@@ -695,8 +695,8 @@ class CaptionsService:
 					)
 				)
 			await session.commit()
-		logger.info("Шаблон подписи «%s» сохранён (канал id=%s).", name, channel_id)
-		templates = await self.list_templates(channel_id)
+		logger.info("Шаблон подписи «%s» сохранён (канал id=%s).", name, community_id)
+		templates = await self.list_templates(community_id)
 		return next(t for t in templates if t.id == saved_id)
 
 	async def delete_template(self, template_id: int) -> None:
@@ -709,7 +709,7 @@ class CaptionsService:
 	async def render_filename(
 		self,
 		template_id: int,
-		channel_id: int,
+		community_id: int,
 		title: str,
 		used_values: dict[int, list[str]],
 		media_path: str,
@@ -738,9 +738,9 @@ class CaptionsService:
 			if template is None or not template.filename_pattern:
 				raise CaptionsError("У шаблона не задан шаблон имени файла.")
 			pattern = template.filename_pattern
-			channel = await session.get(Channel, channel_id)
+			community = await session.get(Community, community_id)
 		mapping: dict[str, str] = {}
-		for field in await self.list_fields(channel_id):
+		for field in await self.list_fields(community_id):
 			mapping[field.name] = ", ".join(used_values.get(field.id, []))
 		# встроенные плейсхолдеры — поверх полей: поле, названное «video»,
 		# не должно молча подменять название поста (приоритет закреплён
@@ -749,7 +749,7 @@ class CaptionsService:
 		# ffprobe — блокирующий подпроцесс: в отдельном потоке,
 		# чтобы не останавливать цикл событий движка
 		mapping["quality"] = await asyncio.to_thread(self._probe_quality, media_path)
-		mapping["channel"] = (channel.username or "") if channel else ""
+		mapping["channel"] = (community.username or "") if community else ""
 		rendered = _PLACEHOLDER.sub(lambda m: mapping.get(m.group(1), m.group(0)), pattern)
 		# байтовый бюджет — предел ФС минус расширение (оно едет как есть);
 		# поверх — лимит Telegram: срез до законченного слова
@@ -901,7 +901,7 @@ class CaptionsService:
 
 	@staticmethod
 	async def _get_or_create_template(
-		session: AsyncSession, channel_id: int, name: str, template_id: int | None
+		session: AsyncSession, community_id: int, name: str, template_id: int | None
 	) -> CaptionTemplate:
 		"""Находит шаблон для перезаписи или создаёт новый.
 
@@ -909,7 +909,7 @@ class CaptionsService:
 			CaptionsError: Шаблон для обновления не найден.
 		"""
 		if template_id is None:
-			template = CaptionTemplate(channel_id=channel_id, name=name)
+			template = CaptionTemplate(community_id=community_id, name=name)
 			session.add(template)
 			await session.flush()
 			return template

@@ -17,7 +17,7 @@ import logging
 from collections.abc import Callable
 
 from pxcontrol.engine.telegram.bot_api import (
-	check_channel,
+	check_community,
 	check_token,
 	get_bot_events,
 	send_media,
@@ -29,7 +29,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 )
 from pxcontrol.engine.telegram.types import (
-	ChannelInfo,
+	CommunityInfo,
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
@@ -124,7 +124,7 @@ class TelegramGateway:
 
 	# Исходы бот-методов — таксономия бот-пути, единая для всех пяти
 	# (см. Raises одноимённых функций bot_api): InvalidBotTokenError /
-	# TelegramFloodError / ChannelCheckError / ConnectionError.
+	# TelegramFloodError / CommunityCheckError / ConnectionError.
 
 	async def check_bot_token(self, token: str) -> str:
 		"""Проверяет токен бота через getMe и возвращает его @имя.
@@ -133,12 +133,12 @@ class TelegramGateway:
 		"""
 		return await check_token(token)
 
-	async def check_channel(self, token: str, chat_ref: str) -> ChannelInfo:
+	async def check_community(self, token: str, chat_ref: str) -> CommunityInfo:
 		"""Проверяет канал и права бота в нём (getChat + getChatMember).
 
-		Raises: см. :func:`bot_api.check_channel` (+ ``ChatRefError``).
+		Raises: см. :func:`bot_api.check_community` (+ ``ChatRefError``).
 		"""
-		return await check_channel(token, chat_ref)
+		return await check_community(token, chat_ref)
 
 	async def bot_events(self, token: str) -> list[str]:
 		"""Диагностика: события бота за 24 ч (getUpdates, без удаления).
@@ -165,7 +165,7 @@ class TelegramGateway:
 
 	# --- MTProto (userbot) -------------------------------------------------------
 
-	async def check_channel_userbot(self, account_id: int, chat_ref: str) -> ChannelInfo:
+	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		"""Проверяет канал и права аккаунта (админ + право публиковать).
 
 		Raises:
@@ -175,7 +175,7 @@ class TelegramGateway:
 			UserbotAccessError: Прав нет или канал не виден (подтверждено).
 			UserbotUnavailableError: Прочие отказы Telegram (включая флуд).
 		"""
-		return await self._userbot(account_id).check_channel(chat_ref)
+		return await self._userbot(account_id).check_community(chat_ref)
 
 	async def publish(
 		self,

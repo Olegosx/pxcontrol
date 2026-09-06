@@ -27,7 +27,7 @@ from pxcontrol.engine.db.models import SUBDIR_MAX_CHARS, VideoPreset
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.captions import FORBIDDEN_NAME_CHARS
 from pxcontrol.engine.services.settings import (
-	CHANNEL_DEFAULT_PRESET,
+	COMMUNITY_DEFAULT_PRESET,
 	VIDEO_PROCESSED_DIR,
 	VIDEO_PUBLISHED_DIR,
 	VIDEO_QUEUED_DIR,
@@ -745,14 +745,14 @@ class VideoService:
 		queued_root = video_base_dir(self._settings, VIDEO_QUEUED_DIR)
 		prune_empty_dirs(target.parent, root, mirror_root=queued_root)
 
-	async def processed_dir_for_channel(self, channel_id: int) -> str:
+	async def processed_dir_for_community(self, community_id: int) -> str:
 		"""Папка результатов канала: подпапка его пресета по умолчанию.
 
 		Для диалога выбора видео на «Публикации». Нет пресета (или он
 		удалён) — корень папки результатов.
 		"""
 		subdir = ""
-		preset_id = await self._settings.get_for(CHANNEL_DEFAULT_PRESET, channel_id)
+		preset_id = await self._settings.get_for(COMMUNITY_DEFAULT_PRESET, community_id)
 		if preset_id is not None:
 			async with self._db.session_factory() as session:
 				preset = await session.get(VideoPreset, preset_id)
@@ -775,7 +775,7 @@ class VideoService:
 		# порядок важен: сначала снять ссылки, потом удалить пресет — сбой
 		# между шагами оставит пресет без ссылок (безвредно), а не ссылки
 		# каналов на несуществующий пресет
-		await self._settings.drop_channel_value(CHANNEL_DEFAULT_PRESET, preset_id)
+		await self._settings.drop_community_value(COMMUNITY_DEFAULT_PRESET, preset_id)
 		async with self._db.session_factory() as session:
 			await session.execute(delete(VideoPreset).where(VideoPreset.id == preset_id))
 			await session.commit()

@@ -25,7 +25,7 @@ from pxcontrol.ui.pages.common import DtoComboBox, QueuePanel, fixed_list_area, 
 _LIST_HEIGHT = 480
 
 #: Служебный первый пункт фильтра по каналу.
-_ALL_CHANNELS = "Все каналы"
+_ALL_COMMUNITIES = "Все каналы"
 
 
 class QueueSort(StrEnum):
@@ -33,7 +33,7 @@ class QueueSort(StrEnum):
 
 	NEAREST = "Ближайшие сначала"  # по дате публикации; «сейчас» — первыми
 	ENQUEUED = "Порядок постановки"
-	CHANNEL = "По каналам"  # каналы по алфавиту, внутри — по дате
+	COMMUNITY = "По каналам"  # каналы по алфавиту, внутри — по дате
 
 
 class QueueFilter(StrEnum):
@@ -63,7 +63,7 @@ def queue_subtitle(item: QueueItemDto) -> str:
 		status = "ждёт слота отложек · уйдёт при запущенном приложении"
 	else:
 		status = "в очереди"
-	subtitle = f"{item.channel_title} · публикация: {when_text} · {status}"
+	subtitle = f"{item.community_title} · публикация: {when_text} · {status}"
 	if item.note:
 		subtitle += f" · {item.note}"
 	return subtitle
@@ -73,7 +73,7 @@ def apply_view(
 	items: list[QueueItemDto],
 	sort: QueueSort,
 	status: QueueFilter,
-	channel_id: int | None,
+	community_id: int | None,
 ) -> list[QueueItemDto]:
 	"""Правило показа: фильтр по статусу и каналу, затем сортировка.
 
@@ -81,11 +81,11 @@ def apply_view(
 		items: видимые элементы очереди (без завершённых).
 		sort: порядок показа.
 		status: фильтр по статусу.
-		channel_id: id канала (None — все). Идентичность — по id:
+		community_id: id канала (None — все). Идентичность — по id:
 			названия каналов Telegram не уникальны.
 	"""
-	if channel_id is not None:
-		items = [item for item in items if item.channel_id == channel_id]
+	if community_id is not None:
+		items = [item for item in items if item.community_id == community_id]
 	if status is QueueFilter.SENDABLE:
 		wanted = (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
 		items = [item for item in items if item.status in wanted]
@@ -96,13 +96,13 @@ def apply_view(
 	nearest = datetime.min.replace(tzinfo=UTC)  # «сейчас» — раньше любых дат
 	if sort is QueueSort.NEAREST:
 		return sorted(items, key=lambda item: (item.when or nearest, item.id))
-	if sort is QueueSort.CHANNEL:
+	if sort is QueueSort.COMMUNITY:
 		# id в ключе разводит каналы-тёзки, чтобы их посты не перемешивались
 		return sorted(
 			items,
 			key=lambda item: (
-				item.channel_title.casefold(),
-				item.channel_id,
+				item.community_title.casefold(),
+				item.community_id,
 				item.when or nearest,
 				item.id,
 			),
@@ -117,8 +117,8 @@ class QueueViewDialog(MessageBoxBase):
 		super().__init__(parent)
 		self._sort = QueueSort.NEAREST
 		self._status = QueueFilter.ALL
-		self._channel: int | None = None
-		self._known_channels: list[tuple[int, str]] = []
+		self._community: int | None = None
+		self._known_communities: list[tuple[int, str]] = []
 		self._total = 0
 		self.viewLayout.addWidget(SubtitleLabel("Очередь отправки", self))
 		self._build_controls()
@@ -158,11 +158,11 @@ class QueueViewDialog(MessageBoxBase):
 			self._status_combo.addItem(status_option.value)
 		self._status_combo.currentIndexChanged.connect(self._on_view_changed)
 		row.addWidget(self._status_combo)
-		self._channel_combo: DtoComboBox[tuple[int, str]] = DtoComboBox(
-			self, placeholder=_ALL_CHANNELS
+		self._community_combo: DtoComboBox[tuple[int, str]] = DtoComboBox(
+			self, placeholder=_ALL_COMMUNITIES
 		)
-		self._channel_combo.currentIndexChanged.connect(self._on_view_changed)
-		row.addWidget(self._channel_combo)
+		self._community_combo.currentIndexChanged.connect(self._on_view_changed)
+		row.addWidget(self._community_combo)
 		row.addStretch()
 		self.viewLayout.addLayout(row)
 
@@ -171,10 +171,10 @@ class QueueViewDialog(MessageBoxBase):
 	def _apply_view(self, items: list[QueueItemDto]) -> list[QueueItemDto]:
 		"""Крючок панели: запоминает общее число и применяет правило показа."""
 		self._total = len(items)
-		self._refresh_channels(items)
-		return apply_view(items, self._sort, self._status, self._channel)
+		self._refresh_communities(items)
+		return apply_view(items, self._sort, self._status, self._community)
 
-	def _refresh_channels(self, items: list[QueueItemDto]) -> None:
+	def _refresh_communities(self, items: list[QueueItemDto]) -> None:
 		"""Обновляет пункты фильтра канала по каналам, живущим в очереди.
 
 		Пересборка — только при смене набора (каждые полсекунды дёргать
@@ -182,25 +182,25 @@ class QueueViewDialog(MessageBoxBase):
 		забота ``DtoComboBox``: выбранный канал сохраняется по id,
 		исчезнувший из очереди — сбрасывается на «Все каналы».
 		"""
-		channels = sorted(
-			{(item.channel_id, item.channel_title) for item in items},
+		communities = sorted(
+			{(item.community_id, item.community_title) for item in items},
 			key=lambda entry: (entry[1].casefold(), entry[0]),
 		)
-		if channels == self._known_channels:
+		if communities == self._known_communities:
 			return
-		self._known_channels = channels
-		self._channel_combo.set_items(
-			channels, label=lambda entry: entry[1], key=lambda entry: entry[0]
+		self._known_communities = communities
+		self._community_combo.set_items(
+			communities, label=lambda entry: entry[1], key=lambda entry: entry[0]
 		)
-		selected = self._channel_combo.selected()
-		self._channel = selected[0] if selected is not None else None
+		selected = self._community_combo.selected()
+		self._community = selected[0] if selected is not None else None
 
 	def _on_view_changed(self, _index: int = 0) -> None:
 		"""Читает правило показа из списков; следующий опрос его применит."""
 		self._sort = list(QueueSort)[int(self._sort_combo.currentIndex())]
 		self._status = list(QueueFilter)[int(self._status_combo.currentIndex())]
-		selected = self._channel_combo.selected()
-		self._channel = selected[0] if selected is not None else None
+		selected = self._community_combo.selected()
+		self._community = selected[0] if selected is not None else None
 		self._panel.poll()  # показ обновляется сразу, не по таймеру
 
 	def _update_summary(self, shown: list[QueueItemDto]) -> None:

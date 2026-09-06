@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import AppSetting, Channel, ChannelSetting
-from pxcontrol.engine.services.channels import ChannelsService
+from pxcontrol.engine.db.models import AppSetting, Community, CommunitySetting
+from pxcontrol.engine.services.communities import CommunitiesService
 from pxcontrol.engine.services.settings import (
-	CHANNEL_DEFAULT_PRESET,
-	CHANNEL_ENABLED,
+	COMMUNITY_DEFAULT_PRESET,
+	COMMUNITY_ENABLED,
 	FFMPEG_PATH,
-	PUBLISH_LAST_CHANNEL_ID,
+	PUBLISH_LAST_COMMUNITY_ID,
 	PUBLISH_TIMES,
 	THEME_DARK,
 	VIDEO_PROCESSED_DIR,
@@ -21,14 +21,14 @@ from pxcontrol.engine.services.settings import (
 )
 
 
-async def _add_channel(db: Database, tg_chat_id: str = "-1001") -> int:
+async def _add_community(db: Database, tg_chat_id: str = "-1001") -> int:
 	"""Создаёт канал, возвращает id."""
 	async with db.session_factory() as session:
-		channel = Channel(title="Канал", tg_chat_id=tg_chat_id)
-		session.add(channel)
+		community = Community(title="Канал", tg_chat_id=tg_chat_id)
+		session.add(community)
 		await session.commit()
-		await session.refresh(channel)
-		return channel.id
+		await session.refresh(community)
+		return community.id
 
 
 async def test_app_defaults_and_roundtrip(db: Database) -> None:
@@ -48,10 +48,10 @@ async def test_app_defaults_and_roundtrip(db: Database) -> None:
 async def test_none_resets_to_default(db: Database) -> None:
 	"""Запись None удаляет строку — настройка возвращается к умолчанию."""
 	service = SettingsService(db)
-	await service.set(PUBLISH_LAST_CHANNEL_ID, 7)
-	assert await service.get(PUBLISH_LAST_CHANNEL_ID) == 7
-	await service.set(PUBLISH_LAST_CHANNEL_ID, None)
-	assert await service.get(PUBLISH_LAST_CHANNEL_ID) is None
+	await service.set(PUBLISH_LAST_COMMUNITY_ID, 7)
+	assert await service.get(PUBLISH_LAST_COMMUNITY_ID) == 7
+	await service.set(PUBLISH_LAST_COMMUNITY_ID, None)
+	assert await service.get(PUBLISH_LAST_COMMUNITY_ID) is None
 
 
 async def test_invalid_stored_value_falls_back(db: Database) -> None:
@@ -74,31 +74,31 @@ async def test_cached_and_prime(db: Database) -> None:
 	assert fresh.cached(FFMPEG_PATH) == "/usr/bin/ffmpeg"
 
 
-async def test_channel_scope_roundtrip_and_cleanup(db: Database) -> None:
+async def test_community_scope_roundtrip_and_cleanup(db: Database) -> None:
 	"""Настройка канала: круговой путь, сброс, чистка при удалении канала."""
 	service = SettingsService(db)
-	channel_id = await _add_channel(db)
-	assert await service.get_for(CHANNEL_DEFAULT_PRESET, channel_id) is None
-	await service.set_for(CHANNEL_DEFAULT_PRESET, channel_id, 5)
-	assert await service.get_for(CHANNEL_DEFAULT_PRESET, channel_id) == 5
-	await service.set_for(CHANNEL_DEFAULT_PRESET, channel_id, None)
-	assert await service.get_for(CHANNEL_DEFAULT_PRESET, channel_id) is None
+	community_id = await _add_community(db)
+	assert await service.get_for(COMMUNITY_DEFAULT_PRESET, community_id) is None
+	await service.set_for(COMMUNITY_DEFAULT_PRESET, community_id, 5)
+	assert await service.get_for(COMMUNITY_DEFAULT_PRESET, community_id) == 5
+	await service.set_for(COMMUNITY_DEFAULT_PRESET, community_id, None)
+	assert await service.get_for(COMMUNITY_DEFAULT_PRESET, community_id) is None
 	# удаление канала уносит его настройки (страховка сервиса)
-	await service.set_for(CHANNEL_DEFAULT_PRESET, channel_id, 5)
+	await service.set_for(COMMUNITY_DEFAULT_PRESET, community_id, 5)
 
-	class _Gateway:  # ChannelsService для удаления шлюз не использует
+	class _Gateway:  # CommunitiesService для удаления шлюз не использует
 		pass
 
-	channels = ChannelsService(db, _Gateway())  # type: ignore[arg-type]
-	await channels.delete_channel(channel_id)
-	assert await service.get_for(CHANNEL_DEFAULT_PRESET, channel_id) is None
+	communities = CommunitiesService(db, _Gateway())  # type: ignore[arg-type]
+	await communities.delete_community(community_id)
+	assert await service.get_for(COMMUNITY_DEFAULT_PRESET, community_id) is None
 
 
-async def test_channel_scope_requires_existing_channel(db: Database) -> None:
+async def test_community_scope_requires_existing_community(db: Database) -> None:
 	"""Запись настройки несуществующему каналу — понятная ошибка."""
 	service = SettingsService(db)
 	with pytest.raises(SettingsError, match="Канал не найден"):
-		await service.set_for(CHANNEL_DEFAULT_PRESET, 999, 1)
+		await service.set_for(COMMUNITY_DEFAULT_PRESET, 999, 1)
 
 
 async def test_scope_mismatch_is_error(db: Database) -> None:
@@ -107,16 +107,16 @@ async def test_scope_mismatch_is_error(db: Database) -> None:
 	with pytest.raises(SettingsError, match="принадлежит"):
 		await service.get_for(THEME_DARK, 1)
 	with pytest.raises(SettingsError, match="принадлежит"):
-		await service.get(CHANNEL_DEFAULT_PRESET)
+		await service.get(COMMUNITY_DEFAULT_PRESET)
 
 
 async def test_bool_does_not_pass_as_int(db: Database) -> None:
 	"""True в БД не сходит за целое: у int-ключа откат к умолчанию."""
 	async with db.session_factory() as session:
-		session.add(AppSetting(name=PUBLISH_LAST_CHANNEL_ID.name, value=True))
+		session.add(AppSetting(name=PUBLISH_LAST_COMMUNITY_ID.name, value=True))
 		await session.commit()
 	service = SettingsService(db)
-	assert await service.get(PUBLISH_LAST_CHANNEL_ID) is None
+	assert await service.get(PUBLISH_LAST_COMMUNITY_ID) is None
 
 
 async def test_set_rejects_wrong_type(db: Database) -> None:
@@ -124,47 +124,47 @@ async def test_set_rejects_wrong_type(db: Database) -> None:
 	service = SettingsService(db)
 	with pytest.raises(SettingsError, match="не подходит по типу"):
 		await service.set(THEME_DARK, "тьма")  # type: ignore[arg-type]
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	with pytest.raises(SettingsError, match="не подходит по типу"):
 		# 1 — не bool: подкласс-ловушку проверяем в обе стороны
-		await service.set_for(CHANNEL_ENABLED, channel_id, 1)  # type: ignore[arg-type]
+		await service.set_for(COMMUNITY_ENABLED, community_id, 1)  # type: ignore[arg-type]
 
 
 async def test_get_for_all_returns_only_stored(db: Database) -> None:
 	"""Пакетное чтение отдаёт строки только заданных каналов."""
 	service = SettingsService(db)
-	first = await _add_channel(db, "-1001")
-	await _add_channel(db, "-1002")  # без настройки — читается умолчанием
-	await service.set_for(CHANNEL_ENABLED, first, False)
-	assert await service.get_for_all(CHANNEL_ENABLED) == {first: False}
+	first = await _add_community(db, "-1001")
+	await _add_community(db, "-1002")  # без настройки — читается умолчанием
+	await service.set_for(COMMUNITY_ENABLED, first, False)
+	assert await service.get_for_all(COMMUNITY_ENABLED) == {first: False}
 
 
 async def test_list_setting_roundtrip_keeps_order(db: Database) -> None:
 	"""Списковый ключ: круговой путь с сохранением порядка, [] по умолчанию."""
 	service = SettingsService(db)
-	channel_id = await _add_channel(db)
-	assert await service.get_for(PUBLISH_TIMES, channel_id) == []
-	await service.set_for(PUBLISH_TIMES, channel_id, ["18:30", "10:00"])
-	assert await service.get_for(PUBLISH_TIMES, channel_id) == ["18:30", "10:00"]
+	community_id = await _add_community(db)
+	assert await service.get_for(PUBLISH_TIMES, community_id) == []
+	await service.set_for(PUBLISH_TIMES, community_id, ["18:30", "10:00"])
+	assert await service.get_for(PUBLISH_TIMES, community_id) == ["18:30", "10:00"]
 	# не-список в БД → откат к умолчанию
 	async with db.session_factory() as session:
-		row = await session.get(ChannelSetting, (channel_id, PUBLISH_TIMES.name))
+		row = await session.get(CommunitySetting, (community_id, PUBLISH_TIMES.name))
 		assert row is not None
 		row.value = "10:00"
 		await session.commit()
-	assert await service.get_for(PUBLISH_TIMES, channel_id) == []
+	assert await service.get_for(PUBLISH_TIMES, community_id) == []
 
 
-async def test_drop_channel_value_removes_matching_refs(db: Database) -> None:
+async def test_drop_community_value_removes_matching_refs(db: Database) -> None:
 	"""Снятие настройки-ссылки задевает только каналы с этим значением."""
 	service = SettingsService(db)
-	first = await _add_channel(db, "-1001")
-	second = await _add_channel(db, "-1002")
-	await service.set_for(CHANNEL_DEFAULT_PRESET, first, 5)
-	await service.set_for(CHANNEL_DEFAULT_PRESET, second, 7)
-	await service.drop_channel_value(CHANNEL_DEFAULT_PRESET, 5)
-	assert await service.get_for(CHANNEL_DEFAULT_PRESET, first) is None
-	assert await service.get_for(CHANNEL_DEFAULT_PRESET, second) == 7
+	first = await _add_community(db, "-1001")
+	second = await _add_community(db, "-1002")
+	await service.set_for(COMMUNITY_DEFAULT_PRESET, first, 5)
+	await service.set_for(COMMUNITY_DEFAULT_PRESET, second, 7)
+	await service.drop_community_value(COMMUNITY_DEFAULT_PRESET, 5)
+	assert await service.get_for(COMMUNITY_DEFAULT_PRESET, first) is None
+	assert await service.get_for(COMMUNITY_DEFAULT_PRESET, second) == 7
 
 
 async def test_set_many_atomic(db: Database) -> None:
@@ -186,11 +186,11 @@ async def test_set_many_atomic(db: Database) -> None:
 async def test_set_for_many_atomic(db: Database) -> None:
 	"""set_for_many: обе настройки канала одной записью; чужой канал — ошибка."""
 	service = SettingsService(db)
-	channel_id = await _add_channel(db)
+	community_id = await _add_community(db)
 	await service.set_for_many(
-		channel_id, [(PUBLISH_TIMES, ["10:00", "18:00"]), (CHANNEL_ENABLED, False)]
+		community_id, [(PUBLISH_TIMES, ["10:00", "18:00"]), (COMMUNITY_ENABLED, False)]
 	)
-	assert await service.get_for(PUBLISH_TIMES, channel_id) == ["10:00", "18:00"]
-	assert await service.get_for(CHANNEL_ENABLED, channel_id) is False
+	assert await service.get_for(PUBLISH_TIMES, community_id) == ["10:00", "18:00"]
+	assert await service.get_for(COMMUNITY_ENABLED, community_id) is False
 	with pytest.raises(SettingsError, match="не найден"):
-		await service.set_for_many(999, [(CHANNEL_ENABLED, True)])
+		await service.set_for_many(999, [(COMMUNITY_ENABLED, True)])

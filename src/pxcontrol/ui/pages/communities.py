@@ -25,10 +25,10 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
-from pxcontrol.engine.services.channels import ChannelAccess, ChannelDto
+from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto
 from pxcontrol.engine.services.settings import (
-	CHANNEL_DEFAULT_PRESET,
-	CHANNEL_ENABLED,
+	COMMUNITY_DEFAULT_PRESET,
+	COMMUNITY_ENABLED,
 	PUBLISH_TIMES,
 	SettingKey,
 )
@@ -190,14 +190,14 @@ class _AssignUserbotDialog(MessageBoxBase):
 		return account.id if account is not None else None
 
 
-class _ChannelPrefsDialog(MessageBoxBase):
+class _CommunityPrefsDialog(MessageBoxBase):
 	"""Настройки канала: пресет видео по умолчанию и времена публикации."""
 
 	_TIMES_HINT = "Через запятую, первое — по умолчанию; пусто — без стандартных."
 
 	def __init__(
 		self,
-		channel_title: str,
+		community_title: str,
 		presets: list[PresetDto],
 		current_id: int | None,
 		times: list[str],
@@ -205,7 +205,7 @@ class _ChannelPrefsDialog(MessageBoxBase):
 	) -> None:
 		super().__init__(parent)
 		self.viewLayout.addWidget(SubtitleLabel("Настройки канала", self))
-		self.viewLayout.addWidget(BodyLabel(f"«{channel_title}»", self))
+		self.viewLayout.addWidget(BodyLabel(f"«{community_title}»", self))
 		self.viewLayout.addWidget(BodyLabel("Пресет видео по умолчанию:", self))
 		self._combo: DtoComboBox[PresetDto] = DtoComboBox(self, placeholder="(не задан)")
 		self._combo.set_items(presets, label=lambda preset: preset.name)
@@ -256,12 +256,12 @@ class _ChannelPrefsDialog(MessageBoxBase):
 		return result
 
 
-class ChannelsPage(ScrollArea):
+class CommunitiesPage(ScrollArea):
 	"""Список подключённых каналов; подключение через проверку прав бота."""
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
-		self.setObjectName("channels")
+		self.setObjectName("communities")
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		self._build()
@@ -287,19 +287,19 @@ class ChannelsPage(ScrollArea):
 	def _reload(self) -> None:
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.list_channels(),
+			self._worker.engine.communities.list_communities(),
 			self,
-			self._show_channels,
+			self._show_communities,
 			self._show_error,
 		)
 
-	def _show_channels(self, channels: list[ChannelDto]) -> None:
+	def _show_communities(self, communities: list[CommunityDto]) -> None:
 		clear_layout(self._list)
-		if not channels:
+		if not communities:
 			self._list.addWidget(self._empty_state())
 			return
-		for channel in channels:
-			self._list.addWidget(self._channel_row(channel))
+		for community in communities:
+			self._list.addWidget(self._community_row(community))
 
 	def _empty_state(self) -> QWidget:
 		"""Пустое состояние с подсказкой."""
@@ -317,59 +317,59 @@ class ChannelsPage(ScrollArea):
 		layout.addWidget(hint)
 		return box
 
-	def _channel_row(self, channel: ChannelDto) -> CardWidget:
+	def _community_row(self, community: CommunityDto) -> CardWidget:
 		"""Карточка канала: название, публикаторы, действия."""
 		ways = []
-		if channel.tg_account_label:
-			ways.append(f"userbot {channel.tg_account_label}")
-		if channel.bot_label:
-			ways.append(f"бот {channel.bot_label}")
-		subtitle = f"@{channel.username or '—'} · админ: {' + '.join(ways) or '—'}"
+		if community.tg_account_label:
+			ways.append(f"userbot {community.tg_account_label}")
+		if community.bot_label:
+			ways.append(f"бот {community.bot_label}")
+		subtitle = f"@{community.username or '—'} · админ: {' + '.join(ways) or '—'}"
 		buttons = QWidget(self)
 		row = QHBoxLayout(buttons)
 		row.setContentsMargins(0, 0, 0, 0)
 		enabled_switch = SwitchButton(buttons)
-		enabled_switch.setChecked(channel.enabled)
+		enabled_switch.setChecked(community.enabled)
 		enabled_switch.setToolTip("Канал активен: участвует в публикации и опросе расписания")
-		enabled_switch.checkedChanged.connect(partial(self._on_toggle_enabled, channel))
+		enabled_switch.checkedChanged.connect(partial(self._on_toggle_enabled, community))
 		row.addWidget(enabled_switch)
 		recheck = PushButton("Проверить доступы", buttons)
-		recheck.clicked.connect(bind(self._recheck_channel, channel))
+		recheck.clicked.connect(bind(self._recheck_community, community))
 		row.addWidget(recheck)
 		prefs_action = PushButton("Настройки…", buttons)
 		prefs_action.setToolTip("Пресет видео по умолчанию и времена публикации")
-		prefs_action.clicked.connect(bind(self._on_open_prefs, channel))
+		prefs_action.clicked.connect(bind(self._on_open_prefs, community))
 		row.addWidget(prefs_action)
-		if channel.tg_account_id is None:
+		if community.tg_account_id is None:
 			userbot_action = PushButton("Привязать userbot…", buttons)
 			userbot_action.setToolTip("Постинг пойдёт из сессии привязанного аккаунта")
-			userbot_action.clicked.connect(bind(self._on_assign_userbot, channel))
+			userbot_action.clicked.connect(bind(self._on_assign_userbot, community))
 		else:
 			userbot_action = PushButton("Отвязать userbot", buttons)
-			userbot_action.clicked.connect(bind(self._on_unassign_userbot, channel))
+			userbot_action.clicked.connect(bind(self._on_unassign_userbot, community))
 		row.addWidget(userbot_action)
-		if channel.bot_id is None:
+		if community.bot_id is None:
 			bot_action = PushButton("Назначить бота…", buttons)
-			bot_action.clicked.connect(bind(self._on_assign_bot, channel))
+			bot_action.clicked.connect(bind(self._on_assign_bot, community))
 		else:
 			bot_action = PushButton("Отвязать бота", buttons)
-			bot_action.clicked.connect(bind(self._on_unassign_bot, channel))
+			bot_action.clicked.connect(bind(self._on_unassign_bot, community))
 		row.addWidget(bot_action)
 		return row_card(
 			self,
-			channel.title,
+			community.title,
 			subtitle,
 			trailing=buttons,
-			on_delete=bind(self._delete_channel, channel),
+			on_delete=bind(self._delete_community, community),
 		)
 
 	# --- настройки канала (активность, пресет) -----------------------------------
 
-	def _on_toggle_enabled(self, channel: ChannelDto, checked: bool) -> None:
+	def _on_toggle_enabled(self, community: CommunityDto, checked: bool) -> None:
 		"""Включает/выключает канал (публикация и расписание)."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.set_for(CHANNEL_ENABLED, channel.id, checked),
+			self._worker.engine.settings.set_for(COMMUNITY_ENABLED, community.id, checked),
 			self,
 			noop,
 			self._on_toggle_failed,
@@ -380,85 +380,85 @@ class ChannelsPage(ScrollArea):
 		self._show_error(message)
 		self._reload()
 
-	def _on_open_prefs(self, channel: ChannelDto) -> None:
+	def _on_open_prefs(self, community: CommunityDto) -> None:
 		"""Открывает настройки канала (цепочка: пресеты → пресет → времена)."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.video.list_presets(),
 			self,
-			partial(self._on_presets_loaded, channel),
+			partial(self._on_presets_loaded, community),
 			self._show_error,
 		)
 
-	def _on_presets_loaded(self, channel: ChannelDto, presets: list[PresetDto]) -> None:
+	def _on_presets_loaded(self, community: CommunityDto, presets: list[PresetDto]) -> None:
 		"""Пресеты получены — узнаём текущий выбор канала."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id),
+			self._worker.engine.settings.get_for(COMMUNITY_DEFAULT_PRESET, community.id),
 			self,
-			partial(self._on_current_preset_loaded, channel, presets),
+			partial(self._on_current_preset_loaded, community, presets),
 			self._show_error,
 		)
 
 	def _on_current_preset_loaded(
-		self, channel: ChannelDto, presets: list[PresetDto], current_id: int | None
+		self, community: CommunityDto, presets: list[PresetDto], current_id: int | None
 	) -> None:
 		"""Текущий пресет получен — узнаём времена публикации."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.get_for(PUBLISH_TIMES, channel.id),
+			self._worker.engine.settings.get_for(PUBLISH_TIMES, community.id),
 			self,
-			partial(self._open_prefs_dialog, channel, presets, current_id),
+			partial(self._open_prefs_dialog, community, presets, current_id),
 			self._show_error,
 		)
 
 	def _open_prefs_dialog(
 		self,
-		channel: ChannelDto,
+		community: CommunityDto,
 		presets: list[PresetDto],
 		current_id: int | None,
 		times: list[str],
 	) -> None:
 		"""Диалог настроек; сохранение — одной транзакцией движка."""
-		dialog = _ChannelPrefsDialog(channel.title, presets, current_id, times, self.window())
+		dialog = _CommunityPrefsDialog(community.title, presets, current_id, times, self.window())
 		if not exec_dialog(dialog):
 			return
 		# обе настройки — одна пользовательская операция: движок пишет их
 		# одной транзакцией (set_for_many), успех сообщается по факту записи
 		items: list[tuple[SettingKey[Any], Any]] = [
-			(CHANNEL_DEFAULT_PRESET, dialog.preset_id()),
+			(COMMUNITY_DEFAULT_PRESET, dialog.preset_id()),
 			(PUBLISH_TIMES, dialog.times()),
 		]
 		run_in_engine(
 			self._worker,
-			self._worker.engine.settings.set_for_many(channel.id, items),
+			self._worker.engine.settings.set_for_many(community.id, items),
 			self,
-			partial(self._on_prefs_saved, channel),
+			partial(self._on_prefs_saved, community),
 			self._show_error,
 		)
 
-	def _on_prefs_saved(self, channel: ChannelDto, _result: object = None) -> None:
-		InfoBar.success("Готово", f"Настройки канала «{channel.title}» сохранены.", parent=self)
+	def _on_prefs_saved(self, community: CommunityDto, _result: object = None) -> None:
+		InfoBar.success("Готово", f"Настройки канала «{community.title}» сохранены.", parent=self)
 
 	# --- доступы и бот -----------------------------------------------------------
 
-	def _recheck_channel(self, channel: ChannelDto) -> None:
+	def _recheck_community(self, community: CommunityDto) -> None:
 		"""Перепроверяет оба способа администрирования канала."""
-		InfoBar.info("Проверка", f"Проверяю доступы «{channel.title}»…", parent=self)
+		InfoBar.info("Проверка", f"Проверяю доступы «{community.title}»…", parent=self)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.recheck_channel(channel.id),
+			self._worker.engine.communities.recheck_community(community.id),
 			self,
 			self._on_rechecked,
 			self._show_error,
 		)
 
-	def _on_rechecked(self, access: ChannelAccess) -> None:
+	def _on_rechecked(self, access: CommunityAccess) -> None:
 		"""Показывает итог перепроверки и обновляет список."""
 		if access.userbot_ok is None:
 			userbot_text = "не удалось проверить (нет связи или аккаунт не подключён)"
 		elif access.userbot_ok:
-			userbot_text = f"админ — {access.channel.tg_account_label or '—'}"
+			userbot_text = f"админ — {access.community.tg_account_label or '—'}"
 		else:
 			userbot_text = "не админ — привязка снята"
 		parts = [f"userbot: {userbot_text}"]
@@ -466,22 +466,22 @@ class ChannelsPage(ScrollArea):
 			parts.append(f"бот: {'права на месте' if access.bot_ok else 'права потеряны'}")
 		summary = " · ".join(parts)
 		if access.userbot_ok and access.bot_ok is not False:
-			InfoBar.success(access.channel.title, summary, parent=self)
+			InfoBar.success(access.community.title, summary, parent=self)
 		else:
-			show_warning(self, access.channel.title, summary)
+			show_warning(self, access.community.title, summary)
 		self._reload()
 
-	def _on_assign_bot(self, channel: ChannelDto) -> None:
+	def _on_assign_bot(self, community: CommunityDto) -> None:
 		"""Открывает выбор бота для назначения каналу."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.accounts.list_bots(),
 			self,
-			partial(self._open_assign_dialog, channel),
+			partial(self._open_assign_dialog, community),
 			self._show_error,
 		)
 
-	def _open_assign_dialog(self, channel: ChannelDto, bots: list[BotDto]) -> None:
+	def _open_assign_dialog(self, community: CommunityDto, bots: list[BotDto]) -> None:
 		"""Диалог выбора бота; после выбора — проверка его прав в канале."""
 		if not bots:
 			self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
@@ -495,45 +495,45 @@ class ChannelsPage(ScrollArea):
 		InfoBar.info("Проверка", "Проверяю права бота в канале…", parent=self)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.assign_bot(channel.id, bot_id),
+			self._worker.engine.communities.assign_bot(community.id, bot_id),
 			self,
 			self._on_publisher_changed,
 			self._show_error,
 		)
 
-	def _on_unassign_bot(self, channel: ChannelDto) -> None:
+	def _on_unassign_bot(self, community: CommunityDto) -> None:
 		if not confirm_delete(
 			self,
-			f"Отвязать бота от канала «{channel.title}»?",
+			f"Отвязать бота от канала «{community.title}»?",
 			accept_text="Отвязать",
 		):
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.unassign_bot(channel.id),
+			self._worker.engine.communities.unassign_bot(community.id),
 			self,
 			self._on_publisher_changed,
 			self._show_error,
 		)
 
-	def _on_publisher_changed(self, channel: ChannelDto) -> None:
-		InfoBar.success("Готово", channel.title, parent=self)
+	def _on_publisher_changed(self, community: CommunityDto) -> None:
+		InfoBar.success("Готово", community.title, parent=self)
 		self._reload()
 
 	# --- привязка userbot (ADR-0019) --------------------------------------------
 
-	def _on_assign_userbot(self, channel: ChannelDto) -> None:
+	def _on_assign_userbot(self, community: CommunityDto) -> None:
 		"""Открывает выбор аккаунта для привязки к каналу."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.accounts.list_tg_accounts(),
 			self,
-			partial(self._open_assign_userbot_dialog, channel),
+			partial(self._open_assign_userbot_dialog, community),
 			self._show_error,
 		)
 
 	def _open_assign_userbot_dialog(
-		self, channel: ChannelDto, accounts: list[TgAccountDto]
+		self, community: CommunityDto, accounts: list[TgAccountDto]
 	) -> None:
 		"""Диалог выбора аккаунта; после выбора — проверка его прав в канале."""
 		logged_in = [account for account in accounts if account.logged_in]
@@ -549,23 +549,23 @@ class ChannelsPage(ScrollArea):
 		InfoBar.info("Проверка", "Проверяю права аккаунта в канале…", parent=self)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.assign_userbot(channel.id, account_id),
+			self._worker.engine.communities.assign_userbot(community.id, account_id),
 			self,
 			self._on_publisher_changed,
 			self._show_error,
 		)
 
-	def _on_unassign_userbot(self, channel: ChannelDto) -> None:
+	def _on_unassign_userbot(self, community: CommunityDto) -> None:
 		if not confirm_delete(
 			self,
-			f"Отвязать userbot от канала «{channel.title}»? Отложенные посты "
+			f"Отвязать userbot от канала «{community.title}»? Отложенные посты "
 			"и большие файлы станут ему недоступны.",
 			accept_text="Отвязать",
 		):
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.unassign_userbot(channel.id),
+			self._worker.engine.communities.unassign_userbot(community.id),
 			self,
 			self._on_publisher_changed,
 			self._show_error,
@@ -604,28 +604,28 @@ class ChannelsPage(ScrollArea):
 			if bot_id is None:  # недостижимо после validate(), страховка типа
 				self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
 				return
-			coro = self._worker.engine.channels.add_channel(bot_id, dialog.chat_ref())
+			coro = self._worker.engine.communities.add_community(bot_id, dialog.chat_ref())
 		else:
 			account_id = dialog.account_id()
 			if account_id is None:  # недостижимо после validate(), страховка типа
 				self._show_error("Войдите в userbot-аккаунт: Настройки → Аккаунты.")
 				return
-			coro = self._worker.engine.channels.add_channel_via_userbot(
+			coro = self._worker.engine.communities.add_community_via_userbot(
 				account_id, dialog.chat_ref()
 			)
 		InfoBar.info("Проверка", "Проверяю канал и права…", parent=self)
 		run_in_engine(self._worker, coro, self, self._on_connected, self._show_error)
 
-	def _on_connected(self, channel: ChannelDto) -> None:
-		InfoBar.success("Канал подключён", channel.title, parent=self)
+	def _on_connected(self, community: CommunityDto) -> None:
+		InfoBar.success("Канал подключён", community.title, parent=self)
 		self._reload()
 
-	def _delete_channel(self, channel: ChannelDto) -> None:
-		if not confirm_delete(self, f"Удалить канал «{channel.title}» из приложения?"):
+	def _delete_community(self, community: CommunityDto) -> None:
+		if not confirm_delete(self, f"Удалить канал «{community.title}» из приложения?"):
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.delete_channel(channel.id),
+			self._worker.engine.delete_community(community.id),
 			self,
 			self._reload,
 			self._show_error,

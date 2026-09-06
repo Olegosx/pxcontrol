@@ -1,7 +1,7 @@
 """Настройки в БД: реестр ключей и сервис (ADR-0013).
 
 Хранение — «строка = имя → значение»: настройки приложения —
-в ``app_settings``, настройки канала — в ``channel_settings`` (по строке
+в ``app_settings``, настройки канала — в ``community_settings`` (по строке
 на канал × имя, с внешним ключом на канал). Состав, типы и умолчания
 задаёт реестр ключей ниже; сервис принимает только объекты ключей,
 поэтому мусорные имена не заводятся в принципе.
@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import AppSetting, Channel, ChannelSetting
+from pxcontrol.engine.db.models import AppSetting, Community, CommunitySetting
 from pxcontrol.engine.errors import EngineError
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class SettingScope(StrEnum):
 	"""Владелец настройки."""
 
 	APP = "app"  # приложение в целом (одно значение)
-	CHANNEL = "channel"  # конкретный канал (значение на канал)
+	COMMUNITY = "community"  # конкретный канал (значение на канал)
 
 
 @dataclass(frozen=True)
@@ -69,22 +69,22 @@ THEME_DARK: SettingKey[bool] = SettingKey("theme_dark", SettingScope.APP, True, 
 WINDOW_GEOMETRY: SettingKey[str | None] = SettingKey("window_geometry", SettingScope.APP, None, str)
 
 #: Канал, в который публиковали в прошлый раз (предвыбор на «Публикации»).
-PUBLISH_LAST_CHANNEL_ID: SettingKey[int | None] = SettingKey(
-	"publish_last_channel_id", SettingScope.APP, None, int
+PUBLISH_LAST_COMMUNITY_ID: SettingKey[int | None] = SettingKey(
+	"publish_last_community_id", SettingScope.APP, None, int
 )
 
 #: Путь к ffmpeg; пусто — бутстрап из .env / поиск в PATH.
 FFMPEG_PATH: SettingKey[str] = SettingKey("ffmpeg_path", SettingScope.APP, "", str)
 
 #: Пресет обработки видео по умолчанию для канала (id пресета).
-CHANNEL_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
-	"default_video_preset", SettingScope.CHANNEL, None, int
+COMMUNITY_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
+	"default_video_preset", SettingScope.COMMUNITY, None, int
 )
 
 #: Стандартные времена публикации канала: список «ЧЧ:ММ», первое — по умолчанию.
 #: Сервис проверяет только «это список»; формат элементов валидирует интерфейс
 #: при сохранении и отфильтровывает битые при чтении (parse_hhmm).
-PUBLISH_TIMES: SettingKey[list[str]] = SettingKey("publish_times", SettingScope.CHANNEL, [], list)
+PUBLISH_TIMES: SettingKey[list[str]] = SettingKey("publish_times", SettingScope.COMMUNITY, [], list)
 
 #: Папка исходных видео для обработки; пусто — media/source в папке приложения.
 VIDEO_SOURCE_DIR: SettingKey[str] = SettingKey("video_source_dir", SettingScope.APP, "", str)
@@ -111,7 +111,7 @@ QUEUE_SLOT_POLL_MINUTES: SettingKey[int] = SettingKey(
 QUEUE_SLOT_POLL_RANGE: tuple[int, int] = (1, 120)
 
 #: Канал активен: участвует в публикации и опросе расписания.
-CHANNEL_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.CHANNEL, True, bool)
+COMMUNITY_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.COMMUNITY, True, bool)
 
 #: Заготовка правил разбора имени файла для пакетной публикации:
 #: список токенов ``TitleParseRules`` (сериализацию и терпимость
@@ -119,7 +119,7 @@ CHANNEL_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.CHANNEL, 
 #: Правила пакетные по природе; у канала хранится последний применённый
 #: набор как удобный старт следующего пакета.
 TITLE_PARSE_RULES: SettingKey[list[str]] = SettingKey(
-	"title_parse_rules", SettingScope.CHANNEL, [], list
+	"title_parse_rules", SettingScope.COMMUNITY, [], list
 )
 
 #: Компактные отступы интерфейса. Читается один раз при запуске:
@@ -225,11 +225,11 @@ class SettingsService:
 
 	# --- настройки каналов -----------------------------------------------------
 
-	async def get_for(self, key: SettingKey[_T], channel_id: int) -> _T:
+	async def get_for(self, key: SettingKey[_T], community_id: int) -> _T:
 		"""Возвращает настройку канала (умолчание — если не задана)."""
-		self._require_scope(key, SettingScope.CHANNEL)
+		self._require_scope(key, SettingScope.COMMUNITY)
 		async with self._db.session_factory() as session:
-			row = await session.get(ChannelSetting, (channel_id, key.name))
+			row = await session.get(CommunitySetting, (community_id, key.name))
 		return self._validated(key, row.value if row is not None else None)
 
 	async def get_for_all(self, key: SettingKey[_T]) -> dict[int, _T]:
@@ -239,14 +239,16 @@ class SettingsService:
 			Отображение «id канала → значение» только для каналов,
 			у которых настройка задана; остальные — умолчание ключа.
 		"""
-		self._require_scope(key, SettingScope.CHANNEL)
+		self._require_scope(key, SettingScope.COMMUNITY)
 		async with self._db.session_factory() as session:
 			rows = (
-				await session.execute(select(ChannelSetting).where(ChannelSetting.name == key.name))
+				await session.execute(
+					select(CommunitySetting).where(CommunitySetting.name == key.name)
+				)
 			).scalars()
-			return {row.channel_id: self._validated(key, row.value) for row in rows}
+			return {row.community_id: self._validated(key, row.value) for row in rows}
 
-	async def drop_channel_value(self, key: SettingKey[_T], value: _T) -> None:
+	async def drop_community_value(self, key: SettingKey[_T], value: _T) -> None:
 		"""Снимает настройку со значением ``value`` у всех каналов.
 
 		Целостность настроек-ссылок держит сервис (ADR-0013, вариант «а»):
@@ -254,12 +256,12 @@ class SettingsService:
 		пресета видео), ссылки чистятся этим методом. Сравнение — в коде:
 		JSON-значения в SQL сравниваются ненадёжно, а строк немного.
 		"""
-		self._require_scope(key, SettingScope.CHANNEL)
+		self._require_scope(key, SettingScope.COMMUNITY)
 		async with self._db.session_factory() as session:
 			rows = (
 				(
 					await session.execute(
-						select(ChannelSetting).where(ChannelSetting.name == key.name)
+						select(CommunitySetting).where(CommunitySetting.name == key.name)
 					)
 				)
 				.scalars()
@@ -279,16 +281,16 @@ class SettingsService:
 				removed,
 			)
 
-	async def set_for(self, key: SettingKey[_T], channel_id: int, value: _T) -> None:
+	async def set_for(self, key: SettingKey[_T], community_id: int, value: _T) -> None:
 		"""Сохраняет настройку канала (None — сброс к умолчанию).
 
 		Raises:
 			SettingsError: Канал не найден или значение не подходит по типу.
 		"""
-		await self.set_for_many(channel_id, [(key, value)])
+		await self.set_for_many(community_id, [(key, value)])
 
 	async def set_for_many(
-		self, channel_id: int, items: Sequence[tuple[SettingKey[Any], Any]]
+		self, community_id: int, items: Sequence[tuple[SettingKey[Any], Any]]
 	) -> None:
 		"""Сохраняет несколько настроек канала одной транзакцией.
 
@@ -301,24 +303,26 @@ class SettingsService:
 				по типу — не записывается ничего.
 		"""
 		for key, value in items:
-			self._require_scope(key, SettingScope.CHANNEL)
+			self._require_scope(key, SettingScope.COMMUNITY)
 			self._require_valid(key, value)
 		async with self._db.session_factory() as session:
-			if await session.get(Channel, channel_id) is None:
+			if await session.get(Community, community_id) is None:
 				raise SettingsError("Канал не найден — обновите список.")
 			for key, value in items:
-				row = await session.get(ChannelSetting, (channel_id, key.name))
+				row = await session.get(CommunitySetting, (community_id, key.name))
 				if value is None:
 					if row is not None:
 						await session.delete(row)
 				elif row is None:
-					session.add(ChannelSetting(channel_id=channel_id, name=key.name, value=value))
+					session.add(
+						CommunitySetting(community_id=community_id, name=key.name, value=value)
+					)
 				else:
 					row.value = value
 			await session.commit()
 		logger.info(
 			"Настройки канала id=%s сохранены: %s.",
-			channel_id,
+			community_id,
 			", ".join(key.name for key, _value in items),
 		)
 

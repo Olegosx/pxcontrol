@@ -43,17 +43,17 @@ class AppSetting(Base):
 	value: Mapped[Any] = mapped_column(JSON)
 
 
-class ChannelSetting(Base):
+class CommunitySetting(Base):
 	"""Настройка канала: строка «(канал, имя) → значение» (ADR-0013).
 
 	Внешний ключ с каскадом: настройки живут и умирают вместе с каналом
-	(каскад страхует и сервис — ``ChannelsService.delete_channel``).
+	(каскад страхует и сервис — ``CommunitiesService.delete_community``).
 	"""
 
-	__tablename__ = "channel_settings"
+	__tablename__ = "community_settings"
 
-	channel_id: Mapped[int] = mapped_column(
-		ForeignKey("channels.id", ondelete="CASCADE"), primary_key=True
+	community_id: Mapped[int] = mapped_column(
+		ForeignKey("communities.id", ondelete="CASCADE"), primary_key=True
 	)
 	name: Mapped[str] = mapped_column(String(128), primary_key=True)
 	value: Mapped[Any] = mapped_column(JSON)
@@ -166,7 +166,7 @@ class VideoPreset(TimestampMixin, Base):
 	subdir: Mapped[str] = mapped_column(String(SUBDIR_MAX_CHARS), default="")
 
 
-class Channel(TimestampMixin, Base):
+class Community(TimestampMixin, Base):
 	"""Подключённый Telegram-канал.
 
 	Два возможных публикатора — ссылками (оба необязательны, ADR-0019):
@@ -174,11 +174,11 @@ class Channel(TimestampMixin, Base):
 	сессии, приоритетный путь по ADR-0011), ``bot_id`` — бот-публикатор
 	(запасной путь; самостоятелен — работает по токену, без
 	пользовательской сессии). Параметры-предпочтения канала — строками
-	в ``channel_settings`` (ADR-0013), например пресет обработки
+	в ``community_settings`` (ADR-0013), например пресет обработки
 	по умолчанию.
 	"""
 
-	__tablename__ = "channels"
+	__tablename__ = "communities"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
 	title: Mapped[str] = mapped_column(String(255))
@@ -213,7 +213,7 @@ class PublishQueueItem(TimestampMixin, Base):
 	__tablename__ = "publish_queue_items"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
+	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
 	text: Mapped[str] = mapped_column(Text)
 	media_path: Mapped[str | None] = mapped_column(String(1024))
 	media_kind: Mapped[str] = mapped_column(String(16))
@@ -236,7 +236,7 @@ class CaptionField(TimestampMixin, Base):
 	__tablename__ = "caption_fields"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
+	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
 	name: Mapped[str] = mapped_column(String(64))
 	hashtag: Mapped[bool] = mapped_column(Boolean, default=True)
 	multiple: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -285,7 +285,7 @@ class CaptionTemplate(TimestampMixin, Base):
 	__tablename__ = "caption_templates"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
+	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
 	name: Mapped[str] = mapped_column(String(64))
 	# для предвыбора «последнего использованного» шаблона в диалоге
 	last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

@@ -24,10 +24,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.db.models import Community
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.settings import (
-	CHANNEL_ENABLED,
+	COMMUNITY_ENABLED,
 	VIDEO_PROCESSED_DIR,
 	VIDEO_PUBLISHED_DIR,
 	VIDEO_QUEUED_DIR,
@@ -111,7 +111,7 @@ class PostDraft:
 	"""Черновик публикации — единая сущность для всех типов контента.
 
 	Attributes:
-		channel_id: подключённый канал (id в нашей БД).
+		community_id: подключённый канал (id в нашей БД).
 		text: текст поста или подпись к медиа.
 		media_path: путь к файлу вложения (None — чистый текст).
 		media_kind: тип вложения.
@@ -120,7 +120,7 @@ class PostDraft:
 			с файлом переименовывается его кадр-превью (сосед ``.png``).
 	"""
 
-	channel_id: int
+	community_id: int
 	text: str = ""
 	media_path: str | None = None
 	media_kind: MediaKind = MediaKind.NONE
@@ -193,13 +193,13 @@ class PublishPlan:
 
 	Attributes:
 		draft: черновик (после снятия просрочки, если она была).
-		channel: канал-получатель (строка БД с привязками).
+		community: канал-получатель (строка БД с привязками).
 		media_path: путь файла после переименования; None — текст.
 		use_userbot: транспорт: userbot (True) или бот (False).
 	"""
 
 	draft: PostDraft
-	channel: Channel
+	community: Community
 	media_path: str | None
 	use_userbot: bool
 
@@ -208,12 +208,12 @@ class PublishPlan:
 class ScheduledPostDto:
 	"""Отложенная запись канала (прочитана из Telegram) для интерфейса.
 
-	``channel_id`` — id канала в нашей БД: по нему интерфейс фильтрует
+	``community_id`` — id канала в нашей БД: по нему интерфейс фильтрует
 	список по каналам (название для этого не годится — не уникально).
 	"""
 
-	channel_id: int
-	channel_title: str
+	community_id: int
+	community_title: str
 	text_preview: str
 	scheduled_at: datetime
 
@@ -268,20 +268,20 @@ class PostsService:
 				или у канала нет способа публикации.
 		"""
 		self.validate_draft(draft)
-		channel = await self._get_channel(draft.channel_id)
-		if not await self._settings.get_for(CHANNEL_ENABLED, draft.channel_id):
+		community = await self._get_community(draft.community_id)
+		if not await self._settings.get_for(COMMUNITY_ENABLED, draft.community_id):
 			# правило системы, не интерфейса: любой будущий вход в публикацию
 			# (автопостинг из источников) не должен писать в выключенный канал
 			raise PostError(
-				f"Канал «{channel.title}» выключен — включите его на странице «Каналы»."
+				f"Канал «{community.title}» выключен — включите его на странице «Каналы»."
 			)
-		caps = publish_capabilities(channel.bot is not None, channel.tg_account_id is not None)
-		self._check_transport(caps, draft, channel.tg_account_id)
+		caps = publish_capabilities(community.bot is not None, community.tg_account_id is not None)
+		self._check_transport(caps, draft, community.tg_account_id)
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
 			media_path = self._apply_rename(media_path, draft.rename_to)
 		return PublishPlan(
-			draft=draft, channel=channel, media_path=media_path, use_userbot=caps.userbot
+			draft=draft, community=community, media_path=media_path, use_userbot=caps.userbot
 		)
 
 	async def transmit(
@@ -298,15 +298,15 @@ class PostsService:
 		"""
 		draft = plan.draft
 		if plan.use_userbot:
-			await self._publish_userbot(plan.channel, draft, plan.media_path, on_progress)
+			await self._publish_userbot(plan.community, draft, plan.media_path, on_progress)
 		else:
-			await self._publish_bot(plan.channel, draft, plan.media_path)
+			await self._publish_bot(plan.community, draft, plan.media_path)
 		if draft.media_kind is MediaKind.VIDEO and plan.media_path is not None:
 			await self._move_to_published(plan.media_path)
 		logger.info(
 			"Пост (%s) → «%s» (%s, %s).",
 			draft.media_kind if draft.media_path else "текст",
-			plan.channel.title,
+			plan.community.title,
 			"userbot" if plan.use_userbot else "бот",
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
@@ -366,7 +366,7 @@ class PostsService:
 
 	async def _publish_userbot(
 		self,
-		channel: Channel,
+		community: Community,
 		draft: PostDraft,
 		media_path: str | None,
 		on_progress: ProgressCallback | None,
@@ -376,7 +376,7 @@ class PostsService:
 		Лимит размера файла проверен раньше (:meth:`_check_transport`);
 		сюда канал приходит только с привязкой (маршрутизация ``publish``).
 		"""
-		if channel.tg_account_id is None:  # publish() сюда без привязки не приводит
+		if community.tg_account_id is None:  # publish() сюда без привязки не приводит
 			raise PostError("У канала нет userbot-админа — проверьте доступы.")
 		with tempfile.TemporaryDirectory() as tmp:
 			thumb: str | None = None
@@ -390,25 +390,25 @@ class PostsService:
 				thumb_path=thumb,
 			)
 			await self._gateway.publish(
-				channel.tg_account_id, channel.tg_chat_id, post, on_progress
+				community.tg_account_id, community.tg_chat_id, post, on_progress
 			)
 
 	async def _publish_bot(
-		self, channel: Channel, draft: PostDraft, media_path: str | None
+		self, community: Community, draft: PostDraft, media_path: str | None
 	) -> None:
 		"""Запасной путь через бота: текст и медиа до 50 МБ, только «сейчас».
 
 		Отложенность и лимит размера проверены раньше
 		(:meth:`_check_transport`).
 		"""
-		if channel.bot is None:  # publish() сюда без бота не приводит
+		if community.bot is None:  # publish() сюда без бота не приводит
 			raise PostError("У канала не назначен бот — переподключите канал.")
 		if media_path is None:
-			await self._gateway.send_text(channel.bot.token, channel.tg_chat_id, draft.text)
+			await self._gateway.send_text(community.bot.token, community.tg_chat_id, draft.text)
 			return
 		await self._gateway.send_media(
-			channel.bot.token,
-			channel.tg_chat_id,
+			community.bot.token,
+			community.tg_chat_id,
 			draft.media_kind,
 			media_path,
 			draft.text,
@@ -672,7 +672,7 @@ class PostsService:
 			return None
 		return thumb
 
-	async def userbot_limit_gb(self, channel_id: int) -> int:
+	async def userbot_limit_gb(self, community_id: int) -> int:
 		"""Лимит на файл канала в целых ГБ — для подсказок интерфейса.
 
 		Зависит от Premium аккаунта, привязанного к каналу (ADR-0019);
@@ -681,9 +681,9 @@ class PostsService:
 		Raises:
 			PostError: Канал не найден.
 		"""
-		return (await self.userbot_limit_bytes(channel_id)) // 10**9
+		return (await self.userbot_limit_bytes(community_id)) // 10**9
 
-	async def userbot_limit_bytes(self, channel_id: int) -> int:
+	async def userbot_limit_bytes(self, community_id: int) -> int:
 		"""Точный лимит на файл канала в байтах (2000/4000 МиБ по Premium).
 
 		Для пометки «больше лимита канала» в пакете отправки (ADR-0015):
@@ -693,16 +693,16 @@ class PostsService:
 		Raises:
 			PostError: Канал не найден.
 		"""
-		channel = await self._get_channel(channel_id)
-		return userbot_max_file_bytes(self._gateway.userbot_premium(channel.tg_account_id))
+		community = await self._get_community(community_id)
+		return userbot_max_file_bytes(self._gateway.userbot_premium(community.tg_account_id))
 
-	async def channel_title(self, channel_id: int) -> str:
+	async def community_title(self, community_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).
 
 		Raises:
 			PostError: Канал не найден.
 		"""
-		return (await self._get_channel(channel_id)).title
+		return (await self._get_community(community_id)).title
 
 	@staticmethod
 	def check_rename_name(rename_to: str) -> None:
@@ -750,14 +750,14 @@ class PostsService:
 		с предупреждением в логе (включая «его аккаунт не подключён»:
 		другие аккаунты могут быть живы).
 		"""
-		enabled = await self._settings.get_for_all(CHANNEL_ENABLED)
+		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
 		async with self._db.session_factory() as session:
-			channels = (
+			communities = (
 				(
 					await session.execute(
-						select(Channel)
-						.where(Channel.tg_account_id.is_not(None))
-						.order_by(Channel.id)
+						select(Community)
+						.where(Community.tg_account_id.is_not(None))
+						.order_by(Community.id)
 					)
 				)
 				.scalars()
@@ -765,38 +765,38 @@ class PostsService:
 			)
 		items: list[ScheduledPostDto] = []
 		flooded: set[int] = set()  # аккаунты, поймавшие флуд-лимит в этом проходе
-		for channel in channels:
-			if not enabled.get(channel.id, CHANNEL_ENABLED.default):
+		for community in communities:
+			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
-			if channel.tg_account_id is None:  # для mypy: выборка отфильтровала
+			if community.tg_account_id is None:  # для mypy: выборка отфильтровала
 				continue
-			if channel.tg_account_id in flooded:
+			if community.tg_account_id in flooded:
 				continue
 			try:
 				messages = await self._gateway.get_scheduled(
-					channel.tg_account_id, channel.tg_chat_id
+					community.tg_account_id, community.tg_chat_id
 				)
 			except TelegramFloodError as exc:
 				# флуд-лимит — на весь аккаунт (ADR-0017): стучаться в его
 				# остальные каналы значит удлинять срок, который ждёт
 				# и очередь отправки; пропускаем их до конца прохода
 				# (та же дисциплина, что у дозора слотов)
-				flooded.add(channel.tg_account_id)
+				flooded.add(community.tg_account_id)
 				logger.warning(
 					"Отложенные: флуд-лимит аккаунта id=%s (%s) — его каналы пропущены.",
-					channel.tg_account_id,
+					community.tg_account_id,
 					exc,
 				)
 				continue
 			except UserbotUnavailableError as exc:
-				logger.warning("Отложенные канала «%s» не прочитаны: %s", channel.title, exc)
+				logger.warning("Отложенные канала «%s» не прочитаны: %s", community.title, exc)
 				continue
 			for message in messages:
-				items.append(self._dto(channel, message))
+				items.append(self._dto(community, message))
 		items.sort(key=lambda item: item.scheduled_at)
 		return items
 
-	async def scheduled_times(self, channel_id: int) -> list[datetime]:
+	async def scheduled_times(self, community_id: int) -> list[datetime]:
 		"""Моменты существующих отложек канала (для раскладки пакета).
 
 		Пакетная отправка (ADR-0015) пропускает занятые слоты — сюда
@@ -809,13 +809,13 @@ class PostsService:
 			UserbotUnavailableError: Отложки прочитать не удалось —
 				вызывающая сторона решает, продолжать ли без них.
 		"""
-		channel = await self._get_channel(channel_id)
-		if channel.tg_account_id is None:
+		community = await self._get_community(community_id)
+		if community.tg_account_id is None:
 			return []
-		messages = await self._gateway.get_scheduled(channel.tg_account_id, channel.tg_chat_id)
+		messages = await self._gateway.get_scheduled(community.tg_account_id, community.tg_chat_id)
 		return [message.scheduled_at for message in messages]
 
-	async def account_for_channel(self, channel_id: int) -> int | None:
+	async def account_for_community(self, community_id: int) -> int | None:
 		"""Привязанный userbot-аккаунт канала (None — привязки нет).
 
 		Нужен дозору слотов очереди отправки (ADR-0016/0019): флуд-лимит
@@ -825,28 +825,28 @@ class PostsService:
 		Raises:
 			PostError: Канал не найден.
 		"""
-		return (await self._get_channel(channel_id)).tg_account_id
+		return (await self._get_community(community_id)).tg_account_id
 
-	async def _get_channel(self, channel_id: int) -> Channel:
+	async def _get_community(self, community_id: int) -> Community:
 		"""Возвращает канал с ботом или объясняет, что канал не найден."""
 		async with self._db.session_factory() as session:
-			channel = (
+			community = (
 				await session.execute(
-					select(Channel)
-					.options(selectinload(Channel.bot))
-					.where(Channel.id == channel_id)
+					select(Community)
+					.options(selectinload(Community.bot))
+					.where(Community.id == community_id)
 				)
 			).scalar_one_or_none()
-		if channel is None:
+		if community is None:
 			raise PostError("Канал не найден — обновите список каналов.")
-		return channel
+		return community
 
 	@staticmethod
-	def _dto(channel: Channel, message: ScheduledMessage) -> ScheduledPostDto:
+	def _dto(community: Community, message: ScheduledMessage) -> ScheduledPostDto:
 		"""Готовит запись для интерфейса: канал, короткий текст, время."""
 		text = message.text or "(медиа без текста)"
 		preview = text_preview(text, _SCHEDULED_PREVIEW_CHARS)
-		return ScheduledPostDto(channel.id, channel.title, preview, message.scheduled_at)
+		return ScheduledPostDto(community.id, community.title, preview, message.scheduled_at)
 
 
 def _make_thumbnail(

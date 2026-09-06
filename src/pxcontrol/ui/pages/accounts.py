@@ -20,7 +20,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import AiKeyDto, BotDto, TgAccountDto
-from pxcontrol.engine.services.channels import ChannelDto
+from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -336,15 +336,17 @@ class AccountsPage(ScrollArea):
 		"""Удаление аккаунта: сначала — какие каналы останутся без админа."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.channels.list_channels(),
+			self._worker.engine.communities.list_communities(),
 			self,
 			partial(self._confirm_delete_account, account),
 			self._show_error,
 		)
 
-	def _confirm_delete_account(self, account: TgAccountDto, channels: list[ChannelDto]) -> None:
+	def _confirm_delete_account(
+		self, account: TgAccountDto, communities: list[CommunityDto]
+	) -> None:
 		"""Подтверждение с перечнем каналов, привязанных к аккаунту (ADR-0019)."""
-		bound = [ch.title for ch in channels if ch.tg_account_id == account.id]
+		bound = [ch.title for ch in communities if ch.tg_account_id == account.id]
 		text = f"Удалить аккаунт «{account.label}»?"
 		if bound:
 			names = ", ".join(f"«{title}»" for title in bound)

@@ -54,7 +54,7 @@
 
 ## Что покрывать дальше (план)
 
-- [ ] Сетевые функции Bot API (`check_channel`, `send_media`…)
+- [ ] Сетевые функции Bot API (`check_community`, `send_media`…)
       на подставном объекте `Bot` — по образцу `_FakeClient` MTProto.
 - [ ] Путь «системное хранилище ключей недоступно» (`SecretStorageError`).
 - [ ] Источники: нормализация и дедупликация.

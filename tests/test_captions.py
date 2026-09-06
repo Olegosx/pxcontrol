@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.db.models import Community
 from pxcontrol.engine.services.captions import (
 	CaptionLine,
 	CaptionsError,
@@ -144,43 +144,43 @@ def test_sanitize_filename_limits_bytes_not_chars() -> None:
 # --- сервис -------------------------------------------------------------------
 
 
-async def _add_channel(db: Database, username: str | None = None) -> int:
+async def _add_community(db: Database, username: str | None = None) -> int:
 	"""Заводит канал; ID чата уникален — их бывает несколько в одном тесте."""
 	async with db.session_factory() as session:
-		count = len((await session.execute(select(Channel))).scalars().all())
-		channel = Channel(title="Канал", tg_chat_id=f"-100{count + 1}", username=username)
-		session.add(channel)
+		count = len((await session.execute(select(Community))).scalars().all())
+		community = Community(title="Канал", tg_chat_id=f"-100{count + 1}", username=username)
+		session.add(community)
 		await session.commit()
-		await session.refresh(channel)
-		return channel.id
+		await session.refresh(community)
+		return community.id
 
 
 async def test_fields_crud_and_duplicates(db: Database) -> None:
 	"""Поле создаётся, дубль имени отклоняется, удаление чистит словарь."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	field = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
+	community_id = await _add_community(db)
+	field = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
 	assert field.name == "Genre" and field.values == []
 	assert field.parent_field_id is None
 	with pytest.raises(CaptionsError, match="уже есть"):
-		await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
+		await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
 	await service.delete_field(field.id)
-	assert await service.list_fields(channel_id) == []
+	assert await service.list_fields(community_id) == []
 
 
 async def test_template_roundtrip_and_shared_dictionary(db: Database) -> None:
 	"""Шаблоны включают поля канала; словарь общий для всех шаблонов."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	genre = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
-	year = await service.add_field(channel_id, "Year", hashtag=False, multiple=False)
-	movie = await service.save_template(channel_id, "Фильм", [year.id, genre.id])
-	await service.save_template(channel_id, "Клип", [genre.id])
+	community_id = await _add_community(db)
+	genre = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
+	year = await service.add_field(community_id, "Year", hashtag=False, multiple=False)
+	movie = await service.save_template(community_id, "Фильм", [year.id, genre.id])
+	await service.save_template(community_id, "Клип", [genre.id])
 	assert [tf.field.name for tf in movie.fields] == ["Year", "Genre"]
 
 	# использование по «Фильму» пополняет словарь, «Клип» его видит
 	await service.record_usage(movie.id, {genre.id: ["action", "Action", "drama"]})
-	templates = await service.list_templates(channel_id)
+	templates = await service.list_templates(community_id)
 	clip = next(t for t in templates if t.name == "Клип")
 	assert next(tf for tf in clip.fields).field.names() == ["action", "drama"]
 	film = next(t for t in templates if t.name == "Фильм")
@@ -196,11 +196,11 @@ async def test_render_filename(db: Database, monkeypatch: pytest.MonkeyPatch) ->
 		lambda _p, _b: VideoInfo(1920, 1080, 60.0, 25.0, True),
 	)
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db, username="mych")
-	author = await service.add_field(channel_id, "Author", hashtag=True, multiple=False)
-	genre = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
+	community_id = await _add_community(db, username="mych")
+	author = await service.add_field(community_id, "Author", hashtag=True, multiple=False)
+	genre = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
 	template = await service.save_template(
-		channel_id,
+		community_id,
 		"Фильм",
 		[author.id, genre.id],
 		"{Author}, {video} ({Genre}) {quality} (@{channel})",
@@ -208,7 +208,7 @@ async def test_render_filename(db: Database, monkeypatch: pytest.MonkeyPatch) ->
 	assert template.filename_pattern is not None
 	name = await service.render_filename(
 		template.id,
-		channel_id,
+		community_id,
 		"Lara: Croft",
 		{author.id: ["Best"], genre.id: ["action", "drama"]},
 		"/x/видео.mp4",
@@ -228,11 +228,11 @@ async def test_render_filename_builtin_wins_over_field_namesake(
 		lambda _p, _b: VideoInfo(1920, 1080, 60.0, 25.0, True),
 	)
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db, username="mych")
-	namesake = await service.add_field(channel_id, "video", hashtag=True, multiple=False)
-	template = await service.save_template(channel_id, "Тёзка", [namesake.id], "{video}")
+	community_id = await _add_community(db, username="mych")
+	namesake = await service.add_field(community_id, "video", hashtag=True, multiple=False)
+	template = await service.save_template(community_id, "Тёзка", [namesake.id], "{video}")
 	name = await service.render_filename(
-		template.id, channel_id, "Название поста", {namesake.id: ["значение-поля"]}, "/x/в.mp4"
+		template.id, community_id, "Название поста", {namesake.id: ["значение-поля"]}, "/x/в.mp4"
 	)
 	assert name == "Название поста.mp4"  # встроенный приоритетнее поля
 
@@ -248,9 +248,11 @@ async def test_render_filename_fits_telegram_limit(
 		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
 	)
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db, username="nature_docs")
-	tags = await service.add_field(channel_id, "Tags", hashtag=True, multiple=True)
-	template = await service.save_template(channel_id, "Т", [tags.id], "{video},@{channel},{Tags}")
+	community_id = await _add_community(db, username="nature_docs")
+	tags = await service.add_field(community_id, "Tags", hashtag=True, multiple=True)
+	template = await service.save_template(
+		community_id, "Т", [tags.id], "{video},@{channel},{Tags}"
+	)
 	values = [
 		"4K",
 		"8K",
@@ -264,7 +266,7 @@ async def test_render_filename_fits_telegram_limit(
 	]
 	name = await service.render_filename(
 		template.id,
-		channel_id,
+		community_id,
 		"WinterMorningLights",
 		{tags.id: values},
 		"/x/v.mp4",
@@ -285,11 +287,11 @@ async def test_render_filename_cuts_long_title_at_word(
 		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
 	)
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
-	template = await service.save_template(channel_id, "Т", [field.id], "{video}")
+	community_id = await _add_community(db)
+	field = await service.add_field(community_id, "Год", hashtag=False, multiple=False)
+	template = await service.save_template(community_id, "Т", [field.id], "{video}")
 	name = await service.render_filename(
-		template.id, channel_id, "Длинное Слово " * 20, {}, "/x/v.mp4"
+		template.id, community_id, "Длинное Слово " * 20, {}, "/x/v.mp4"
 	)
 	stem = name.removesuffix(".mp4")
 	assert len(stem) <= 78
@@ -305,25 +307,25 @@ async def test_render_filename_edge_cases(db: Database, monkeypatch: pytest.Monk
 		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
 	)
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)  # канал без username
-	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
+	community_id = await _add_community(db)  # канал без username
+	field = await service.add_field(community_id, "Год", hashtag=False, multiple=False)
 	template = await service.save_template(
-		channel_id, "Т", [field.id], "{video} {quality} {Нет} ({Год})"
+		community_id, "Т", [field.id], "{video} {quality} {Нет} ({Год})"
 	)
 	name = await service.render_filename(
-		template.id, channel_id, "Имя", {field.id: ["2026"]}, "/x/файл.zip"
+		template.id, community_id, "Имя", {field.id: ["2026"]}, "/x/файл.zip"
 	)
 	assert name == "Имя {Нет} (2026).zip"
-	no_pattern = await service.save_template(channel_id, "Без", [field.id])
+	no_pattern = await service.save_template(community_id, "Без", [field.id])
 	with pytest.raises(CaptionsError, match="не задан шаблон имени"):
-		await service.render_filename(no_pattern.id, channel_id, "х", {}, "/x/ф.mp4")
+		await service.render_filename(no_pattern.id, community_id, "х", {}, "/x/ф.mp4")
 
 
 async def test_dictionary_add_and_delete_values(db: Database) -> None:
 	"""Редактор словаря: добавление с дедупликацией, удаление значения."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	field = await service.add_field(channel_id, "Genre", hashtag=True, multiple=True)
+	community_id = await _add_community(db)
+	field = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
 	updated = await service.add_values(field.id, ["action", " Action ", "", "drama"])
 	assert updated.names() == ["action", "drama"]  # дубль и пустое — пропущены
 	action = next(item for item in updated.values if item.value == "action")
@@ -349,16 +351,16 @@ async def test_render_filename_respects_limits(
 		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
 	)
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
-	template = await service.save_template(channel_id, "Т", [field.id], "{video}")
+	community_id = await _add_community(db)
+	field = await service.add_field(community_id, "Год", hashtag=False, multiple=False)
+	template = await service.save_template(community_id, "Т", [field.id], "{video}")
 	# сплошная латиница без разделителей: границы слова нет — срез ровно
 	# по лимиту Telegram (длиннее сервер изменил бы имя сам)
-	name = await service.render_filename(template.id, channel_id, "a" * 200, {}, "/x/ф.mp4")
+	name = await service.render_filename(template.id, community_id, "a" * 200, {}, "/x/ф.mp4")
 	assert name == "a" * TELEGRAM_MAX_STEM_CHARS + ".mp4"
 	# эмодзи — 4 байта на символ: байтовый предел ФС строже символьного
 	long_name = await service.render_filename(
-		template.id, channel_id, "\U0001f600" * 100, {}, "/x/ф.mp4"
+		template.id, community_id, "\U0001f600" * 100, {}, "/x/ф.mp4"
 	)
 	assert long_name.endswith(".mp4")
 	assert len(long_name.encode("utf-8")) <= MAX_FILENAME_BYTES
@@ -368,26 +370,26 @@ async def test_render_filename_respects_limits(
 async def test_template_validation_and_delete(db: Database) -> None:
 	"""Пустое имя/состав отклоняются; удаление шаблона не трогает словарь."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	field = await service.add_field(channel_id, "Год", hashtag=False, multiple=False)
+	community_id = await _add_community(db)
+	field = await service.add_field(community_id, "Год", hashtag=False, multiple=False)
 	with pytest.raises(CaptionsError, match="имя"):
-		await service.save_template(channel_id, " ", [field.id])
+		await service.save_template(community_id, " ", [field.id])
 	with pytest.raises(CaptionsError, match="хотя бы одно"):
-		await service.save_template(channel_id, "Пустой", [])
-	template = await service.save_template(channel_id, "Т", [field.id])
+		await service.save_template(community_id, "Пустой", [])
+	template = await service.save_template(community_id, "Т", [field.id])
 	await service.record_usage(template.id, {field.id: ["2026"]})
 	await service.delete_template(template.id)
-	assert await service.list_templates(channel_id) == []
-	assert (await service.list_fields(channel_id))[0].names() == ["2026"]
+	assert await service.list_templates(community_id) == []
+	assert (await service.list_fields(community_id))[0].names() == ["2026"]
 
 
 # --- связанные словари (персонаж внутри тайтла) ------------------------------
 
 
-async def _linked_fields(service: CaptionsService, channel_id: int) -> tuple[int, int]:
+async def _linked_fields(service: CaptionsService, community_id: int) -> tuple[int, int]:
 	"""Готовит пару полей «Title» и зависимый от него «Character»."""
-	title = await service.add_field(channel_id, "Title", hashtag=True, multiple=False)
-	character = await service.add_field(channel_id, "Character", hashtag=True, multiple=True)
+	title = await service.add_field(community_id, "Title", hashtag=True, multiple=False)
+	character = await service.add_field(community_id, "Character", hashtag=True, multiple=True)
 	linked = await service.set_field_parent(character.id, title.id)
 	assert linked.parent_field_id == title.id
 	return title.id, character.id
@@ -396,14 +398,14 @@ async def _linked_fields(service: CaptionsService, channel_id: int) -> tuple[int
 async def test_usage_binds_new_values_to_selected_parent(db: Database) -> None:
 	"""Персонажи привязываются к выбранному тайтлу; тёзка — своя запись."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	title_id, character_id = await _linked_fields(service, channel_id)
-	template = await service.save_template(channel_id, "Фильм", [title_id, character_id])
+	community_id = await _add_community(db)
+	title_id, character_id = await _linked_fields(service, community_id)
+	template = await service.save_template(community_id, "Фильм", [title_id, character_id])
 	await service.record_usage(
 		template.id, {title_id: ["TombRider"], character_id: ["Lara", "Zip"]}
 	)
 	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Lara"]})
-	fields = {f.name: f for f in await service.list_fields(channel_id)}
+	fields = {f.name: f for f in await service.list_fields(community_id)}
 	titles = {item.id: item.value for item in fields["Title"].values}
 	bound = sorted(
 		(item.value, titles[item.parent_id])
@@ -417,14 +419,14 @@ async def test_usage_binds_new_values_to_selected_parent(db: Database) -> None:
 async def test_available_filters_by_parent(db: Database) -> None:
 	"""Словарь зависимого поля фильтруется по выбранному значению родителя."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	title_id, character_id = await _linked_fields(service, channel_id)
-	template = await service.save_template(channel_id, "Фильм", [title_id, character_id])
+	community_id = await _add_community(db)
+	title_id, character_id = await _linked_fields(service, community_id)
+	template = await service.save_template(community_id, "Фильм", [title_id, character_id])
 	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
 	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]})
 	# значение без привязки видно при любом выборе: иначе его не выбрать
 	await service.add_values(character_id, ["Ничей"])
-	fields = {f.name: f for f in await service.list_fields(channel_id)}
+	fields = {f.name: f for f in await service.list_fields(community_id)}
 	tomb = next(i for i in fields["Title"].values if i.value == "TombRider")
 	character = fields["Character"]
 	assert [i.value for i in character.available([tomb.id])] == ["Lara", "Ничей"]
@@ -436,24 +438,24 @@ async def test_available_filters_by_parent(db: Database) -> None:
 async def test_deleting_parent_value_removes_children(db: Database) -> None:
 	"""Удаление тайтла уносит его персонажей; чужие остаются."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	title_id, character_id = await _linked_fields(service, channel_id)
-	template = await service.save_template(channel_id, "Фильм", [title_id, character_id])
+	community_id = await _add_community(db)
+	title_id, character_id = await _linked_fields(service, community_id)
+	template = await service.save_template(community_id, "Фильм", [title_id, character_id])
 	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
 	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]})
-	fields = {f.name: f for f in await service.list_fields(channel_id)}
+	fields = {f.name: f for f in await service.list_fields(community_id)}
 	tomb = next(i for i in fields["Title"].values if i.value == "TombRider")
 	titles = await service.delete_value(tomb.id)
 	assert titles.names() == ["Fallout"]
-	character = next(f for f in await service.list_fields(channel_id) if f.name == "Character")
+	character = next(f for f in await service.list_fields(community_id) if f.name == "Character")
 	assert character.names() == ["Vault Boy"]
 
 
 async def test_manual_binding_and_adoption(db: Database) -> None:
 	"""Привязка руками, отвязка и усыновление значения без родителя."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	title_id, character_id = await _linked_fields(service, channel_id)
+	community_id = await _add_community(db)
+	title_id, character_id = await _linked_fields(service, community_id)
 	titles = await service.add_values(title_id, ["TombRider"])
 	tomb = titles.values[0]
 	characters = await service.add_values(character_id, ["Lara"])
@@ -467,9 +469,9 @@ async def test_manual_binding_and_adoption(db: Database) -> None:
 
 	# значение без привязки, использованное вместе с тайтлом, усыновляется:
 	# новой записи не появляется, у прежней проставляется родитель
-	template = await service.save_template(channel_id, "Фильм", [title_id, character_id])
+	template = await service.save_template(community_id, "Фильм", [title_id, character_id])
 	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
-	characters = next(f for f in await service.list_fields(channel_id) if f.name == "Character")
+	characters = next(f for f in await service.list_fields(community_id) if f.name == "Character")
 	assert characters.names() == ["Lara"]
 	assert characters.values[0].parent_id == tomb.id
 
@@ -477,14 +479,14 @@ async def test_manual_binding_and_adoption(db: Database) -> None:
 async def test_parent_validation_and_unlink(db: Database) -> None:
 	"""Негодный родитель отклоняется; снятие связи чистит привязки значений."""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	other_channel = await _add_channel(db)
-	title_id, character_id = await _linked_fields(service, channel_id)
+	community_id = await _add_community(db)
+	other_community = await _add_community(db)
+	title_id, character_id = await _linked_fields(service, community_id)
 	with pytest.raises(CaptionsError, match="само от себя"):
 		await service.set_field_parent(character_id, character_id)
 	with pytest.raises(CaptionsError, match="кольцо"):
 		await service.set_field_parent(title_id, character_id)
-	alien = await service.add_field(other_channel, "Title", hashtag=True, multiple=False)
+	alien = await service.add_field(other_community, "Title", hashtag=True, multiple=False)
 	with pytest.raises(CaptionsError, match="не найдено у этого канала"):
 		await service.set_field_parent(character_id, alien.id)
 	with pytest.raises(CaptionsError, match="не найдено"):
@@ -508,14 +510,14 @@ async def test_delete_parent_field_keeps_dependent_dictionary(db: Database) -> N
 	set_field_parent, а не гибнут каскадом parent_value_id.
 	"""
 	service = CaptionsService(db)
-	channel_id = await _add_channel(db)
-	title_id, character_id = await _linked_fields(service, channel_id)
+	community_id = await _add_community(db)
+	title_id, character_id = await _linked_fields(service, community_id)
 	titles = await service.add_values(title_id, ["TombRider"])
 	await service.add_values(character_id, ["Lara"], titles.values[0].id)
 
 	await service.delete_field(title_id)
 
-	fields = await service.list_fields(channel_id)
+	fields = await service.list_fields(community_id)
 	assert [f.name for f in fields] == ["Character"]  # Title удалён
 	character = fields[0]
 	assert character.parent_field_id is None  # поле стало независимым

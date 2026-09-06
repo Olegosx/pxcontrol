@@ -149,7 +149,7 @@ class AccountsService:
 	async def delete_bot(self, bot_id: int) -> None:
 		"""Удаляет бота; каналы, публиковавшие через него, остаются без бота.
 
-		``channels.bot_id`` обнуляет политика внешнего ключа (SET NULL) —
+		``communities.bot_id`` обнуляет политика внешнего ключа (SET NULL) —
 		канал не «прилипнет» к чужому боту, если SQLite переиспользует id.
 		"""
 		async with self._db.session_factory() as session:

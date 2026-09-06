@@ -401,7 +401,7 @@ def test_translate_error_confirmed_refusals() -> None:
 	"""«Выгнали из канала» и родня — подтверждённый отказ, не временный сбой.
 
 	От класса зависит поведение системы: только UserbotAccessError даёт
-	recheck_channel право снять хранимый флаг userbot-админа.
+	recheck_community право снять хранимый флаг userbot-админа.
 	"""
 	from telethon import errors
 
@@ -429,7 +429,7 @@ async def test_bot_errors_translate_flood_and_server_failures() -> None:
 	"""Флуд-лимит, «файл велик» и 5xx Bot API — понятные тексты, не дампы."""
 	from aiogram.methods import GetMe
 
-	from pxcontrol.engine.telegram.bot_api import ChannelCheckError, _bot_errors
+	from pxcontrol.engine.telegram.bot_api import CommunityCheckError, _bot_errors
 
 	async def _raise_inside(exc: BaseException) -> None:
 		async with _bot_errors("нет прав", "отклонено"):
@@ -447,7 +447,7 @@ async def test_bot_errors_translate_flood_and_server_failures() -> None:
 		await _raise_inside(TelegramRetryAfter(GetMe(), "flood", retry_after=17))
 	assert flood.value.retry_after_s == 17  # очередь ждёт ровно названный срок
 	# «файл велик» наследует сетевую ошибку — не должен стать «нет связи»
-	with pytest.raises(ChannelCheckError, match="лимита Bot API"):
+	with pytest.raises(CommunityCheckError, match="лимита Bot API"):
 		await _raise_inside(TelegramEntityTooLarge(GetMe(), "too large"))
-	with pytest.raises(ChannelCheckError, match="отклонил операцию"):
+	with pytest.raises(CommunityCheckError, match="отклонил операцию"):
 		await _raise_inside(TelegramServerError(GetMe(), "internal"))

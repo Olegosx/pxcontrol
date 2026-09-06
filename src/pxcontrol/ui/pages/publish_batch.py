@@ -41,7 +41,7 @@ from pxcontrol.engine.services.captions import (
 	parse_title,
 	title_from_filename,
 )
-from pxcontrol.engine.services.channels import ChannelDto
+from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import PostDraft
 from pxcontrol.engine.services.schedule_plan import (
 	PlanError,
@@ -85,7 +85,7 @@ _CASE_MODES: list[tuple[str, TitleCaseMode]] = [
 
 #: Стратегии раскладки: подпись → вид плана и «раз в N дней?».
 _STRATEGIES: list[tuple[str, PlanKind, bool]] = [
-	("По временам канала", PlanKind.CHANNEL_TIMES, False),
+	("По временам канала", PlanKind.COMMUNITY_TIMES, False),
 	("Каждый день в…", PlanKind.DAILY, False),
 	("Раз в N дней в…", PlanKind.DAILY, True),
 	("Каждые N часов от…", PlanKind.EVERY_HOURS, False),
@@ -176,14 +176,14 @@ class PublishBatchDialog(MessageBoxBase):
 	def __init__(
 		self,
 		worker: EngineWorker,
-		channel: ChannelDto,
+		community: CommunityDto,
 		root: str,
 		files: list[ReadyVideo],
 		parent: QWidget,
 		caption_lines: list[CaptionLine] | None = None,
 		filename_template_id: int | None = None,
 		used_values: dict[int, list[str]] | None = None,
-		channel_times: list[str] | None = None,
+		community_times: list[str] | None = None,
 		limit_bytes: int | None = None,
 		schedule_allowed: bool = True,
 		busy: list[datetime] | None = None,
@@ -200,8 +200,8 @@ class PublishBatchDialog(MessageBoxBase):
 		применяется только явной кнопкой)."""
 		super().__init__(parent)
 		self._worker = worker
-		self._channel = channel
-		self._channel_times = list(channel_times or [])
+		self._community = community
+		self._community_times = list(community_times or [])
 		self._schedule_allowed = schedule_allowed
 		self._busy = list(busy or [])
 		self._rows: list[_BatchRow] = []
@@ -209,7 +209,7 @@ class PublishBatchDialog(MessageBoxBase):
 		self._filename_template_id = filename_template_id
 		self._used_values = dict(used_values or {})
 		self._applied_rules: TitleParseRules | None = None
-		self.viewLayout.addWidget(SubtitleLabel(f"Пакет в «{channel.title}»", self))
+		self.viewLayout.addWidget(SubtitleLabel(f"Пакет в «{community.title}»", self))
 		folder = CaptionLabel(f"Папка: {root}", self)
 		folder.setWordWrap(True)
 		self.viewLayout.addWidget(folder)
@@ -226,7 +226,7 @@ class PublishBatchDialog(MessageBoxBase):
 		self._request_renames()
 		self._apply_initial_plan()
 
-	def drafts(self, channel_id: int) -> list[PostDraft]:
+	def drafts(self, community_id: int) -> list[PostDraft]:
 		"""Черновики отмеченных строк (время — в UTC, как у формы).
 
 		Raises:
@@ -238,7 +238,7 @@ class PublishBatchDialog(MessageBoxBase):
 			when_local = _parse_when(str(row.when.text()))
 			result.append(
 				PostDraft(
-					channel_id,
+					community_id,
 					text=str(row.caption.toPlainText()).strip(),
 					media_path=row.video.path,
 					media_kind=MediaKind.VIDEO,
@@ -351,7 +351,7 @@ class PublishBatchDialog(MessageBoxBase):
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.set_for(
-				TITLE_PARSE_RULES, self._channel.id, self._applied_rules.to_tokens()
+				TITLE_PARSE_RULES, self._community.id, self._applied_rules.to_tokens()
 			),
 			self,
 			noop,
@@ -416,7 +416,7 @@ class PublishBatchDialog(MessageBoxBase):
 
 	def _default_at(self) -> str:
 		"""Время по умолчанию для «каждый день»: первое валидное у канала."""
-		for item in self._channel_times:
+		for item in self._community_times:
 			try:
 				hours, minutes = parse_hhmm(str(item))
 			except ValueError:
@@ -465,7 +465,7 @@ class PublishBatchDialog(MessageBoxBase):
 				self._worker,
 				self._worker.engine.captions.render_filename(
 					self._filename_template_id,
-					self._channel.id,
+					self._community.id,
 					self._row_title(row),
 					self._used_values,
 					row.video.path,
@@ -491,7 +491,7 @@ class PublishBatchDialog(MessageBoxBase):
 		hourly = kind is PlanKind.EVERY_HOURS
 		# дата начала — у стратегий по дням (у «каждые N часов» есть
 		# полный стартовый момент, у «сейчас» дата не нужна)
-		dated = daily or kind is PlanKind.CHANNEL_TIMES
+		dated = daily or kind is PlanKind.COMMUNITY_TIMES
 		self._date_label.setVisible(dated)
 		self._date.setVisible(dated)
 		self._at_label.setVisible(daily)
@@ -529,7 +529,7 @@ class PublishBatchDialog(MessageBoxBase):
 			return SchedulePlan(kind, every_hours=int(self._hours.value()), start=start)
 		return SchedulePlan(
 			kind,
-			channel_times=tuple(self._channel_times),
+			community_times=tuple(self._community_times),
 			start_date=self._start_date(),
 		)
 
@@ -558,7 +558,9 @@ class PublishBatchDialog(MessageBoxBase):
 			return
 		try:
 			moments = plan_times(
-				SchedulePlan(PlanKind.CHANNEL_TIMES, channel_times=tuple(self._channel_times)),
+				SchedulePlan(
+					PlanKind.COMMUNITY_TIMES, community_times=tuple(self._community_times)
+				),
 				len(self._checked()),
 				datetime.now(),
 				busy=self._busy,

@@ -9,13 +9,13 @@ from pxcontrol.engine.db.database import MIGRATIONS_DIR, Database
 
 EXPECTED_TABLES = {
 	"app_settings",
-	"channel_settings",
+	"community_settings",
 	"bots",
 	"tg_accounts",
 	"tg_api_credentials",
 	"ai_credentials",
 	"video_presets",
-	"channels",
+	"communities",
 	"publish_queue_items",
 	"caption_fields",
 	"caption_values",
@@ -106,20 +106,20 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 		)
 		await session.execute(
 			text(
-				"INSERT INTO channels (title, tg_chat_id, bot_id, tg_account_id,"
+				"INSERT INTO communities (title, tg_chat_id, bot_id, tg_account_id,"
 				" created_at, updated_at) VALUES ('c', '-1001', 1, 1,"
 				" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
 			)
 		)
 		await session.execute(
 			text(
-				"INSERT INTO channel_settings (channel_id, name, value) "
+				"INSERT INTO community_settings (community_id, name, value) "
 				"VALUES (1, 'enabled', 'false')"
 			)
 		)
 		await session.execute(
 			text(
-				"INSERT INTO caption_fields (id, channel_id, name, hashtag,"
+				"INSERT INTO caption_fields (id, community_id, name, hashtag,"
 				" multiple, created_at, updated_at) VALUES (1, 1, 'Genre', 1, 0,"
 				" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
 			)
@@ -137,20 +137,20 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 		await session.execute(text("DELETE FROM bots WHERE id = 1"))
 		await session.commit()
 		bot_id = (
-			await session.execute(text("SELECT bot_id FROM channels WHERE id = 1"))
+			await session.execute(text("SELECT bot_id FROM communities WHERE id = 1"))
 		).scalar_one()
 		assert bot_id is None  # SET NULL, а не висячая ссылка
 
 		await session.execute(text("DELETE FROM tg_accounts WHERE id = 1"))
 		await session.commit()
 		account_id = (
-			await session.execute(text("SELECT tg_account_id FROM channels WHERE id = 1"))
+			await session.execute(text("SELECT tg_account_id FROM communities WHERE id = 1"))
 		).scalar_one()
 		assert account_id is None  # удаление аккаунта отвязывает канал (ADR-0019)
 
-		await session.execute(text("DELETE FROM channels WHERE id = 1"))
+		await session.execute(text("DELETE FROM communities WHERE id = 1"))
 		await session.commit()
-		for table in ("channel_settings", "caption_fields", "caption_values"):
+		for table in ("community_settings", "caption_fields", "caption_values"):
 			count = (
 				await session.execute(
 					text(f"SELECT COUNT(*) FROM {table}")  # noqa: S608 — имена из констант
@@ -185,7 +185,7 @@ def test_tg_api_columns_dropped_accounts_survive(tmp_path: Path) -> None:
 	assert api_rows == (0,)  # данные не переносятся — таблица пуста
 
 
-def test_channel_userbot_flag_becomes_binding_column(tmp_path: Path) -> None:
+def test_community_userbot_flag_becomes_binding_column(tmp_path: Path) -> None:
 	"""Миграция e6b9d43a7f21: флаг уходит, колонка привязки появляется пустой.
 
 	Переноса данных в миграции нет сознательно (разовая ручная привязка,
@@ -195,6 +195,7 @@ def test_channel_userbot_flag_becomes_binding_column(tmp_path: Path) -> None:
 	_upgrade(db_file, "d8f2a61c4e93")  # состояние до привязки
 	with sqlite3.connect(db_file) as conn:
 		conn.execute(
+			# имя таблицы до переименования a9d4c37e8b15
 			"INSERT INTO channels (title, tg_chat_id, userbot_admin,"
 			" created_at, updated_at) VALUES ('c', '-1001', 1,"
 			" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
@@ -202,13 +203,13 @@ def test_channel_userbot_flag_becomes_binding_column(tmp_path: Path) -> None:
 		conn.commit()
 	_upgrade(db_file, "head")
 	with sqlite3.connect(db_file) as conn:
-		columns = [row[1] for row in conn.execute("PRAGMA table_info(channels)")]
-		row = conn.execute("SELECT title, tg_account_id FROM channels").fetchone()
+		columns = [row[1] for row in conn.execute("PRAGMA table_info(communities)")]
+		row = conn.execute("SELECT title, tg_account_id FROM communities").fetchone()
 	assert "userbot_admin" not in columns and "tg_account_id" in columns
 	assert row == ("c", None)  # канал цел, привязка не переносится — ручная
 
 
-def test_channel_enabled_moves_to_settings(tmp_path: Path) -> None:
+def test_community_enabled_moves_to_settings(tmp_path: Path) -> None:
 	"""Перенос c8f1d29e4a35: выключенный канал — строкой, колонка удаляется.
 
 	Переносятся только отличия от умолчания: включённый канал строки
@@ -219,6 +220,7 @@ def test_channel_enabled_moves_to_settings(tmp_path: Path) -> None:
 	with sqlite3.connect(db_file) as conn:
 		for title, chat_id, enabled in (("Выкл", "-1001", 0), ("Вкл", "-1002", 1)):
 			conn.execute(
+				# имя таблицы до переименования a9d4c37e8b15
 				"INSERT INTO channels (title, tg_chat_id, enabled, userbot_admin,"
 				" created_at, updated_at) VALUES (?, ?, ?, 1,"
 				" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -228,9 +230,9 @@ def test_channel_enabled_moves_to_settings(tmp_path: Path) -> None:
 	_upgrade(db_file, "head")
 	with sqlite3.connect(db_file) as conn:
 		rows = conn.execute(
-			"SELECT channel_id, value FROM channel_settings WHERE name = 'enabled'"
+			"SELECT community_id, value FROM community_settings WHERE name = 'enabled'"
 		).fetchall()
-		columns = [row[1] for row in conn.execute("PRAGMA table_info(channels)")]
+		columns = [row[1] for row in conn.execute("PRAGMA table_info(communities)")]
 	assert rows == [(1, "false")]  # JSON-текст значения False
 	assert "enabled" not in columns
 

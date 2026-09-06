@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Channel
+from pxcontrol.engine.db.models import Community
 from pxcontrol.engine.services.settings import (
-	CHANNEL_DEFAULT_PRESET,
+	COMMUNITY_DEFAULT_PRESET,
 	VIDEO_PROCESSED_DIR,
 	VIDEO_QUEUED_DIR,
 	SettingsService,
@@ -100,7 +100,7 @@ async def test_prepare_uses_processed_dir_setting_and_subdir(
 	assert Path(output).parent == tmp_path / "мои-результаты" / "паб"
 
 
-async def test_dirs_for_and_processed_dir_for_channel(
+async def test_dirs_for_and_processed_dir_for_community(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""dirs_for создаёт папки; папка результатов канала — из его пресета."""
@@ -112,16 +112,16 @@ async def test_dirs_for_and_processed_dir_for_channel(
 	assert Path(dirs.processed).is_dir() and Path(dirs.published).is_dir()
 	# канал без пресета — корень результатов
 	async with db.session_factory() as session:
-		channel = Channel(title="Канал", tg_chat_id="-1001")
-		session.add(channel)
+		community = Community(title="Канал", tg_chat_id="-1001")
+		session.add(community)
 		await session.commit()
-		await session.refresh(channel)
-	root = await service.processed_dir_for_channel(channel.id)
+		await session.refresh(community)
+	root = await service.processed_dir_for_community(community.id)
 	assert root == str(tmp_path / "media" / "processed")
 	# канал с пресетом — подпапка пресета
 	preset = await service.save_preset(PresetFields(name="Суб", subdir="суб"))
-	await settings.set_for(CHANNEL_DEFAULT_PRESET, channel.id, preset.id)
-	assert (await service.processed_dir_for_channel(channel.id)).endswith("/суб")
+	await settings.set_for(COMMUNITY_DEFAULT_PRESET, community.id, preset.id)
+	assert (await service.processed_dir_for_community(community.id)).endswith("/суб")
 
 
 async def test_list_processed_shows_whole_subdir(db: Database, tmp_path: Path) -> None:
@@ -267,20 +267,20 @@ async def test_delete_processed_prunes_empty_dir(db: Database, tmp_path: Path) -
 	assert blocked.is_dir()  # файл может вернуться из очереди — папка стоит
 
 
-async def test_delete_preset_clears_channel_defaults(db: Database) -> None:
+async def test_delete_preset_clears_community_defaults(db: Database) -> None:
 	"""Удаление пресета снимает его у каналов (ADR-0013, вариант «а»)."""
 	service = VideoService(db, "ffmpeg", processor=FakeProcessor())
 	preset = await service.save_preset(FIELDS)
 	keep = await service.save_preset(PresetFields(name="Другой"))
 	async with db.session_factory() as session:
-		channel = Channel(title="Канал", tg_chat_id="-1001")
-		session.add(channel)
+		community = Community(title="Канал", tg_chat_id="-1001")
+		session.add(community)
 		await session.commit()
-		await session.refresh(channel)
+		await session.refresh(community)
 	settings = SettingsService(db)
-	await settings.set_for(CHANNEL_DEFAULT_PRESET, channel.id, preset.id)
+	await settings.set_for(COMMUNITY_DEFAULT_PRESET, community.id, preset.id)
 	await service.delete_preset(preset.id)
-	assert await settings.get_for(CHANNEL_DEFAULT_PRESET, channel.id) is None
+	assert await settings.get_for(COMMUNITY_DEFAULT_PRESET, community.id) is None
 	# другой пресет не задет
 	assert [p.id for p in await service.list_presets()] == [keep.id]
 

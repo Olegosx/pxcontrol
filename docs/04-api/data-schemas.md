@@ -27,7 +27,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | Тип | Модуль | Роль |
 | --- | --- | --- |
 | `BotDto`, `TgAccountDto`, `TgApiDto`, `AiKeyDto` | `accounts.py` | аккаунты: боты, userbot, ключ API приложения (ADR-0018), ключи ИИ |
-| `ChannelDto`, `ChannelAccess` | `channels.py` | канал и итог перепроверки доступов |
+| `CommunityDto`, `CommunityAccess` | `communities.py` | канал и итог перепроверки доступов |
 | `PostDraft` | `posts.py` | черновик публикации — единый вход для всех типов контента |
 | `PublishCapabilities`, `ScheduledPostDto` | `posts.py` | возможности канала; отложенная запись из Telegram |
 | `QueueItemDto`, `QueueItemStatus` | `publish_queue.py` | элемент очереди отправки и его статус |
@@ -47,7 +47,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | Тип | Роль |
 | --- | --- |
 | `MediaKind` | тип вложения поста (текст/фото/видео/аудио/файл) |
-| `ChannelInfo` | канал, проверенный любым транспортом (бот или userbot) |
+| `CommunityInfo` | канал, проверенный любым транспортом (бот или userbot) |
 | `OutgoingPost` | исходящий пост для транспорта |
 | `ScheduledMessage` | отложенная запись, прочитанная из Telegram |
 
