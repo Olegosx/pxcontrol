@@ -239,6 +239,8 @@ class PublishQueueItem(TimestampMixin, Base):
 	# желаемый момент публикации (UTC); NULL — «сейчас»
 	when: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 	rename_to: Mapped[str | None] = mapped_column(String(255))
+	# тема форума (id корневого сообщения темы); NULL — общая лента (ADR-0021)
+	topic_id: Mapped[int | None] = mapped_column(Integer)
 	# pending — готов к отправке; waiting — ждёт слота отложек; error
 	status: Mapped[str] = mapped_column(String(16))
 	error: Mapped[str | None] = mapped_column(Text)

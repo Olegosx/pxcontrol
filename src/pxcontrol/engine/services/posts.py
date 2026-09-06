@@ -38,6 +38,7 @@ from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
+	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
@@ -118,6 +119,8 @@ class PostDraft:
 		when: момент публикации (None — «сейчас»).
 		rename_to: новое имя файла (без пути) перед отправкой; вместе
 			с файлом переименовывается его кадр-превью (сосед ``.png``).
+		topic_id: тема форума (id корневого сообщения; None — общая
+			лента; допустима только у сообществ с включёнными темами).
 	"""
 
 	community_id: int
@@ -126,6 +129,7 @@ class PostDraft:
 	media_kind: MediaKind = MediaKind.NONE
 	when: datetime | None = None
 	rename_to: str | None = None
+	topic_id: int | None = None
 
 
 def _free_name(target: Path) -> Path:
@@ -165,7 +169,11 @@ class _PostPort(Protocol):
 
 	def userbot_premium(self, account_id: int | None) -> bool: ...
 
-	async def send_text(self, token: str, chat_id: str, text: str) -> int: ...
+	async def send_text(
+		self, token: str, chat_id: str, text: str, topic_id: int | None = None
+	) -> int: ...
+
+	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]: ...
 
 	async def publish(
 		self,
@@ -176,7 +184,13 @@ class _PostPort(Protocol):
 	) -> None: ...
 
 	async def send_media(
-		self, token: str, chat_id: str, kind: MediaKind, path: str, caption: str
+		self,
+		token: str,
+		chat_id: str,
+		kind: MediaKind,
+		path: str,
+		caption: str,
+		topic_id: int | None = None,
 	) -> int: ...
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
@@ -274,6 +288,13 @@ class PostsService:
 			# (автопостинг из источников) не должен писать в выключенный канал
 			raise PostError(
 				f"Канал «{community.title}» выключен — включите его на странице «Каналы»."
+			)
+		if draft.topic_id is not None and not community.forum:
+			# тема живёт только в форуме: без проверки пост с темой улетел бы
+			# в Telegram и вернулся сырой ошибкой TOPIC_ID_INVALID
+			raise PostError(
+				f"У «{community.title}» нет тем (форум выключен) — "
+				"обновите выбор темы или перепроверьте доступы."
 			)
 		caps = publish_capabilities(community.bot is not None, community.tg_account_id is not None)
 		self._check_transport(caps, draft, community.tg_account_id)
@@ -388,6 +409,7 @@ class PostsService:
 				media_kind=draft.media_kind,
 				when=draft.when,
 				thumb_path=thumb,
+				topic_id=draft.topic_id,
 			)
 			await self._gateway.publish(
 				community.tg_account_id, community.tg_chat_id, post, on_progress
@@ -404,7 +426,9 @@ class PostsService:
 		if community.bot is None:  # publish() сюда без бота не приводит
 			raise PostError("У канала не назначен бот — переподключите канал.")
 		if media_path is None:
-			await self._gateway.send_text(community.bot.token, community.tg_chat_id, draft.text)
+			await self._gateway.send_text(
+				community.bot.token, community.tg_chat_id, draft.text, draft.topic_id
+			)
 			return
 		await self._gateway.send_media(
 			community.bot.token,
@@ -412,7 +436,31 @@ class PostsService:
 			draft.media_kind,
 			media_path,
 			draft.text,
+			draft.topic_id,
 		)
+
+	async def list_topics(self, community_id: int) -> list[ForumTopicInfo]:
+		"""Читает темы форума сообщества живьём (истина — Telegram).
+
+		Только userbot: у Bot API метода перечисления тем нет — форум
+		с одним ботом публикует в общую ленту (ограничение зафиксировано
+		в ADR-0021).
+
+		Raises:
+			PostError: Сообщество не найдено, темы выключены или нет
+				userbot-привязки.
+			UserbotUnavailableError: Аккаунт недоступен или Telegram
+				отказал.
+		"""
+		community = await self._get_community(community_id)
+		if not community.forum:
+			raise PostError(f"У «{community.title}» темы (форум) не включены.")
+		if community.tg_account_id is None:
+			raise PostError(
+				f"Темы «{community.title}» может прочитать только userbot — "
+				"привяжите аккаунт на странице «Каналы»."
+			)
+		return await self._gateway.get_forum_topics(community.tg_account_id, community.tg_chat_id)
 
 	async def _move_to_published(self, media_path: str) -> None:
 		"""Переносит опубликованное видео из результатов в опубликованные.

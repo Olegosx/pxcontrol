@@ -100,6 +100,8 @@ class OutgoingPost:
 		media_kind: тип вложения.
 		when: момент публикации (None — «сейчас»).
 		thumb_path: JPEG-миниатюра видео (None — без неё).
+		topic_id: тема форума (id корневого сообщения темы;
+			None — общая лента, для каналов и обычных групп всегда None).
 	"""
 
 	text: str = ""
@@ -107,6 +109,24 @@ class OutgoingPost:
 	media_kind: MediaKind = MediaKind.NONE
 	when: datetime | None = None
 	thumb_path: str | None = None
+	topic_id: int | None = None
+
+
+@dataclass(frozen=True)
+class ForumTopicInfo:
+	"""Тема форума, прочитанная транспортом из Telegram (ADR-0021).
+
+	Темы не хранятся в БД — список читается живьём (истина — Telegram,
+	принцип ADR-0010). Перечислять темы умеет только userbot: у Bot API
+	такого метода нет.
+
+	Attributes:
+		id: идентификатор темы (id корневого сообщения; «General» — 1).
+		title: название темы.
+	"""
+
+	id: int
+	title: str
 
 
 @dataclass(frozen=True)

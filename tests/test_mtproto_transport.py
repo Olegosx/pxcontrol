@@ -50,8 +50,10 @@ class _FakeClient:
 	async def disconnect(self) -> None:
 		self.connected = False
 
-	async def send_message(self, entity: Any, text: str, schedule: Any = None) -> None:
-		self.sent.append((entity, text, schedule))
+	async def send_message(
+		self, entity: Any, text: str, schedule: Any = None, reply_to: Any = None
+	) -> None:
+		self.sent.append((entity, text, schedule, reply_to))
 
 	async def send_file(self, entity: Any, file: str, **kwargs: Any) -> None:
 		progress = kwargs.pop("progress_callback", None)
@@ -70,6 +72,15 @@ class _FakeClient:
 		return self.permissions
 
 	async def __call__(self, request: Any) -> Any:
+		if type(request).__name__ == "GetForumTopicsRequest":
+			return SimpleNamespace(
+				topics=[
+					SimpleNamespace(id=1, title="General"),
+					SimpleNamespace(id=7, title="Новости"),
+					SimpleNamespace(id=9, title=None),  # ForumTopicDeleted
+				],
+				count=3,
+			)
 		return SimpleNamespace(
 			messages=[
 				SimpleNamespace(message="из телеграма", date=datetime(2026, 7, 13, tzinfo=UTC)),
@@ -202,7 +213,7 @@ async def test_reconnects_on_demand_after_network_drop() -> None:
 	fake.connected = False  # Telethon исчерпал свои попытки и отключился
 	await transport.publish("-1001234", OutgoingPost(text="после обрыва"))
 	assert fake.connected is True
-	assert fake.sent == [(-1001234, "после обрыва", None)]
+	assert fake.sent == [(-1001234, "после обрыва", None, None)]
 
 
 async def test_failed_reconnect_gives_clear_error() -> None:
@@ -227,7 +238,7 @@ async def test_failed_reconnect_gives_clear_error() -> None:
 		await transport.publish("-1001", OutgoingPost(text="x"))
 	flaky.fail_connect = False  # сеть вернулась — следующая операция чинит сама
 	await transport.publish("-1001", OutgoingPost(text="ожил"))
-	assert [text for _peer, text, _when in flaky.sent] == ["ожил"]
+	assert [text for _peer, text, _when, _topic in flaky.sent] == ["ожил"]
 
 
 async def test_reconnect_detects_revoked_session() -> None:
@@ -279,7 +290,7 @@ async def test_publish_text_passes_schedule() -> None:
 	await transport.start()
 	when = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 	await transport.publish("-1001234", OutgoingPost(text="текст", when=when))
-	assert fake.sent == [(-1001234, "текст", when)]
+	assert fake.sent == [(-1001234, "текст", when, None)]
 	assert fake.files == []
 
 
@@ -547,3 +558,25 @@ async def test_check_community_channel_requires_admin() -> None:
 	await transport.start()
 	with pytest.raises(UserbotUnavailableError, match="не администратор"):
 		await transport.check_community("@chan")
+
+
+async def test_publish_passes_topic() -> None:
+	"""Тема форума уходит транспорту ответом на её корневое сообщение."""
+	fake = _FakeClient()
+	transport = _transport(fake)
+	await transport.start()
+	await transport.publish("-1001234", OutgoingPost(text="в тему", topic_id=7))
+	assert fake.sent == [(-1001234, "в тему", None, 7)]
+	await transport.publish(
+		"-1001234", OutgoingPost(media_path="v.mp4", media_kind=MediaKind.VIDEO, topic_id=7)
+	)
+	assert fake.files[-1]["reply_to"] == 7
+
+
+async def test_get_forum_topics_skips_deleted() -> None:
+	"""Список тем: удалённые (без названия) пропускаются, id и названия целы."""
+	fake = _FakeClient()
+	transport = _transport(fake)
+	await transport.start()
+	topics = await transport.get_forum_topics("-1001234")
+	assert [(t.id, t.title) for t in topics] == [(1, "General"), (7, "Новости")]

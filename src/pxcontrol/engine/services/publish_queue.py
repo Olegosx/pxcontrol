@@ -225,6 +225,7 @@ class PublishQueue:
 					media_kind=MediaKind(row.media_kind),
 					when=_as_utc(row.when),
 					rename_to=row.rename_to,
+					topic_id=row.topic_id,
 				)
 			)
 			item = _Item(row.id, draft, titles[row.community_id])
@@ -281,6 +282,7 @@ class PublishQueue:
 					media_kind=str(draft.media_kind),
 					when=draft.when,
 					rename_to=draft.rename_to,
+					topic_id=draft.topic_id,
 					status=self._initial_status(draft).value,
 				)
 				for draft in stashed

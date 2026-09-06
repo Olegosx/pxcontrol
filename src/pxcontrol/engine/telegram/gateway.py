@@ -30,6 +30,7 @@ from pxcontrol.engine.telegram.mtproto import (
 )
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
+	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
@@ -147,21 +148,29 @@ class TelegramGateway:
 		"""
 		return await get_bot_events(token)
 
-	async def send_text(self, token: str, chat_id: str, text: str) -> int:
+	async def send_text(
+		self, token: str, chat_id: str, text: str, topic_id: int | None = None
+	) -> int:
 		"""Публикует текстовый пост «сейчас» через бота.
 
 		Raises: см. :func:`bot_api.send_text`.
 		"""
-		return await send_text(token, chat_id, text)
+		return await send_text(token, chat_id, text, topic_id)
 
 	async def send_media(
-		self, token: str, chat_id: str, kind: MediaKind, path: str, caption: str
+		self,
+		token: str,
+		chat_id: str,
+		kind: MediaKind,
+		path: str,
+		caption: str,
+		topic_id: int | None = None,
 	) -> int:
 		"""Отправляет медиа ботом (запасной транспорт, лимит 50 МБ).
 
 		Raises: см. :func:`bot_api.send_media`.
 		"""
-		return await send_media(token, chat_id, kind, path, caption)
+		return await send_media(token, chat_id, kind, path, caption, topic_id)
 
 	# --- MTProto (userbot) -------------------------------------------------------
 
@@ -200,6 +209,16 @@ class TelegramGateway:
 			UserbotUnavailableError: Прочие отказы Telegram (лимиты и т.п.).
 		"""
 		await self._userbot(account_id).publish(chat_id, post, on_progress)
+
+	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
+		"""Читает темы форума аккаунтом сообщества (только userbot, ADR-0021).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotUnavailableError: Прочие отказы Telegram (не форум и т.п.).
+		"""
+		return await self._userbot(account_id).get_forum_topics(chat_id)
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала из Telegram (его аккаунтом).

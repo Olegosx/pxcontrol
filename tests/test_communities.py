@@ -403,6 +403,10 @@ async def test_group_connect_stores_kind_and_forum(db: Database) -> None:
 	row = await _community_row(db, dto.id)
 	assert row.kind == "group"
 	assert row.forum is True
+	# DTO несёт вид и форум для интерфейса (этап 2)
+	assert dto.kind is CommunityKind.GROUP and dto.forum is True
+	listed = await service.list_communities()
+	assert listed[0].kind is CommunityKind.GROUP and listed[0].forum is True
 
 
 async def test_recheck_refreshes_forum_keeps_kind(db: Database) -> None:

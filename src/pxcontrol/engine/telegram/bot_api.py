@@ -208,8 +208,18 @@ def ensure_bot_can_send_in_group(member: Any, default_permissions: Any) -> None:
 		)
 
 
-async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, caption: str) -> int:
-	"""Отправляет медиа в канал через Bot API (лимит — 50 МБ на файл).
+async def send_media(
+	token: str,
+	chat_id: str,
+	kind: MediaKind,
+	path: str,
+	caption: str,
+	topic_id: int | None = None,
+) -> int:
+	"""Отправляет медиа через Bot API (лимит — 50 МБ на файл).
+
+	``topic_id`` — тема форума (``message_thread_id``); None — общая
+	лента (для каналов и обычных групп всегда None).
 
 	Returns:
 		ID сообщения в Telegram.
@@ -230,27 +240,46 @@ async def send_media(token: str, chat_id: str, kind: MediaKind, path: str, capti
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			if kind is MediaKind.PHOTO:
 				message = await bot.send_photo(
-					_chat_id(chat_id), file, caption=text, parse_mode=mode
+					_chat_id(chat_id),
+					file,
+					caption=text,
+					parse_mode=mode,
+					message_thread_id=topic_id,
 				)
 			elif kind is MediaKind.VIDEO:
 				message = await bot.send_video(
-					_chat_id(chat_id), file, caption=text, parse_mode=mode, supports_streaming=True
+					_chat_id(chat_id),
+					file,
+					caption=text,
+					parse_mode=mode,
+					supports_streaming=True,
+					message_thread_id=topic_id,
 				)
 			elif kind is MediaKind.AUDIO:
 				message = await bot.send_audio(
-					_chat_id(chat_id), file, caption=text, parse_mode=mode
+					_chat_id(chat_id),
+					file,
+					caption=text,
+					parse_mode=mode,
+					message_thread_id=topic_id,
 				)
 			else:
 				message = await bot.send_document(
-					_chat_id(chat_id), file, caption=text, parse_mode=mode
+					_chat_id(chat_id),
+					file,
+					caption=text,
+					parse_mode=mode,
+					message_thread_id=topic_id,
 				)
 			return int(message.message_id)
 	finally:
 		await bot.session.close()
 
 
-async def send_text(token: str, chat_id: str, text: str) -> int:
-	"""Публикует текстовый пост в канал через Bot API («сейчас»).
+async def send_text(token: str, chat_id: str, text: str, topic_id: int | None = None) -> int:
+	"""Публикует текстовый пост через Bot API («сейчас»).
+
+	``topic_id`` — тема форума (``message_thread_id``); None — общая лента.
 
 	Returns:
 		ID сообщения в Telegram.
@@ -264,7 +293,9 @@ async def send_text(token: str, chat_id: str, text: str) -> int:
 	bot = _make_bot(token)
 	try:
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
-			message = await bot.send_message(_chat_id(chat_id), to_html(text), parse_mode="HTML")
+			message = await bot.send_message(
+				_chat_id(chat_id), to_html(text), parse_mode="HTML", message_thread_id=topic_id
+			)
 			return int(message.message_id)
 	finally:
 		await bot.session.close()

@@ -20,7 +20,7 @@ from pxcontrol.engine.db.models import Bot, Community, TgAccount
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
-from pxcontrol.engine.telegram.types import CommunityInfo
+from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class _CommunityChecker(Protocol):
 
 @dataclass(frozen=True)
 class CommunityDto:
-	"""Канал для показа в интерфейсе."""
+	"""Сообщество для показа в интерфейсе (вид и форум — ADR-0021)."""
 
 	id: int
 	title: str
@@ -66,6 +66,8 @@ class CommunityDto:
 	enabled: bool
 	tg_account_id: int | None = None
 	tg_account_label: str | None = None
+	kind: CommunityKind = CommunityKind.CHANNEL
+	forum: bool = False
 
 	@property
 	def userbot_admin(self) -> bool:
@@ -487,4 +489,6 @@ class CommunitiesService:
 			enabled,
 			community.tg_account_id,
 			community.tg_account.label if community.tg_account is not None else None,
+			kind=CommunityKind(community.kind),
+			forum=community.forum,
 		)

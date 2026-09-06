@@ -17,7 +17,12 @@ from pxcontrol.engine.services.posts import (
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotFloodError, UserbotUnavailableError
-from pxcontrol.engine.telegram.types import MediaKind, OutgoingPost, ScheduledMessage
+from pxcontrol.engine.telegram.types import (
+	ForumTopicInfo,
+	MediaKind,
+	OutgoingPost,
+	ScheduledMessage,
+)
 
 
 class _FakeGateway:
@@ -29,6 +34,8 @@ class _FakeGateway:
 
 	def __init__(self) -> None:
 		self.sent: list[tuple[str, str, str]] = []
+		self.sent_topics: list[int | None] = []
+		self.topics: list[ForumTopicInfo] = []
 		self.media: list[tuple[str, str, str, str, str]] = []
 		self.published: list[tuple[int, str, OutgoingPost]] = []
 		self.userbot_ok = True
@@ -37,13 +44,27 @@ class _FakeGateway:
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return account_id in self.premium_ids
 
-	async def send_text(self, token: str, chat_id: str, text: str) -> int:
+	async def send_text(
+		self, token: str, chat_id: str, text: str, topic_id: int | None = None
+	) -> int:
 		self.sent.append((token, chat_id, text))
+		self.sent_topics.append(topic_id)
 		return 42
 
-	async def send_media(self, token: str, chat_id: str, kind: str, path: str, caption: str) -> int:
+	async def send_media(
+		self,
+		token: str,
+		chat_id: str,
+		kind: str,
+		path: str,
+		caption: str,
+		topic_id: int | None = None,
+	) -> int:
 		self.media.append((token, chat_id, kind, path, caption))
 		return 43
+
+	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
+		return list(self.topics)
 
 	async def publish(
 		self, account_id: int, chat_id: str, post: OutgoingPost, on_progress: object
@@ -82,8 +103,14 @@ async def _add_account(db: Database, label: str = "@ub") -> int:
 		return account.id
 
 
-async def _add_community(db: Database, with_bot: bool = True, userbot_admin: bool = True) -> int:
-	"""Создаёт канал (при нужде — бота и userbot-аккаунт), возвращает id."""
+async def _add_community(
+	db: Database,
+	with_bot: bool = True,
+	userbot_admin: bool = True,
+	forum: bool = False,
+	tg_chat_id: str = "-1001",
+) -> int:
+	"""Создаёт сообщество (при нужде — бота и userbot-аккаунт), возвращает id."""
 	async with db.session_factory() as session:
 		bot_id = None
 		if with_bot:
@@ -99,7 +126,9 @@ async def _add_community(db: Database, with_bot: bool = True, userbot_admin: boo
 			account_id = account.id
 		community = Community(
 			title="Канал",
-			tg_chat_id="-1001",
+			tg_chat_id=tg_chat_id,
+			kind="group" if forum else "channel",
+			forum=forum,
 			bot_id=bot_id,
 			tg_account_id=account_id,
 		)
@@ -710,3 +739,55 @@ async def test_list_scheduled_flood_skips_rest_of_account(db: Database) -> None:
 		await session.commit()
 	assert await service.list_scheduled() == []  # ни ошибок, ни данных
 	assert len(calls) == 1  # после флуда второй канал аккаунта не опрашивался
+
+
+async def test_topic_requires_forum(db: Database) -> None:
+	"""Тема при выключенном форуме отклоняется до любых побочных эффектов."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	with pytest.raises(PostError, match="нет тем"):
+		await service.publish(PostDraft(community_id, text="в тему", topic_id=7))
+	assert gateway.published == [] and gateway.sent == []
+
+
+async def test_topic_passes_to_userbot(db: Database) -> None:
+	"""Тема форума доезжает до userbot-транспорта в исходящем посте."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, forum=True)
+	await service.publish(PostDraft(community_id, text="в тему", topic_id=7))
+	assert [post.topic_id for _chat, post in gateway.sent_posts()] == [7]
+
+
+async def test_topic_passes_to_bot(db: Database) -> None:
+	"""Бот умеет отправлять в тему (message_thread_id) — тема доезжает."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, userbot_admin=False, forum=True)
+	await service.publish(PostDraft(community_id, text="в тему", topic_id=7))
+	assert gateway.sent_topics == [7]
+
+
+async def test_list_topics_guards_and_reads(db: Database) -> None:
+	"""Список тем: только форум и только userbot; чтение — живьём из шлюза."""
+	gateway = _FakeGateway()
+	gateway.topics = [ForumTopicInfo(1, "General"), ForumTopicInfo(7, "Новости")]
+	service = PostsService(db, gateway)
+	plain = await _add_community(db)
+	with pytest.raises(PostError, match="не включены"):
+		await service.list_topics(plain)
+	# сообщество-форум только с ботом: перечислить темы нечем (Bot API не умеет)
+	bot_only = await _add_community(db, userbot_admin=False, forum=True, tg_chat_id="-1002")
+	with pytest.raises(PostError, match="userbot"):
+		await service.list_topics(bot_only)
+
+
+async def test_list_topics_returns_from_gateway(db: Database) -> None:
+	"""Темы форума с userbot-привязкой читаются через шлюз."""
+	gateway = _FakeGateway()
+	gateway.topics = [ForumTopicInfo(1, "General"), ForumTopicInfo(7, "Новости")]
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, with_bot=False, forum=True)
+	topics = await service.list_topics(community_id)
+	assert [(t.id, t.title) for t in topics] == [(1, "General"), (7, "Новости")]

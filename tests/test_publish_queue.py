@@ -516,6 +516,28 @@ async def test_schedule_full_race_returns_to_waiting(
 	assert [post.text for post in gateway.published] == ["гонка"]
 
 
+async def test_topic_persisted_and_restored(db: Database, make_queue: QueueFactory) -> None:
+	"""Тема форума элемента очереди переживает перезапуск (ADR-0021)."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(
+		PostDraft(community_id, text="в тему", when=_future(120), topic_id=7)
+	)
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	async with db.session_factory() as session:
+		row = await session.get(PublishQueueItem, item)
+		assert row is not None and row.topic_id == 7
+	await queue.shutdown()
+
+	restarted = make_queue(gateway)  # «перезапуск приложения»
+	await restarted.load()
+	drafts = {i.id: i.draft for i in restarted._items}  # noqa: SLF001 — восстановленный черновик
+	assert drafts[item].topic_id == 7
+
+
 async def test_queue_survives_restart(db: Database, make_queue: QueueFactory) -> None:
 	"""Очередь восстанавливается из БД: статусы, ошибки и aware-времена."""
 	gateway = _SlotGateway()

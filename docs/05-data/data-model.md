@@ -138,6 +138,7 @@
 | `media_kind` | str | тип вложения (`MediaKind`) |
 | `when` | datetime? | желаемый момент публикации (UTC); NULL — «сейчас» |
 | `rename_to` | str? | переименование при отправке |
+| `topic_id` | int? | тема форума (id корневого сообщения; NULL — общая лента); миграция `c5f8a24d7b31` |
 | `status` | str | `pending` / `waiting` (ждёт слота отложек) / `error` |
 | `error` | text? | текст ошибки последней попытки |
 

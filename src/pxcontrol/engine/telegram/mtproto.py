@@ -21,6 +21,7 @@ from pxcontrol.engine.telegram.types import (
 	TELEGRAM_MAX_SCHEDULED,
 	CommunityInfo,
 	CommunityKind,
+	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
@@ -471,8 +472,11 @@ class MtprotoTransport:
 				on_progress(sent / total)
 
 		async with _mtproto_errors():
+			# тема форума адресуется ответом на её корневое сообщение
 			if post.media_path is None:
-				await client.send_message(peer, post.text, schedule=post.when)
+				await client.send_message(
+					peer, post.text, schedule=post.when, reply_to=post.topic_id
+				)
 			else:
 				await client.send_file(
 					peer,
@@ -483,6 +487,7 @@ class MtprotoTransport:
 					force_document=post.media_kind is MediaKind.DOCUMENT,
 					progress_callback=_progress,
 					thumb=post.thumb_path,
+					reply_to=post.topic_id,
 				)
 		logger.info(
 			"Пост отправлен в чат %s (%s, %s).",
@@ -526,6 +531,44 @@ class MtprotoTransport:
 			kind=kind,
 			forum=bool(getattr(entity, "forum", False)),
 		)
+
+	async def get_forum_topics(self, chat_id: str) -> list[ForumTopicInfo]:
+		"""Читает темы форума (id и название), «General» — id 1.
+
+		Одним запросом до 100 тем: больше на живых форумах — экзотика;
+		если тем всё же больше, хвост не читается — об этом след в логе
+		(правило «нет молчаливых обрезаний»).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotUnavailableError: Прочие отказы Telegram (не форум,
+				чат не виден и т.п.).
+		"""
+		from telethon.tl.functions.messages import GetForumTopicsRequest
+
+		client = await self._connected_client()
+		peer_id = _peer_id(chat_id)
+		async with _mtproto_errors():
+			entity = await client.get_input_entity(peer_id)
+			result = await client(
+				GetForumTopicsRequest(
+					peer=entity, offset_date=None, offset_id=0, offset_topic=0, limit=100
+				)
+			)
+		topics = [
+			ForumTopicInfo(id=topic.id, title=topic.title)
+			for topic in result.topics
+			if getattr(topic, "title", None) is not None  # ForumTopicDeleted — без названия
+		]
+		total = getattr(result, "count", len(topics))
+		if total > len(result.topics):
+			logger.warning(
+				"Форум %s: тем больше лимита выборки (%s > %s) — хвост не показан.",
+				chat_id,
+				total,
+				len(result.topics),
+			)
+		return topics
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""
