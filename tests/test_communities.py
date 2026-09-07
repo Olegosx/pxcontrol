@@ -433,6 +433,19 @@ async def test_recheck_refreshes_forum_keeps_kind(db: Database) -> None:
 	assert (await _community_row(db, dto.id)).kind == "group"
 
 
+async def test_get_community_snapshot(db: Database) -> None:
+	"""Снимок одного сообщества: свежие данные или понятная ошибка."""
+	gateway = _FakeGateway()
+	account_id = await _make_account(db)
+	gateway.userbot_admins.add(account_id)
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
+	snapshot = await service.get_community(dto.id)
+	assert snapshot.id == dto.id and snapshot.title == dto.title
+	with pytest.raises(CommunityError, match="не найден"):
+		await service.get_community(999_999)
+
+
 async def test_confirmed_checks_call_profile_sync_hook(db: Database) -> None:
 	"""Живая проверка прав дёргает крючок актуализации профиля аккаунта.
 

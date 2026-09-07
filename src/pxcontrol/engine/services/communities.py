@@ -152,6 +152,14 @@ class CommunitiesService:
 				self._dto(ch, enabled=enabled.get(ch.id, COMMUNITY_ENABLED.default)) for ch in rows
 			]
 
+	async def get_community(self, community_id: int) -> CommunityDto:
+		"""Свежий снимок одного сообщества (страница сообщества в интерфейсе).
+
+		Raises:
+			CommunityError: Сообщество не найдено (например, уже удалено).
+		"""
+		return await self._fresh_dto(community_id)
+
 	async def add_community(self, bot_id: int, chat_ref: str) -> CommunityDto:
 		"""Подключает канал через бота (с попутным поиском userbot-админа).
 
