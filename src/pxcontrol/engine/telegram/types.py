@@ -103,6 +103,22 @@ class CommunityInfo:
 
 
 @dataclass(frozen=True)
+class CommunityStatsInfo:
+	"""Живая статистика сообщества из полной информации о канале.
+
+	Оба поля — из одного ответа Telegram (``GetFullChannelRequest``):
+	отдельных запросов на онлайн нет. None — Telegram поле не отдал.
+
+	Attributes:
+		participants: подписчики канала или участники группы.
+		online: сколько участников сейчас онлайн (только у групп).
+	"""
+
+	participants: int | None
+	online: int | None
+
+
+@dataclass(frozen=True)
 class UserbotProfile:
 	"""Профиль владельца userbot-сессии (ответ Telegram «кто я»).
 

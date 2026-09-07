@@ -21,6 +21,7 @@ from pxcontrol.engine.telegram.types import (
 	TELEGRAM_MAX_SCHEDULED,
 	CommunityInfo,
 	CommunityKind,
+	CommunityStatsInfo,
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
@@ -605,6 +606,51 @@ class MtprotoTransport:
 				len(result.topics),
 			)
 		return topics
+
+	async def community_stats(self, chat_id: str) -> CommunityStatsInfo:
+		"""Читает подписчиков и онлайн сообщества (один запрос Telegram).
+
+		``GetFullChannelRequest`` отдаёт оба поля разом; супергруппы
+		в MTProto — те же каналы, малые группы не подключаются
+		(ADR-0021), поэтому запрос един для обоих видов.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotFloodError: Флуд-лимит — вызывающий пропускает аккаунт.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.channels import GetFullChannelRequest
+
+		client = await self._connected_client()
+		peer_id = _peer_id(chat_id)
+		async with _mtproto_errors():
+			entity = await client.get_input_entity(peer_id)
+			result = await client(GetFullChannelRequest(channel=entity))
+		full = result.full_chat
+		return CommunityStatsInfo(
+			participants=getattr(full, "participants_count", None),
+			online=getattr(full, "online_count", None) or None,
+		)
+
+	async def download_avatar(self, chat_id: str, target: str) -> str | None:
+		"""Скачивает аватар сообщества в файл ``target``.
+
+		Returns:
+			Путь скачанного файла или None — у сообщества нет аватара.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotFloodError: Флуд-лимит — вызывающий пропускает аккаунт.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		client = await self._connected_client()
+		peer_id = _peer_id(chat_id)
+		async with _mtproto_errors():
+			entity = await client.get_input_entity(peer_id)
+			path = await client.download_profile_photo(entity, file=target)
+		return str(path) if path else None
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""

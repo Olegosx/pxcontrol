@@ -14,7 +14,7 @@ from collections.abc import Callable
 from functools import partial
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QShowEvent
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
@@ -36,6 +36,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
 from pxcontrol.engine.telegram.types import CommunityKind
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -67,12 +68,20 @@ _LOGO_SIZE = 44
 #: Размер карточки сообщества в сетке дашборда (пиксели). Высота
 #: фиксирована: карточки в сетке обязаны быть одинаковыми, содержимое
 #: подгоняется (длинные тексты сокращаются многоточием).
-_CARD_WIDTH = 330
+_CARD_WIDTH = 360
 _CARD_HEIGHT = 150
 
 #: Внутренние отступы карточки и ширина текста шапки (пиксели).
 _CARD_MARGIN = 16
 _TITLE_WIDTH = _CARD_WIDTH - 2 * _CARD_MARGIN - _LOGO_SIZE - 12
+
+#: Цвет значения метрики «ошибки», когда они есть (светлая/тёмная тема).
+_ERROR_LIGHT = QColor(196, 43, 28)
+_ERROR_DARK = QColor(255, 153, 164)
+
+#: Предел ширины значения метрики (пиксели): подписи короткие, а вот
+#: значение (число подписчиков) может разрастись — обрезается с «…».
+_METRIC_VALUE_WIDTH = 90
 
 #: Размер плитки сводки (пиксели): одинаковый у всех — ряд ровный,
 #: ширины хватает самой длинной подписи («в очереди отправки»).
@@ -92,11 +101,7 @@ def _elide(label: QLabel, text: str, width: int) -> None:
 
 
 def _logo_placeholder(parent: QWidget, community: CommunityDto) -> QLabel:
-	"""Логотип-заглушка: первая буква названия на цветной подложке.
-
-	Когда появится загрузка аватаров из Telegram, картинка встанет
-	в этот же квадрат — вёрстка шапки не изменится.
-	"""
+	"""Логотип-заглушка: первая буква названия на цветной подложке."""
 	label = QLabel(community.title[:1].upper() or "?", parent)
 	label.setFixedSize(_LOGO_SIZE, _LOGO_SIZE)
 	label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -108,15 +113,58 @@ def _logo_placeholder(parent: QWidget, community: CommunityDto) -> QLabel:
 	return label
 
 
+def _round_pixmap(path: str, size: int) -> QPixmap | None:
+	"""Круглая миниатюра из файла (None — файл не читается)."""
+	source = QPixmap(path)
+	if source.isNull():
+		return None
+	scaled = source.scaled(
+		size,
+		size,
+		Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+		Qt.TransformationMode.SmoothTransformation,
+	)
+	rounded = QPixmap(size, size)
+	rounded.fill(Qt.GlobalColor.transparent)
+	painter = QPainter(rounded)
+	painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+	clip = QPainterPath()
+	clip.addEllipse(0, 0, size, size)
+	painter.setClipPath(clip)
+	painter.drawPixmap(0, 0, scaled)
+	painter.end()
+	return rounded
+
+
+def _logo_widget(parent: QWidget, community: CommunityDto, avatar_path: str | None) -> QLabel:
+	"""Логотип сообщества: аватар из кэша, без него — буква-заглушка."""
+	if avatar_path:
+		pixmap = _round_pixmap(avatar_path, _LOGO_SIZE)
+		if pixmap is not None:
+			label = QLabel(parent)
+			label.setFixedSize(_LOGO_SIZE, _LOGO_SIZE)
+			label.setPixmap(pixmap)
+			return label
+	return _logo_placeholder(parent, community)
+
+
 class CommunityCard(CardWidget):
-	"""Плитка сообщества: шапка, ряд метрик, нижняя строка.
+	"""Плитка сообщества: шапка с аватаром, ряд метрик, нижняя строка.
 
 	Метрики задаются данными (:meth:`_metric`) — новые показатели
-	(подписчики, сообщения) добавляются в ряд без перестройки каркаса.
-	Нижняя строка зарезервирована под индикаторы и быстрые действия.
+	добавляются в ряд без перестройки каркаса. Нижняя строка
+	зарезервирована под индикаторы и быстрые действия.
 	"""
 
-	def __init__(self, community: CommunityDto, queued: int, parent: QWidget) -> None:
+	def __init__(
+		self,
+		community: CommunityDto,
+		queue_counts: tuple[int, int, int],
+		stats: CommunityStatsDto | None,
+		parent: QWidget,
+	) -> None:
+		"""``queue_counts`` — (запланировано, из них ждут слота, ошибки);
+		``stats`` — снимок кэша статистики (None — ещё не собирался)."""
 		super().__init__(parent)
 		# высота фиксирована наравне с шириной: сетка из одинаковых плиток
 		self.setFixedSize(_CARD_WIDTH, _CARD_HEIGHT)
@@ -124,13 +172,13 @@ class CommunityCard(CardWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(_CARD_MARGIN, 12, _CARD_MARGIN, 12)
 		layout.setSpacing(10)
-		layout.addWidget(self._header(community))
-		layout.addWidget(self._metrics(community, queued))
+		layout.addWidget(self._header(community, stats))
+		layout.addWidget(self._metrics(community, queue_counts, stats))
 		layout.addStretch()
 		layout.addWidget(self._bottom(community))
 
-	def _header(self, community: CommunityDto) -> QWidget:
-		"""Шапка: логотип (пока заглушка), название, вид и @имя.
+	def _header(self, community: CommunityDto, stats: CommunityStatsDto | None) -> QWidget:
+		"""Шапка: аватар (или буква-заглушка), название, вид и @имя.
 
 		Название и детали — по одной строке с многоточием: высота
 		шапки одинакова у всех карточек.
@@ -139,7 +187,8 @@ class CommunityCard(CardWidget):
 		row = QHBoxLayout(box)
 		row.setContentsMargins(0, 0, 0, 0)
 		row.setSpacing(12)
-		row.addWidget(_logo_placeholder(box, community))
+		avatar_path = stats.avatar_path if stats is not None else None
+		row.addWidget(_logo_widget(box, community, avatar_path))
 		column = QVBoxLayout()
 		column.setSpacing(2)
 		title = StrongBodyLabel(box)
@@ -155,46 +204,74 @@ class CommunityCard(CardWidget):
 		row.addLayout(column, stretch=1)
 		return box
 
-	def _metrics(self, community: CommunityDto, queued: int) -> QWidget:
-		"""Ряд метрик: три равные колонки «значение + подпись».
+	def _metrics(
+		self,
+		community: CommunityDto,
+		queue_counts: tuple[int, int, int],
+		stats: CommunityStatsDto | None,
+	) -> QWidget:
+		"""Ряд метрик: подписчики · запланировано (ждут слота) · отложено · ошибки.
 
-		Колонки фиксированы по числу и ширине — ряд не переносится
-		и не меняет высоту карточки; новые метрики добавляются
-		расширением этого ряда (и при нехватке места — высоты карточки
-		одной константой).
+		Числа короткие — колонки размещаются по естественной ширине
+		подписей, ряд не переносится и высоту карточки не меняет.
+		«—» — данные из Telegram ещё не приезжали (кэш пуст).
 		"""
+		planned, waiting, errors = queue_counts
+		participants = stats.participants if stats is not None else None
+		scheduled = stats.scheduled_count if stats is not None else None
 		box = QWidget(self)
 		row = QHBoxLayout(box)
 		row.setContentsMargins(0, 0, 0, 0)
-		row.setSpacing(12)
-		publisher = (
-			community.default_account_label
-			or (f"бот {community.bot_label}" if community.bot_label else None)
-			or "—"
-		)
+		row.setSpacing(16)
 		metrics = [
-			(str(community.members_count), "участников"),
-			(str(queued), "в очереди"),
-			(publisher, "публикатор"),
+			(
+				str(participants) if participants is not None else "—",
+				"участники" if community.kind is CommunityKind.GROUP else "подписчики",
+				"Из Telegram, обновляется фоном",
+				False,
+			),
+			(
+				f"{planned} ({waiting})" if waiting else str(planned),
+				"запланировано",
+				"Очередь приложения: всего к отправке"
+				+ (f", из них {waiting} ждут слота отложек" if waiting else ""),
+				False,
+			),
+			(
+				str(scheduled) if scheduled is not None else "—",
+				"отложено",
+				"Отложенные записи на сервере Telegram",
+				False,
+			),
+			(
+				str(errors),
+				"ошибки",
+				"Элементы очереди с ошибкой — ждут повтора",
+				errors > 0,
+			),
 		]
-		column_width = (_CARD_WIDTH - 2 * _CARD_MARGIN - 12 * (len(metrics) - 1)) // len(metrics)
-		for value, caption in metrics:
-			row.addWidget(self._metric(box, value, caption, column_width), stretch=1)
+		for value, caption, tooltip, alert in metrics:
+			row.addWidget(self._metric(box, value, caption, tooltip, alert))
+		row.addStretch()
 		return box
 
 	@staticmethod
-	def _metric(parent: QWidget, value: str, caption: str, width: int) -> QWidget:
-		"""Мини-показатель: значение сверху, подпись снизу (одной строкой)."""
+	def _metric(parent: QWidget, value: str, caption: str, tooltip: str, alert: bool) -> QWidget:
+		"""Мини-показатель: значение сверху, подпись снизу.
+
+		``alert`` подсвечивает значение цветом ошибки (обе темы).
+		"""
 		box = QWidget(parent)
+		box.setToolTip(tooltip)
 		column = QVBoxLayout(box)
 		column.setContentsMargins(0, 0, 0, 0)
 		column.setSpacing(0)
 		value_label = StrongBodyLabel(box)
-		_elide(value_label, value, width)
+		_elide(value_label, value, _METRIC_VALUE_WIDTH)
+		if alert:
+			value_label.setTextColor(_ERROR_LIGHT, _ERROR_DARK)
 		column.addWidget(value_label)
-		caption_label = CaptionLabel(box)
-		_elide(caption_label, caption, width)
-		column.addWidget(caption_label)
+		column.addWidget(CaptionLabel(caption, box))
 		return box
 
 	def _bottom(self, community: CommunityDto) -> QWidget:
@@ -315,7 +392,10 @@ class CommunitiesPage(ScrollArea):
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		self._communities: list[CommunityDto] = []
-		self._queued: dict[int, int] = {}
+		# счётчики очереди сообщества: (запланировано, ждут слота, ошибки)
+		self._queue_counts: dict[int, tuple[int, int, int]] = {}
+		self._stats_cache: dict[int, CommunityStatsDto] = {}
+		self._stats_refreshing = False
 		self._build()
 
 	def _build(self) -> None:
@@ -380,20 +460,75 @@ class CommunitiesPage(ScrollArea):
 		)
 
 	def _on_queue_loaded(self, items: list[QueueItemDto]) -> None:
-		"""Очередь получена — карточкам нужны счётчики неотправленных.
+		"""Очередь получена — считаем по сообществам план, слоты и ошибки.
 
-		Ошибочные элементы тоже считаются: они не отправлены и ждут
-		повтора — «завершёнными» их считает только жизненный цикл
-		панели очереди, а не сводка дашборда.
+		«Запланировано» — всё неотправленное без ошибок (в том числе
+		ждущие слота отложек — они выделяются вторым числом); ошибки —
+		отдельно: они ждут повтора и требуют внимания.
 		"""
-		gone = (QueueItemStatus.DONE, QueueItemStatus.CANCELLED)
-		queued: dict[int, int] = {}
+		counts: dict[int, tuple[int, int, int]] = {}
 		for item in items:
-			if item.status not in gone:
-				queued[item.community_id] = queued.get(item.community_id, 0) + 1
-		self._queued = queued
+			if item.status in (QueueItemStatus.DONE, QueueItemStatus.CANCELLED):
+				continue
+			planned, waiting, errors = counts.get(item.community_id, (0, 0, 0))
+			if item.status is QueueItemStatus.ERROR:
+				errors += 1
+			else:
+				planned += 1
+				if item.status is QueueItemStatus.WAITING:
+					waiting += 1
+			counts[item.community_id] = (planned, waiting, errors)
+		self._queue_counts = counts
+		run_in_engine(
+			self._worker,
+			self._worker.engine.community_stats.snapshot(),
+			self,
+			self._on_stats_loaded,
+			self._show_error,
+		)
+
+	def _on_stats_loaded(self, stats: list[CommunityStatsDto]) -> None:
+		"""Кэш статистики получен — рисуем и запускаем фоновое обновление."""
+		self._stats_cache = {item.community_id: item for item in stats}
 		self._render()
 		self.communities_changed.emit(list(self._communities))
+		self._refresh_stats_in_background()
+
+	def _refresh_stats_in_background(self) -> None:
+		"""Фоновое обновление кэша статистики (не чаще одного за раз).
+
+		Ошибки не показываются: обновление вспомогательное, каждый сбой
+		уже залогирован движком — всплывашка при каждом открытии
+		страницы без сети только раздражала бы.
+		"""
+		if self._stats_refreshing:
+			return
+		self._stats_refreshing = True
+		run_in_engine(
+			self._worker,
+			self._worker.engine.community_stats.refresh_stale(),
+			self,
+			self._on_stats_refreshed,
+			lambda _message: setattr(self, "_stats_refreshing", False),
+		)
+
+	def _on_stats_refreshed(self, changed: bool) -> None:
+		"""Кэш обновился — перечитываем снимок (без нового обновления)."""
+		self._stats_refreshing = False
+		if not changed:
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.community_stats.snapshot(),
+			self,
+			self._on_fresh_stats,
+			self._show_error,
+		)
+
+	def _on_fresh_stats(self, stats: list[CommunityStatsDto]) -> None:
+		"""Свежий снимок после фонового обновления — только перерисовка."""
+		self._stats_cache = {item.community_id: item for item in stats}
+		self._render()
 
 	# --- отрисовка ---------------------------------------------------------------
 
@@ -407,7 +542,12 @@ class CommunitiesPage(ScrollArea):
 			self._cards.addWidget(self._empty_state(filtered=bool(self._communities)))
 			return
 		for community in shown:
-			card = CommunityCard(community, self._queued.get(community.id, 0), self._cards_box)
+			card = CommunityCard(
+				community,
+				self._queue_counts.get(community.id, (0, 0, 0)),
+				self._stats_cache.get(community.id),
+				self._cards_box,
+			)
 			card.clicked.connect(partial(self.open_community.emit, community.id))
 			self._cards.addWidget(card)
 
@@ -425,7 +565,10 @@ class CommunitiesPage(ScrollArea):
 			(str(len(communities) - channels), "групп"),
 			(str(sum(1 for c in communities if c.enabled)), "активных"),
 			(str(without_publisher), "без публикатора"),
-			(str(sum(self._queued.values())), "в очереди отправки"),
+			(
+				str(sum(planned + errors for planned, _w, errors in self._queue_counts.values())),
+				"в очереди отправки",
+			),
 		]
 		for value, caption in tiles:
 			self._stats.addWidget(self._stat_tile(value, caption))

@@ -407,6 +407,29 @@ async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 		await bot.session.close()
 
 
+async def get_member_count(token: str, chat_id: str) -> int:
+	"""Число участников сообщества через бота (getChatMemberCount).
+
+	Запасной путь для сообществ без userbot: только число, без аватара
+	и отложек (их Bot API не отдаёт).
+
+	Raises:
+		InvalidBotTokenError: Токен отклонён Telegram.
+		TelegramFloodError: Флуд-лимит — подождать и повторить.
+		CommunityCheckError: Бот не видит сообщество или запрос отклонён.
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	bot = _make_bot(token)
+	try:
+		async with _bot_errors(
+			"Бот не видит сообщество — его могли исключить.",
+			"Telegram отклонил запрос числа участников.",
+		):
+			return await bot.get_chat_member_count(_chat_id(chat_id))
+	finally:
+		await bot.session.close()
+
+
 async def check_token(token: str) -> str:
 	"""Проверяет токен через метод getMe и возвращает @имя бота.
 

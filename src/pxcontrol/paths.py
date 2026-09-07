@@ -38,3 +38,8 @@ def logs_dir() -> Path:
 def media_dir() -> Path:
 	"""Каталог медиа-файлов — подпапка ``media`` в каталоге приложения."""
 	return app_dir() / "media"
+
+
+def cache_dir() -> Path:
+	"""Каталог кэша (аватары сообществ и т.п.) — подпапка ``cache``."""
+	return app_dir() / "cache"

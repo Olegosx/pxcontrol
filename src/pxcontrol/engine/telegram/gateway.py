@@ -20,6 +20,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	check_community,
 	check_token,
 	get_bot_events,
+	get_member_count,
 	send_media,
 	send_text,
 )
@@ -30,6 +31,7 @@ from pxcontrol.engine.telegram.mtproto import (
 )
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
+	CommunityStatsInfo,
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
@@ -173,6 +175,13 @@ class TelegramGateway:
 		"""
 		return await send_media(token, chat_id, kind, path, caption, topic_id)
 
+	async def bot_member_count(self, token: str, chat_id: str) -> int:
+		"""Число участников сообщества через бота (запасной путь).
+
+		Raises: см. :func:`bot_api.get_member_count`.
+		"""
+		return await get_member_count(token, chat_id)
+
 	# --- MTProto (userbot) -------------------------------------------------------
 
 	async def userbot_me(self, account_id: int) -> UserbotProfile:
@@ -230,6 +239,24 @@ class TelegramGateway:
 			UserbotUnavailableError: Прочие отказы Telegram (не форум и т.п.).
 		"""
 		return await self._userbot(account_id).get_forum_topics(chat_id)
+
+	async def userbot_community_stats(self, account_id: int, chat_id: str) -> CommunityStatsInfo:
+		"""Подписчики и онлайн сообщества аккаунтом (один запрос).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
+			UserbotFloodError: Флуд-лимит — вызывающий пропускает аккаунт.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		return await self._userbot(account_id).community_stats(chat_id)
+
+	async def userbot_avatar(self, account_id: int, chat_id: str, target: str) -> str | None:
+		"""Скачивает аватар сообщества аккаунтом (None — аватара нет).
+
+		Raises: как у :meth:`userbot_community_stats`.
+		"""
+		return await self._userbot(account_id).download_avatar(chat_id, target)
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала из Telegram (его аккаунтом).

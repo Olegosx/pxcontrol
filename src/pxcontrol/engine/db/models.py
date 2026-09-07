@@ -253,6 +253,28 @@ class CommunityMember(TimestampMixin, Base):
 	tg_account: Mapped[TgAccount] = relationship()
 
 
+class CommunityStats(Base):
+	"""Кэш статистики сообщества для карточек дашборда.
+
+	Данные приезжают из Telegram фоновым обновлением (TTL); дашборд
+	читает только кэш. NULL в поле — данные ещё не получены (или
+	Telegram их не отдаёт: онлайн есть только у групп). ``avatar_path``
+	указывает на файл в кэше на диске; сам файл при удалении сообщества
+	убирает движок (строку — каскад БД).
+	"""
+
+	__tablename__ = "community_stats"
+
+	community_id: Mapped[int] = mapped_column(
+		ForeignKey("communities.id", ondelete="CASCADE"), primary_key=True
+	)
+	participants: Mapped[int | None] = mapped_column(Integer, default=None)
+	online: Mapped[int | None] = mapped_column(Integer, default=None)
+	scheduled_count: Mapped[int | None] = mapped_column(Integer, default=None)
+	avatar_path: Mapped[str | None] = mapped_column(String(1024), default=None)
+	fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
 class PublishQueueItem(TimestampMixin, Base):
 	"""Элемент очереди отправки: черновик, ждущий отправки (ADR-0016).
 

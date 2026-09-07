@@ -10,6 +10,7 @@ from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.communities import CommunitiesService
+from pxcontrol.engine.services.community_stats import CommunityStatsService
 from pxcontrol.engine.services.posts import PostsService
 from pxcontrol.engine.services.publish_queue import PublishQueue, QueueItemStatus
 from pxcontrol.engine.services.settings import (
@@ -45,6 +46,7 @@ class Engine:
 		self.communities = CommunitiesService(
 			self.db, self.gateway, self.settings, profile_sync=self.accounts.sync_profile
 		)
+		self.community_stats = CommunityStatsService(self.db, self.gateway, self.settings)
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
 		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)
@@ -97,6 +99,8 @@ class Engine:
 		живёт здесь, чтобы ``CommunitiesService`` не зависел от очереди.
 		"""
 		await self.publish_queue.drop_community(community_id)
+		# файл аватара каскад БД не видит — убирается движком до строки
+		await self.community_stats.drop(community_id)
 		await self.communities.delete_community(community_id)
 
 	def _ffmpeg_path(self) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -38,6 +39,8 @@ class _FakeClient:
 		# сущность и права для check_community (тесты задают под сценарий)
 		self.entity: Any = None
 		self.permissions: Any = None
+		self.online = 0  # онлайн в ответе полной информации (0 — не отдан)
+		self.has_avatar = True  # есть ли у сообщества аватар
 
 	async def connect(self) -> None:
 		self.connect_calls += 1
@@ -76,7 +79,17 @@ class _FakeClient:
 	async def get_permissions(self, entity: Any, user: Any) -> Any:
 		return self.permissions
 
+	async def download_profile_photo(self, entity: Any, file: str) -> str | None:
+		if not self.has_avatar:
+			return None
+		Path(file).write_bytes(b"jpg")
+		return file
+
 	async def __call__(self, request: Any) -> Any:
+		if type(request).__name__ == "GetFullChannelRequest":
+			return SimpleNamespace(
+				full_chat=SimpleNamespace(participants_count=1234, online_count=self.online)
+			)
 		if type(request).__name__ == "GetForumTopicsRequest":
 			return SimpleNamespace(
 				topics=[
@@ -423,6 +436,32 @@ async def test_get_scheduled_returns_messages() -> None:
 	assert len(messages) == 1
 	assert messages[0].text == "из телеграма"
 	assert messages[0].scheduled_at == datetime(2026, 7, 13, tzinfo=UTC)
+
+
+async def test_community_stats_reads_full_info() -> None:
+	"""Подписчики и онлайн — из одного запроса полной информации."""
+	client = _FakeClient()
+	client.online = 17
+	transport = _transport(client)
+	await transport.start()
+	stats = await transport.community_stats("-1001234")
+	assert stats.participants == 1234
+	assert stats.online == 17
+	# нулевой онлайн (каналы) нормализуется в None — «не отдан»
+	client.online = 0
+	assert (await transport.community_stats("-1001234")).online is None
+
+
+async def test_download_avatar_and_absence(tmp_path: Path) -> None:
+	"""Аватар скачивается в файл; отсутствие аватара — честный None."""
+	client = _FakeClient()
+	transport = _transport(client)
+	await transport.start()
+	target = tmp_path / "1.jpg"
+	path = await transport.download_avatar("-1001234", str(target))
+	assert path == str(target) and target.exists()
+	client.has_avatar = False
+	assert await transport.download_avatar("-1001234", str(target)) is None
 
 
 def test_translate_error_confirmed_refusals() -> None:
