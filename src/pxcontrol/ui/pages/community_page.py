@@ -42,6 +42,7 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
+	WorkDialog,
 	account_caption,
 	bind,
 	bot_caption,
@@ -50,6 +51,7 @@ from pxcontrol.ui.pages.common import (
 	confirm_delete,
 	error_reporter,
 	exec_dialog,
+	list_area,
 	page_layout,
 	parse_hhmm,
 	role_caption,
@@ -87,7 +89,7 @@ class _AssignBotDialog(MessageBoxBase):
 		return bot.id if bot is not None else None
 
 
-class _MembersDialog(MessageBoxBase):
+class _MembersDialog(WorkDialog):
 	"""Участники сообщества (ADR-0022): роли, умолчание, состав.
 
 	Живой диалог: операции выполняются сразу (движком), список
@@ -102,34 +104,30 @@ class _MembersDialog(MessageBoxBase):
 		parent: QWidget,
 	) -> None:
 		"""``accounts`` — вошедшие userbot-аккаунты (кандидаты)."""
-		super().__init__(parent)
+		super().__init__(f"Участники — {community.title}", parent, size=(560, 520))
 		self._worker = worker
 		self._community = community
 		self._accounts = accounts
 		self._show_error = error_reporter(self)
-		self.viewLayout.addWidget(SubtitleLabel(f"Участники — {community.title}", self))
-		self.viewLayout.addWidget(
+		self.content.addWidget(
 			BodyLabel(
 				"Публикует аккаунт по умолчанию; остальные — пул сообщества.\n"
 				"Каналу нужен админ с правом публиковать, группе — участник.",
 				self,
 			)
 		)
-		self._rows = QVBoxLayout()
-		self._rows.setSpacing(density.spacing().list_spacing)
-		self.viewLayout.addLayout(self._rows)
+		area, self._rows = list_area(self, spacing=density.spacing().list_spacing)
+		self.content.addWidget(area, stretch=1)
 		add_row = QHBoxLayout()
 		self._add_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
 		add_row.addWidget(self._add_combo, stretch=1)
 		add_button = PushButton("Добавить", self)
 		add_button.clicked.connect(self._on_add)
 		add_row.addWidget(add_button)
-		self.viewLayout.addLayout(add_row)
+		self.content.addLayout(add_row)
 		self._error = ErrorLabel(self)
-		self.viewLayout.addWidget(self._error)
-		self.yesButton.setText("Готово")
-		self.cancelButton.hide()
-		self.widget.setMinimumWidth(520)
+		self.content.addWidget(self._error)
+		self.add_close_button("Готово")
 		self._members: list[MemberDto] = []
 		self._reload()
 
@@ -150,6 +148,7 @@ class _MembersDialog(MessageBoxBase):
 			self._rows.addWidget(BodyLabel("Участников нет — добавьте вошедший аккаунт.", self))
 		for member in members:
 			self._rows.addWidget(self._member_row(member))
+		self._rows.addStretch()
 		taken = {member.account_id for member in members}
 		self._add_combo.set_items(
 			[account for account in self._accounts if account.id not in taken],

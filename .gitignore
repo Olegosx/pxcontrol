@@ -12,6 +12,7 @@
 # --- локальное/личное ---
 logs/
 media/
+cache/
 _misc/
 .claude/
 CLAUDE.md

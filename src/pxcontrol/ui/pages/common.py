@@ -26,10 +26,12 @@ from qfluentwidgets import (
 	ComboBox,
 	EditableComboBox,
 	FluentIcon,
+	FluentStyleSheet,
 	InfoBar,
 	LineEdit,
 	MessageBox,
 	MessageBoxBase,
+	PrimaryPushButton,
 	ProgressBar,
 	PushButton,
 	ScrollArea,
@@ -816,15 +818,19 @@ class SelectionRow:
 		self._summary.setText(f"Отмечено {picked} из {total} · {human_size(picked_bytes)}")
 
 
-def fixed_list_area(parent: QWidget, height: int, spacing: int) -> tuple[ScrollArea, QVBoxLayout]:
-	"""Прокручиваемый список фиксированной высоты для диалога.
+def list_area(parent: QWidget, spacing: int) -> tuple[ScrollArea, QVBoxLayout]:
+	"""Прокручиваемый список для рабочего окна.
 
-	Прокрутка живёт внутри области — длинный список не раздувает диалог.
+	Высота не задаётся: область добавляется в окно с растяжением
+	и занимает свободное место, а полосу прокрутки показывает сама,
+	когда содержимое не влезло. Считать высоту руками (прежний
+	``fixed_list_area``) было нужно только диалогу-вопросу, который
+	растёт под содержимое и своего размера не имеет.
 
 	Returns:
-		Область (её добавляет в диалог вызывающий) и компоновка
-		контейнера — в неё складываются строки; распорку в конец,
-		если нужна, добавляет вызывающий.
+		Область (её добавляет в окно вызывающий — обычно
+		``content.addWidget(area, stretch=1)``) и компоновка
+		контейнера: в неё складываются строки.
 	"""
 	area = ScrollArea(parent)
 	container = QWidget(area)
@@ -834,7 +840,6 @@ def fixed_list_area(parent: QWidget, height: int, spacing: int) -> tuple[ScrollA
 	area.setWidget(container)
 	area.setWidgetResizable(True)
 	area.enableTransparentBackground()
-	area.setFixedHeight(height)
 	return area, box
 
 
@@ -944,6 +949,119 @@ class WhenRow:
 		date = self._date.getDate()
 		local = datetime(date.year(), date.month(), date.day(), hours, minutes)
 		return local.astimezone(UTC)
+
+
+#: Размер рабочего окна по умолчанию (ширина, высота в пикселях).
+#: Не ограничение, а разумная точка старта: окно меняется мышью.
+WORK_DIALOG_SIZE = (640, 560)
+
+
+class WorkDialog(QDialog):
+	"""Рабочее окно: обычное окно приложения с рамками от системы.
+
+	Второй вид окон интерфейса — рядом с диалогом-вопросом
+	(``MessageBoxBase``), а не вместо него. Диалог-вопрос прибит маской
+	к главному окну, не двигается и растёт под содержимое: это верно
+	для короткого вопроса («удалить?», «введите код»), но не для экрана,
+	на котором работают.
+
+	Рамки и заголовок рисует система, а не мы. Безрамочный вариант
+	(как у главного окна) обходился слишком дорого: в нём приложение
+	само считает, у какого края курсор, а под Wayland оно не знает
+	своего места на экране — для дочернего окна расчёт разъезжался,
+	и полосу захвата пришлось бы чинить своими руками. Системные рамки
+	снимают этот класс задач целиком: перетаскивание, растягивание
+	за любой край и угол, привязку к краям экрана и кнопки окна даёт
+	оконный менеджер. Плата — заголовок выглядит системным, а не
+	в стиле остального приложения.
+
+	Собственный размер окна — не украшение, а условие штатной механики
+	Qt: пока высота бралась «по содержимому» (как у диалога-вопроса),
+	область прокрутки внутри росла вместе с содержимым и полосе
+	неоткуда было взяться. Здесь окно имеет свой размер, компоновка
+	раздаёт его детям, и представление (таблица, список) или
+	``ScrollArea`` сами показывают полосу, когда содержимое не влезло, —
+	высоты нигде не считаются.
+
+	Содержимое кладётся в :attr:`content`, кнопки — в :attr:`buttons`
+	(нижняя строка, прижата вправо). Показывается той же обёрткой
+	:func:`exec_dialog`, что и диалоги-вопросы; клавиша Esc закрывает
+	окно штатно.
+	"""
+
+	def __init__(
+		self,
+		title: str,
+		parent: QWidget,
+		size: tuple[int, int] = WORK_DIALOG_SIZE,
+	) -> None:
+		"""Args:
+		title: заголовок окна (показывается в его шапке).
+		parent: окно-родитель (обычно ``self.window()`` страницы).
+		size: стартовый размер (ширина, высота); дальше — мышью.
+		"""
+		super().__init__(parent)
+		self.setWindowTitle(title)
+		self.resize(*size)
+		# уголок растягивания в правом нижнем углу: там, где система
+		# рисует тонкие рамки, он даёт заведомую точку захвата
+		self.setSizeGripEnabled(True)
+		# фон окна под текущую тему (тот же лист стилей, что у диалогов
+		# библиотеки) — при смене темы применяется заново, без нашего участия
+		FluentStyleSheet.DIALOG.apply(self)
+		spacing = density.spacing()
+		root = QVBoxLayout(self)
+		root.setContentsMargins(*spacing.page_margins)
+		root.setSpacing(spacing.block_spacing)
+		self.content = QVBoxLayout()
+		self.content.setSpacing(spacing.row_spacing)
+		root.addLayout(self.content, stretch=1)
+		self.buttons = QHBoxLayout()
+		self.buttons.addStretch()
+		root.addLayout(self.buttons)
+
+	def add_close_button(self, text: str = "Закрыть") -> PushButton:
+		"""Добавляет кнопку закрытия окна в нижнюю строку.
+
+		Для окон, где правки применяются сразу и «отменить всё» нечем:
+		кнопка дублирует крестик заголовка — привычный выход для тех,
+		кто ищет его внизу.
+		"""
+		button = PushButton(text, self)
+		button.clicked.connect(self.accept)
+		self.buttons.addWidget(button)
+		return button
+
+	def add_accept_buttons(
+		self, accept_text: str, cancel_text: str = "Отмена"
+	) -> PrimaryPushButton:
+		"""Добавляет пару «принять / отмена» в нижнюю строку.
+
+		Returns:
+			Кнопку принятия — окна включают и выключают её по мере
+			готовности (например, пока не выбран ни один файл).
+		"""
+		self.cancel_button = PushButton(cancel_text, self)
+		self.cancel_button.clicked.connect(self.reject)
+		self.buttons.addWidget(self.cancel_button)
+		self.accept_button = PrimaryPushButton(accept_text, self)
+		self.accept_button.clicked.connect(self.accept)
+		self.buttons.addWidget(self.accept_button)
+		return self.accept_button
+
+	def validate(self) -> bool:
+		"""Крючок перед закрытием по «принять»: False оставляет окно.
+
+		Тот же контракт, что у диалога-вопроса библиотеки: окно
+		показывает причину отказа и не закрывается, а введённое
+		не пропадает.
+		"""
+		return True
+
+	def accept(self) -> None:
+		"""Закрывает окно принятием, если :meth:`validate` разрешает."""
+		if self.validate():
+			super().accept()
 
 
 class FormDialog(MessageBoxBase):

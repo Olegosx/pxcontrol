@@ -24,17 +24,22 @@ from qfluentwidgets import (
 	CaptionLabel,
 	FluentIcon,
 	IndeterminateProgressRing,
-	MessageBoxBase,
 	PushButton,
 	SpinBox,
-	SubtitleLabel,
 	TogglePushButton,
 )
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.video import FrameCandidate
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import clear_layout, format_duration, show_error
+from pxcontrol.ui.pages.common import (
+	WorkDialog,
+	clear_layout,
+	format_duration,
+	list_area,
+	show_error,
+)
 
 #: Колонок в плитке выбора кадра заставки.
 _FRAME_GRID_COLUMNS = 3
@@ -60,7 +65,7 @@ class _FrameTileButton(TogglePushButton):
 		self.doubleClicked.emit()
 
 
-class FramePickerDialog(MessageBoxBase):
+class FramePickerDialog(WorkDialog):
 	"""Выбор кадра заставки из случайных кандидатов."""
 
 	def __init__(
@@ -75,7 +80,7 @@ class FramePickerDialog(MessageBoxBase):
 		"""``file_label`` — подпись с именем файла под заголовком: пакетная
 		обработка показывает диалог по разу на файл, и без подписи не видно,
 		для какого видео сейчас выбирается кадр."""
-		super().__init__(parent)
+		super().__init__("Выберите кадр заставки", parent, size=(820, 700))
 		self._worker = worker
 		self._source = source_path
 		# кандидаты — из обрезанного диапазона, время — от обрезанной версии
@@ -84,22 +89,24 @@ class FramePickerDialog(MessageBoxBase):
 		self._chosen: str | None = None
 		self._group = QButtonGroup(self)
 		self._group.setExclusive(True)
-		self.viewLayout.addWidget(SubtitleLabel("Выберите кадр заставки", self))
 		if file_label:
 			name_label = CaptionLabel(file_label, self)
 			name_label.setWordWrap(True)
-			self.viewLayout.addWidget(name_label)
+			self.content.addWidget(name_label)
 		self._build_controls_row()
+		# плитка кандидатов — в прокручиваемой области: при двенадцати
+		# кадрах она выше окна, и полосу область показывает сама
+		area, box = list_area(self, spacing=density.spacing().list_spacing)
 		self._grid_box = QWidget(self)
 		self._grid = QGridLayout(self._grid_box)
-		self.viewLayout.addWidget(self._grid_box)
+		box.addWidget(self._grid_box)
+		box.addStretch()
+		self.content.addWidget(area, stretch=1)
 		self._ring = IndeterminateProgressRing(self)
 		self._ring.setFixedSize(48, 48)
-		self.viewLayout.addWidget(self._ring, 0, Qt.AlignmentFlag.AlignHCenter)
-		self.yesButton.setText("Использовать кадр")
-		self.yesButton.setEnabled(False)
-		self.cancelButton.setText("Отмена")
-		self.widget.setMinimumWidth(760)
+		self.content.addWidget(self._ring, 0, Qt.AlignmentFlag.AlignHCenter)
+		self.add_accept_buttons("Использовать кадр")
+		self.accept_button.setEnabled(False)
 		self._reload()
 
 	def _build_controls_row(self) -> None:
@@ -114,7 +121,7 @@ class FramePickerDialog(MessageBoxBase):
 		self._refresh.clicked.connect(self._reload)
 		row.addWidget(self._refresh)
 		row.addStretch()
-		self.viewLayout.addLayout(row)
+		self.content.addLayout(row)
 
 	def chosen_path(self) -> str | None:
 		"""Путь к выбранному кадру (None — не выбран)."""
@@ -122,7 +129,7 @@ class FramePickerDialog(MessageBoxBase):
 
 	def _reload(self) -> None:
 		"""Запрашивает новую партию: чистит плитку и крутит колёсико."""
-		self.yesButton.setEnabled(False)
+		self.accept_button.setEnabled(False)
 		self._refresh.setEnabled(False)
 		self._chosen = None
 		self._clear_grid()
@@ -153,7 +160,6 @@ class FramePickerDialog(MessageBoxBase):
 		for index, frame in enumerate(frames):
 			row, column = divmod(index, _FRAME_GRID_COLUMNS)
 			self._grid.addWidget(self._frame_tile(frame), row, column)
-		self.widget.adjustSize()
 
 	def _frame_tile(self, frame: FrameCandidate) -> QWidget:
 		"""Плитка кандидата: миниатюра по центру, время подписью снизу."""
@@ -191,13 +197,13 @@ class FramePickerDialog(MessageBoxBase):
 	def _on_toggled(self, path: str, checked: bool) -> None:
 		if checked:
 			self._chosen = path
-			self.yesButton.setEnabled(True)
+			self.accept_button.setEnabled(True)
 
 	def _on_double_clicked(self, path: str) -> None:
 		"""Двойной клик по плитке = выбрать кадр и «Использовать кадр»."""
 		self._chosen = path
-		self.yesButton.setEnabled(True)
-		self.yesButton.click()
+		self.accept_button.setEnabled(True)
+		self.accept_button.click()
 
 	def _show_error(self, message: str) -> None:
 		"""Показывает ошибку и останавливает колёсико."""

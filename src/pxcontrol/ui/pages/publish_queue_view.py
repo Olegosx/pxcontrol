@@ -15,15 +15,14 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from PySide6.QtWidgets import QHBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, ComboBox, MessageBoxBase, SubtitleLabel
+from qfluentwidgets import BodyLabel, CaptionLabel, ComboBox
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
-from pxcontrol.ui.pages.common import DtoComboBox, QueuePanel, fixed_list_area, format_local
+from pxcontrol.ui import density
+from pxcontrol.ui.pages.common import DtoComboBox, QueuePanel, WorkDialog, format_local, list_area
 
 #: Высота списка элементов (прокрутка внутри, а не рост диалога).
-_LIST_HEIGHT = 480
-
 #: Служебный первый пункт фильтра по сообществу.
 _ALL_COMMUNITIES = "Все сообщества"
 
@@ -110,25 +109,22 @@ def apply_view(
 	return sorted(items, key=lambda item: item.id)
 
 
-class QueueViewDialog(MessageBoxBase):
+class QueueViewDialog(WorkDialog):
 	"""Вся очередь отправки: живой список с сортировкой и фильтрами."""
 
 	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
-		super().__init__(parent)
+		super().__init__("Очередь отправки", parent, size=(880, 620))
 		self._sort = QueueSort.NEAREST
 		self._status = QueueFilter.ALL
 		self._community: int | None = None
 		self._known_communities: list[tuple[int, str]] = []
 		self._total = 0
-		self.viewLayout.addWidget(SubtitleLabel("Очередь отправки", self))
 		self._build_controls()
-		area, box = fixed_list_area(self, _LIST_HEIGHT, spacing=8)
-		self.viewLayout.addWidget(area)
+		area, box = list_area(self, spacing=density.spacing().list_spacing)
+		self.content.addWidget(area, stretch=1)
 		self._summary = CaptionLabel("", self)
-		self.viewLayout.addWidget(self._summary)
-		self.yesButton.setText("Закрыть")
-		self.cancelButton.hide()
-		self.widget.setMinimumWidth(880)
+		self.content.addWidget(self._summary)
+		self.add_close_button()
 		self._panel = QueuePanel(
 			worker,
 			self,
@@ -164,7 +160,7 @@ class QueueViewDialog(MessageBoxBase):
 		self._community_combo.currentIndexChanged.connect(self._on_view_changed)
 		row.addWidget(self._community_combo)
 		row.addStretch()
-		self.viewLayout.addLayout(row)
+		self.content.addLayout(row)
 
 	# --- правило показа --------------------------------------------------------
 

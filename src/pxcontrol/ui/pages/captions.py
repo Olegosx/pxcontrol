@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Sequence
 from functools import partial
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
 	QGridLayout,
 	QHBoxLayout,
@@ -20,18 +20,21 @@ from PySide6.QtWidgets import (
 	QWidget,
 )
 from qfluentwidgets import (
+	Action,
 	BodyLabel,
 	CaptionLabel,
 	CheckBox,
 	ComboBox,
 	EditableComboBox,
 	FlowLayout,
+	FluentIcon,
 	LineEdit,
-	MessageBoxBase,
 	PillPushButton,
 	PushButton,
-	SubtitleLabel,
+	RoundMenu,
+	ScrollArea,
 	SwitchButton,
+	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -44,14 +47,17 @@ from pxcontrol.engine.services.captions import (
 	ValueDto,
 	build_caption,
 )
+from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
+	WorkDialog,
 	bind,
 	clear_layout,
 	confirm_delete,
 	error_reporter,
 	exec_dialog,
+	list_area,
 )
 
 
@@ -218,33 +224,37 @@ class _FieldRow:
 		return [item.id for item in self.field.values if item.value.lower() in chosen]
 
 
-class CaptionDialog(MessageBoxBase):
+class CaptionDialog(WorkDialog):
 	"""Сборка подписи: шаблон, название, поля со словарями."""
 
 	def __init__(self, templates: list[TemplateDto], suggested_title: str, parent: QWidget) -> None:
-		super().__init__(parent)
+		super().__init__("Собрать подпись", parent, size=(680, 640))
 		self._templates = templates
 		self._rows: list[_FieldRow] = []
 		self._refreshing = False
-		self.viewLayout.addWidget(SubtitleLabel("Собрать подпись", self))
 		self._build_template_combo()
 		self._title = LineEdit(self)
 		self._title.setPlaceholderText("Название (первой строкой, жирным)…")
 		self._title.setText(suggested_title)
-		self.viewLayout.addWidget(self._title)
-		self._fields_grid = QGridLayout()
+		self.content.addWidget(self._title)
+		# поля с их словарями — в прокручиваемой области: у шаблона
+		# с десятком полей, да ещё с пилюлями значений, они не влезают
+		area, box = list_area(self, spacing=density.spacing().row_spacing)
+		fields_host = QWidget(self)
+		self._fields_grid = QGridLayout(fields_host)
+		self._fields_grid.setContentsMargins(0, 0, 0, 0)
 		self._fields_grid.setHorizontalSpacing(16)
 		self._fields_grid.setVerticalSpacing(10)
 		self._fields_grid.setColumnStretch(1, 1)
-		self.viewLayout.addLayout(self._fields_grid)
+		box.addWidget(fields_host)
+		box.addStretch()
+		self.content.addWidget(area, stretch=1)
 		# индекс и перерисовка — после сборки формы, сигнал подключаем последним
 		index = self._last_used_index()
 		self._combo.setCurrentIndex(index)
 		self._show_template(index)
 		self._combo.currentIndexChanged.connect(self._show_template)
-		self.yesButton.setText("Вставить в подпись")
-		self.cancelButton.setText("Отмена")
-		self.widget.setMinimumWidth(560)
+		self.add_accept_buttons("Вставить в подпись")
 
 	def _build_template_combo(self) -> None:
 		"""Выбор шаблона подписи (виден всегда, даже если шаблон один)."""
@@ -254,7 +264,7 @@ class CaptionDialog(MessageBoxBase):
 		for template in self._templates:
 			self._combo.addItem(template.name)
 		row.addWidget(self._combo, stretch=1)
-		self.viewLayout.addLayout(row)
+		self.content.addLayout(row)
 
 	def _last_used_index(self) -> int:
 		"""Индекс последнего использованного шаблона (или первого)."""
@@ -328,16 +338,80 @@ class CaptionDialog(MessageBoxBase):
 		}
 
 
-class DictionaryDialog(MessageBoxBase):
-	"""Редактор словаря поля: список значений, удаление, добавление.
+#: Имя группы значений, не привязанных ни к какому значению родителя.
+_NO_PARENT_GROUP = "Без привязки"
+
+
+class _ValueChip(PillPushButton):
+	"""Значение словаря пилюлей с крестиком удаления.
+
+	Внутри пилюли — обычная компоновка Qt: надпись и кнопка-крестик.
+	Всё расставляет и меряет она; своих расчётов размеров, положения
+	и обрезки текста здесь нет.
+
+	Две оговорки, из-за которых класс вообще существует:
+
+	1. Кнопка сама компоновку о размере не спрашивает (``sizeHint``
+	у неё свой, по тексту), поэтому ширину берём у компоновки,
+	а высоту — у самой кнопки, чтобы совпасть с пилюлями выбора.
+	2. Свой лист стилей задавать нельзя: библиотека вешает на каждую
+	кнопку собственный (``FluentStyleSheet.BUTTON``), наш заменил бы
+	его целиком — вместе с правилом, которое гасит рисование коробки,
+	и поверх нарисованной пилюли встала бы вторая рамка. Поэтому
+	отступы задаются полями компоновки, а не стилем.
+	"""
+
+	#: Поля внутри пилюли: слева — под надпись, справа — под крестик.
+	MARGINS = (12, 0, 6, 0)
+	#: Сторона кнопки-крестика и её значка (точек).
+	CLOSE_SIZE = 20
+	CLOSE_ICON_SIZE = 10
+
+	def __init__(self, text: str, parent: QWidget, on_delete: Callable[[], None]) -> None:
+		# конструктор родителя — в форме «только родитель»: форма
+		# с текстом у библиотеки перевызывает self.__init__(parent=…),
+		# и наша сигнатура с обязательными аргументами её ломает
+		super().__init__(parent=parent)
+		self.setCheckable(False)  # это не выбор, а показ значения
+		self.setToolTip(text)
+		row = QHBoxLayout(self)
+		row.setContentsMargins(*self.MARGINS)
+		row.setSpacing(density.spacing().list_spacing)
+		self._label = BodyLabel(text, self)
+		row.addWidget(self._label)
+		close = TransparentToolButton(FluentIcon.CLOSE, self)
+		close.setFixedSize(self.CLOSE_SIZE, self.CLOSE_SIZE)
+		close.setIconSize(QSize(self.CLOSE_ICON_SIZE, self.CLOSE_ICON_SIZE))
+		close.setToolTip(f"Удалить «{text}»")
+		close.clicked.connect(on_delete)
+		row.addWidget(close)
+
+	def value_text(self) -> str:
+		"""Показанное значение (``text()`` у самой кнопки пуст)."""
+		return str(self._label.text())
+
+	def sizeHint(self) -> QSize:  # noqa: N802 — API Qt
+		"""Ширина — от компоновки, высота — штатная кнопочная."""
+		return QSize(int(self.layout().sizeHint().width()), int(super().sizeHint().height()))
+
+
+class DictionaryDialog(WorkDialog):
+	"""Редактор словаря поля: значения пилюлями, удаление, добавление.
 
 	Словарь пополняется и сам — из значений, введённых при сборке
 	подписи; здесь он правится руками: опечатки и устаревшие значения
 	удаляются, новые добавляются пачкой через запятую.
 
-	У зависимого поля («Character» внутри «Title») у каждого значения
-	есть выбор родителя: к какому тайтлу относится персонаж. Новые
-	значения кладутся внутрь тайтла, выбранного в строке добавления.
+	Значения показываются пилюлями в поточной раскладке: словарь легко
+	вырастает до сотен значений, и строка на каждое занимала бы экраны
+	пустого места справа. Прокрутка — у области с пилюлями: окно имеет
+	собственный размер, поэтому область показывает полосу сама, когда
+	значения не влезли.
+
+	У зависимого поля («Character» внутри «Title») значения сгруппированы
+	по родителю: заголовок группы — тайтл, под ним его персонажи, в конце
+	группа «Без привязки». Перенести значение в другой тайтл — правый
+	щелчок по пилюле.
 	"""
 
 	def __init__(
@@ -351,34 +425,48 @@ class DictionaryDialog(MessageBoxBase):
 		"""``parent_field`` — родительское поле (None — поле независимое);
 		``dependent_names`` — поля, зависящие от этого: их значения уйдут
 		вместе с удаляемым (предупреждение перед удалением)."""
-		super().__init__(parent)
+		super().__init__(f"Словарь поля «{field.name}»", parent)
 		self._worker = worker
 		self._field = field
 		self._parent_field = parent_field
 		self._dependent_names = list(dependent_names)
 		self._show_error = error_reporter(self)
-		self.viewLayout.addWidget(SubtitleLabel(f"Словарь поля «{field.name}»", self))
 		if parent_field is not None:
-			self.viewLayout.addWidget(
+			self.content.addWidget(
 				CaptionLabel(
-					f"Значения живут внутри поля «{parent_field.name}»: "
-					"выберите, к какому значению относится каждое.",
+					f"Значения живут внутри поля «{parent_field.name}» и сгруппированы "
+					"по нему. Правый щелчок по значению — перенести в другую группу.",
 					self,
 				)
 			)
-		self._values_box = QVBoxLayout()
-		self.viewLayout.addLayout(self._values_box)
+		self._build_values_area()
 		self._build_add_row()
-		self.yesButton.setText("Готово")
-		self.cancelButton.hide()
-		self.widget.setMinimumWidth(520)
+		self.add_close_button("Готово")
 		self._show_values(field)
+
+	# --- сборка окна ----------------------------------------------------------
+
+	def _build_values_area(self) -> None:
+		"""Прокручиваемая область значений (растёт на всю высоту окна)."""
+		self._area = ScrollArea(self)
+		container = QWidget(self._area)
+		self._values_box = QVBoxLayout(container)
+		self._values_box.setContentsMargins(0, 0, 0, 0)
+		self._values_box.setSpacing(density.spacing().row_spacing)
+		self._area.setWidget(container)
+		# содержимое тянется по ширине области, а его высоту считает
+		# поточная раскладка (heightForWidth) — отсюда и берётся полоса
+		# прокрутки, когда пилюли не помещаются
+		self._area.setWidgetResizable(True)
+		self._area.enableTransparentBackground()
+		self.content.addWidget(self._area, stretch=1)
 
 	def _build_add_row(self) -> None:
 		"""Строка добавления: значения через запятую и (для зависимого) родитель."""
 		row = QHBoxLayout()
 		self._new_values = LineEdit(self)
 		self._new_values.setPlaceholderText("новые значения через запятую…")
+		self._new_values.returnPressed.connect(self._on_add)
 		row.addWidget(self._new_values, stretch=1)
 		self._new_parent: DtoComboBox[ValueDto] | None = None
 		if self._parent_field is not None:
@@ -390,10 +478,12 @@ class DictionaryDialog(MessageBoxBase):
 		add = PushButton("Добавить", self)
 		add.clicked.connect(self._on_add)
 		row.addWidget(add)
-		self.viewLayout.addLayout(row)
+		self.content.addLayout(row)
+
+	# --- показ ------------------------------------------------------------------
 
 	def _show_values(self, field: FieldDto) -> None:
-		"""Перерисовывает список значений словаря."""
+		"""Перерисовывает значения: одна лента или группы по родителю."""
 		self._field = field
 		clear_layout(self._values_box)
 		if not field.values:
@@ -403,42 +493,81 @@ class DictionaryDialog(MessageBoxBase):
 					self,
 				)
 			)
-		for item in field.values:
-			extras = [] if self._parent_field is None else [self._parent_combo(item)]
-			self._values_box.addWidget(
-				_row_widget(
-					self,
-					item.value,
-					"",
-					bind(self._on_delete_value, item),
-					extras,
-				)
-			)
-		self.widget.adjustSize()  # список меняется после показа окна
+			self._values_box.addStretch()
+			return
+		if self._parent_field is None:
+			self._values_box.addWidget(self._chips_row(field.values))
+		else:
+			for title, values in self._grouped(field.values):
+				self._values_box.addWidget(CaptionLabel(title, self))
+				self._values_box.addWidget(self._chips_row(values))
+		# распорка прижимает содержимое кверху: короткий словарь
+		# не растягивается на всю высоту окна
+		self._values_box.addStretch()
 
-	def _parent_combo(self, item: ValueDto) -> QWidget:
-		"""Выбор родительского значения для одного значения словаря."""
-		combo: DtoComboBox[ValueDto] = DtoComboBox(self, "(без привязки)")
-		assert self._parent_field is not None  # вызывается только у зависимого поля
-		combo.set_items(self._parent_field.values, lambda v: v.value)
-		if item.parent_id is not None:
-			combo.select(lambda v: v.id == item.parent_id)
-		combo.setMinimumWidth(160)
-		# сигнал — после установки текущего значения: иначе предвыбор
-		# сам себя сохранил бы обратно в движок
-		combo.currentIndexChanged.connect(bind(self._on_parent_changed, (item, combo)))
-		widget: QWidget = combo
-		return widget
+	def _grouped(self, values: list[ValueDto]) -> list[tuple[str, list[ValueDto]]]:
+		"""Значения по группам «родитель → его значения»; пустые группы — мимо.
 
-	def _on_parent_changed(self, pair: tuple[ValueDto, DtoComboBox[ValueDto]]) -> None:
-		"""Пользователь сменил родителя значения — сохранить связь."""
-		item, combo = pair
-		chosen = combo.selected()
+		Порядок групп — как у значений родительского поля; значения без
+		привязки (и с исчезнувшим родителем) идут последней группой.
+		"""
+		assert self._parent_field is not None  # группы есть только у зависимого
+		by_parent: dict[int | None, list[ValueDto]] = {}
+		known = {parent.id for parent in self._parent_field.values}
+		for value in values:
+			key = value.parent_id if value.parent_id in known else None
+			by_parent.setdefault(key, []).append(value)
+		groups = [
+			(parent.value, by_parent[parent.id])
+			for parent in self._parent_field.values
+			if parent.id in by_parent
+		]
+		if None in by_parent:
+			groups.append((_NO_PARENT_GROUP, by_parent[None]))
+		return groups
+
+	def _chips_row(self, values: list[ValueDto]) -> QWidget:
+		"""Пилюли значений в поточной раскладке (переносятся по ширине)."""
+		host = QWidget(self)
+		flow = FlowLayout(host, needAni=False)
+		flow.setContentsMargins(0, 0, 0, 0)
+		for value in values:
+			flow.addWidget(self._chip(value))
+		return host
+
+	def _chip(self, value: ValueDto) -> _ValueChip:
+		"""Пилюля значения: крестик удаляет, правый щелчок переносит."""
+		chip = _ValueChip(value.value, self, bind(self._on_delete_value, value))
+		if self._parent_field is not None:
+			chip.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+			chip.customContextMenuRequested.connect(bind(self._on_chip_menu, (value, chip)))
+		return chip
+
+	# --- операции ----------------------------------------------------------------
+
+	def _on_chip_menu(self, pair: tuple[ValueDto, _ValueChip]) -> None:
+		"""Меню переноса значения в другую группу (правый щелчок)."""
+		assert self._parent_field is not None  # меню вешается только у зависимого
+		value, chip = pair
+		menu = RoundMenu(parent=self)
+		for parent in self._parent_field.values:
+			if parent.id == value.parent_id:
+				continue
+			action = Action(f"Перенести в «{parent.value}»", self)
+			action.triggered.connect(bind(self._on_reparent, (value, parent.id)))
+			menu.addAction(action)
+		if value.parent_id is not None:
+			detach = Action("Убрать привязку", self)
+			detach.triggered.connect(bind(self._on_reparent, (value, None)))
+			menu.addAction(detach)
+		menu.exec(chip.mapToGlobal(chip.rect().bottomLeft()))
+
+	def _on_reparent(self, pair: tuple[ValueDto, int | None]) -> None:
+		"""Сохраняет новую привязку значения."""
+		value, parent_id = pair
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.assign_value_parent(
-				item.id, chosen.id if chosen is not None else None
-			),
+			self._worker.engine.captions.assign_value_parent(value.id, parent_id),
 			self,
 			self._on_changed,
 			self._show_error,
@@ -482,7 +611,7 @@ class DictionaryDialog(MessageBoxBase):
 		self._show_values(field)
 
 
-class FieldsDialog(MessageBoxBase):
+class FieldsDialog(WorkDialog):
 	"""Настройка канала: пул полей со словарями и шаблоны."""
 
 	def __init__(
@@ -492,28 +621,30 @@ class FieldsDialog(MessageBoxBase):
 		community_title: str,
 		parent: QWidget,
 	) -> None:
-		super().__init__(parent)
+		super().__init__(f"Подписи канала «{community_title}»", parent, size=(720, 760))
 		self._worker = worker
 		self._community_id = community_id
 		self._show_error = error_reporter(self)
 		self._fields: list[FieldDto] = []
 		# шаблон, который сейчас правится (None — форма собирает новый)
 		self._editing: TemplateDto | None = None
-		self.viewLayout.addWidget(SubtitleLabel(f"Подписи канала «{community_title}»", self))
+		# всё содержимое — в одной прокручиваемой области: блоков два
+		# (поля и шаблоны), каждый растёт по мере наполнения канала
+		area, self._body = list_area(self, spacing=density.spacing().block_spacing)
+		self.content.addWidget(area, stretch=1)
 		self._build_fields_block()
 		self._build_templates_block()
-		self.yesButton.setText("Готово")
-		self.cancelButton.hide()
-		self.widget.setMinimumWidth(560)
+		self._body.addStretch()
+		self.add_close_button("Готово")
 		self._reload()
 
 	# --- поля -----------------------------------------------------------------
 
 	def _build_fields_block(self) -> None:
 		"""Блок пула полей: список и строка добавления нового поля."""
-		self.viewLayout.addWidget(BodyLabel("Поля (словарь общий для шаблонов):", self))
+		self._body.addWidget(BodyLabel("Поля (словарь общий для шаблонов):", self))
 		self._fields_box = QVBoxLayout()
-		self.viewLayout.addLayout(self._fields_box)
+		self._body.addLayout(self._fields_box)
 		row = QHBoxLayout()
 		self._field_name = LineEdit(self)
 		self._field_name.setPlaceholderText("Новое поле (например, Genre)…")
@@ -535,7 +666,7 @@ class FieldsDialog(MessageBoxBase):
 		add = PushButton("Добавить", self)
 		add.clicked.connect(self._on_add_field)
 		row.addWidget(add)
-		self.viewLayout.addLayout(row)
+		self._body.addLayout(row)
 
 	def _show_fields(self, fields: list[FieldDto]) -> None:
 		"""Перерисовывает список полей и набор для сборки шаблона."""
@@ -562,7 +693,6 @@ class FieldsDialog(MessageBoxBase):
 		# восстанавливается в списке (например, после добавления поля)
 		self._fill_template_list(self._editing)
 		self._update_pattern_hint(fields)
-		self.widget.adjustSize()  # данные пришли после показа окна
 
 	def _show_name_switch(self, field: FieldDto) -> QWidget:
 		"""Переключатель «имя в подписи»: уходит ли название поля в подпись.
@@ -679,28 +809,26 @@ class FieldsDialog(MessageBoxBase):
 
 	def _build_templates_block(self) -> None:
 		"""Блок шаблонов: список, набор полей, шаблон имени файла, сохранение."""
-		self.viewLayout.addWidget(
-			BodyLabel("Шаблоны (отметьте поля, порядок — перетаскиванием):", self)
-		)
+		self._body.addWidget(BodyLabel("Шаблоны (отметьте поля, порядок — перетаскиванием):", self))
 		self._templates_box = QVBoxLayout()
-		self.viewLayout.addLayout(self._templates_box)
+		self._body.addLayout(self._templates_box)
 		self._template_list = QListWidget(self)
 		self._template_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
 		self._template_list.setMaximumHeight(140)
-		self.viewLayout.addWidget(self._template_list)
+		self._body.addWidget(self._template_list)
 		self._template_pattern = LineEdit(self)
 		self._template_pattern.setPlaceholderText(
 			"Шаблон имени файла (необязательно): {Author}, {video} ({Genre}) {quality} (@{channel})"
 		)
-		self.viewLayout.addWidget(self._template_pattern)
+		self._body.addWidget(self._template_pattern)
 		self._pattern_hint = CaptionLabel("", self)
 		self._pattern_hint.setWordWrap(True)
 		# подсказку можно выделять и копировать (плейсхолдеры — в шаблон)
 		self._pattern_hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-		self.viewLayout.addWidget(self._pattern_hint)
+		self._body.addWidget(self._pattern_hint)
 		self._edit_hint = CaptionLabel("", self)
 		self._edit_hint.hide()
-		self.viewLayout.addWidget(self._edit_hint)
+		self._body.addWidget(self._edit_hint)
 		row = QHBoxLayout()
 		self._template_name = LineEdit(self)
 		self._template_name.setPlaceholderText("Имя шаблона (например, Фильм)…")
@@ -712,7 +840,7 @@ class FieldsDialog(MessageBoxBase):
 		self._save_template_button = PushButton("Сохранить шаблон", self)
 		self._save_template_button.clicked.connect(self._on_save_template)
 		row.addWidget(self._save_template_button)
-		self.viewLayout.addLayout(row)
+		self._body.addLayout(row)
 
 	def _fill_template_list(self, template: TemplateDto | None = None) -> None:
 		"""Заполняет набор полей формы шаблона.
@@ -758,7 +886,6 @@ class FieldsDialog(MessageBoxBase):
 					[edit],
 				)
 			)
-		self.widget.adjustSize()  # данные пришли после показа окна
 
 	def _start_edit_template(self, template: TemplateDto) -> None:
 		"""Загружает шаблон в форму: имя, состав с порядком, шаблон имени."""

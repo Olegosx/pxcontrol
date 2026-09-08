@@ -24,11 +24,9 @@ from qfluentwidgets import (
 	CheckBox,
 	ComboBox,
 	LineEdit,
-	MessageBoxBase,
 	PushButton,
 	SpinBox,
 	StrongBodyLabel,
-	SubtitleLabel,
 	TextEdit,
 )
 
@@ -59,9 +57,10 @@ from pxcontrol.ui.pages.common import (
 	CollapsibleCard,
 	ErrorLabel,
 	SelectionRow,
+	WorkDialog,
 	file_action_buttons,
-	fixed_list_area,
 	human_size,
+	list_area,
 	noop,
 	parse_hhmm,
 	show_error,
@@ -71,8 +70,6 @@ from pxcontrol.ui.pages.common import (
 _WHEN_FORMAT = "%d.%m.%Y %H:%M"
 
 #: Высота списка черновиков (прокрутка внутри, а не рост диалога).
-_LIST_HEIGHT = 420
-
 #: Высота поля подписи в строке (несколько строк текста без прокрутки окна).
 _CAPTION_HEIGHT = 64
 
@@ -170,7 +167,7 @@ class _BatchRow:
 		box.addLayout(bottom)
 
 
-class PublishBatchDialog(MessageBoxBase):
+class PublishBatchDialog(WorkDialog):
 	"""Черновики пакета отправки с раскладкой времени и правкой строк."""
 
 	def __init__(
@@ -198,7 +195,7 @@ class PublishBatchDialog(MessageBoxBase):
 		наивное время) — раскладка их пропускает; ``title_rules`` —
 		заготовка правил разбора имени файла (наполняет блок правил,
 		применяется только явной кнопкой)."""
-		super().__init__(parent)
+		super().__init__(f"Пакет в «{community.title}»", parent, size=(980, 720))
 		self._worker = worker
 		self._community = community
 		self._community_times = list(community_times or [])
@@ -209,19 +206,16 @@ class PublishBatchDialog(MessageBoxBase):
 		self._filename_template_id = filename_template_id
 		self._used_values = dict(used_values or {})
 		self._applied_rules: TitleParseRules | None = None
-		self.viewLayout.addWidget(SubtitleLabel(f"Пакет в «{community.title}»", self))
 		folder = CaptionLabel(f"Папка: {root}", self)
 		folder.setWordWrap(True)
-		self.viewLayout.addWidget(folder)
+		self.content.addWidget(folder)
 		self._build_rules_card(title_rules or TitleParseRules())
 		self._build_strategy_row()
 		self._build_rows(files, caption_lines, limit_bytes)
 		self._build_selection_row()
 		self._error = ErrorLabel(self)
-		self.viewLayout.addWidget(self._error)
-		self.yesButton.setText("В очередь")
-		self.cancelButton.setText("Отмена")
-		self.widget.setMinimumWidth(900)
+		self.content.addWidget(self._error)
+		self.add_accept_buttons("В очередь")
 		self._update_summary()
 		self._request_renames()
 		self._apply_initial_plan()
@@ -253,7 +247,7 @@ class PublishBatchDialog(MessageBoxBase):
 		return result
 
 	def validate(self) -> bool:
-		"""Крючок MessageBoxBase: False не даёт диалогу закрыться."""
+		"""Крючок рабочего окна: False не даёт ему закрыться."""
 		checked = self._checked()
 		if not checked:
 			return self._error.fail("Отметьте хотя бы один файл.")
@@ -311,7 +305,7 @@ class PublishBatchDialog(MessageBoxBase):
 		apply_button.clicked.connect(self._apply_title_rules)
 		words_row.addWidget(apply_button)
 		card.body.addLayout(words_row)
-		self.viewLayout.addWidget(card)
+		self.content.addWidget(card)
 
 	def _rules_from_form(self) -> TitleParseRules:
 		"""Правила из виджетов блока (слова — через запятую, пустые долой)."""
@@ -410,7 +404,7 @@ class PublishBatchDialog(MessageBoxBase):
 		apply_button.clicked.connect(self._apply_plan)
 		row.addWidget(apply_button)
 		row.addStretch()
-		self.viewLayout.addLayout(row)
+		self.content.addLayout(row)
 		if not self._schedule_allowed:
 			# бот-канал не умеет отложку — только «сейчас»
 			self._strategy.setCurrentIndex(len(_STRATEGIES) - 1)
@@ -435,7 +429,7 @@ class PublishBatchDialog(MessageBoxBase):
 		limit_bytes: int | None,
 	) -> None:
 		"""Строки черновиков в прокручиваемом списке."""
-		area, box = fixed_list_area(self, _LIST_HEIGHT, spacing=8)
+		area, box = list_area(self, spacing=density.spacing().list_spacing)
 		for video in files:
 			caption = (
 				build_caption(title_from_filename(video.path), caption_lines)
@@ -448,12 +442,12 @@ class PublishBatchDialog(MessageBoxBase):
 			box.addWidget(row.card)
 			self._rows.append(row)
 		box.addStretch()
-		self.viewLayout.addWidget(area)
+		self.content.addWidget(area, stretch=1)
 
 	def _build_selection_row(self) -> None:
 		"""Кнопки выбора и итог по отмеченному."""
 		self._selection = SelectionRow(self, self._set_all)
-		self.viewLayout.addLayout(self._selection.layout)
+		self.content.addLayout(self._selection.layout)
 
 	def _request_renames(self) -> None:
 		"""Просит движок предложить имена файлов по шаблону имени.
