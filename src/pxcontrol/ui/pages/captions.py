@@ -814,7 +814,6 @@ class FieldsDialog(WorkDialog):
 		self._body.addLayout(self._templates_box)
 		self._template_list = QListWidget(self)
 		self._template_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-		self._template_list.setMaximumHeight(140)
 		self._body.addWidget(self._template_list)
 		self._template_pattern = LineEdit(self)
 		self._template_pattern.setPlaceholderText(

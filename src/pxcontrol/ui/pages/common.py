@@ -7,12 +7,13 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Generic, TypeVar
 
-from PySide6.QtCore import QDate, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QMouseEvent
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
 	QHBoxLayout,
+	QLabel,
 	QLayout,
 	QSizePolicy,
 	QVBoxLayout,
@@ -164,6 +165,58 @@ def page_layout(page: ScrollArea, spacing: int | None = None) -> QVBoxLayout:
 	page.setWidgetResizable(True)
 	page.enableTransparentBackground()
 	return layout
+
+
+class _Elider(QObject):
+	"""Держит полный текст надписи и подгоняет его под её живую ширину.
+
+	Живёт при надписи (она же родитель) и переподгоняет текст на каждом
+	изменении её размера: ширину даёт Qt, а не наш расчёт «ширина
+	карточки минус поля минус значок».
+	"""
+
+	def __init__(self, label: QLabel, text: str) -> None:
+		super().__init__(label)
+		self._label = label
+		self._text = text
+		label.installEventFilter(self)
+		self._apply()
+
+	def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 — API Qt
+		"""Ширина надписи изменилась — пересчитать сокращение."""
+		if event.type() == QEvent.Type.Resize:
+			self._apply()
+		return False
+
+	def _apply(self) -> None:
+		"""Ставит полный текст или сокращённый — по настоящей ширине."""
+		metrics = self._label.fontMetrics()
+		width = self._label.contentsRect().width()
+		# сокращаем, только когда текст действительно шире: elidedText
+		# сокращает уже при равенстве, и короткое значение превращалось
+		# бы в одно многоточие
+		if metrics.horizontalAdvance(self._text) > width:
+			self._label.setText(metrics.elidedText(self._text, Qt.TextElideMode.ElideRight, width))
+			self._label.setToolTip(self._text)
+		else:
+			self._label.setText(self._text)
+			self._label.setToolTip("")
+
+
+def elide_text(label: QLabel, text: str) -> None:
+	"""Показывает текст в надписи, сокращая его под её настоящую ширину.
+
+	У ``QLabel`` своего сокращения нет, поэтому его делает наблюдатель
+	при надписи: он берёт ширину у самой надписи (``contentsRect``)
+	и повторяет подгонку при каждом изменении размера. Полный текст
+	остаётся во всплывающей подсказке.
+
+	Ширину надписи задаёт вызывающий — обычной вёрсткой: либо предел
+	(``setMaximumWidth``), либо политика размера «занимай, что дадут»
+	(``QSizePolicy.Policy.Ignored``) у надписи, которой отдана колонка.
+	Считать доступную ширину арифметикой по чужим отступам не нужно.
+	"""
+	_Elider(label, text)
 
 
 def clear_layout(layout: QLayout) -> None:

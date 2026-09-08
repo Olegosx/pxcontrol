@@ -13,7 +13,6 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
 	QButtonGroup,
-	QGridLayout,
 	QHBoxLayout,
 	QLabel,
 	QVBoxLayout,
@@ -22,6 +21,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
+	FlowLayout,
 	FluentIcon,
 	IndeterminateProgressRing,
 	PushButton,
@@ -35,21 +35,18 @@ from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	WorkDialog,
-	clear_layout,
 	format_duration,
 	list_area,
 	show_error,
 )
 
-#: Колонок в плитке выбора кадра заставки.
-_FRAME_GRID_COLUMNS = 3
-
-#: Размеры плитки кадра: кнопка и картинка внутри (кнопка минус поля 2×8).
-_TILE_SIZE = QSize(232, 133)
+#: Размер миниатюры кадра (пиксели) и поля вокруг неё внутри плитки.
+#: Размер самой плитки не задаётся: его считает её компоновка.
+_FRAME_IMAGE_SIZE = QSize(216, 117)
 _TILE_PADDING = 8
 
-#: Границы и умолчание числа кадров-кандидатов за раз: максимум кратен
-#: сетке (_FRAME_GRID_COLUMNS × 4 ряда), больше — плитка нечитаема.
+#: Границы и умолчание числа кадров-кандидатов за раз: больше дюжины —
+#: плитка нечитаема, меньше пары — не из чего выбирать.
 _FRAMES_MIN = 2
 _FRAMES_MAX = 12
 _FRAMES_DEFAULT = 6
@@ -63,6 +60,16 @@ class _FrameTileButton(TogglePushButton):
 	def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
 		super().mouseDoubleClickEvent(event)
 		self.doubleClicked.emit()
+
+	def sizeHint(self) -> QSize:  # noqa: N802 — API Qt
+		"""Размер — от компоновки: кнопка сама её не спрашивает.
+
+		Внутри кнопки лежит миниатюра, и её размер вместе с полями
+		и есть размер плитки (то же, что у пилюли словаря). Своего
+		``sizeHint`` у кнопки — по тексту, а текста здесь нет.
+		"""
+		layout = self.layout()
+		return QSize(layout.sizeHint()) if layout is not None else super().sizeHint()
 
 
 class FramePickerDialog(WorkDialog):
@@ -95,10 +102,12 @@ class FramePickerDialog(WorkDialog):
 			self.content.addWidget(name_label)
 		self._build_controls_row()
 		# плитка кандидатов — в прокручиваемой области: при двенадцати
-		# кадрах она выше окна, и полосу область показывает сама
+		# кадрах она выше окна, и полосу область показывает сама.
+		# Раскладка поточная: сколько плиток войдёт в ширину окна,
+		# столько и встанет в ряд — при растягивании окна перестроится
 		area, box = list_area(self, spacing=density.spacing().list_spacing)
 		self._grid_box = QWidget(self)
-		self._grid = QGridLayout(self._grid_box)
+		self._grid = FlowLayout(self._grid_box, needAni=False)
 		box.addWidget(self._grid_box)
 		box.addStretch()
 		self.content.addWidget(area, stretch=1)
@@ -148,8 +157,8 @@ class FramePickerDialog(WorkDialog):
 		)
 
 	def _clear_grid(self) -> None:
-		"""Убирает плитку кандидатов (общая очистка + снятие кнопок из группы)."""
-		clear_layout(self._grid)
+		"""Убирает плитку кандидатов (виджеты + снятие кнопок из группы)."""
+		self._grid.takeAllWidgets()
 		for button in self._group.buttons():
 			self._group.removeButton(button)
 
@@ -157,9 +166,8 @@ class FramePickerDialog(WorkDialog):
 		"""Перерисовывает плитку кандидатов."""
 		self._ring.hide()
 		self._refresh.setEnabled(True)
-		for index, frame in enumerate(frames):
-			row, column = divmod(index, _FRAME_GRID_COLUMNS)
-			self._grid.addWidget(self._frame_tile(frame), row, column)
+		for frame in frames:
+			self._grid.addWidget(self._frame_tile(frame))
 
 	def _frame_tile(self, frame: FrameCandidate) -> QWidget:
 		"""Плитка кандидата: миниатюра по центру, время подписью снизу."""
@@ -168,16 +176,18 @@ class FramePickerDialog(WorkDialog):
 		column.setContentsMargins(0, 0, 0, 0)
 		column.setSpacing(2)
 		button = _FrameTileButton(tile)
-		button.setFixedSize(_TILE_SIZE)
 		# картинка — QLabel внутри кнопки: родная отрисовка иконки
-		# смещала её от центра и обрезала; подпись прозрачна для мыши
+		# смещала её от центра и обрезала; подпись прозрачна для мыши.
+		# Размер плитки задаёт эта компоновка: миниатюра плюс поля
 		inner = QVBoxLayout(button)
 		inner.setContentsMargins(_TILE_PADDING, _TILE_PADDING, _TILE_PADDING, _TILE_PADDING)
 		image = QLabel(button)
+		# фикс-размер надписи держит плитки одинаковыми: кадры уже,
+		# чем рамка, вписываются в неё и центруются
+		image.setFixedSize(_FRAME_IMAGE_SIZE)
 		image.setPixmap(
 			QPixmap(frame.path).scaled(
-				_TILE_SIZE.width() - 2 * _TILE_PADDING,
-				_TILE_SIZE.height() - 2 * _TILE_PADDING,
+				_FRAME_IMAGE_SIZE,
 				Qt.AspectRatioMode.KeepAspectRatio,
 				Qt.TransformationMode.SmoothTransformation,
 			)

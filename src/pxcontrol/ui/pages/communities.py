@@ -15,7 +15,7 @@ from functools import partial
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap, QShowEvent
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
@@ -46,6 +46,7 @@ from pxcontrol.ui.pages.common import (
 	account_caption,
 	bot_caption,
 	community_kind_caption,
+	elide_text,
 	error_reporter,
 	exec_dialog,
 	page_layout,
@@ -71,33 +72,22 @@ _LOGO_SIZE = 44
 _CARD_WIDTH = 360
 _CARD_HEIGHT = 150
 
-#: Внутренние отступы карточки и ширина текста шапки (пиксели).
+#: Внутренние отступы карточки (пиксели).
 _CARD_MARGIN = 16
-_TITLE_WIDTH = _CARD_WIDTH - 2 * _CARD_MARGIN - _LOGO_SIZE - 12
 
 #: Цвет значения метрики «ошибки», когда они есть (светлая/тёмная тема).
 _ERROR_LIGHT = QColor(196, 43, 28)
 _ERROR_DARK = QColor(255, 153, 164)
 
 #: Предел ширины значения метрики (пиксели): подписи короткие, а вот
-#: значение (число подписчиков) может разрастись — обрезается с «…».
+#: значение (число подписчиков) может разрастись — упирается в предел
+#: и сокращается многоточием под свою настоящую ширину.
 _METRIC_VALUE_WIDTH = 90
 
 #: Размер плитки сводки (пиксели): одинаковый у всех — ряд ровный,
 #: ширины хватает самой длинной подписи («в очереди отправки»).
 _STAT_TILE_HEIGHT = 72
 _STAT_TILE_WIDTH = 160
-
-
-def _elide(label: QLabel, text: str, width: int) -> None:
-	"""Укладывает текст в одну строку заданной ширины (хвост — «…»).
-
-	Обрезанный текст остаётся доступным во всплывающей подсказке.
-	"""
-	metrics = label.fontMetrics()
-	label.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight, width))
-	if metrics.horizontalAdvance(text) > width:
-		label.setToolTip(text)
 
 
 def _logo_placeholder(parent: QWidget, community: CommunityDto) -> QLabel:
@@ -192,14 +182,14 @@ class CommunityCard(CardWidget):
 		column = QVBoxLayout()
 		column.setSpacing(2)
 		title = StrongBodyLabel(box)
-		_elide(title, community.title, _TITLE_WIDTH)
+		# «занимай, что дадут»: иначе длинное название требовало бы свою
+		# ширину и распирало карточку, а сокращать было бы нечего
+		title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		elide_text(title, community.title)
 		column.addWidget(title)
 		details = CaptionLabel(box)
-		_elide(
-			details,
-			f"{community_kind_caption(community)} · @{community.username or '—'}",
-			_TITLE_WIDTH,
-		)
+		details.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		elide_text(details, f"{community_kind_caption(community)} · @{community.username or '—'}")
 		column.addWidget(details)
 		row.addLayout(column, stretch=1)
 		return box
@@ -267,7 +257,8 @@ class CommunityCard(CardWidget):
 		column.setContentsMargins(0, 0, 0, 0)
 		column.setSpacing(0)
 		value_label = StrongBodyLabel(box)
-		_elide(value_label, value, _METRIC_VALUE_WIDTH)
+		value_label.setMaximumWidth(_METRIC_VALUE_WIDTH)
+		elide_text(value_label, value)
 		if alert:
 			value_label.setTextColor(_ERROR_LIGHT, _ERROR_DARK)
 		column.addWidget(value_label)
