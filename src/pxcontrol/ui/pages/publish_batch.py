@@ -23,6 +23,7 @@ from qfluentwidgets import (
 	CardWidget,
 	CheckBox,
 	ComboBox,
+	FlowLayout,
 	LineEdit,
 	PushButton,
 	SpinBox,
@@ -33,9 +34,11 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import (
 	CaptionLine,
+	CaptionsError,
 	TitleCaseMode,
 	TitleParseRules,
 	build_caption,
+	compile_remove_pattern,
 	parse_title,
 	title_from_filename,
 )
@@ -275,23 +278,44 @@ class PublishBatchDialog(WorkDialog):
 		применении (``TITLE_PARSE_RULES``).
 		"""
 		card = CollapsibleCard("Правила разбора имени файла", self)
-		checks_row = QHBoxLayout()
-		self._rule_separators = CheckBox("_ и - → пробелы", card)
-		self._rule_separators.setChecked(rules.separators_to_spaces)
+		# галочек много — поточная раскладка переносит их по ширине окна
+		checks_host = QWidget(card)
+		checks = FlowLayout(checks_host, needAni=False)
+		checks.setContentsMargins(0, 0, 0, 0)
+		self._rule_underscores = CheckBox("_ → пробел", card)
+		self._rule_underscores.setChecked(rules.underscores_to_spaces)
+		self._rule_hyphens = CheckBox("- → пробел", card)
+		self._rule_hyphens.setChecked(rules.hyphens_to_spaces)
 		self._rule_brackets = CheckBox("Убирать [скобки] и (скобки)", card)
 		self._rule_brackets.setChecked(rules.strip_brackets)
+		self._rule_dates = CheckBox("Убирать даты", card)
+		self._rule_dates.setToolTip(
+			"Даты вида 2024-01-31, 31.01.2024, 31.01.24, 20240131 "
+			"(одиночный год не трогается — он может быть частью названия)"
+		)
+		self._rule_dates.setChecked(rules.strip_dates)
 		self._rule_numbers = CheckBox("Срезать номера по краям", card)
 		self._rule_numbers.setChecked(rules.strip_edge_numbers)
-		for check in (self._rule_separators, self._rule_brackets, self._rule_numbers):
-			checks_row.addWidget(check)
+		self._rule_digit_words = CheckBox("Убирать слова из цифр", card)
+		self._rule_digit_words.setToolTip("Слова целиком из цифр: 2024, 1080, 007")
+		self._rule_digit_words.setChecked(rules.strip_digit_words)
+		for check in (
+			self._rule_underscores,
+			self._rule_hyphens,
+			self._rule_brackets,
+			self._rule_dates,
+			self._rule_numbers,
+			self._rule_digit_words,
+		):
+			checks.addWidget(check)
 		self._rule_case = ComboBox(card)
 		for label, _mode in _CASE_MODES:
 			self._rule_case.addItem(label)
 		modes = [mode for _label, mode in _CASE_MODES]
 		self._rule_case.setCurrentIndex(modes.index(rules.case))
-		checks_row.addWidget(self._rule_case)
-		checks_row.addStretch()
-		card.body.addLayout(checks_row)
+		checks.addWidget(self._rule_case)
+		card.body.addWidget(checks_host)
+		self._build_pattern_row(card, rules)
 		words_row = QHBoxLayout()
 		words_row.addWidget(BodyLabel("Убирать слова:", card))
 		self._rule_words = LineEdit(card)
@@ -307,6 +331,22 @@ class PublishBatchDialog(WorkDialog):
 		card.body.addLayout(words_row)
 		self.content.addWidget(card)
 
+	def _build_pattern_row(self, card: CollapsibleCard, rules: TitleParseRules) -> None:
+		"""Строка своего выражения удаления и место под причину отказа."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Убирать по шаблону:", card))
+		self._rule_pattern = LineEdit(card)
+		self._rule_pattern.setPlaceholderText(r"регулярное выражение, например \d{3,4}p|WEB-DL")
+		self._rule_pattern.setToolTip(
+			"Совпадения вырезаются из имени до остальных правил. "
+			"Без учёта регистра — начните шаблон с (?i)"
+		)
+		self._rule_pattern.setText(rules.remove_pattern)
+		row.addWidget(self._rule_pattern, stretch=1)
+		card.body.addLayout(row)
+		self._pattern_error = ErrorLabel(card)
+		card.body.addWidget(self._pattern_error)
+
 	def _rules_from_form(self) -> TitleParseRules:
 		"""Правила из виджетов блока (слова — через запятую, пустые долой)."""
 		words = tuple(
@@ -315,9 +355,13 @@ class PublishBatchDialog(WorkDialog):
 			if word
 		)
 		return TitleParseRules(
-			separators_to_spaces=self._rule_separators.isChecked(),
+			underscores_to_spaces=self._rule_underscores.isChecked(),
+			hyphens_to_spaces=self._rule_hyphens.isChecked(),
 			strip_brackets=self._rule_brackets.isChecked(),
+			strip_dates=self._rule_dates.isChecked(),
 			strip_edge_numbers=self._rule_numbers.isChecked(),
+			strip_digit_words=self._rule_digit_words.isChecked(),
+			remove_pattern=str(self._rule_pattern.text()).strip(),
 			case=_CASE_MODES[int(self._rule_case.currentIndex())][1],
 			remove_words=words,
 		)
@@ -337,8 +381,20 @@ class PublishBatchDialog(WorkDialog):
 		настраивают, разобранное название должно быть видно в форме).
 		Применённый набор сохраняется заготовкой канала; сбой сохранения
 		применению не мешает (текст — в плашку ошибок диалога).
+
+		Своё выражение проверяется до применения: битый шаблон
+		не применяется вовсе (причина — строкой под полем), остальные
+		правила при этом отработали бы вслепую, поэтому разбор
+		прекращается целиком.
 		"""
-		self._applied_rules = self._rules_from_form()
+		rules = self._rules_from_form()
+		try:
+			compile_remove_pattern(rules.remove_pattern)
+		except CaptionsError as exc:
+			self._pattern_error.fail(str(exc))
+			return
+		self._pattern_error.succeed()
+		self._applied_rules = rules
 		for row in self._rows:
 			row.caption.setPlainText(build_caption(self._row_title(row), self._caption_lines or []))
 		self._request_renames()
