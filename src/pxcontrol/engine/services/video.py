@@ -37,7 +37,7 @@ from pxcontrol.engine.services.settings import (
 )
 from pxcontrol.engine.telegram.types import userbot_max_file_bytes
 from pxcontrol.engine.video import ProcessingOptions, process
-from pxcontrol.engine.video.constants import AUDIO_KBPS, fitted_size
+from pxcontrol.engine.video.constants import AUDIO_KBPS, DEFAULT_RESOLUTION, scaled_size
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
 from pxcontrol.engine.video.frames import extract_still, resolve_timestamp
 from pxcontrol.engine.video.pipeline import ProgressCallback
@@ -101,6 +101,26 @@ def recommended_bitrate_kbps(duration_s: float, max_bytes: int) -> int:
 
 
 @dataclass(frozen=True)
+class SourceAdvice:
+	"""Сведения об исходнике для подсказок в карточке файла.
+
+	Собираются одной пробой ffprobe: интерфейсу нужны и размеры кадра
+	(предупреждение об апскейле), и совет по качеству.
+
+	Attributes:
+		width: ширина исходного кадра в пикселях (отображаемая — флаг
+			поворота учитывает ``probe_video``).
+		height: высота исходного кадра в пикселях (отображаемая).
+		bitrate: рекомендация битрейта, если файл больше лимита Telegram;
+			None — файл в лимит укладывается или совет невозможен.
+	"""
+
+	width: int
+	height: int
+	bitrate: BitrateAdvice | None
+
+
+@dataclass(frozen=True)
 class PresetDto:
 	"""Пресет обработки для интерфейса."""
 
@@ -161,12 +181,17 @@ class FoundVideo:
 		size_bytes: размер файла.
 		duration_s: длительность в секундах; None — файл не прочитался
 			ffprobe (такой в обработке всё равно упадёт).
+		frame: размеры кадра (ширина, высота) с учётом флага поворота;
+			None — файл не прочитался. Пара едет вместе с находкой,
+			чтобы карточка пакета сказала об апскейле, не запуская
+			ffprobe второй раз: сканирование уже прощупало файл.
 	"""
 
 	name: str
 	path: str
 	size_bytes: int
 	duration_s: float | None
+	frame: tuple[int, int] | None
 
 
 #: Колбэк хода сканирования папки: (прочитано файлов, всего файлов).
@@ -367,6 +392,10 @@ class PresetFields:
 
 	``video_bitrate_kbps``: целевой битрейт видео в кбит/с;
 	None — «как в оригинале» (по умолчанию).
+
+	``target_resolution``: ступень разрешения итогового кадра — число
+	по короткой стороне (``RESOLUTION_STEPS``); None — «как в оригинале»,
+	кадр не масштабируется.
 	"""
 
 	name: str
@@ -389,6 +418,7 @@ class PresetFields:
 	cover: bool = False
 	no_audio: bool = False
 	video_bitrate_kbps: int | None = None
+	target_resolution: int | None = DEFAULT_RESOLUTION
 	meta_comment: str | None = None  # тег comment: «ссылка на канал — описание»
 	subdir: str = ""  # подпапка внутри базовых папок видео (пусто — без неё)
 
@@ -484,6 +514,46 @@ class VideoService:
 			return None
 		duration = trimmed_info(info, trim_start, trim_end).duration
 		return BitrateAdvice(limit // 10**9, recommended_bitrate_kbps(duration, limit))
+
+	async def source_advice(
+		self, source_path: str, trim_start: float = 0.0, trim_end: float = 0.0
+	) -> SourceAdvice | None:
+		"""Размеры кадра исходника и совет по битрейту — одной пробой ffprobe.
+
+		Для карточки файла на странице «Видео»: по размерам она говорит
+		об апскейле, по совету — подставляет качество. Отдельно от
+		:meth:`bitrate_advice` (им пользуется очередь обработки, которой
+		размеры кадра не нужны и лишняя проба ни к чему).
+
+		Returns:
+			Сведения об исходнике; None — файла нет или он не читается:
+			подсказки вспомогательные, шуметь ошибкой из-за них незачем.
+		"""
+		path = Path(source_path)
+		# is_file/stat — обращения к диску: вне цикла событий движка
+		if not await asyncio.to_thread(path.is_file):
+			return None
+		try:
+			info = await asyncio.to_thread(
+				probe_video, source_path, ffprobe_bin_for(self._ffmpeg())
+			)
+		except (OSError, RuntimeError, ValueError):
+			logger.warning(
+				"Подсказки по исходнику: файл %s не прочитан.", source_path, exc_info=True
+			)
+			return None
+		limit = userbot_max_file_bytes(self._userbot_premium())
+		bitrate: BitrateAdvice | None = None
+		if (await asyncio.to_thread(path.stat)).st_size > limit:
+			try:
+				duration = trimmed_info(info, trim_start, trim_end).duration
+				bitrate = BitrateAdvice(limit // 10**9, recommended_bitrate_kbps(duration, limit))
+			except (VideoError, ValueError):
+				# «не вписать даже минимальным качеством» и «обрезка съела
+				# всё видео» — не повод скрывать размеры кадра: обе причины
+				# скажет честной ошибкой сама обработка
+				logger.info("Совет по битрейту для %s невозможен.", source_path, exc_info=True)
+		return SourceAdvice(info.width, info.height, bitrate)
 
 	# --- пресеты -----------------------------------------------------------
 
@@ -689,15 +759,18 @@ class VideoService:
 			except OSError:  # файл исчез между обходом и stat()
 				continue
 			duration: float | None
+			frame: tuple[int, int] | None
 			try:
-				duration = probe_video(str(path), ffprobe).duration
+				info = probe_video(str(path), ffprobe)
 			except (OSError, RuntimeError, ValueError):
 				# нечитаемый файл показывается в списке с пометкой —
 				# решать, что с ним делать, будет человек
 				logger.warning("Сканирование: файл %s не прочитан ffprobe.", path, exc_info=True)
-				duration = None
+				duration, frame = None, None
+			else:
+				duration, frame = info.duration, (info.width, info.height)
 			found.append(
-				FoundVideo(path.relative_to(directory).as_posix(), str(path), size, duration)
+				FoundVideo(path.relative_to(directory).as_posix(), str(path), size, duration, frame)
 			)
 			if on_progress is not None:
 				on_progress(index, len(files))
@@ -827,13 +900,18 @@ class VideoService:
 		count: int = 6,
 		trim_start: float = 0.0,
 		trim_end: float = 0.0,
+		*,
+		target_resolution: int | None,
 	) -> list[FrameCandidate]:
 		"""Выдёргивает случайные кадры-кандидаты заставки (5–95 % длительности).
 
 		Кадры пишутся PNG точно в размере итогового кадра — выбранный файл
 		уходит в обработку как есть (``image:<путь>``), без повторного
-		извлечения. Партией владеет сервис: предыдущая удаляется при каждом
-		новом запросе, так что за сессию живёт максимум одна папка.
+		извлечения. Поэтому ступень разрешения обязательна и должна быть
+		той же, с какой пойдёт обработка: иначе склейка заставки с видео
+		(xfade) упрётся в расхождение размеров. Партией владеет сервис:
+		предыдущая удаляется при каждом новом запросе, так что за сессию
+		живёт максимум одна папка.
 		При обрезке (``trim_start``/``trim_end``) кандидаты берутся только
 		из обрезанного диапазона, время — от обрезанной версии.
 
@@ -858,6 +936,7 @@ class VideoService:
 				self._candidates_dir,
 				trim_start,
 				trim_end,
+				target_resolution,
 			)
 		except (RuntimeError, ValueError, OSError) as exc:
 			raise VideoError(f"Не удалось извлечь кадры: {exc}") from exc
@@ -869,6 +948,7 @@ class VideoService:
 		out_dir: str,
 		trim_start: float,
 		trim_end: float,
+		target_resolution: int | None,
 	) -> list[FrameCandidate]:
 		"""Блокирующее извлечение кадров (выполняется в отдельном потоке).
 
@@ -877,7 +957,7 @@ class VideoService:
 		"""
 		info = probe_video(source_path, ffprobe_bin_for(self._ffmpeg()))
 		work_info = trimmed_info(info, trim_start, trim_end)
-		width, height = fitted_size(work_info.width, work_info.height)
+		width, height = scaled_size(work_info.width, work_info.height, target_resolution)
 		stamps = sorted(resolve_timestamp("random-choice", work_info) for _ in range(count))
 		frames: list[FrameCandidate] = []
 		for index, timestamp in enumerate(stamps):
@@ -971,6 +1051,7 @@ class VideoService:
 			cover=fields.cover,
 			no_audio=fields.no_audio,
 			video_bitrate_kbps=fields.video_bitrate_kbps,
+			target_resolution=fields.target_resolution,
 			meta_comment=fields.meta_comment,
 			ffmpeg_bin=self._ffmpeg(),
 			ffprobe_bin=ffprobe,

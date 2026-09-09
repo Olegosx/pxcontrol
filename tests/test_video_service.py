@@ -43,6 +43,7 @@ FIELDS = PresetFields(
 	cover=True,
 	video_bitrate_kbps=2500,
 	meta_comment="https://t.me/mych — мой канал",
+	target_resolution=1440,
 )
 
 
@@ -54,6 +55,7 @@ async def test_preset_crud(db: Database) -> None:
 	fields = await service.get_preset_fields(preset.id)
 	assert fields.intro_source == "time:5.0" and fields.wm_opacity == 0.8
 	assert fields.video_bitrate_kbps == 2500
+	assert fields.target_resolution == 1440
 	assert fields.trim_start == 3.5 and fields.trim_end == 1.5
 	assert fields.fade_in == 0.5 and fields.fade_out == 1.0
 	assert fields.subdir == "Бренд"  # авто из имени при создании
@@ -379,12 +381,12 @@ async def test_extract_random_frames(
 	source = tmp_path / "v.mp4"
 	source.write_bytes(b"v")
 	service = VideoService(db, "ffmpeg", processor=FakeProcessor())
-	frames = await service.extract_random_frames(str(source), 4)
+	frames = await service.extract_random_frames(str(source), 4, target_resolution=1080)
 	assert len(frames) == 4
 	assert [f.timestamp for f in frames] == sorted(f.timestamp for f in frames)
 	assert all(Path(f.path).is_file() for f in frames)
 	first_dir = Path(frames[0].path).parent
-	second = await service.extract_random_frames(str(source), 2)
+	second = await service.extract_random_frames(str(source), 2, target_resolution=1080)
 	assert len(second) == 2
 	assert not first_dir.exists()  # старая партия удалена
 
@@ -419,13 +421,17 @@ async def test_extract_random_frames_respects_trim(
 	source = tmp_path / "v.mp4"
 	source.write_bytes(b"v")
 	service = VideoService(db, "ffmpeg", processor=FakeProcessor())
-	frames = await service.extract_random_frames(str(source), 6, trim_start=20.0, trim_end=30.0)
+	frames = await service.extract_random_frames(
+		str(source), 6, trim_start=20.0, trim_end=30.0, target_resolution=1080
+	)
 	# рабочая версия — 50 с: подписи в её времени, извлечение — со сдвигом
 	for frame, raw in zip(frames, extracted, strict=True):
 		assert 2.5 <= frame.timestamp <= 47.5  # 5–95 % от 50 с
 		assert raw == pytest.approx(20.0 + frame.timestamp)
 	with pytest.raises(VideoError, match="не оставляет"):
-		await service.extract_random_frames(str(source), 2, trim_start=70.0, trim_end=40.0)
+		await service.extract_random_frames(
+			str(source), 2, trim_start=70.0, trim_end=40.0, target_resolution=1080
+		)
 
 
 async def test_ffmpeg_provider_picks_up_changes(
@@ -623,6 +629,9 @@ async def test_scan_sources_finds_videos_recursively(
 
 	assert [video.name for video in found] == ["а.mp4", "вложенная/б.MOV"]
 	assert found[0].size_bytes == 10 and found[0].duration_s == 42.0
+	# размеры кадра едут с находкой: карточка пакета скажет об апскейле
+	# без второй пробы ffprobe
+	assert found[0].frame == (1920, 1080)
 	assert found[1].path == str(root / "вложенная" / "б.MOV")
 	assert progress == [(1, 2), (2, 2)]
 
@@ -655,7 +664,9 @@ async def test_scan_sources_excludes_results_dirs_and_marks_unreadable(
 	found = await service.scan_sources(str(root))
 	assert [video.name for video in found] == ["битое.mp4", "хорошее.mp4"]
 	assert found[0].duration_s is None  # нечитаемый — с пометкой, не ошибка
+	assert found[0].frame is None
 	assert found[1].duration_s == 42.0
+	assert found[1].frame == (1920, 1080)
 
 
 async def test_scan_sources_requires_existing_dir_and_ffmpeg(db: Database, tmp_path: Path) -> None:
@@ -707,3 +718,88 @@ def test_batch_subdir_name_stamps_and_keeps_folder_name() -> None:
 	moment = datetime(2026, 9, 6, 12, 30, 45)
 	name = batch_subdir_name("/data/Мои исходники", now=moment)
 	assert name == "20260906-123045_Мои исходники"
+
+
+async def test_source_advice_reports_frame_and_bitrate(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Одна проба отдаёт и размеры кадра, и совет по битрейту.
+
+	Размеры нужны карточке файла для предупреждения об апскейле, совет —
+	для подстановки качества. Файл в лимите оставляет совет пустым,
+	но размеры отдаёт: апскейл от размера файла не зависит.
+	"""
+	from pxcontrol.engine.services.video import SourceAdvice
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.userbot_max_file_bytes", lambda _premium: 2_000_000
+	)
+	probes: list[str] = []
+
+	def _probe(path: str, _b: str) -> VideoInfo:
+		probes.append(path)
+		# 30 с: в лимит 2 МБ такой ролик вписывается осмысленным битрейтом
+		return VideoInfo(1280, 720, 30.0, 25.0, True)
+
+	monkeypatch.setattr("pxcontrol.engine.services.video.probe_video", _probe)
+	small = tmp_path / "small.mp4"
+	small.write_bytes(b"x" * 1_000_000)
+	big = tmp_path / "big.mp4"
+	big.write_bytes(b"x" * 2_500_000)
+	service = VideoService(db, "ffmpeg", processor=FakeProcessor(), userbot_premium=lambda: False)
+
+	advice = await service.source_advice(str(small))
+	assert isinstance(advice, SourceAdvice)
+	assert (advice.width, advice.height) == (1280, 720)
+	assert advice.bitrate is None  # в лимит укладывается
+	oversized = await service.source_advice(str(big))
+	assert oversized is not None and oversized.bitrate is not None
+	assert len(probes) == 2  # по одной пробе на файл, не по две
+	assert await service.source_advice(str(tmp_path / "нет.mp4")) is None
+
+
+async def test_source_advice_keeps_frame_when_bitrate_impossible(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Невозможный совет по битрейту не прячет размеры кадра.
+
+	Видео, которое не вписать в лимит даже минимальным качеством, — повод
+	для честной ошибки при обработке, а не для молчания о разрешении.
+	"""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.userbot_max_file_bytes", lambda _premium: 2_000_000
+	)
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.probe_video",
+		lambda _p, _b: VideoInfo(640, 480, 10**9, 25.0, True),  # вечное видео
+	)
+	source = tmp_path / "вечное.mp4"
+	source.write_bytes(b"x" * 2_500_000)
+	service = VideoService(db, "ffmpeg", processor=FakeProcessor(), userbot_premium=lambda: False)
+
+	advice = await service.source_advice(str(source))
+	assert advice is not None
+	assert (advice.width, advice.height) == (640, 480)
+	assert advice.bitrate is None
+
+
+async def test_prepare_passes_resolution_to_pipeline(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Ступень из полей доезжает до параметров обработки без изменений."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	source = tmp_path / "исходник.mp4"
+	source.write_bytes(b"v")
+	processor = FakeProcessor()
+	settings = SettingsService(db)
+	await settings.set(VIDEO_PROCESSED_DIR, str(tmp_path / "готовое"))
+	service = VideoService(db, "ffmpeg", settings=settings, processor=processor)
+
+	await service.prepare(str(source), PresetFields(name="Т", target_resolution=2160))
+	await service.prepare(str(source), PresetFields(name="Т", target_resolution=None))
+	assert [options.target_resolution for options in processor.calls] == [2160, None]

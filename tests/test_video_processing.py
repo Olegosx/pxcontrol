@@ -149,15 +149,57 @@ def test_main_chain_uses_explicit_size() -> None:
 # --- геометрия кадра --------------------------------------------------------------
 
 
-def test_fitted_size() -> None:
-	"""Вписывание в FullHD: пропорции сохраняются, стороны чётные."""
-	from pxcontrol.engine.video.constants import fitted_size
+def test_scaled_size_leads_by_short_side() -> None:
+	"""Ступень получает короткая сторона; пропорции не меняются.
 
-	assert fitted_size(1920, 1080) == (1920, 1080)  # уже FullHD
-	assert fitted_size(1280, 720) == (1920, 1080)  # растяжение 16:9
-	assert fitted_size(720, 1280) == (608, 1080)  # вертикальное
-	assert fitted_size(3840, 2160) == (1920, 1080)  # уменьшение 4K
-	assert fitted_size(853, 480) == (1920, 1080)  # почти 16:9, округление
+	Замок правила: число ступени — это строки развёртки стандарта
+	(«1080p» = 1920×1080), то есть короткая сторона кадра. У альбомной
+	ориентации короткая — высота, у книжной — ширина; вторая сторона
+	считается из пропорций исходника.
+	"""
+	from pxcontrol.engine.video.constants import scaled_size
+
+	assert scaled_size(1920, 1080, 1080) == (1920, 1080)  # уже FullHD
+	assert scaled_size(1280, 720, 1080) == (1920, 1080)  # увеличение 16:9
+	assert scaled_size(3840, 2160, 1080) == (1920, 1080)  # уменьшение 4K
+	assert scaled_size(1440, 1080, 1080) == (1440, 1080)  # 4:3 — по высоте
+	assert scaled_size(2560, 1080, 1080) == (2560, 1080)  # 21:9 шире FullHD
+	assert scaled_size(720, 1280, 1080) == (1080, 1920)  # книжное — по ширине
+	assert scaled_size(1080, 1080, 1080) == (1080, 1080)  # квадрат
+	assert scaled_size(853, 480, 1080) == (1920, 1080)  # почти 16:9, округление
+
+
+def test_scaled_size_steps_and_original() -> None:
+	"""Каждая ступень масштабирует по себе; None не трогает размер."""
+	from pxcontrol.engine.video.constants import RESOLUTION_STEPS, scaled_size
+
+	for step in RESOLUTION_STEPS:  # 16:9 даёт канонические растры ступеней
+		assert scaled_size(1280, 720, step) == (round(step * 16 / 9 / 2) * 2, step)
+	assert scaled_size(1280, 720, None) == (1280, 720)  # как в оригинале
+	assert scaled_size(1919, 1079, None) == (1920, 1080)  # нечётные — до чётных
+	assert scaled_size(1, 1, 720) == (720, 720)  # вырожденный исходник
+
+
+def test_scaled_size_rejects_empty_frame() -> None:
+	"""Нулевые размеры исходника — честная ошибка, а не деление на ноль."""
+	import pytest as _pytest
+
+	from pxcontrol.engine.video.constants import scaled_size
+
+	with _pytest.raises(ValueError, match="Недопустимые размеры"):
+		scaled_size(0, 1080, 1080)
+
+
+def test_is_upscale_compares_short_side() -> None:
+	"""Апскейл — когда ступень больше короткой стороны исходника."""
+	from pxcontrol.engine.video.constants import is_upscale
+
+	assert is_upscale(1280, 720, 1080)  # HD → FullHD
+	assert is_upscale(720, 1280, 1080)  # книжное HD → FullHD
+	assert not is_upscale(1920, 1080, 1080)  # ровно ступень
+	assert not is_upscale(3840, 2160, 1080)  # уменьшение
+	assert not is_upscale(2560, 1080, 1080)  # 21:9: короткая сторона — 1080
+	assert not is_upscale(640, 480, None)  # «как в оригинале» не увеличивает
 
 
 def test_fit_pad_filter_letterboxes() -> None:
@@ -385,13 +427,13 @@ def test_prepare_still_shifts_by_trim(monkeypatch: pytest.MonkeyPatch, tmp_path:
 		"extract_still",
 		lambda _src, ts, _out, _w, _h, _bin: captured.append(ts),
 	)
-	frames.prepare_still("in.mp4", "time:5", INFO, "out.png", start_offset=3.5)
+	frames.prepare_still("in.mp4", "time:5", INFO, "out.png", 1080, start_offset=3.5)
 	assert captured == [8.5]  # 5-я секунда обрезанной = 8.5 исходника
 	captured.clear()
 	# своя картинка от обрезки не зависит (файл должен существовать)
 	image = tmp_path / "кадр.png"
 	image.write_bytes(b"png")
-	frames.prepare_still("in.mp4", f"image:{image}", INFO, "out.png", start_offset=3.5)
+	frames.prepare_still("in.mp4", f"image:{image}", INFO, "out.png", 1080, start_offset=3.5)
 	assert captured == [0.0]
 
 
@@ -529,7 +571,7 @@ def test_missing_intro_image_fails_before_ffmpeg(tmp_path: Path) -> None:
 	from pxcontrol.engine.video.frames import prepare_still
 
 	with pytest.raises(ValueError, match="Картинка для заставки не найдена"):
-		prepare_still("input.mp4", f"image:{tmp_path / 'нет.png'}", INFO, "out.png")
+		prepare_still("input.mp4", f"image:{tmp_path / 'нет.png'}", INFO, "out.png", 1080)
 
 
 def test_run_streaming_survives_chatty_stderr(tmp_path: Path) -> None:

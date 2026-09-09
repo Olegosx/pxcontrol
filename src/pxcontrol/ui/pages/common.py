@@ -842,6 +842,27 @@ class ErrorLabel(CaptionLabel):
 		return True
 
 
+class WarningLabel(CaptionLabel):
+	"""Янтарная подпись-предупреждение (единые цвета обеих тем).
+
+	Не ошибка: сообщает о последствии выбора, ничего не запрещая
+	(например, об увеличении кадра при выбранном разрешении). Пустой
+	текст прячет подпись, непустой — показывает.
+	"""
+
+	def __init__(self, parent: QWidget) -> None:
+		# текст базовому классу не передаём — причина в комментарии
+		# конструктора ErrorLabel (рекурсия в диспетчере QFluentWidgets)
+		super().__init__(parent)
+		self.setTextColor("#9d5d00", "#fff100")
+		self.hide()
+
+	def set_note(self, message: str) -> None:
+		"""Показывает предупреждение; пустая строка прячет подпись."""
+		self.setText(message)
+		self.setVisible(bool(message))
+
+
 class SelectionRow:
 	"""Строка выбора пакетного диалога: «Выбрать все»/«Снять все» и итог.
 

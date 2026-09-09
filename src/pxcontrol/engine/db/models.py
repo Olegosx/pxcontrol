@@ -174,6 +174,9 @@ class VideoPreset(TimestampMixin, Base):
 	xfade: Mapped[float] = mapped_column(Float)
 	cover: Mapped[bool] = mapped_column(Boolean)
 	no_audio: Mapped[bool] = mapped_column(Boolean)
+	# ступень разрешения итога: число по короткой стороне кадра
+	# (720/1080/1440/2160); NULL — «как в оригинале», без масштабирования
+	target_resolution: Mapped[int | None] = mapped_column(Integer)
 	# NULL — «как в оригинале»: целевой битрейт берётся из исходника
 	video_bitrate_kbps: Mapped[int | None] = mapped_column(Integer)
 	# комментарий в метаданные файла (тег comment): «ссылка — описание»

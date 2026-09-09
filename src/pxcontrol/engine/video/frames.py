@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
-from pxcontrol.engine.video.constants import fitted_size
+from pxcontrol.engine.video.constants import scaled_size
 from pxcontrol.engine.video.ffmpeg import run_tool
 from pxcontrol.engine.video.probe import VideoInfo
 
@@ -94,6 +94,7 @@ def prepare_still(
 	source: str,
 	info: VideoInfo,
 	output_path: str,
+	target_resolution: int | None,
 	ffmpeg_bin: str = "ffmpeg",
 	start_offset: float = 0.0,
 ) -> None:
@@ -107,12 +108,15 @@ def prepare_still(
 	и кадра считаются от неё. ``start_offset`` — смещение начала рабочей
 	версии в исходном файле (обрезка в начале): кадр извлекается
 	из исходника, поэтому момент сдвигается на это смещение.
+	``target_resolution`` — ступень разрешения итога (None — «как
+	в оригинале»); она обязана совпадать со ступенью основного видео:
+	склейка xfade требует точного равенства размеров.
 
 	Raises:
 		RuntimeError: Если ffmpeg не смог подготовить картинку.
 		ValueError: Режим источника не распознан или картинка не найдена.
 	"""
-	width, height = fitted_size(info.width, info.height)
+	width, height = scaled_size(info.width, info.height, target_resolution)
 	if source.startswith("image:"):
 		image_path = source.split(":", 1)[1]
 		# проверка до ffmpeg: несуществующий файл дал бы дамп журнала

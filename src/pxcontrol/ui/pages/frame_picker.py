@@ -82,9 +82,15 @@ class FramePickerDialog(WorkDialog):
 		parent: QWidget,
 		trim_start: float = 0.0,
 		trim_end: float = 0.0,
+		*,
+		target_resolution: int | None,
 		file_label: str | None = None,
 	) -> None:
-		"""``file_label`` — подпись с именем файла под заголовком: пакетная
+		"""``target_resolution`` — ступень разрешения обработки: кандидаты
+		извлекаются точно в размере итогового кадра и уходят в обработку
+		как есть, поэтому ступень обязана совпадать с выбранной в параметрах.
+
+		``file_label`` — подпись с именем файла под заголовком: пакетная
 		обработка показывает диалог по разу на файл, и без подписи не видно,
 		для какого видео сейчас выбирается кадр."""
 		super().__init__("Выберите кадр заставки", parent, size=(820, 700))
@@ -93,6 +99,7 @@ class FramePickerDialog(WorkDialog):
 		# кандидаты — из обрезанного диапазона, время — от обрезанной версии
 		self._trim_start = trim_start
 		self._trim_end = trim_end
+		self._target_resolution = target_resolution
 		self._chosen: str | None = None
 		self._group = QButtonGroup(self)
 		self._group.setExclusive(True)
@@ -150,6 +157,7 @@ class FramePickerDialog(WorkDialog):
 				int(self._count.value()),
 				trim_start=self._trim_start,
 				trim_end=self._trim_end,
+				target_resolution=self._target_resolution,
 			),
 			self,
 			self._show_frames,

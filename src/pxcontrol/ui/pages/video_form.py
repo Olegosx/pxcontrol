@@ -33,8 +33,15 @@ from pxcontrol.engine.services.video import (
 	build_intro_source,
 	parse_intro_source,
 )
+from pxcontrol.engine.video.constants import RESOLUTION_STEPS
 from pxcontrol.ui import density
-from pxcontrol.ui.pages.common import INPUT_DEBOUNCE_MS, CollapsibleCard, debounced, pick_file
+from pxcontrol.ui.pages.common import (
+	INPUT_DEBOUNCE_MS,
+	CollapsibleCard,
+	WarningLabel,
+	debounced,
+	pick_file,
+)
 
 #: Значения по умолчанию параметров обработки — единственная точка истины
 #: движка (``PresetFields``): «чистая» форма совпадает с «чистым» пресетом,
@@ -52,6 +59,24 @@ _CORNERS = [
 	("Вдоль левого края", "lc"),
 	("Вдоль правого края", "rc"),
 ]
+#: Имена ступеней разрешения. Сам перечень ступеней — за движком
+#: (``RESOLUTION_STEPS``): числа это логика обработки, слова — показ.
+#: Ступень без имени покажется одним числом, а не пропадёт из списка.
+_RESOLUTION_NAMES = {720: "HD", 1080: "FullHD", 1440: "QHD", 2160: "4K UHD"}
+
+#: Пункты списка «Разрешение»: подпись → ступень (None — без масштабирования).
+_RESOLUTIONS: list[tuple[str, int | None]] = [
+	*((f"{_RESOLUTION_NAMES.get(step, '')} ({step})".strip(), step) for step in RESOLUTION_STEPS),
+	("Как в оригинале", None),
+]
+
+#: Пункт по умолчанию: он же — запасной для пресета с незнакомой
+#: ступенью (запись из будущей версии). Ступень берётся из «чистого»
+#: пресета движка, как и остальные умолчания панели.
+_RESOLUTION_FALLBACK = next(
+	index for index, (_, step) in enumerate(_RESOLUTIONS) if step == _DEFAULTS.target_resolution
+)
+
 #: Источники кадра заставки: подпись → вид (протокол — в сервисе видео).
 _INTRO_SOURCES = [
 	("Случайный кадр из середины", IntroSourceKind.RANDOM_MIDDLE),
@@ -73,6 +98,11 @@ class PresetForm(QWidget):
 	#: перечитывает по ней список готовых видео: он всегда показывает
 	#: ту папку, в которую уйдёт следующий результат.
 	subdir_changed = Signal(str)
+
+	#: Ступень разрешения сменилась — списком или загрузкой пресета.
+	#: Страница пересчитывает по ней предупреждение об апскейле: оно
+	#: зависит и от размеров исходника, и от выбранной ступени.
+	resolution_changed = Signal()
 
 	def __init__(self, parent: QWidget) -> None:
 		super().__init__(parent)
@@ -262,8 +292,23 @@ class PresetForm(QWidget):
 			widget.setEnabled(enabled)
 
 	def _output_card(self) -> CardWidget:
-		"""Раздел «Вывод»: обложка, звук, качество."""
+		"""Раздел «Вывод»: разрешение, обложка, звук, качество."""
 		card, box = self._card("Вывод")
+		res_row = QHBoxLayout()
+		self._resolution = ComboBox(card)
+		self._resolution.addItems([title for title, _ in _RESOLUTIONS])
+		self._resolution.setCurrentIndex(_RESOLUTION_FALLBACK)
+		self._resolution.setToolTip(
+			"Число ступени получает короткая сторона кадра (у альбомного "
+			"кадра это высота, у книжного — ширина), вторая сторона "
+			"считается из пропорций исходника — они не меняются."
+		)
+		self._labeled(res_row, "Разрешение:", self._resolution)
+		self._scale_note = WarningLabel(card)
+		res_row.addWidget(self._scale_note)
+		res_row.addStretch()
+		box.addLayout(res_row)
+		self._resolution.currentIndexChanged.connect(lambda *_: self.resolution_changed.emit())
 		row = QHBoxLayout()
 		self._cover = SwitchButton(card)
 		self._labeled(row, "Вшить обложку:", self._cover)
@@ -304,6 +349,7 @@ class PresetForm(QWidget):
 		self._bind_summary(
 			card,
 			self._output_summary,
+			self._resolution.currentIndexChanged,
 			self._bitrate.valueChanged,
 			self._cover.checkedChanged,
 			self._no_audio.checkedChanged,
@@ -377,9 +423,12 @@ class PresetForm(QWidget):
 		return f"{source}, держать {_fmt_num(float(self._hold.value()))} с"
 
 	def _output_summary(self) -> str:
-		"""«Вывод»: битрейт и включённые особенности (всегда непустая)."""
+		"""«Вывод»: разрешение, битрейт и особенности (всегда непустая)."""
 		mbps = float(self._bitrate.value())
-		parts = [f"{_fmt_num(mbps)} Мбит/с" if mbps > 0 else "битрейт исходника"]
+		parts = [
+			self._resolution_summary(),
+			f"{_fmt_num(mbps)} Мбит/с" if mbps > 0 else "битрейт исходника",
+		]
 		if self._cover.isChecked():
 			parts.append("обложка")
 		if self._no_audio.isChecked():
@@ -388,6 +437,11 @@ class PresetForm(QWidget):
 		if subdir:
 			parts.append(f"подпапка «{subdir}»")
 		return ", ".join(parts)
+
+	def _resolution_summary(self) -> str:
+		"""Ступень для сводки: «1080p» или «разрешение исходника»."""
+		step = self._target_resolution()
+		return f"{step}p" if step is not None else "разрешение исходника"
 
 	# --- значения ---------------------------------------------------------------
 
@@ -420,6 +474,16 @@ class PresetForm(QWidget):
 		self._intro_value.setText(value)
 		self._cover.setChecked(fields.cover)
 		self._no_audio.setChecked(fields.no_audio)
+		self._resolution.setCurrentIndex(
+			next(
+				(
+					index
+					for index, (_, step) in enumerate(_RESOLUTIONS)
+					if step == fields.target_resolution
+				),
+				_RESOLUTION_FALLBACK,
+			)
+		)
 		kbps = fields.video_bitrate_kbps
 		self._bitrate.setValue(kbps / 1000 if kbps else 0.0)
 		self._meta_comment.setText(fields.meta_comment or "")
@@ -457,9 +521,22 @@ class PresetForm(QWidget):
 			cover=self._cover.isChecked(),
 			no_audio=self._no_audio.isChecked(),
 			video_bitrate_kbps=self._bitrate_kbps(),
+			target_resolution=self._target_resolution(),
 			meta_comment=str(self._meta_comment.text()).strip() or None,
 			subdir=str(self._subdir.text()).strip(),
 		)
+
+	def _target_resolution(self) -> int | None:
+		"""Выбранная ступень разрешения; None — «как в оригинале»."""
+		return _RESOLUTIONS[int(self._resolution.currentIndex())][1]
+
+	def set_scale_note(self, note: str) -> None:
+		"""Показывает предупреждение рядом с выбором разрешения.
+
+		Текст готовит страница: только она знает размеры исходника
+		этой карточки. Пустая строка убирает предупреждение.
+		"""
+		self._scale_note.set_note(note)
 
 	def _bitrate_kbps(self) -> int | None:
 		"""Битрейт из регулятора: Мбит/с → кбит/с; 0 — «как в оригинале»."""

@@ -46,6 +46,7 @@ from pxcontrol.engine.services.video import (
 	PresetFields,
 	ProcessedListing,
 	ProcessedVideo,
+	SourceAdvice,
 	VideoDirs,
 	batch_subdir_name,
 	build_intro_source,
@@ -57,6 +58,7 @@ from pxcontrol.engine.services.video_queue import (
 	VideoItemDto,
 	VideoItemStatus,
 )
+from pxcontrol.engine.video.constants import is_upscale, scaled_size
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -118,6 +120,10 @@ class _FileEntry:
 		self.batch = batch  # подпапка пакета («» — одиночное добавление)
 		self.preset_name = preset_name  # имя параметров на момент добавления
 		self.advice_note = ""  # пометка авто-битрейта (после совета движка)
+		# размеры кадра исходника: у пакета приезжают со сканированием,
+		# у одиночного файла — с подсказкой движка; None — ещё не знаем
+		self.source_frame: tuple[int, int] | None = None
+		self.scale_note = ""  # пометка об апскейле (зависит и от ступени)
 		trailing = file_action_buttons(
 			page,
 			path,
@@ -130,14 +136,18 @@ class _FileEntry:
 		title = f"{Path(path).name} — {human_size(size_bytes)}"
 		self.card = CollapsibleCard(title, page, trailing=trailing, leading=self.check)
 		self.form = PresetForm(page)
+		# смена ступени разрешения меняет вердикт об апскейле
+		self.form.resolution_changed.connect(bind(page._refresh_scale_note, self))  # noqa: SLF001
 		self.card.body.addWidget(self.form)
 		self.refresh_summary()
 
 	def refresh_summary(self) -> None:
-		"""Сводка шапки: пакет и пометка авто-битрейта (видна у свёрнутой)."""
+		"""Сводка шапки: пакет и пометки (видны у свёрнутой карточки)."""
 		parts = []
 		if self.batch:
 			parts.append(f"пакет «{self.batch}»")
+		if self.scale_note:
+			parts.append(self.scale_note)
 		if self.advice_note:
 			parts.append(self.advice_note)
 		self.card.set_summary(" · ".join(parts))
@@ -554,13 +564,29 @@ class VideoPage(ScrollArea):
 		batch = batch_subdir_name(root)
 		added = 0
 		for video in files:
-			if self._add_entry(video.path, batch=batch, size_bytes=video.size_bytes):
+			if self._add_entry(
+				video.path, batch=batch, size_bytes=video.size_bytes, frame=video.frame
+			):
 				added += 1
 		if added:
 			InfoBar.success("Файлы добавлены", f"В списке новых: {added}", parent=self)
 
-	def _add_entry(self, path: str, batch: str, size_bytes: int | None = None) -> bool:
+	def _add_entry(
+		self,
+		path: str,
+		batch: str,
+		size_bytes: int | None = None,
+		frame: tuple[int, int] | None = None,
+	) -> bool:
 		"""Добавляет файл карточкой; параметры — снимок шаблона.
+
+		Args:
+			path: путь к исходнику.
+			batch: подпапка пакета («» — одиночное добавление).
+			size_bytes: размер файла, если он уже известен.
+			frame: размеры кадра, если исходник уже прощупан (пакет:
+				сканирование папки прощупывает каждый файл). Известные
+				размеры избавляют от второй пробы ffprobe на файл.
 
 		Returns:
 			True — карточка добавлена; False — файл уже в списке
@@ -587,18 +613,40 @@ class VideoPage(ScrollArea):
 		self._entries.append(entry)
 		self._files_box.addWidget(entry.card)
 		self._update_empty_hint()
-		# рекомендация битрейта — в параметры именно этой карточки
 		fields = entry.form.fields("")
-		run_in_engine(
-			self._worker,
-			self._worker.engine.video.bitrate_advice(path, fields.trim_start, fields.trim_end),
-			self,
-			partial(self._on_entry_advice, entry),
-			noop,  # совет вспомогательный: сбой не мешает добавлению
-		)
+		# подсказки вспомогательные: сбой не мешает добавлению файла
+		if frame is not None:
+			# размеры уже есть — спрашиваем движок только о битрейте
+			# (для файла в лимите это лишь чтение размера файла)
+			entry.source_frame = frame
+			self._refresh_scale_note(entry)
+			run_in_engine(
+				self._worker,
+				self._worker.engine.video.bitrate_advice(path, fields.trim_start, fields.trim_end),
+				self,
+				partial(self._on_entry_bitrate, entry),
+				noop,
+			)
+		else:
+			# одиночный файл: размеры кадра и совет по битрейту — одной пробой
+			run_in_engine(
+				self._worker,
+				self._worker.engine.video.source_advice(path, fields.trim_start, fields.trim_end),
+				self,
+				partial(self._on_entry_source, entry),
+				noop,
+			)
 		return True
 
-	def _on_entry_advice(self, entry: _FileEntry, advice: BitrateAdvice | None) -> None:
+	def _on_entry_source(self, entry: _FileEntry, advice: SourceAdvice | None) -> None:
+		"""Сведения об исходнике пришли: размеры кадра и совет по битрейту."""
+		if advice is None or entry not in self._entries:
+			return  # файл не прочитан или карточку уже убрали
+		entry.source_frame = (advice.width, advice.height)
+		self._refresh_scale_note(entry)
+		self._on_entry_bitrate(entry, advice.bitrate)
+
+	def _on_entry_bitrate(self, entry: _FileEntry, advice: BitrateAdvice | None) -> None:
 		"""Совет битрейта пришёл — подставляем в параметры карточки файла."""
 		if advice is None or entry not in self._entries:
 			return  # файл в лимите или карточку уже убрали
@@ -607,6 +655,25 @@ class VideoPage(ScrollArea):
 				f"больше лимита {advice.limit_gb} ГБ — качество {advice.mbps:g} Мбит/с"
 			)
 			entry.refresh_summary()
+
+	def _refresh_scale_note(self, entry: _FileEntry) -> None:
+		"""Пересчитывает предупреждение об апскейле для карточки файла.
+
+		Зовётся и при появлении размеров исходника, и при смене ступени
+		разрешения. Пока размеры неизвестны (файл не прощупан), молчим:
+		врать про увеличение хуже, чем не сказать ничего.
+		"""
+		if entry not in self._entries:
+			return
+		note = ""
+		target = entry.form.fields("").target_resolution
+		if entry.source_frame is not None and is_upscale(*entry.source_frame, target):
+			width, height = entry.source_frame
+			out_width, out_height = scaled_size(width, height, target)
+			note = f"апскейл: {width}×{height} → {out_width}×{out_height}"
+		entry.scale_note = note
+		entry.form.set_scale_note(note)
+		entry.refresh_summary()
 
 	def _remove_entry(self, entry: _FileEntry) -> None:
 		"""Убирает карточку файла из списка (сам файл не трогается)."""
@@ -710,6 +777,7 @@ class VideoPage(ScrollArea):
 				self.window(),
 				trim_start=fields.trim_start,
 				trim_end=fields.trim_end,
+				target_resolution=fields.target_resolution,
 				file_label=None if single else Path(entry.path).name,
 			)
 			accepted = exec_dialog(dialog)

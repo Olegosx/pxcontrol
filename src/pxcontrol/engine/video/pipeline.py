@@ -1,6 +1,6 @@
 """Оркестрация обработки: сборка и запуск ffmpeg (порт из makeVideo).
 
-Поведение — по SPEC.md референса makeVideo: FullHD-вписывание, вотермарк
+Поведение — по SPEC.md референса makeVideo: масштабирование кадра, вотермарк
 с окном показа (отсчёт от исходного видео), заставка hold+xfade для
 статичного превью, опциональная обложка attached_pic.
 """
@@ -22,7 +22,7 @@ from pxcontrol.engine.video.constants import (
 	FALLBACK_CRF,
 	TARGET_PIX_FMT,
 	VIDEO_CODEC,
-	fitted_size,
+	scaled_size,
 )
 from pxcontrol.engine.video.ffmpeg import ProgressCallback, run_streaming, run_tool
 from pxcontrol.engine.video.filtergraph import WatermarkOptions, build_filter_complex
@@ -47,7 +47,8 @@ class ProcessingOptions:
 	месте — ``PresetFields`` (сервис видео), а здесь — только контракт
 	исполнения. ``video_bitrate_kbps``: целевой битрейт видео в кбит/с;
 	None — «как в оригинале» (битрейт исходника, а если он неизвестен —
-	CRF 20).
+	CRF 20). ``target_resolution``: ступень разрешения кадра;
+	None — «как в оригинале» (размер исходника).
 	"""
 
 	input: str
@@ -60,6 +61,9 @@ class ProcessingOptions:
 	# уход в чёрное, видео и звук вместе; к обрезке не привязано
 	fade_in: float
 	fade_out: float
+	# ступень разрешения итога: число по короткой стороне кадра
+	# (у альбома это высота, у книги — ширина); None — «как в оригинале»
+	target_resolution: int | None
 	video_bitrate_kbps: int | None
 	watermark: str | None
 	wm_corner: str
@@ -209,10 +213,10 @@ def _run_main(
 	output: str,
 	on_progress: ProgressCallback | None,
 ) -> None:
-	"""Запускает основную обработку: FullHD, вотермарк, заставка, кодирование."""
+	"""Запускает основную обработку: размер, вотермарк, заставка, кодирование."""
 	inputs, wm_index, still_index = _build_inputs(opts, info, still_path)
 	has_audio = info.has_audio and not opts.no_audio
-	width, height = fitted_size(info.width, info.height)
+	width, height = scaled_size(info.width, info.height, opts.target_resolution)
 	# длительность итога = исходник + удержание кадра заставки (см. SPEC)
 	total = info.duration + (opts.intro_hold if opts.intro else 0.0)
 	if opts.fade_in + opts.fade_out > total:
@@ -290,7 +294,7 @@ def _save_preview(opts: ProcessingOptions, info: VideoInfo, still_path: str | No
 		if still_path is not None:
 			shutil.copyfile(still_path, preview)
 		else:
-			width, height = fitted_size(info.width, info.height)
+			width, height = scaled_size(info.width, info.height, opts.target_resolution)
 			extract_still(opts.output, 0.0, preview, width, height, opts.ffmpeg_bin)
 	except (OSError, RuntimeError):
 		logger.warning("Не удалось сохранить превью %s.", preview, exc_info=True)
@@ -333,6 +337,7 @@ def process(opts: ProcessingOptions, on_progress: ProgressCallback | None = None
 				opts.intro_source,
 				work_info,
 				still_path,
+				opts.target_resolution,
 				opts.ffmpeg_bin,
 				start_offset=opts.trim_start,
 			)

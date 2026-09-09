@@ -333,3 +333,27 @@ async def test_backup_before_upgrade_copies_and_rotates(tmp_path: Path) -> None:
 	before = sorted(p.name for p in tmp_path.glob("app.db.pre-migration-*"))
 	assert _backup_before_upgrade(cfg, url) is None
 	assert sorted(p.name for p in tmp_path.glob("app.db.pre-migration-*")) == before
+
+
+def test_preset_resolution_defaults_to_fullhd(tmp_path: Path) -> None:
+	"""Миграция a7c3e91b5d24: существующим пресетам проставляется 1080.
+
+	До ступеней разрешения конвейер вписывал кадр в рамку FullHD, так что
+	1080 — фактическое поведение сохранённых пресетов. NULL означал бы
+	«не масштабировать» и молча сменил бы их всем разом.
+	"""
+	db_file = tmp_path / "resolution.db"
+	_upgrade(db_file, "f6b2d84c9e17")  # состояние до ступеней разрешения
+	with sqlite3.connect(db_file) as conn:
+		conn.execute(
+			"INSERT INTO video_presets (name, wm_corner, wm_margin, wm_opacity, wm_scale,"
+			" intro, intro_source, intro_hold, xfade, cover, no_audio, wm_fade,"
+			" trim_start, trim_end, fade_in, fade_out, subdir, created_at, updated_at)"
+			" VALUES ('Старый', 'tr', 24, 1.0, 0.15, 0, 'random-middle', 1.0, 0.5, 0, 0, 0.0,"
+			" 0.0, 0.0, 0.0, 0.0, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		)
+		conn.commit()
+	_upgrade(db_file, "head")
+	with sqlite3.connect(db_file) as conn:
+		row = conn.execute("SELECT name, target_resolution FROM video_presets").fetchone()
+	assert row == ("Старый", 1080)
