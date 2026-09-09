@@ -10,13 +10,17 @@ from sqlalchemy import select
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community
 from pxcontrol.engine.services.captions import (
+	BRACKETS_STEP,
+	DATE_STEP,
+	DIGIT_WORDS_STEP,
+	TITLE_STEP_PRESETS,
 	CaptionLine,
 	CaptionsError,
 	CaptionsService,
 	TitleCaseMode,
 	TitleParseRules,
 	build_caption,
-	compile_remove_pattern,
+	compile_step,
 	hashtag,
 	parse_title,
 	title_from_filename,
@@ -85,145 +89,117 @@ def test_title_from_filename_strips_pipeline_suffix() -> None:
 # --- разбор имени файла в название (пакетная публикация) ---------------------
 
 
-def test_parse_title_separators_and_case() -> None:
-	"""Разделители → пробелы, регистры: каждое слово и первая буква."""
-	rules = TitleParseRules(
-		underscores_to_spaces=True, hyphens_to_spaces=True, case=TitleCaseMode.EVERY_WORD
+def test_parse_title_applies_steps_in_order() -> None:
+	"""Шаги идут по очереди: каждый — по результату предыдущего."""
+	rules = TitleParseRules(steps=("_", DATE_STEP, DIGIT_WORDS_STEP))
+	assert parse_title("Фильм_2024-01-31_1080_финал", rules) == "Фильм финал"
+	# порядок важен: даты после замены разделителей уже не видны
+	late_dates = TitleParseRules(steps=("_", DATE_STEP))
+	assert parse_title("Фильм_2024_01_31", late_dates) == "Фильм 2024 01 31"
+	early_dates = TitleParseRules(steps=(DATE_STEP, "_"))
+	assert parse_title("Фильм_2024_01_31", early_dates) == "Фильм"
+
+
+def test_parse_title_case_modes() -> None:
+	"""Регистр применяется по итоговой фразе, не ломая «iPhone»."""
+	every = TitleParseRules(steps=("_",), case=TitleCaseMode.EVERY_WORD)
+	assert parse_title("lara_croft_tomb", every) == "Lara Croft Tomb"
+	assert parse_title("обзор iPhone", TitleParseRules(case=TitleCaseMode.EVERY_WORD)) == (
+		"Обзор IPhone"
 	)
-	assert parse_title("lara_croft-tomb_raider", rules) == "Lara Croft Tomb Raider"
-	first = TitleParseRules(underscores_to_spaces=True, case=TitleCaseMode.FIRST_WORD)
+	first = TitleParseRules(steps=("_",), case=TitleCaseMode.FIRST_WORD)
 	assert parse_title("новый_ролик_серии", first) == "Новый ролик серии"
 
 
-def test_parse_title_separators_are_independent() -> None:
-	"""Подчёркивание и дефис — разные правила: включается любое одно."""
-	underscores = TitleParseRules(underscores_to_spaces=True)
-	assert parse_title("lara_croft-tomb", underscores) == "lara croft-tomb"
-	hyphens = TitleParseRules(hyphens_to_spaces=True)
-	assert parse_title("lara_croft-tomb", hyphens) == "lara_croft tomb"
+def test_date_preset_covers_common_writings() -> None:
+	"""Заготовка дат: ходовые написания, включая короткий год."""
+	rules = TitleParseRules(steps=(DATE_STEP,))
+	for name in (
+		"Выпуск 2024-01-31 финал",
+		"Выпуск 31.01.2024 финал",
+		"Выпуск 31.01.24 финал",
+		"Выпуск 24-01-31 финал",
+		"Выпуск 20240131 финал",
+	):
+		assert parse_title(name, rules) == "Выпуск финал", name
 
 
-def test_parse_title_strips_dates_in_common_patterns() -> None:
-	"""Даты убираются в ходовых написаниях, включая короткий год."""
-	rules = TitleParseRules(strip_dates=True)
-	assert parse_title("Выпуск 2024-01-31 финал", rules) == "Выпуск финал"
-	assert parse_title("Выпуск 31.01.2024 финал", rules) == "Выпуск финал"
-	assert parse_title("Выпуск 31.01.24 финал", rules) == "Выпуск финал"
-	assert parse_title("Выпуск 24-01-31 финал", rules) == "Выпуск финал"
-	assert parse_title("Выпуск 20240131 финал", rules) == "Выпуск финал"
-	# дата с подчёркиваниями видна до замены разделителей на пробелы
-	both = TitleParseRules(strip_dates=True, underscores_to_spaces=True)
-	assert parse_title("Выпуск_2024_01_31_финал", both) == "Выпуск финал"
-
-
-def test_parse_title_dates_keep_plain_numbers() -> None:
+def test_date_preset_keeps_plain_numbers() -> None:
 	"""Одиночный год и длинные числа датой не считаются.
 
 	«Blade Runner 2049» обязан пережить разбор: год сам по себе — часть
-	названия, а не дата. Разные разделители внутри одной даты
-	(«31.01-24») тоже не дата.
+	названия. Разные разделители внутри одной даты («31.01-24») —
+	тоже не дата.
 	"""
-	rules = TitleParseRules(strip_dates=True)
+	rules = TitleParseRules(steps=(DATE_STEP,))
 	assert parse_title("Blade Runner 2049", rules) == "Blade Runner 2049"
 	assert parse_title("Отчёт 123456789", rules) == "Отчёт 123456789"
 	assert parse_title("Выпуск 31.01-24", rules) == "Выпуск 31.01-24"
 
 
-def test_parse_title_strips_digit_words() -> None:
-	"""Слова из одних цифр убираются, смешанные — остаются."""
-	rules = TitleParseRules(strip_digit_words=True, underscores_to_spaces=True)
+def test_digit_words_preset_keeps_mixed_words() -> None:
+	"""Заготовка «слова из цифр» не трогает смешанные слова."""
+	rules = TitleParseRules(steps=("_", DIGIT_WORDS_STEP))
 	assert parse_title("Ролик_2024_1080_4k_S01E02", rules) == "Ролик 4k S01E02"
-	# знаки вокруг числа не мешают распознать слово-число
-	assert parse_title("Ролик (2024)", TitleParseRules(strip_digit_words=True)) == "Ролик"
 
 
-def test_parse_title_removes_by_own_pattern() -> None:
-	"""Своё выражение вырезает совпадения — до остальных правил."""
-	rules = TitleParseRules(remove_pattern=r"\d{3,4}p|WEB-DL", underscores_to_spaces=True)
-	assert parse_title("Фильм_1080p_WEB-DL_релиз", rules) == "Фильм релиз"
-	# регистр учитывается, как в обычных выражениях; (?i) — на выбор автора
-	assert parse_title("Фильм WEB-dl", TitleParseRules(remove_pattern="WEB-DL")) == "Фильм WEB-dl"
-	insensitive = TitleParseRules(remove_pattern="(?i)WEB-DL")
-	assert parse_title("Фильм WEB-dl", insensitive) == "Фильм"
+def test_parse_title_broken_step_is_skipped() -> None:
+	"""Битый шаг пропускается, остальные отрабатывают.
 
-
-def test_parse_title_broken_pattern_disables_only_that_rule() -> None:
-	"""Битое выражение не роняет разбор: правило пропускается.
-
-	Причину пользователь уже видит в форме (``compile_remove_pattern``),
-	а сотня имён из-за одной опечатки разбираться не перестаёт.
+	Причину пользователь уже видит в форме (``compile_step``), а сотня
+	имён из-за одной опечатки разбираться не перестаёт.
 	"""
-	rules = TitleParseRules(remove_pattern="[незакрытый", underscores_to_spaces=True)
+	rules = TitleParseRules(steps=("[незакрытый", "_"))
 	assert parse_title("Фильм_релиз", rules) == "Фильм релиз"
 
 
-def test_compile_remove_pattern_reports_reason() -> None:
-	"""Проверка шаблона: пустой — выключено, битый — понятная ошибка."""
-	assert compile_remove_pattern("") is None
-	assert compile_remove_pattern(r"\d+") is not None
+def test_compile_step_reports_reason() -> None:
+	"""Проверка шага: пустой — выключен, битый — понятная ошибка."""
+	assert compile_step("") is None
+	assert compile_step(r"\d+") is not None
 	with pytest.raises(CaptionsError):
-		compile_remove_pattern("[незакрытый")
+		compile_step("[незакрытый")
 
 
-def test_parse_title_keeps_inner_capitals() -> None:
-	"""«Каждое Слово» поднимает первую букву, не ломая остальные (iPhone)."""
-	rules = TitleParseRules(case=TitleCaseMode.EVERY_WORD)
-	assert parse_title("обзор iPhone", rules) == "Обзор IPhone"
-
-
-def test_parse_title_brackets_and_edge_numbers() -> None:
-	"""Скобки с содержимым и номера по краям срезаются."""
-	rules = TitleParseRules(strip_brackets=True, strip_edge_numbers=True)
-	assert parse_title("01. Ролик [1080p] (final)", rules) == "Ролик"
-	assert parse_title("Ролик - 2", rules) == "Ролик"
-
-
-def test_parse_title_remove_words_case_insensitive() -> None:
-	"""Слова-мусор убираются без учёта регистра, по целым словам."""
-	rules = TitleParseRules(underscores_to_spaces=True, remove_words=("official", "4k"))
-	assert parse_title("клип_OFFICIAL_4K_версия", rules) == "клип версия"
-	# часть слова не трогается: «официальный» — не «official»
-	assert parse_title("официальный клип", TitleParseRules(remove_words=("официал",))) == (
-		"официальный клип"
-	)
+def test_step_presets_are_valid_expressions() -> None:
+	"""Каждая заготовка помощника разбирается — в форму мусор не попадёт."""
+	for label, pattern in TITLE_STEP_PRESETS:
+		assert compile_step(pattern) is not None, label
 
 
 def test_parse_title_empty_result_falls_back_to_raw() -> None:
-	"""Правила съели всё — возвращается исходное название, не пустота."""
-	rules = TitleParseRules(strip_brackets=True, remove_words=("ролик",))
+	"""Шаги съели всё — возвращается исходное название, не пустота."""
+	rules = TitleParseRules(steps=(BRACKETS_STEP, "(?i)ролик"))
 	assert parse_title("[1080p] ролик", rules) == "[1080p] ролик"
 
 
 def test_parse_title_rules_tokens_round_trip() -> None:
 	"""Сериализация в токены и обратно без потерь; незнакомое — мимо."""
 	rules = TitleParseRules(
-		underscores_to_spaces=True,
-		hyphens_to_spaces=True,
-		strip_brackets=True,
-		strip_dates=True,
-		strip_edge_numbers=True,
-		strip_digit_words=True,
-		remove_pattern=r"\d{3,4}p",
+		steps=("_", DATE_STEP, r"(?i)\bofficial\b"),
 		case=TitleCaseMode.FIRST_WORD,
-		remove_words=("official", "два слова"),
 	)
 	assert TitleParseRules.from_tokens(rules.to_tokens()) == rules
 	assert TitleParseRules.from_tokens([]) == TitleParseRules()
 	# токены будущих версий не ломают чтение (прямая совместимость)
-	tolerant = TitleParseRules.from_tokens(["новое_правило", "case:чудо"])
-	assert tolerant == TitleParseRules()
+	assert TitleParseRules.from_tokens(["новое_правило", "case:чудо"]) == TitleParseRules()
 
 
-def test_parse_title_rules_read_legacy_separators_token() -> None:
-	"""Старый токен одной галочки «_ и -» читается как оба правила.
+def test_parse_title_rules_convert_legacy_tokens() -> None:
+	"""Настройка прежней модели читается шагами и разбирает так же.
 
-	Настройка канала, записанная прежней версией, не должна молча
-	терять замену разделителей.
+	У каналов сохранены наборы галочек; после обновления они обязаны
+	продолжать работать, а не молча обнулиться.
 	"""
-	legacy = TitleParseRules.from_tokens(["separators", "brackets"])
-	assert legacy == TitleParseRules(
-		underscores_to_spaces=True, hyphens_to_spaces=True, strip_brackets=True
+	legacy = TitleParseRules.from_tokens(
+		["separators", "brackets", "dates", "edge_numbers", "remove:official", "case:first_word"]
 	)
+	assert legacy.case is TitleCaseMode.FIRST_WORD
+	assert legacy.steps  # галочки превратились в выражения
+	assert parse_title("01. Фильм_2024-01-31 [1080p] OFFICIAL", legacy) == "Фильм"
+	# одна галочка «_ и -» покрывает оба разделителя
+	both = TitleParseRules.from_tokens(["separators"])
+	assert parse_title("lara_croft-tomb", both) == "lara croft tomb"
 
 
 def test_sanitize_filename_limits_bytes_not_chars() -> None:

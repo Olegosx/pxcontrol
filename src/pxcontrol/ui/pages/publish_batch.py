@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime, timedelta
 from functools import partial
 
 from PySide6.QtCore import QDate
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CalendarPicker,
@@ -23,7 +23,6 @@ from qfluentwidgets import (
 	CardWidget,
 	CheckBox,
 	ComboBox,
-	FlowLayout,
 	LineEdit,
 	PushButton,
 	SpinBox,
@@ -33,12 +32,13 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import (
+	TITLE_STEP_PRESETS,
 	CaptionLine,
 	CaptionsError,
 	TitleCaseMode,
 	TitleParseRules,
 	build_caption,
-	compile_remove_pattern,
+	compile_step,
 	parse_title,
 	title_from_filename,
 )
@@ -61,6 +61,9 @@ from pxcontrol.ui.pages.common import (
 	ErrorLabel,
 	SelectionRow,
 	WorkDialog,
+	bind,
+	clear_layout,
+	elide_text,
 	file_action_buttons,
 	human_size,
 	list_area,
@@ -271,99 +274,91 @@ class PublishBatchDialog(WorkDialog):
 	def _build_rules_card(self, rules: TitleParseRules) -> None:
 		"""Разворачивающийся блок «Правила разбора имени файла».
 
-		Правила применяются только явной кнопкой: подписи и подсказки
-		имён всех строк пересобираются из разобранных названий, после
-		чего строки правятся руками как обычно. Заготовка правил
-		приходит из настройки канала и туда же сохраняется при
-		применении (``TITLE_PARSE_RULES``).
+		Разбор — цепочка замен по выражениям: шаг применяется кнопкой,
+		встаёт в конец цепочки, и названия всех строк пересчитываются
+		от исходного имени файла через всю цепочку. Поэтому убранный
+		из середины шаг даёт честный результат, а не «как получилось».
+		Помощник рядом с полем вставляет готовое выражение — дальше его
+		правят руками. Цепочка приходит из настройки канала и туда же
+		сохраняется (``TITLE_PARSE_RULES``).
 		"""
 		card = CollapsibleCard("Правила разбора имени файла", self)
-		# галочек много — поточная раскладка переносит их по ширине окна
-		checks_host = QWidget(card)
-		checks = FlowLayout(checks_host, needAni=False)
-		checks.setContentsMargins(0, 0, 0, 0)
-		self._rule_underscores = CheckBox("_ → пробел", card)
-		self._rule_underscores.setChecked(rules.underscores_to_spaces)
-		self._rule_hyphens = CheckBox("- → пробел", card)
-		self._rule_hyphens.setChecked(rules.hyphens_to_spaces)
-		self._rule_brackets = CheckBox("Убирать [скобки] и (скобки)", card)
-		self._rule_brackets.setChecked(rules.strip_brackets)
-		self._rule_dates = CheckBox("Убирать даты", card)
-		self._rule_dates.setToolTip(
-			"Даты вида 2024-01-31, 31.01.2024, 31.01.24, 20240131 "
-			"(одиночный год не трогается — он может быть частью названия)"
+		self._steps: list[str] = list(rules.steps)
+		step_row = QHBoxLayout()
+		self._step_edit = LineEdit(card)
+		self._step_edit.setPlaceholderText(r"регулярное выражение, например \d{3,4}p|WEB-DL")
+		self._step_edit.setToolTip(
+			"Совпадения заменяются пробелом. Без учёта регистра — начните с (?i)"
 		)
-		self._rule_dates.setChecked(rules.strip_dates)
-		self._rule_numbers = CheckBox("Срезать номера по краям", card)
-		self._rule_numbers.setChecked(rules.strip_edge_numbers)
-		self._rule_digit_words = CheckBox("Убирать слова из цифр", card)
-		self._rule_digit_words.setToolTip("Слова целиком из цифр: 2024, 1080, 007")
-		self._rule_digit_words.setChecked(rules.strip_digit_words)
-		for check in (
-			self._rule_underscores,
-			self._rule_hyphens,
-			self._rule_brackets,
-			self._rule_dates,
-			self._rule_numbers,
-			self._rule_digit_words,
-		):
-			checks.addWidget(check)
+		self._step_edit.returnPressed.connect(self._apply_step)
+		step_row.addWidget(self._step_edit, stretch=1)
+		self._step_presets = ComboBox(card)
+		self._step_presets.setPlaceholderText("Заготовки")
+		for label, _pattern in TITLE_STEP_PRESETS:
+			self._step_presets.addItem(label)
+		self._step_presets.setCurrentIndex(-1)
+		self._step_presets.currentIndexChanged.connect(self._insert_preset)
+		step_row.addWidget(self._step_presets)
+		apply_button = PushButton("Применить", card)
+		apply_button.setToolTip(
+			"Добавить шаг в цепочку и пересобрать названия всех строк "
+			"(ручные правки подписей перезапишутся)"
+		)
+		apply_button.clicked.connect(self._apply_step)
+		step_row.addWidget(apply_button)
+		card.body.addLayout(step_row)
+		self._pattern_error = ErrorLabel(card)
+		card.body.addWidget(self._pattern_error)
+		self._steps_box = QVBoxLayout()
+		self._steps_box.setSpacing(density.spacing().list_spacing)
+		card.body.addLayout(self._steps_box)
+		case_row = QHBoxLayout()
+		case_row.addWidget(BodyLabel("Регистр названия:", card))
 		self._rule_case = ComboBox(card)
 		for label, _mode in _CASE_MODES:
 			self._rule_case.addItem(label)
 		modes = [mode for _label, mode in _CASE_MODES]
 		self._rule_case.setCurrentIndex(modes.index(rules.case))
-		checks.addWidget(self._rule_case)
-		card.body.addWidget(checks_host)
-		self._build_pattern_row(card, rules)
-		words_row = QHBoxLayout()
-		words_row.addWidget(BodyLabel("Убирать слова:", card))
-		self._rule_words = LineEdit(card)
-		self._rule_words.setPlaceholderText("через запятую: 4k, official, final")
-		self._rule_words.setText(", ".join(rules.remove_words))
-		words_row.addWidget(self._rule_words, stretch=1)
-		apply_button = PushButton("Применить разбор", card)
-		apply_button.setToolTip(
-			"Пересобрать подписи и имена всех строк по правилам (ручные правки строк перезапишутся)"
-		)
-		apply_button.clicked.connect(self._apply_title_rules)
-		words_row.addWidget(apply_button)
-		card.body.addLayout(words_row)
+		# регистр заменой не выражается — это отдельное правило поверх
+		# цепочки; смена сразу пересобирает названия
+		self._rule_case.currentIndexChanged.connect(self._reapply_rules)
+		case_row.addWidget(self._rule_case)
+		case_row.addStretch()
+		card.body.addLayout(case_row)
 		self.content.addWidget(card)
+		self._show_steps()
 
-	def _build_pattern_row(self, card: CollapsibleCard, rules: TitleParseRules) -> None:
-		"""Строка своего выражения удаления и место под причину отказа."""
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Убирать по шаблону:", card))
-		self._rule_pattern = LineEdit(card)
-		self._rule_pattern.setPlaceholderText(r"регулярное выражение, например \d{3,4}p|WEB-DL")
-		self._rule_pattern.setToolTip(
-			"Совпадения вырезаются из имени до остальных правил. "
-			"Без учёта регистра — начните шаблон с (?i)"
-		)
-		self._rule_pattern.setText(rules.remove_pattern)
-		row.addWidget(self._rule_pattern, stretch=1)
-		card.body.addLayout(row)
-		self._pattern_error = ErrorLabel(card)
-		card.body.addWidget(self._pattern_error)
+	def _insert_preset(self, index: int) -> None:
+		"""Вставляет выбранную заготовку в поле — дальше её правят руками."""
+		if 0 <= index < len(TITLE_STEP_PRESETS):
+			self._step_edit.setText(TITLE_STEP_PRESETS[index][1])
+			self._step_presets.setCurrentIndex(-1)  # пункт не «залипает»
+			self._step_edit.setFocus()
+
+	def _show_steps(self) -> None:
+		"""Перерисовывает список применённых шагов (в порядке применения)."""
+		clear_layout(self._steps_box)
+		if not self._steps:
+			self._steps_box.addWidget(
+				CaptionLabel("Шагов нет — названия берутся из имён файлов как есть.", self)
+			)
+			return
+		for position, step in enumerate(self._steps, start=1):
+			row = QHBoxLayout()
+			label = BodyLabel(f"{position}. {step}", self)
+			label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+			elide_text(label, f"{position}. {step}")
+			row.addWidget(label, stretch=1)
+			remove = PushButton("Убрать", self)
+			remove.clicked.connect(bind(self._remove_step, step))
+			row.addWidget(remove)
+			self._steps_box.addLayout(row)
 
 	def _rules_from_form(self) -> TitleParseRules:
-		"""Правила из виджетов блока (слова — через запятую, пустые долой)."""
-		words = tuple(
-			word
-			for word in (part.strip() for part in str(self._rule_words.text()).split(","))
-			if word
-		)
+		"""Правила из состояния блока: цепочка шагов и режим регистра."""
 		return TitleParseRules(
-			underscores_to_spaces=self._rule_underscores.isChecked(),
-			hyphens_to_spaces=self._rule_hyphens.isChecked(),
-			strip_brackets=self._rule_brackets.isChecked(),
-			strip_dates=self._rule_dates.isChecked(),
-			strip_edge_numbers=self._rule_numbers.isChecked(),
-			strip_digit_words=self._rule_digit_words.isChecked(),
-			remove_pattern=str(self._rule_pattern.text()).strip(),
+			steps=tuple(self._steps),
 			case=_CASE_MODES[int(self._rule_case.currentIndex())][1],
-			remove_words=words,
 		)
 
 	def _row_title(self, row: _BatchRow) -> str:
@@ -373,28 +368,43 @@ class PublishBatchDialog(WorkDialog):
 			title = parse_title(title, self._applied_rules)
 		return title
 
-	def _apply_title_rules(self) -> None:
-		"""Пересобирает подписи и подсказки имён всех строк по правилам.
+	def _apply_step(self) -> None:
+		"""Добавляет шаг из поля в цепочку и пересобирает названия.
 
-		Без общего шаблона подписи результат — жирное название само
-		по себе (до применения правил подпись была пустой — раз правила
-		настраивают, разобранное название должно быть видно в форме).
-		Применённый набор сохраняется заготовкой канала; сбой сохранения
-		применению не мешает (текст — в плашку ошибок диалога).
-
-		Своё выражение проверяется до применения: битый шаблон
-		не применяется вовсе (причина — строкой под полем), остальные
-		правила при этом отработали бы вслепую, поэтому разбор
-		прекращается целиком.
+		Битое выражение в цепочку не попадает: причина — строкой под
+		полем, названия остаются прежними.
 		"""
-		rules = self._rules_from_form()
+		pattern = str(self._step_edit.text()).strip()
+		if not pattern:
+			return
 		try:
-			compile_remove_pattern(rules.remove_pattern)
+			compile_step(pattern)
 		except CaptionsError as exc:
 			self._pattern_error.fail(str(exc))
 			return
 		self._pattern_error.succeed()
-		self._applied_rules = rules
+		self._steps.append(pattern)
+		self._step_edit.clear()
+		self._show_steps()
+		self._reapply_rules()
+
+	def _remove_step(self, step: str) -> None:
+		"""Убирает шаг из цепочки и пересобирает названия заново."""
+		self._steps.remove(step)
+		self._show_steps()
+		self._reapply_rules()
+
+	def _reapply_rules(self, *_args: object) -> None:
+		"""Пересобирает подписи и подсказки имён всех строк по цепочке.
+
+		Названия всегда считаются от исходного имени файла через всю
+		цепочку — поэтому убранный шаг честно отменяется. Без общего
+		шаблона подписи результат — жирное название само по себе (раз
+		правила настраивают, разобранное название должно быть видно).
+		Цепочка сохраняется заготовкой канала; сбой сохранения
+		применению не мешает (текст — в плашку ошибок окна).
+		"""
+		self._applied_rules = self._rules_from_form()
 		for row in self._rows:
 			row.caption.setPlainText(build_caption(self._row_title(row), self._caption_lines or []))
 		self._request_renames()

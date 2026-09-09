@@ -203,45 +203,55 @@ def title_from_filename(path: str) -> str:
 
 
 # --- элементарный разбор имени файла в название (пакетная публикация) ---------
+#
+# Модель одна: разбор — это цепочка замен по регулярным выражениям.
+# Каждый шаг применяется к результату предыдущего, совпадения заменяются
+# пробелом (для имён файлов «удалить» и «заменить пробелом» — одно и то
+# же: лишние пробелы схлопываются в конце). Единственное, что заменой
+# не выражается, — регистр: он остался отдельным полем правил.
 
-#: Содержимое квадратных и круглых скобок вместе со скобками: частый
-#: мусор источников — [1080p], (official) и т.п.
-_BRACKETED = re.compile(r"\[[^\[\]]*\]|\([^()]*\)")
-
-#: Номер в начале названия: «01. », «2 — », «3) » (нумерация серий).
-_EDGE_NUMBER_LEAD = re.compile(r"^\s*\d+[\s.\-–—)]+")
-
-#: Номер в конце названия: « - 2», «.3» (счётчики дублей загрузки).
-_EDGE_NUMBER_TAIL = re.compile(r"[\s.\-–—(]+\d+\s*$")
-
-#: Разделитель внутри даты: точка, дефис, подчёркивание, косая черта.
-_DATE_SEP = r"[-._/]"
-
-#: Шаблоны дат в именах файлов. Внутри одной даты разделитель
-#: одинаковый (обратная ссылка ``\1``): «31.01-24» датой не считается.
-#: По краям запрещена цифра — иначе шаблон выкусывал бы куски
-#: из длинных чисел. Год бывает полным (2024) и коротким (24);
-#: одиночный год датой НЕ считается — «Blade Runner 2049» должен
-#: пережить разбор, а кому нужно убрать и его, включает удаление слов
-#: из одних цифр.
-_DATE_PATTERNS = (
+#: Заготовка дат: ходовые написания в именах файлов. Внутри одной даты
+#: разделитель одинаковый (обратная ссылка по имени): «31.01-24» датой
+#: не считается. По краям запрещена цифра — иначе выкусывались бы куски
+#: длинных чисел. Год бывает полным (2024) и коротким (24); одиночный
+#: год датой НЕ считается — «Blade Runner 2049» должен пережить разбор
+#: (кому мешает и год — берёт заготовку «слова из одних цифр»).
+#: Группы именованные: без имён их номера разъехались бы при склейке
+#: вариантов через «|».
+DATE_STEP = (
 	# год впереди четырьмя цифрами: 2024-01-31, 2024.1.5
-	rf"(?<!\d)(?:19|20)\d{{2}}({_DATE_SEP})\d{{1,2}}\1\d{{1,2}}(?!\d)",
+	r"(?<!\d)(?:19|20)\d{2}(?P<ds_lead>[-._/])\d{1,2}(?P=ds_lead)\d{1,2}(?!\d)"
 	# год в конце четырьмя цифрами: 31.01.2024
-	rf"(?<!\d)\d{{1,2}}({_DATE_SEP})\d{{1,2}}\1(?:19|20)\d{{2}}(?!\d)",
+	r"|(?<!\d)\d{1,2}(?P<ds_tail>[-._/])\d{1,2}(?P=ds_tail)(?:19|20)\d{2}(?!\d)"
 	# все три части по две цифры — год короткий: 31.01.24, 24-01-31
-	rf"(?<!\d)\d{{2}}({_DATE_SEP})\d{{2}}\1\d{{2}}(?!\d)",
+	r"|(?<!\d)\d{2}(?P<ds_short>[-._/])\d{2}(?P=ds_short)\d{2}(?!\d)"
 	# слитно восемь цифр: 20240131 (век и границы месяца/дня — якорь
 	# против случайных длинных чисел вроде битрейта или идентификатора)
-	r"(?<!\d)(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?!\d)",
+	r"|(?<!\d)(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?!\d)"
 )
 
-#: Шаблоны применяются по очереди: у каждого своя обратная ссылка,
-#: и в одном объединённом выражении их номера бы разъехались.
-_DATE_RES = tuple(re.compile(pattern) for pattern in _DATE_PATTERNS)
+#: Заготовка скобок с содержимым: частый мусор источников — [1080p], (official).
+BRACKETS_STEP = r"\[[^\[\]]*\]|\([^()]*\)"
 
-#: Слово из одних цифр, возможно с прилипшими знаками: «2024», «(007)».
-_DIGIT_WORD = re.compile(r"^\W*\d+\W*$")
+#: Заготовка номеров по краям: «01. » в начале, « - 2» в конце.
+EDGE_NUMBERS_STEP = r"^\s*\d+[\s.\-–—)]+|[\s.\-–—(]+\d+\s*$"
+
+#: Заготовка слов из одних цифр: «2024», «1080», «007».
+DIGIT_WORDS_STEP = r"\b\d+\b"
+
+#: Заготовки для помощника в интерфейсе: подпись → выражение. Единая
+#: точка: список пунктов и их шаблоны не должны жить в двух местах.
+#: Выбранная заготовка вставляется в поле ввода и правится руками.
+TITLE_STEP_PRESETS: tuple[tuple[str, str], ...] = (
+	("Подчёркивания", "_"),
+	("Дефисы", "-"),
+	("Скобки с содержимым", BRACKETS_STEP),
+	("Даты", DATE_STEP),
+	("Слова из одних цифр", DIGIT_WORDS_STEP),
+	("Номера по краям", EDGE_NUMBERS_STEP),
+	("Перечень слов", r"(?i)\b(?:слово1|слово2)\b"),
+	("Метки качества и релиза", r"(?i)\d{3,4}p|WEB-?DL|BluRay|x26[45]|HDR"),
+)
 
 
 class TitleCaseMode(StrEnum):
@@ -252,57 +262,86 @@ class TitleCaseMode(StrEnum):
 	FIRST_WORD = "first_word"  # Только первая буква фразы
 
 
+def compile_step(pattern: str) -> re.Pattern[str] | None:
+	"""Готовит выражение шага; None — пустая строка (шага нет).
+
+	Публичная: интерфейс проверяет ею шаг до применения и показывает
+	причину отказа рядом с полем ввода — разбирать сообщение ``re``
+	на двух сторонах не нужно.
+
+	Raises:
+		CaptionsError: Выражение не разбирается (с текстом от ``re``).
+	"""
+	if not pattern:
+		return None
+	try:
+		return re.compile(pattern)
+	except re.error as exc:
+		raise CaptionsError(f"Выражение не разобрано: {exc}") from exc
+
+
+#: Прежние правила-галочки → выражения. Порядок фиксирован и повторяет
+#: порядок применения старой версии: настройка канала, записанная ею,
+#: должна разбирать имена ровно так же, как разбирала.
+_LEGACY_STEPS: tuple[tuple[str, str], ...] = (
+	("brackets", BRACKETS_STEP),
+	("dates", DATE_STEP),
+	("separators", "_"),  # одна галочка на оба разделителя
+	("underscores", "_"),
+	("hyphens", "-"),
+	("edge_numbers", EDGE_NUMBERS_STEP),
+	("digit_words", DIGIT_WORDS_STEP),
+)
+
+
+def _legacy_steps(tokens: Collection[str]) -> list[str]:
+	"""Выражения из токенов прежней модели (галочки и список слов).
+
+	Токены прежних версий читаются, а не отбрасываются: у каналов
+	сохранены наборы правил, и после обновления они обязаны продолжать
+	работать — уже шагами.
+	"""
+	steps: list[str] = []
+	for name, pattern in _LEGACY_STEPS:
+		if name in tokens:
+			steps.append(pattern)
+			if name == "separators":
+				steps.append("-")  # прежняя галочка меняла оба сразу
+	words = [
+		word
+		for token in tokens
+		if token.startswith("remove:") and (word := token.removeprefix("remove:").strip())
+	]
+	if words:
+		# прежнее удаление слов не различало регистр и работало по целым
+		# словам — то же самое выражением
+		steps.append(r"(?i)\b(?:" + "|".join(re.escape(word) for word in words) + r")\b")
+	return steps
+
+
 @dataclass(frozen=True)
 class TitleParseRules:
-	"""Правила элементарного разбора имени файла в название поста.
+	"""Разбор имени файла в название поста: цепочка замен и регистр.
 
-	Осознанно простые и детерминированные (полный смысловой разбор —
-	будущая задача ИИ, ей эти правила не мешают). Хранятся настройкой
-	канала как список токенов (:meth:`to_tokens`/:meth:`from_tokens`).
+	Осознанно простые и детерминированные правила (полный смысловой
+	разбор — будущая задача ИИ, ей эти правила не мешают). Хранятся
+	настройкой канала как список токенов
+	(:meth:`to_tokens`/:meth:`from_tokens`).
 
 	Attributes:
-		underscores_to_spaces: заменять ``_`` пробелами.
-		hyphens_to_spaces: заменять ``-`` пробелами.
-		strip_brackets: убирать содержимое [квадратных] и (круглых) скобок.
-		strip_dates: убирать даты (см. :data:`_DATE_PATTERNS`).
-		strip_edge_numbers: срезать номера в начале и в конце названия.
-		strip_digit_words: убирать слова из одних цифр («2024», «1080»).
-		remove_pattern: своё регулярное выражение — совпадения вырезаются
-			(пустая строка — правило выключено).
-		case: режим регистра результата.
-		remove_words: слова-мусор (без учёта регистра, по целым словам).
+		steps: выражения по порядку применения; каждое следующее
+			работает по результату предыдущего.
+		case: режим регистра итоговой фразы.
 	"""
 
-	underscores_to_spaces: bool = False
-	hyphens_to_spaces: bool = False
-	strip_brackets: bool = False
-	strip_dates: bool = False
-	strip_edge_numbers: bool = False
-	strip_digit_words: bool = False
-	remove_pattern: str = ""
+	steps: tuple[str, ...] = ()
 	case: TitleCaseMode = TitleCaseMode.KEEP
-	remove_words: tuple[str, ...] = ()
 
 	def to_tokens(self) -> list[str]:
 		"""Сериализация в список токенов для настройки канала."""
-		tokens: list[str] = []
-		if self.underscores_to_spaces:
-			tokens.append("underscores")
-		if self.hyphens_to_spaces:
-			tokens.append("hyphens")
-		if self.strip_brackets:
-			tokens.append("brackets")
-		if self.strip_dates:
-			tokens.append("dates")
-		if self.strip_edge_numbers:
-			tokens.append("edge_numbers")
-		if self.strip_digit_words:
-			tokens.append("digit_words")
-		if self.remove_pattern:
-			tokens.append(f"regex:{self.remove_pattern}")
+		tokens = [f"step:{step}" for step in self.steps]
 		if self.case is not TitleCaseMode.KEEP:
 			tokens.append(f"case:{self.case.value}")
-		tokens.extend(f"remove:{word}" for word in self.remove_words)
 		return tokens
 
 	@classmethod
@@ -310,110 +349,52 @@ class TitleParseRules:
 		"""Правила из списка токенов; незнакомые токены игнорируются.
 
 		Терпимость к незнакомому — прямая совместимость: настройка,
-		записанная более новой версией, не ломает старую.
+		записанная более новой версией, не ломает старую. Токены
+		прежней модели (галочки, список слов) превращаются в шаги
+		(:func:`_legacy_steps`).
 		"""
 		case = TitleCaseMode.KEEP
-		remove: list[str] = []
-		pattern = ""
-		flags = set()
-		known = ("underscores", "hyphens", "brackets", "dates", "edge_numbers", "digit_words")
+		steps: list[str] = []
+		legacy: list[str] = []
 		for token in tokens:
-			if token in known:
-				flags.add(token)
-			elif token == "separators":
-				# наследие: прежде «_ и -» были одной галочкой
-				flags.update(("underscores", "hyphens"))
-			elif token.startswith("regex:"):
-				pattern = token.removeprefix("regex:")
+			if token.startswith("step:"):
+				steps.append(token.removeprefix("step:"))
 			elif token.startswith("case:"):
 				try:
 					case = TitleCaseMode(token.removeprefix("case:"))
 				except ValueError:
 					logger.warning("Неизвестный режим регистра в настройке: %s", token)
-			elif token.startswith("remove:"):
-				word = token.removeprefix("remove:").strip()
-				if word:
-					remove.append(word)
+			elif token.startswith("remove:") or token in {name for name, _ in _LEGACY_STEPS}:
+				legacy.append(token)
 			else:
 				logger.warning("Неизвестный токен правил разбора: %s", token)
-		return cls(
-			underscores_to_spaces="underscores" in flags,
-			hyphens_to_spaces="hyphens" in flags,
-			strip_brackets="brackets" in flags,
-			strip_dates="dates" in flags,
-			strip_edge_numbers="edge_numbers" in flags,
-			strip_digit_words="digit_words" in flags,
-			remove_pattern=pattern,
-			case=case,
-			remove_words=tuple(remove),
-		)
-
-
-def compile_remove_pattern(pattern: str) -> re.Pattern[str] | None:
-	"""Готовит своё выражение удаления; None — правило выключено.
-
-	Публичная: интерфейс проверяет ею шаблон до применения правил
-	и показывает причину отказа рядом с полем ввода — разбирать
-	сообщение ``re`` на двух сторонах не нужно.
-
-	Raises:
-		CaptionsError: Шаблон не разбирается (с текстом от ``re``).
-	"""
-	if not pattern:
-		return None
-	try:
-		return re.compile(pattern)
-	except re.error as exc:
-		raise CaptionsError(f"Шаблон не разобран: {exc}") from exc
+		# шаги прежней модели идут первыми: своих у неё быть не могло
+		return cls(steps=tuple(_legacy_steps(legacy) + steps), case=case)
 
 
 def parse_title(raw: str, rules: TitleParseRules) -> str:
-	"""Применяет правила разбора к названию из имени файла.
+	"""Применяет разбор к названию, взятому из имени файла.
 
-	Порядок фиксирован и закреплён тестами: своё выражение → скобки →
-	даты → разделители → номера по краям → удаление слов и слов
-	из цифр → схлопывание пробелов → регистр.
+	Шаги идут по порядку, каждый — по результату предыдущего;
+	совпадения заменяются пробелом, в конце пробелы схлопываются,
+	последним применяется регистр (по итоговой фразе). Пустой результат
+	откатывается к исходному названию: пост без названия хуже поста
+	с сырым.
 
-	Своё выражение идёт первым — по исходному имени: пользователь
-	пишет его под то, что видит в имени файла, а не под промежуточный
-	результат чужих правил. Даты — до замены разделителей, иначе
-	``2024_01_31`` распалось бы на три числа и датой уже не выглядело.
-	Скобки и номера — до удаления слов (они позиционные и не должны
-	зависеть от выпавших слов); регистр — последним, по итоговой фразе.
-	Пустой результат откатывается к исходному названию: пост без
-	названия хуже поста с сырым.
-
-	Битое своё выражение правило просто выключает (след — в логе):
-	разбор сотни имён не должен падать из-за одной опечатки, а причину
-	пользователь уже видит в форме.
+	Битый шаг пропускается (след — в логе): разбор сотни имён не должен
+	падать из-за одной опечатки, а причину пользователь уже видит
+	в форме (:func:`compile_step`).
 	"""
 	text = raw
-	if rules.remove_pattern:
+	for step in rules.steps:
 		try:
-			removal = compile_remove_pattern(rules.remove_pattern)
+			expression = compile_step(step)
 		except CaptionsError as exc:
 			logger.warning("Разбор имени: %s", exc)
-		else:
-			if removal is not None:
-				text = removal.sub(" ", text)
-	if rules.strip_brackets:
-		text = _BRACKETED.sub(" ", text)
-	if rules.strip_dates:
-		for date_pattern in _DATE_RES:
-			text = date_pattern.sub(" ", text)
-	if rules.underscores_to_spaces:
-		text = text.replace("_", " ")
-	if rules.hyphens_to_spaces:
-		text = text.replace("-", " ")
-	if rules.strip_edge_numbers:
-		text = _EDGE_NUMBER_LEAD.sub(" ", text)
-		text = _EDGE_NUMBER_TAIL.sub(" ", text)
+			continue
+		if expression is not None:
+			text = expression.sub(" ", text)
 	words = text.split()
-	if rules.remove_words:
-		stop = {word.casefold() for word in rules.remove_words}
-		words = [word for word in words if word.casefold() not in stop]
-	if rules.strip_digit_words:
-		words = [word for word in words if not _DIGIT_WORD.match(word)]
 	if rules.case is TitleCaseMode.EVERY_WORD:
 		# только первая буква каждого слова: title() ломал бы «iPhone»
 		words = [word[:1].upper() + word[1:] for word in words]
