@@ -19,6 +19,7 @@ from pxcontrol.engine.services.captions import (
 	CaptionsService,
 	TitleCaseMode,
 	TitleParseRules,
+	TitleStep,
 	build_caption,
 	compile_step,
 	hashtag,
@@ -88,32 +89,60 @@ def test_title_from_filename_strips_pipeline_suffix() -> None:
 
 # --- разбор имени файла в название (пакетная публикация) ---------------------
 
+#: Ходовой шаг: разделители → пробел. Раньше это была галочка, теперь —
+#: обычная пара «выражение → замена»; в тестах встречается всюду.
+_SPACES = TitleStep("_", " ")
+
 
 def test_parse_title_applies_steps_in_order() -> None:
 	"""Шаги идут по очереди: каждый — по результату предыдущего."""
-	rules = TitleParseRules(steps=("_", DATE_STEP, DIGIT_WORDS_STEP))
+	rules = TitleParseRules(steps=(_SPACES, TitleStep(DATE_STEP), TitleStep(DIGIT_WORDS_STEP)))
 	assert parse_title("Фильм_2024-01-31_1080_финал", rules) == "Фильм финал"
 	# порядок важен: даты после замены разделителей уже не видны
-	late_dates = TitleParseRules(steps=("_", DATE_STEP))
+	late_dates = TitleParseRules(steps=(_SPACES, TitleStep(DATE_STEP)))
 	assert parse_title("Фильм_2024_01_31", late_dates) == "Фильм 2024 01 31"
-	early_dates = TitleParseRules(steps=(DATE_STEP, "_"))
+	early_dates = TitleParseRules(steps=(TitleStep(DATE_STEP), _SPACES))
 	assert parse_title("Фильм_2024_01_31", early_dates) == "Фильм"
+
+
+def test_parse_title_replacement_is_explicit() -> None:
+	"""Замена задаётся шагом: пустая — удаление, пробел — разрыв слов.
+
+	Прежняя модель заменяла совпадение пробелом всегда; теперь это выбор
+	автора правил, и оба исхода должны быть достижимы.
+	"""
+	glue = TitleParseRules(steps=(TitleStep("_", ""),))
+	assert parse_title("Мой_ролик", glue) == "Мойролик"
+	split = TitleParseRules(steps=(TitleStep("_", " "),))
+	assert parse_title("Мой_ролик", split) == "Мой ролик"
+	# замена не обязана быть пустой или пробелом
+	dash = TitleParseRules(steps=(TitleStep(r"\s+", "-"),))
+	assert parse_title("Мой ролик", dash) == "Мой-ролик"
+	# ссылки на группы: совпадение можно переписать, а не выбросить
+	swap = TitleParseRules(steps=(TitleStep(r"(\w+)\.(\w+)", r"\2 \1"),))
+	assert parse_title("ролик.мой", swap) == "мой ролик"
+
+
+def test_parse_title_broken_replacement_is_skipped() -> None:
+	"""Битый шаблон замены выключает шаг, а не роняет разбор."""
+	rules = TitleParseRules(steps=(TitleStep("_", r"\9"), _SPACES))
+	assert parse_title("Фильм_релиз", rules) == "Фильм релиз"
 
 
 def test_parse_title_case_modes() -> None:
 	"""Регистр применяется по итоговой фразе, не ломая «iPhone»."""
-	every = TitleParseRules(steps=("_",), case=TitleCaseMode.EVERY_WORD)
+	every = TitleParseRules(steps=(_SPACES,), case=TitleCaseMode.EVERY_WORD)
 	assert parse_title("lara_croft_tomb", every) == "Lara Croft Tomb"
 	assert parse_title("обзор iPhone", TitleParseRules(case=TitleCaseMode.EVERY_WORD)) == (
 		"Обзор IPhone"
 	)
-	first = TitleParseRules(steps=("_",), case=TitleCaseMode.FIRST_WORD)
+	first = TitleParseRules(steps=(_SPACES,), case=TitleCaseMode.FIRST_WORD)
 	assert parse_title("новый_ролик_серии", first) == "Новый ролик серии"
 
 
 def test_date_preset_covers_common_writings() -> None:
 	"""Заготовка дат: ходовые написания, включая короткий год."""
-	rules = TitleParseRules(steps=(DATE_STEP,))
+	rules = TitleParseRules(steps=(TitleStep(DATE_STEP, " "),))
 	for name in (
 		"Выпуск 2024-01-31 финал",
 		"Выпуск 31.01.2024 финал",
@@ -131,7 +160,7 @@ def test_date_preset_keeps_plain_numbers() -> None:
 	названия. Разные разделители внутри одной даты («31.01-24») —
 	тоже не дата.
 	"""
-	rules = TitleParseRules(steps=(DATE_STEP,))
+	rules = TitleParseRules(steps=(TitleStep(DATE_STEP, " "),))
 	assert parse_title("Blade Runner 2049", rules) == "Blade Runner 2049"
 	assert parse_title("Отчёт 123456789", rules) == "Отчёт 123456789"
 	assert parse_title("Выпуск 31.01-24", rules) == "Выпуск 31.01-24"
@@ -139,7 +168,7 @@ def test_date_preset_keeps_plain_numbers() -> None:
 
 def test_digit_words_preset_keeps_mixed_words() -> None:
 	"""Заготовка «слова из цифр» не трогает смешанные слова."""
-	rules = TitleParseRules(steps=("_", DIGIT_WORDS_STEP))
+	rules = TitleParseRules(steps=(_SPACES, TitleStep(DIGIT_WORDS_STEP)))
 	assert parse_title("Ролик_2024_1080_4k_S01E02", rules) == "Ролик 4k S01E02"
 
 
@@ -149,40 +178,69 @@ def test_parse_title_broken_step_is_skipped() -> None:
 	Причину пользователь уже видит в форме (``compile_step``), а сотня
 	имён из-за одной опечатки разбираться не перестаёт.
 	"""
-	rules = TitleParseRules(steps=("[незакрытый", "_"))
+	rules = TitleParseRules(steps=(TitleStep("[незакрытый"), _SPACES))
 	assert parse_title("Фильм_релиз", rules) == "Фильм релиз"
 
 
 def test_compile_step_reports_reason() -> None:
-	"""Проверка шага: пустой — выключен, битый — понятная ошибка."""
-	assert compile_step("") is None
-	assert compile_step(r"\d+") is not None
-	with pytest.raises(CaptionsError):
-		compile_step("[незакрытый")
+	"""Проверка шага: пустой — выключен, битый — понятная ошибка.
+
+	Проверяются обе части шага: и выражение, и шаблон замены — форма
+	показывает причину до применения, а не после порчи сотни названий.
+	"""
+	assert compile_step(TitleStep("")) is None
+	assert compile_step(TitleStep(r"\d+", " ")) is not None
+	with pytest.raises(CaptionsError, match="Выражение"):
+		compile_step(TitleStep("[незакрытый"))
+	with pytest.raises(CaptionsError, match="Замена"):
+		compile_step(TitleStep(r"\d+", r"\9"))  # группы 9 в выражении нет
+	with pytest.raises(CaptionsError, match="Замена"):
+		compile_step(TitleStep(r"\d+", r"\g<нет>"))  # именованной группы нет
 
 
 def test_step_presets_are_valid_expressions() -> None:
 	"""Каждая заготовка помощника разбирается — в форму мусор не попадёт."""
 	for label, pattern in TITLE_STEP_PRESETS:
-		assert compile_step(pattern) is not None, label
+		assert compile_step(TitleStep(pattern)) is not None, label
+	# разделители из заготовок убраны: это замена на пробел, а не удаление
+	assert not [label for label, pattern in TITLE_STEP_PRESETS if pattern in {"_", "-"}]
 
 
 def test_parse_title_empty_result_falls_back_to_raw() -> None:
 	"""Шаги съели всё — возвращается исходное название, не пустота."""
-	rules = TitleParseRules(steps=(BRACKETS_STEP, "(?i)ролик"))
+	rules = TitleParseRules(steps=(TitleStep(BRACKETS_STEP), TitleStep("(?i)ролик")))
 	assert parse_title("[1080p] ролик", rules) == "[1080p] ролик"
 
 
 def test_parse_title_rules_tokens_round_trip() -> None:
 	"""Сериализация в токены и обратно без потерь; незнакомое — мимо."""
 	rules = TitleParseRules(
-		steps=("_", DATE_STEP, r"(?i)\bofficial\b"),
+		steps=(
+			_SPACES,  # замена-пробел обязана пережить сериализацию
+			TitleStep(DATE_STEP),
+			TitleStep(r"(?i)\bofficial\b", "—"),
+		),
 		case=TitleCaseMode.FIRST_WORD,
 	)
 	assert TitleParseRules.from_tokens(rules.to_tokens()) == rules
 	assert TitleParseRules.from_tokens([]) == TitleParseRules()
 	# токены будущих версий не ломают чтение (прямая совместимость)
 	assert TitleParseRules.from_tokens(["новое_правило", "case:чудо"]) == TitleParseRules()
+	# испорченный токен шага пропускается, остальные читаются
+	survived = TitleParseRules.from_tokens(["sub:не json", 'sub:["_", " "]', "sub:[1, 2]"])
+	assert survived.steps == (_SPACES,)
+
+
+def test_parse_title_rules_read_steps_without_replacement() -> None:
+	"""Шаги прежней модели (без замены) читаются как замена пробелом.
+
+	У каналов сохранены цепочки, записанные версией, которая заменяла
+	совпадение пробелом всегда. Прочитать их как удаление значило бы
+	молча склеить слова во всех сохранённых наборах.
+	"""
+	rules = TitleParseRules.from_tokens(["step:_", "step:-"])
+	assert rules.steps == (_SPACES, TitleStep("-", " "))
+	assert parse_title("lara_croft-tomb", rules) == "lara croft tomb"
 
 
 def test_parse_title_rules_convert_legacy_tokens() -> None:
@@ -200,6 +258,8 @@ def test_parse_title_rules_convert_legacy_tokens() -> None:
 	# одна галочка «_ и -» покрывает оба разделителя
 	both = TitleParseRules.from_tokens(["separators"])
 	assert parse_title("lara_croft-tomb", both) == "lara croft tomb"
+	# галочки прежней модели заменяли пробелом, а не удаляли
+	assert all(step.replacement == " " for step in both.steps)
 
 
 def test_sanitize_filename_limits_bytes_not_chars() -> None:

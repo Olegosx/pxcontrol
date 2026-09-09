@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Collection
@@ -241,10 +242,11 @@ DIGIT_WORDS_STEP = r"\b\d+\b"
 
 #: Заготовки для помощника в интерфейсе: подпись → выражение. Единая
 #: точка: список пунктов и их шаблоны не должны жить в двух местах.
-#: Выбранная заготовка вставляется в поле ввода и правится руками.
+#: Выбранная заготовка вставляется в поле выражения и правится руками;
+#: замену автор задаёт сам (пусто — удаление). Разделителей (``_``, ``-``)
+#: среди заготовок нет намеренно: это замена на пробел, а не удаление,
+#: и пишется она парой «``[_-]``  →  пробел» без всякой заготовки.
 TITLE_STEP_PRESETS: tuple[tuple[str, str], ...] = (
-	("Подчёркивания", "_"),
-	("Дефисы", "-"),
 	("Скобки с содержимым", BRACKETS_STEP),
 	("Даты", DATE_STEP),
 	("Слова из одних цифр", DIGIT_WORDS_STEP),
@@ -262,23 +264,61 @@ class TitleCaseMode(StrEnum):
 	FIRST_WORD = "first_word"  # Только первая буква фразы
 
 
-def compile_step(pattern: str) -> re.Pattern[str] | None:
-	"""Готовит выражение шага; None — пустая строка (шага нет).
+@dataclass(frozen=True)
+class TitleStep:
+	r"""Шаг разбора: что найти и на что заменить.
 
-	Публичная: интерфейс проверяет ею шаг до применения и показывает
-	причину отказа рядом с полем ввода — разбирать сообщение ``re``
-	на двух сторонах не нужно.
+	Attributes:
+		pattern: регулярное выражение поиска; пустое — шага нет.
+		replacement: чем заменить совпадение; пустая строка — удаление.
+			Пробел здесь — обычное значение, а не «ничего»: замена
+			разделителей (``_``, ``-``) пробелом разбивает слипшиеся
+			слова. Допустимы ссылки на группы выражения (``\1``,
+			``\g<имя>``) — совпадение можно не выбрасывать, а
+			переписать.
+	"""
+
+	pattern: str
+	replacement: str = ""
+
+
+def compile_step(step: TitleStep) -> re.Pattern[str] | None:
+	"""Готовит шаг к применению; None — пустое выражение (шага нет).
+
+	Проверяются обе части: выражение и шаблон замены. Публичная:
+	интерфейс проверяет ею шаг до применения и показывает причину отказа
+	рядом с полем ввода — разбирать сообщения ``re`` на двух сторонах
+	не нужно.
 
 	Raises:
-		CaptionsError: Выражение не разбирается (с текстом от ``re``).
+		CaptionsError: Выражение или шаблон замены не разбираются
+			(с текстом от ``re``).
 	"""
-	if not pattern:
+	if not step.pattern:
 		return None
 	try:
-		return re.compile(pattern)
+		expression = re.compile(step.pattern)
 	except re.error as exc:
 		raise CaptionsError(f"Выражение не разобрано: {exc}") from exc
+	try:
+		# шаблон замены разбирается при первой же подстановке — даже
+		# без совпадений, поэтому пустая строка годится в пробники.
+		# IndexError ловим наравне с re.error: ссылку на несуществующую
+		# именованную группу (\g<нет>) Python поднимает именно им
+		expression.sub(step.replacement, "")
+	except (re.error, IndexError) as exc:
+		raise CaptionsError(f"Замена не разобрана: {exc}") from exc
+	return expression
 
+
+#: Токен шага: JSON-пара «выражение, замена».
+_STEP_PREFIX = "sub:"
+
+#: Токен шага прежней модели — только выражение.
+_LEGACY_STEP_PREFIX = "step:"
+
+#: Замена шагов прежних моделей: пробел (другой они не знали).
+_LEGACY_REPLACEMENT = " "
 
 #: Прежние правила-галочки → выражения. Порядок фиксирован и повторяет
 #: порядок применения старой версии: настройка канала, записанная ею,
@@ -294,19 +334,21 @@ _LEGACY_STEPS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _legacy_steps(tokens: Collection[str]) -> list[str]:
-	"""Выражения из токенов прежней модели (галочки и список слов).
+def _legacy_steps(tokens: Collection[str]) -> list[TitleStep]:
+	"""Шаги из токенов прежней модели (галочки и список слов).
 
 	Токены прежних версий читаются, а не отбрасываются: у каналов
 	сохранены наборы правил, и после обновления они обязаны продолжать
-	работать — уже шагами.
+	работать — уже шагами. Замена у всех — пробел: прежняя модель
+	другой и не знала.
 	"""
-	steps: list[str] = []
+	steps: list[TitleStep] = []
 	for name, pattern in _LEGACY_STEPS:
 		if name in tokens:
-			steps.append(pattern)
+			steps.append(TitleStep(pattern, _LEGACY_REPLACEMENT))
 			if name == "separators":
-				steps.append("-")  # прежняя галочка меняла оба сразу
+				# прежняя галочка меняла оба разделителя сразу
+				steps.append(TitleStep("-", _LEGACY_REPLACEMENT))
 	words = [
 		word
 		for token in tokens
@@ -315,8 +357,22 @@ def _legacy_steps(tokens: Collection[str]) -> list[str]:
 	if words:
 		# прежнее удаление слов не различало регистр и работало по целым
 		# словам — то же самое выражением
-		steps.append(r"(?i)\b(?:" + "|".join(re.escape(word) for word in words) + r")\b")
+		pattern = r"(?i)\b(?:" + "|".join(re.escape(word) for word in words) + r")\b"
+		steps.append(TitleStep(pattern, _LEGACY_REPLACEMENT))
 	return steps
+
+
+def _step_from_token(raw: str) -> TitleStep | None:
+	"""Шаг из JSON-пары токена; None — токен испорчен (след в логе)."""
+	try:
+		pair = json.loads(raw)
+	except ValueError:
+		logger.warning("Токен шага разбора не разобран: %s", raw)
+		return None
+	if not (isinstance(pair, list) and len(pair) == 2 and all(isinstance(p, str) for p in pair)):
+		logger.warning("Токен шага разбора — не пара «выражение, замена»: %s", raw)
+		return None
+	return TitleStep(pair[0], pair[1])
 
 
 @dataclass(frozen=True)
@@ -329,17 +385,25 @@ class TitleParseRules:
 	(:meth:`to_tokens`/:meth:`from_tokens`).
 
 	Attributes:
-		steps: выражения по порядку применения; каждое следующее
-			работает по результату предыдущего.
+		steps: шаги по порядку применения; каждый следующий работает
+			по результату предыдущего.
 		case: режим регистра итоговой фразы.
 	"""
 
-	steps: tuple[str, ...] = ()
+	steps: tuple[TitleStep, ...] = ()
 	case: TitleCaseMode = TitleCaseMode.KEEP
 
 	def to_tokens(self) -> list[str]:
-		"""Сериализация в список токенов для настройки канала."""
-		tokens = [f"step:{step}" for step in self.steps]
+		"""Сериализация в список токенов для настройки канала.
+
+		Шаг — пара, поэтому в одну строку токена он пишется как JSON:
+		и выражение, и замена бывают любыми, и разделитель-символ
+		рано или поздно встретился бы внутри них самих.
+		"""
+		tokens = [
+			_STEP_PREFIX + json.dumps([step.pattern, step.replacement], ensure_ascii=False)
+			for step in self.steps
+		]
 		if self.case is not TitleCaseMode.KEEP:
 			tokens.append(f"case:{self.case.value}")
 		return tokens
@@ -350,15 +414,24 @@ class TitleParseRules:
 
 		Терпимость к незнакомому — прямая совместимость: настройка,
 		записанная более новой версией, не ломает старую. Токены
-		прежней модели (галочки, список слов) превращаются в шаги
-		(:func:`_legacy_steps`).
+		прежних моделей превращаются в шаги: галочки и список слов —
+		:func:`_legacy_steps`, шаги-выражения без замены
+		(``step:``) — с заменой на пробел, как они и работали.
 		"""
 		case = TitleCaseMode.KEEP
-		steps: list[str] = []
+		steps: list[TitleStep] = []
 		legacy: list[str] = []
 		for token in tokens:
-			if token.startswith("step:"):
-				steps.append(token.removeprefix("step:"))
+			if token.startswith(_STEP_PREFIX):
+				step = _step_from_token(token.removeprefix(_STEP_PREFIX))
+				if step is not None:
+					steps.append(step)
+			elif token.startswith(_LEGACY_STEP_PREFIX):
+				# прежняя модель заменяла совпадения пробелом и другой
+				# замены не знала — сохраняем смысл сохранённых настроек
+				steps.append(
+					TitleStep(token.removeprefix(_LEGACY_STEP_PREFIX), _LEGACY_REPLACEMENT)
+				)
 			elif token.startswith("case:"):
 				try:
 					case = TitleCaseMode(token.removeprefix("case:"))
@@ -376,10 +449,10 @@ def parse_title(raw: str, rules: TitleParseRules) -> str:
 	"""Применяет разбор к названию, взятому из имени файла.
 
 	Шаги идут по порядку, каждый — по результату предыдущего;
-	совпадения заменяются пробелом, в конце пробелы схлопываются,
-	последним применяется регистр (по итоговой фразе). Пустой результат
-	откатывается к исходному названию: пост без названия хуже поста
-	с сырым.
+	совпадение заменяется тем, что задано шагом (пустая замена —
+	удаление). В конце пробелы схлопываются, последним применяется
+	регистр (по итоговой фразе). Пустой результат откатывается
+	к исходному названию: пост без названия хуже поста с сырым.
 
 	Битый шаг пропускается (след — в логе): разбор сотни имён не должен
 	падать из-за одной опечатки, а причину пользователь уже видит
@@ -393,7 +466,7 @@ def parse_title(raw: str, rules: TitleParseRules) -> str:
 			logger.warning("Разбор имени: %s", exc)
 			continue
 		if expression is not None:
-			text = expression.sub(" ", text)
+			text = expression.sub(step.replacement, text)
 	words = text.split()
 	if rules.case is TitleCaseMode.EVERY_WORD:
 		# только первая буква каждого слова: title() ломал бы «iPhone»

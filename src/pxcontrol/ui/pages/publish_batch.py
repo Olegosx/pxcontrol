@@ -37,6 +37,7 @@ from pxcontrol.engine.services.captions import (
 	CaptionsError,
 	TitleCaseMode,
 	TitleParseRules,
+	TitleStep,
 	build_caption,
 	compile_step,
 	parse_title,
@@ -94,6 +95,16 @@ _STRATEGIES: list[tuple[str, PlanKind, bool]] = [
 	("Каждые N часов от…", PlanKind.EVERY_HOURS, False),
 	("Сейчас", PlanKind.NOW, False),
 ]
+
+
+def _replacement_text(replacement: str) -> str:
+	"""Замена шага для списка: кавычки делают видимым пробел.
+
+	Пустая замена — это удаление, так и пишем словом. Всё остальное
+	берём в кавычки: без них шаг «[_-] → » выглядел бы оборванным,
+	а пробел в замене — самый ходовой случай.
+	"""
+	return f"«{replacement}»" if replacement else "удалить"
 
 
 def _parse_when(text: str) -> datetime | None:
@@ -274,24 +285,37 @@ class PublishBatchDialog(WorkDialog):
 	def _build_rules_card(self, rules: TitleParseRules) -> None:
 		"""Разворачивающийся блок «Правила разбора имени файла».
 
-		Разбор — цепочка замен по выражениям: шаг применяется кнопкой,
-		встаёт в конец цепочки, и названия всех строк пересчитываются
-		от исходного имени файла через всю цепочку. Поэтому убранный
-		из середины шаг даёт честный результат, а не «как получилось».
-		Помощник рядом с полем вставляет готовое выражение — дальше его
-		правят руками. Цепочка приходит из настройки канала и туда же
-		сохраняется (``TITLE_PARSE_RULES``).
+		Разбор — цепочка замен: шаг («что найти» → «на что заменить»)
+		применяется кнопкой, встаёт в конец цепочки, и названия всех
+		строк пересчитываются от исходного имени файла через всю
+		цепочку. Поэтому убранный из середины шаг даёт честный
+		результат, а не «как получилось». Пустое поле замены означает
+		удаление; пробел в нём — обычное значение (им разбивают
+		слипшиеся слова: ``[_-]`` → пробел). Помощник рядом с полем
+		вставляет готовое выражение — дальше его правят руками.
+		Цепочка приходит из настройки канала и туда же сохраняется
+		(``TITLE_PARSE_RULES``).
 		"""
 		card = CollapsibleCard("Правила разбора имени файла", self)
-		self._steps: list[str] = list(rules.steps)
+		self._steps: list[TitleStep] = list(rules.steps)
 		step_row = QHBoxLayout()
 		self._step_edit = LineEdit(card)
-		self._step_edit.setPlaceholderText(r"регулярное выражение, например \d{3,4}p|WEB-DL")
+		self._step_edit.setPlaceholderText(r"что найти: выражение, например \d{3,4}p|WEB-DL")
 		self._step_edit.setToolTip(
-			"Совпадения заменяются пробелом. Без учёта регистра — начните с (?i)"
+			"Регулярное выражение поиска. Без учёта регистра — начните с (?i)"
 		)
 		self._step_edit.returnPressed.connect(self._apply_step)
-		step_row.addWidget(self._step_edit, stretch=1)
+		step_row.addWidget(self._step_edit, stretch=2)
+		step_row.addWidget(BodyLabel("→", card))
+		self._replace_edit = LineEdit(card)
+		self._replace_edit.setPlaceholderText("на что заменить (пусто — удалить)")
+		self._replace_edit.setToolTip(
+			"Чем заменить совпадение. Пусто — удаление; пробел — обычное "
+			"значение: им разбивают слипшиеся слова (например [_-] → пробел). "
+			"Допустимы ссылки на группы выражения: \\1, \\g<имя>"
+		)
+		self._replace_edit.returnPressed.connect(self._apply_step)
+		step_row.addWidget(self._replace_edit, stretch=1)
 		self._step_presets = ComboBox(card)
 		self._step_presets.setPlaceholderText("Заготовки")
 		for label, _pattern in TITLE_STEP_PRESETS:
@@ -329,7 +353,11 @@ class PublishBatchDialog(WorkDialog):
 		self._show_steps()
 
 	def _insert_preset(self, index: int) -> None:
-		"""Вставляет выбранную заготовку в поле — дальше её правят руками."""
+		"""Вставляет заготовку в поле выражения — дальше её правят руками.
+
+		Поле замены заготовка не трогает: чем заменить найденное, решает
+		автор (заготовки — про поиск мусора, и обычно его удаляют).
+		"""
 		if 0 <= index < len(TITLE_STEP_PRESETS):
 			self._step_edit.setText(TITLE_STEP_PRESETS[index][1])
 			self._step_presets.setCurrentIndex(-1)  # пункт не «залипает»
@@ -343,14 +371,17 @@ class PublishBatchDialog(WorkDialog):
 				CaptionLabel("Шагов нет — названия берутся из имён файлов как есть.", self)
 			)
 			return
-		for position, step in enumerate(self._steps, start=1):
+		for index, step in enumerate(self._steps):
 			row = QHBoxLayout()
-			label = BodyLabel(f"{position}. {step}", self)
+			text = f"{index + 1}. {step.pattern} → {_replacement_text(step.replacement)}"
+			label = BodyLabel(text, self)
 			label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-			elide_text(label, f"{position}. {step}")
+			elide_text(label, text)
 			row.addWidget(label, stretch=1)
 			remove = PushButton("Убрать", self)
-			remove.clicked.connect(bind(self._remove_step, step))
+			# по номеру, а не по значению: два одинаковых шага в цепочке
+			# сняли бы друг друга и порядок остальных разъехался бы
+			remove.clicked.connect(bind(self._remove_step, index))
 			row.addWidget(remove)
 			self._steps_box.addLayout(row)
 
@@ -369,30 +400,35 @@ class PublishBatchDialog(WorkDialog):
 		return title
 
 	def _apply_step(self) -> None:
-		"""Добавляет шаг из поля в цепочку и пересобирает названия.
+		"""Добавляет шаг из полей в цепочку и пересобирает названия.
 
-		Битое выражение в цепочку не попадает: причина — строкой под
-		полем, названия остаются прежними.
+		Битое выражение или битый шаблон замены в цепочку не попадают:
+		причина — строкой под полями, названия остаются прежними.
+		Замена берётся как есть, без обрезки краёв: пробел в ней —
+		значащий (``[_-]`` → пробел разбивает слипшиеся слова).
 		"""
 		pattern = str(self._step_edit.text()).strip()
 		if not pattern:
 			return
+		step = TitleStep(pattern, str(self._replace_edit.text()))
 		try:
-			compile_step(pattern)
+			compile_step(step)
 		except CaptionsError as exc:
 			self._pattern_error.fail(str(exc))
 			return
 		self._pattern_error.succeed()
-		self._steps.append(pattern)
+		self._steps.append(step)
 		self._step_edit.clear()
+		self._replace_edit.clear()
 		self._show_steps()
 		self._reapply_rules()
 
-	def _remove_step(self, step: str) -> None:
-		"""Убирает шаг из цепочки и пересобирает названия заново."""
-		self._steps.remove(step)
-		self._show_steps()
-		self._reapply_rules()
+	def _remove_step(self, index: int) -> None:
+		"""Убирает шаг цепочки по номеру и пересобирает названия заново."""
+		if 0 <= index < len(self._steps):
+			del self._steps[index]
+			self._show_steps()
+			self._reapply_rules()
 
 	def _reapply_rules(self, *_args: object) -> None:
 		"""Пересобирает подписи и подсказки имён всех строк по цепочке.
