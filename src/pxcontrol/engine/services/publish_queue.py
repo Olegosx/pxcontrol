@@ -105,6 +105,10 @@ class QueueItemDto:
 		progress: доля загрузки 0.0..1.0 (для отправляющегося).
 		error: текст ошибки (для статуса ERROR).
 		note: пометка состояния для карточки (флуд-пауза); None — нет.
+		media_path: путь к вложению (None — пост без файла). Карточка
+			даёт по нему посмотреть файл системным приложением: пока
+			пост ждёт слота, это единственный способ увидеть, что
+			именно уйдёт (файл уже уехал из «Готовых видео»).
 	"""
 
 	id: int
@@ -116,6 +120,7 @@ class QueueItemDto:
 	progress: float
 	error: str | None
 	note: str | None = None
+	media_path: str | None = None
 
 	@property
 	def scheduled(self) -> bool:
@@ -154,6 +159,7 @@ class _Item:
 			progress=self.progress,
 			error=self.error,
 			note=self.note,
+			media_path=self.draft.media_path,
 		)
 
 

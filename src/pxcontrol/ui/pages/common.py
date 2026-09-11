@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
@@ -655,6 +656,30 @@ class DtoComboBox(ComboBox, Generic[_T]):
 #: осознанный дизайн ADR-0016 (унаследован от ADR-0012): интерфейс читает снимок состояния.
 QUEUE_POLL_MS = 500
 
+
+def queue_signature(items: Sequence[Any]) -> tuple[tuple[Any, ...], ...]:
+	"""Отпечаток видимого состава очереди — по нему решается пересборка карточек.
+
+	Входит всё, что карточка показывает и на что вешает действия:
+	состав и порядок, статус, заголовок, текст ошибки, пометка
+	состояния и путь вложения. Заголовок и путь тут не для красоты:
+	правка элемента очереди (ADR-0016, п. 7) меняет их, не трогая
+	статуса, — без них карточка осталась бы со старым именем, а кнопка
+	просмотра вела бы на прежний файл.
+	"""
+	return tuple(
+		(
+			item.id,
+			item.status,
+			item.title,
+			item.error,
+			getattr(item, "note", None),
+			getattr(item, "media_path", None),
+		)
+		for item in items
+	)
+
+
 #: статусы «работа идёт прямо сейчас» обеих очередей (отправка/обработка);
 #: ждущие (PENDING/WAITING) активными не считаются
 _ACTIVE_STATUSES = ("SENDING", "PROCESSING")
@@ -806,7 +831,7 @@ class QueuePanel:
 		self._active = any(item.status.name in _ACTIVE_STATUSES for item in visible)
 		if self._transform is not None:
 			visible = self._transform(visible)
-		signature = tuple((i.id, i.status, i.error, getattr(i, "note", None)) for i in visible)
+		signature = queue_signature(visible)
 		if signature != self._signature:
 			self._signature = signature
 			self._rebuild(visible)
@@ -840,11 +865,18 @@ class QueuePanel:
 			self._box.addWidget(self._row(item))
 
 	def _row(self, item: Any) -> CardWidget:
-		"""Карточка элемента: прогресс у активного, «Отмена» у живого,
-		«Повторить» и «Убрать» у ошибки."""
+		"""Карточка элемента: просмотр вложения, прогресс у активного,
+		«Отмена» у живого, «Повторить» и «Убрать» у ошибки."""
 		trailing = QWidget(self._page)
 		row = QHBoxLayout(trailing)
 		row.setContentsMargins(0, 0, 0, 0)
+		media_path = getattr(item, "media_path", None)
+		if media_path:
+			# та же кнопка, что у карточек файлов на «Видео» и в пакете
+			play = TransparentToolButton(FluentIcon.PLAY, trailing)
+			play.setToolTip("Посмотреть файл (системный плеер)")
+			play.clicked.connect(bind(self._play, media_path))
+			row.addWidget(play)
 		# полоса прогресса — только у активных (WAITING/PENDING не растут)
 		if item.status.name in _ACTIVE_STATUSES:
 			bar = ProgressBar(trailing)
@@ -868,6 +900,17 @@ class QueuePanel:
 			action.clicked.connect(bind(self._cancel, item.id))
 		row.addWidget(action)
 		return row_card(self._page, item.title, self._subtitle(item), trailing=trailing)
+
+	def _play(self, path: str) -> None:
+		"""Открывает вложение системным приложением.
+
+		Путь проверяется: файл ждущего поста мог уехать или быть удалён
+		мимо приложения, а безмолвный щелчок мимо цели выглядит поломкой.
+		"""
+		if not Path(path).is_file():
+			self._show_error(f"Файл не найден: {path}")
+			return
+		open_in_system(path)
 
 	def _retry(self, item_id: int) -> None:
 		"""Просит движок вернуть элемент с ошибкой в очередь на повтор."""

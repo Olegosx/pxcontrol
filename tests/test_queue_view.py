@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
+from pxcontrol.ui.pages.common import queue_signature
 from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
 	QueueSort,
@@ -161,3 +163,35 @@ def test_summary_text_many_pages_with_filter_names_both_counts() -> None:
 	items = [_item(i) for i in range(1, 13)]
 	text = summary_text(paginate(items, page=1, per_page=5), 40)
 	assert text == "Показаны 1–5 из 12 подходящих (в очереди 40)."
+
+
+# --- отпечаток состава (когда перестраивать карточки) ----------------------
+
+
+def test_signature_stable_for_same_items() -> None:
+	"""Ничего не изменилось — карточки не перестраиваются."""
+	items = [_item(1), _item(2)]
+	assert queue_signature(items) == queue_signature([_item(1), _item(2)])
+
+
+def test_signature_notices_edited_title() -> None:
+	"""Правка текста меняет заголовок, не трогая статуса, — карточку надо перестроить."""
+	before = _item(1)
+	after = replace(before, title="новый текст")
+	assert queue_signature([before]) != queue_signature([after])
+
+
+def test_signature_notices_replaced_media() -> None:
+	"""Замена вложения меняет путь: кнопка просмотра не должна вести на старый файл."""
+	before = replace(_item(1), media_path="/видео/старый.mp4")
+	after = replace(before, media_path="/видео/новый.mp4")
+	assert queue_signature([before]) != queue_signature([after])
+
+
+def test_signature_notices_status_and_order() -> None:
+	"""Статус и порядок — как раньше: смена любого перестраивает список."""
+	first, second = _item(1), _item(2)
+	assert queue_signature([first, second]) != queue_signature([second, first])
+	assert queue_signature([first]) != queue_signature(
+		[replace(first, status=QueueItemStatus.PENDING)]
+	)

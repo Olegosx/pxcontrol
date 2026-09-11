@@ -1240,3 +1240,29 @@ async def test_edit_rejects_text_over_community_limit(
 	with pytest.raises(PostError, match="Текст поста длиннее"):
 		await queue.edit(item, PostDraft(community_id, text="я" * 4097, when=_future(120)))
 	assert (await queue.get_draft(item)).text == "было"
+
+
+async def test_state_carries_media_path_from_queue_folder(
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Снимок очереди несёт путь вложения — карточка даёт по нему просмотр.
+
+	Путь — уже после переезда в папку очереди (ADR-0016): пока пост ждёт
+	слота, файла на прежнем месте нет, и смотреть надо тот, что уйдёт.
+	"""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(
+		PostDraft(
+			community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120)
+		)
+	)
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	shown = (await _statuses(queue))[item]
+	assert shown.media_path == str(tmp_path / "media" / "queued" / "суб" / "ролик.mp4")
+	text_item = await queue.enqueue(PostDraft(community_id, text="без файла", when=_future(180)))
+	assert (await _statuses(queue))[text_item].media_path is None
