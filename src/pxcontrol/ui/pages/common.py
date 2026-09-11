@@ -44,7 +44,14 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.telegram.types import CommunityKind, UserbotRole
+from pxcontrol.engine.services.video import video_dialog_filter
+from pxcontrol.engine.telegram.types import (
+	GENERAL_TOPIC_ID,
+	CommunityKind,
+	ForumTopicInfo,
+	MediaKind,
+	UserbotRole,
+)
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 
@@ -94,6 +101,54 @@ def format_local(moment: datetime) -> str:
 #: Умолчание времени публикации: «через час» — предзаполнение поля
 #: времени (WhenRow) и старта раскладки пакета.
 DEFAULT_SCHEDULE_OFFSET_S = 3600
+
+
+#: Типы контента поста: подпись сегмента → тип вложения → фильтр диалога
+#: выбора файла. Общий для формы «Публикации» и окна правки элемента
+#: очереди: списки типов не должны разъезжаться между ними.
+CONTENT_KINDS: list[tuple[str, MediaKind, str]] = [
+	("Текст", MediaKind.NONE, ""),
+	("Фото", MediaKind.PHOTO, "Изображения (*.png *.jpg *.jpeg *.webp)"),
+	("Видео", MediaKind.VIDEO, video_dialog_filter()),
+	("Аудио", MediaKind.AUDIO, "Аудио (*.mp3 *.m4a *.flac *.ogg *.wav)"),
+	("Файл", MediaKind.DOCUMENT, "Все файлы (*)"),
+]
+
+
+def kind_label(kind: MediaKind) -> str:
+	"""Подпись типа контента («Видео», «Файл»…) для сообщений и сегментов."""
+	return next(label for label, item_kind, _filter in CONTENT_KINDS if item_kind is kind)
+
+
+def kind_file_filter(kind: MediaKind) -> str:
+	"""Фильтр диалога выбора файла для типа контента."""
+	return next(
+		file_filter for _label, item_kind, file_filter in CONTENT_KINDS if item_kind is kind
+	)
+
+
+def visible_topics(
+	topics: list[ForumTopicInfo], role: UserbotRole | None
+) -> tuple[list[ForumTopicInfo], int]:
+	"""Темы, доступные для выбора, и число скрытых закрытых (ADR-0022).
+
+	General не показывается отдельным пунктом — он и есть «Общая лента».
+	В закрытую тему пишет только админ: участнику такие темы недоступны
+	и скрываются, их число возвращается для честной подписи.
+
+	Returns:
+		Пара «темы для выбора, сколько закрытых скрыто».
+	"""
+	shown = [topic for topic in topics if topic.id != GENERAL_TOPIC_ID]
+	if role is UserbotRole.ADMIN:
+		return shown, 0
+	closed = sum(1 for topic in shown if topic.closed)
+	return [topic for topic in shown if not topic.closed], closed
+
+
+def topic_label(topic: ForumTopicInfo) -> str:
+	"""Подпись темы в списке: закрытая помечается (её видит только админ)."""
+	return f"{topic.title} (закрыта)" if topic.closed else topic.title
 
 
 def bot_caption(label: str, username: str | None) -> str:
@@ -597,6 +652,12 @@ QUEUE_POLL_MS = 500
 #: ждущие (PENDING/WAITING) активными не считаются
 _ACTIVE_STATUSES = ("SENDING", "PROCESSING")
 
+#: статусы «элемент покинул очередь»: снимаются с показа, действий у них нет.
+#: Ошибки здесь нет намеренно — элемент с ней остаётся живым (его правят,
+#: повторяют или убирают руками); ``status.finished()`` для этого не годится:
+#: там ошибка считается завершённым исходом попытки.
+_LEFT_STATUSES = ("DONE", "CANCELLED")
+
 
 class QueuePanel:
 	"""Панель очереди движка: опрос, карточки, прогресс, действия.
@@ -634,6 +695,7 @@ class QueuePanel:
 		max_cards: int | None = None,
 		transform: Callable[[list[Any]], list[Any]] | None = None,
 		dismiss_finished: bool = True,
+		on_edit: Callable[[int], None] | None = None,
 	) -> None:
 		"""Args:
 		worker: мост к движку.
@@ -659,6 +721,10 @@ class QueuePanel:
 			их только показывает. Две панели над одной очередью
 			не должны наперегонки снимать элементы — иначе итоговые
 			плашки страницы теряются.
+		on_edit: открыть правку элемента (получает его id). Задан —
+			у карточек появляется кнопка «Изменить…»: у всех, кроме
+			работающих прямо сейчас и покинувших очередь. Очередь
+			обработки видео крючок не передаёт — правки у неё нет.
 		"""
 		self._worker = worker
 		self._page = page
@@ -671,6 +737,7 @@ class QueuePanel:
 		self._max_cards = max_cards
 		self._transform = transform
 		self._dismiss_finished = dismiss_finished
+		self._on_edit = on_edit
 		self._show_error = error_reporter(page)
 		self._signature: tuple[tuple[Any, ...], ...] = ()
 		self._bars: dict[int, ProgressBar] = {}
@@ -718,7 +785,7 @@ class QueuePanel:
 		"""Обновляет панель; завершённые получают реакцию и снимаются с показа."""
 		visible: list[Any] = []
 		for item in items:
-			if item.status.name in ("DONE", "CANCELLED"):
+			if item.status.name in _LEFT_STATUSES:
 				self._finish(item, done=item.status.name == "DONE")
 			else:
 				visible.append(item)
@@ -779,6 +846,10 @@ class QueuePanel:
 			bar.setFixedWidth(160)
 			row.addWidget(bar)
 			self._bars[item.id] = bar
+		if self._on_edit is not None and item.status.name not in _ACTIVE_STATUSES + _LEFT_STATUSES:
+			edit = PushButton("Изменить…", trailing)
+			edit.clicked.connect(bind(self._on_edit, item.id))
+			row.addWidget(edit)
 		if item.status.name == "ERROR":
 			retry = PushButton("Повторить", trailing)
 			retry.clicked.connect(bind(self._retry, item.id))
@@ -1010,6 +1081,22 @@ class WhenRow:
 			return  # дата уже выбрана вперёд — не трогаем
 		passed = QTime(hours, minutes) <= QTime.currentTime()
 		self._date.setDate(today.addDays(1) if passed else today)
+
+	def set_when(self, moment: datetime | None) -> None:
+		"""Показывает заданный момент: None — «сейчас», иначе дата и время.
+
+		Момент приходит в UTC (так его хранит очередь отправки)
+		и показывается в местном времени — симметрично :meth:`when`.
+		Дата ставится как есть, без переноса на завтра: правится
+		существующий пост, и подменять его время самовольно нельзя —
+		прошедшее увидит проверка при сохранении.
+		"""
+		self._now_switch.setChecked(moment is None)
+		if moment is None:
+			return
+		local = moment.astimezone()
+		self._date.setDate(QDate(local.year, local.month, local.day))
+		self._time.setText(local.strftime("%H:%M"))
 
 	def when(self) -> datetime | None:
 		"""None — «сейчас», иначе выбранный момент (в UTC).

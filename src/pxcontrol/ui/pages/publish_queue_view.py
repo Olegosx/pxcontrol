@@ -29,6 +29,7 @@ from pxcontrol.ui.pages.common import (
 	format_local,
 	list_area,
 )
+from pxcontrol.ui.pages.publish_queue_edit import open_queue_item_editor
 
 #: Служебный первый пункт фильтра по сообществу.
 _ALL_COMMUNITIES = "Все сообщества"
@@ -196,6 +197,7 @@ class QueueViewDialog(WorkDialog):
 
 	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
 		super().__init__("Очередь отправки", parent, size=(880, 620))
+		self._worker = worker
 		self._sort = QueueSort.NEAREST
 		self._status = QueueFilter.ALL
 		self._community: int | None = None
@@ -219,7 +221,12 @@ class QueueViewDialog(WorkDialog):
 			# зритель: завершёнными владеет панель страницы «Публикация»,
 			# иначе две панели наперегонки снимали бы элементы
 			dismiss_finished=False,
+			on_edit=self._on_edit_item,
 		)
+
+	def _on_edit_item(self, item_id: int) -> None:
+		"""Открывает правку элемента поверх окна очереди."""
+		open_queue_item_editor(self._worker, self, item_id, self._panel.poll)
 
 	# --- сборка ----------------------------------------------------------------
 

@@ -51,10 +51,9 @@ from pxcontrol.engine.services.settings import (
 	PUBLISH_TIMES,
 	TITLE_PARSE_RULES,
 )
-from pxcontrol.engine.services.video import ReadyVideo, VideoDirs, video_dialog_filter
+from pxcontrol.engine.services.video import ReadyVideo, VideoDirs
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
-	GENERAL_TOPIC_ID,
 	CommunityKind,
 	ForumTopicInfo,
 	MediaKind,
@@ -64,19 +63,25 @@ from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
+	CONTENT_KINDS,
 	DtoComboBox,
 	QueuePanel,
 	WhenRow,
 	community_combo_label,
 	error_reporter,
 	exec_dialog,
+	kind_file_filter,
+	kind_label,
 	noop,
 	page_layout,
 	pick_dir,
 	pick_file,
 	show_warning,
+	topic_label,
+	visible_topics,
 )
 from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
+from pxcontrol.ui.pages.publish_queue_edit import open_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import QueueViewDialog, queue_subtitle
 
 logger = logging.getLogger(__name__)
@@ -104,16 +109,6 @@ class _BatchSetup:
 	times: list[str] = field(default_factory=list)
 	busy: list[datetime] = field(default_factory=list)  # отложки канала (UTC)
 	title_rules: TitleParseRules = field(default_factory=TitleParseRules)
-
-
-#: Сегменты типов контента: подпись → тип → фильтр диалога выбора файла.
-_KINDS: list[tuple[str, MediaKind, str]] = [
-	("Текст", MediaKind.NONE, ""),
-	("Фото", MediaKind.PHOTO, "Изображения (*.png *.jpg *.jpeg *.webp)"),
-	("Видео", MediaKind.VIDEO, video_dialog_filter()),
-	("Аудио", MediaKind.AUDIO, "Аудио (*.mp3 *.m4a *.flac *.ogg *.wav)"),
-	("Файл", MediaKind.DOCUMENT, "Все файлы (*)"),
-]
 
 
 def _actor_note(community: CommunityDto) -> str:
@@ -202,7 +197,7 @@ class PublishPage(ScrollArea):
 	def _build_kind_segments(self, layout: QVBoxLayout) -> None:
 		"""Сегментный переключатель типа контента."""
 		self._segments = SegmentedWidget(self)
-		for label, kind, _file_filter in _KINDS:
+		for label, kind, _file_filter in CONTENT_KINDS:
 			self._segments.addItem(routeKey=kind.value, text=label)
 		self._segments.currentItemChanged.connect(self._on_kind_changed)
 		layout.addWidget(self._segments)
@@ -292,11 +287,16 @@ class PublishPage(ScrollArea):
 			# длинный хвост ждущих слота (ADR-0016) не раздувает страницу;
 			# всё целиком — в диалоге «Вся очередь…»
 			max_cards=_QUEUE_MAX_CARDS,
+			on_edit=self._on_edit_item,
 		)
 
 	def _on_queue_view(self) -> None:
 		"""Открывает полный просмотр очереди (сортировка и фильтры)."""
 		exec_dialog(QueueViewDialog(self._worker, self.window()))
+
+	def _on_edit_item(self, item_id: int) -> None:
+		"""Открывает правку элемента очереди (ADR-0016)."""
+		open_queue_item_editor(self._worker, self.window(), item_id, self._queue.poll)
 
 	# --- поведение -----------------------------------------------------------------
 
@@ -446,19 +446,10 @@ class PublishPage(ScrollArea):
 		"""
 		if self._is_stale(community.id):
 			return
-		shown = [topic for topic in topics if topic.id != GENERAL_TOPIC_ID]
-		if community.default_role is not UserbotRole.ADMIN:
-			closed = sum(1 for topic in shown if topic.closed)
-			shown = [topic for topic in shown if not topic.closed]
-			if closed:
-				self._topic_hint.setText(
-					f"Закрытых тем скрыто: {closed} — в них пишет только админ."
-				)
-		self._topic_combo.set_items(
-			shown,
-			label=lambda topic: f"{topic.title} (закрыта)" if topic.closed else topic.title,
-			key=lambda topic: topic.id,
-		)
+		shown, closed = visible_topics(topics, community.default_role)
+		if closed:
+			self._topic_hint.setText(f"Закрытых тем скрыто: {closed} — в них пишет только админ.")
+		self._topic_combo.set_items(shown, label=topic_label, key=lambda topic: topic.id)
 
 	def _on_topics_failed(self, community_id: int, message: str) -> None:
 		"""Темы не прочитались — публикуем в общую ленту, честно предупредив."""
@@ -543,8 +534,7 @@ class PublishPage(ScrollArea):
 	def _open_file_dialog(self, start: str | VideoDirs) -> None:
 		"""Открывает диалог вложения; ``start`` — папка или VideoDirs."""
 		start_dir = start.processed if isinstance(start, VideoDirs) else start
-		file_filter = next(f for _l, k, f in _KINDS if k is self._kind)
-		path = pick_file(self, "Файл вложения", file_filter, start_dir=start_dir)
+		path = pick_file(self, "Файл вложения", kind_file_filter(self._kind), start_dir=start_dir)
 		if path:
 			self._file_edit.setText(path)
 
@@ -910,9 +900,8 @@ class PublishPage(ScrollArea):
 		media = str(self._file_edit.text()).strip() or None
 		is_text = self._kind is MediaKind.NONE
 		if not is_text and media is None:
-			label = next(name for name, kind, _f in _KINDS if kind is self._kind)
 			raise ValueError(
-				f"Выбран тип «{label}», а файл не указан — "
+				f"Выбран тип «{kind_label(self._kind)}», а файл не указан — "
 				"выберите файл или переключитесь на «Текст»."
 			)
 		return PostDraft(
