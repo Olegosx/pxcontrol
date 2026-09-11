@@ -11,15 +11,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from PySide6.QtWidgets import QHBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, CaptionLabel, ComboBox, PushButton
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
+from pxcontrol.engine.services.publish_queue import (
+	EDITABLE_STATUSES,
+	QueueItemDto,
+	QueueItemStatus,
+)
 from pxcontrol.ui import density
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
@@ -29,7 +34,7 @@ from pxcontrol.ui.pages.common import (
 	format_local,
 	list_area,
 )
-from pxcontrol.ui.pages.publish_queue_edit import open_queue_item_editor
+from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 
 #: Служебный первый пункт фильтра по сообществу.
 _ALL_COMMUNITIES = "Все сообщества"
@@ -221,12 +226,13 @@ class QueueViewDialog(WorkDialog):
 			# зритель: завершёнными владеет панель страницы «Публикация»,
 			# иначе две панели наперегонки снимали бы элементы
 			dismiss_finished=False,
-			on_edit=self._on_edit_item,
+			editable=lambda item: item.status in EDITABLE_STATUSES,
+			fill_body=self._fill_editor,
 		)
 
-	def _on_edit_item(self, item_id: int) -> None:
-		"""Открывает правку элемента поверх окна очереди."""
-		open_queue_item_editor(self._worker, self, item_id, self._panel.poll)
+	def _fill_editor(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
+		"""Наполняет раскрытую карточку формой правки (ADR-0016, п. 7)."""
+		mount_queue_item_editor(self._worker, self, item_id, body, collapse, self._panel.poll)
 
 	# --- сборка ----------------------------------------------------------------
 

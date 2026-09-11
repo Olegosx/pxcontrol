@@ -1,18 +1,21 @@
-"""Правка элемента очереди отправки: рабочее окно (ADR-0016, ADR-0023).
+"""Правка элемента очереди отправки прямо в его карточке (ADR-0016, п. 7).
 
-Правится всё, что ещё не ушло в Telegram: текст, вложение (замена,
-удаление, добавление), переименование при отправке, тема форума и время
-публикации. Канал-получатель не меняется — у другого канала свои темы,
-лимит файла и права на отложенную публикацию; такой пост создают заново.
+Форма живёт внутри карточки списка и раскрывается кликом по ней — тем же
+жестом, каким раскрываются параметры файла на «Видео». Правится всё, что
+ещё не ушло в Telegram: текст, вложение (замена, удаление, добавление),
+переименование при отправке, тема форума и время публикации. Канал-
+получатель не меняется — у другого канала свои темы, лимит файла и право
+на отложенную публикацию; такой пост создают заново.
 
-Окно открывается уже с данными: :func:`open_queue_item_editor` читает
-черновик, сообщество и темы форума, и только потом строит форму — так
-поля не мигают пустыми, пока движок отвечает.
+Данные тянутся лениво, при первом раскрытии карточки
+(:func:`mount_queue_item_editor`): держать их для всего списка значило бы
+десятки запросов на каждый опрос очереди.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
@@ -39,10 +42,7 @@ from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
 	WhenRow,
-	WorkDialog,
-	community_combo_label,
-	error_reporter,
-	exec_dialog,
+	clear_layout,
 	kind_file_filter,
 	kind_label,
 	pick_file,
@@ -56,13 +56,15 @@ logger = logging.getLogger(__name__)
 #: нет отложенных (ADR-0010/0011), остаётся «сейчас».
 _BOT_ONLY_HINT = "Отложенная публикация требует userbot-админа канала — через бота только «сейчас»."
 
+#: Высота поля текста в карточке: форма не должна занимать весь список.
+_TEXT_HEIGHT = 120
 
-class QueueItemEditDialog(WorkDialog):
-	"""Окно правки одного элемента очереди отправки.
 
-	Состав формы повторяет «Публикацию», но канал в ней не выбирают:
-	он задан элементом и показан в шапке. Сохранение возвращает пост
-	в работу — «сейчас» уходит в отправку, отложенный ждёт слота.
+class QueueItemEditor(QWidget):
+	"""Форма правки одного элемента очереди — тело его карточки.
+
+	Канал показан строкой и не редактируется. Сохранение возвращает пост
+	в работу: «сейчас» уходит в отправку, отложенный — ждать слота.
 	"""
 
 	def __init__(
@@ -74,19 +76,23 @@ class QueueItemEditDialog(WorkDialog):
 		community: CommunityDto,
 		limits: TextLimits,
 		topics: list[ForumTopicInfo],
-		topics_error: str = "",
+		topics_error: str,
+		on_saved: Callable[[], None],
+		on_close: Callable[[], None],
 	) -> None:
 		"""Args:
 		worker: мост к движку.
-		parent: окно-родитель.
+		parent: владелец (карточка списка).
 		item_id: элемент очереди, который правим.
 		draft: его текущий черновик (из ``PublishQueue.get_draft``).
-		community: канал-получатель (для тем, вида и возможностей).
+		community: канал-получатель (темы, вид, возможности).
 		limits: пределы длины текста канала (счётчик под полем).
 		topics: темы форума; пустой список — не форум или не прочитались.
 		topics_error: почему темы не прочитались (пусто — прочитались).
+		on_saved: вызвать после успешного сохранения (обновить панель).
+		on_close: закрыть форму (свернуть карточку).
 		"""
-		super().__init__("Правка поста в очереди", parent, size=(720, 640))
+		super().__init__(parent)
 		self._worker = worker
 		self._item_id = item_id
 		self._draft = draft
@@ -94,6 +100,8 @@ class QueueItemEditDialog(WorkDialog):
 		self._limits = limits
 		self._caps = publish_capabilities(community.bot_id is not None, community.userbot_assigned)
 		self._kind = draft.media_kind
+		self._on_saved = on_saved
+		self._on_close = on_close
 		# тема, которую пост сохранит, если ряд выбора скрыт: правка
 		# не должна молча переселять пост из темы в общую ленту
 		self._fallback_topic_id = draft.topic_id if community.forum else None
@@ -103,14 +111,15 @@ class QueueItemEditDialog(WorkDialog):
 
 	def _build(self, topics: list[ForumTopicInfo], topics_error: str) -> None:
 		"""Собирает форму и заполняет её текущим черновиком."""
-		layout = self.content
-		layout.addWidget(BodyLabel(f"Канал: {community_combo_label(self._community)}", self))
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
 		self._build_topic_row(layout, topics, topics_error)
 		self._build_kind_segments(layout)
 		self._build_file_row(layout)
 		self._text = TextEdit(self)
 		self._text.setPlainText(self._draft.text)
-		layout.addWidget(self._text, stretch=1)
+		self._text.setFixedHeight(_TEXT_HEIGHT)
+		layout.addWidget(self._text)
 		self._counter = CharCounter(self, layout, self._text)
 		self._when_row = WhenRow(self, layout)
 		self._when_row.set_schedule_allowed(self._caps.userbot, _BOT_ONLY_HINT)
@@ -118,7 +127,7 @@ class QueueItemEditDialog(WorkDialog):
 		self._error = ErrorLabel(self)
 		layout.addWidget(self._error)
 		self._apply_kind()
-		self._build_buttons()
+		self._build_buttons(layout)
 
 	def _build_topic_row(
 		self, layout: QVBoxLayout, topics: list[ForumTopicInfo], topics_error: str
@@ -196,17 +205,21 @@ class QueueItemEditDialog(WorkDialog):
 		row.addWidget(self._rename_edit, stretch=1)
 		layout.addWidget(self._rename_box)
 
-	def _build_buttons(self) -> None:
-		"""Кнопки окна: сохранение возвращает пост в работу."""
+	def _build_buttons(self, layout: QVBoxLayout) -> None:
+		"""Кнопки формы: сохранение возвращает пост в работу."""
+		row = QHBoxLayout()
+		row.addStretch()
 		cancel = PushButton("Отмена", self)
-		cancel.clicked.connect(self.reject)
-		self.buttons.addWidget(cancel)
+		cancel.setToolTip("Закрыть форму, ничего не меняя")
+		cancel.clicked.connect(self._on_close)
+		row.addWidget(cancel)
 		self._save_button = PrimaryPushButton("Сохранить и отправить", self)
 		self._save_button.setToolTip(
 			"Пост вернётся в очередь: «сейчас» — в отправку, отложенный — ждать слота."
 		)
 		self._save_button.clicked.connect(self._on_save)
-		self.buttons.addWidget(self._save_button)
+		row.addWidget(self._save_button)
+		layout.addLayout(row)
 
 	# --- поведение формы -------------------------------------------------------
 
@@ -216,7 +229,7 @@ class QueueItemEditDialog(WorkDialog):
 		self._apply_kind()
 
 	def _apply_kind(self) -> None:
-		"""Показывает ряды вложения по типу и правит подсказку текста."""
+		"""Показывает ряды вложения по типу и правит подсказку с пределом."""
 		is_text = self._kind is MediaKind.NONE
 		self._file_box.setVisible(not is_text)
 		self._rename_box.setVisible(not is_text)
@@ -275,9 +288,14 @@ class QueueItemEditDialog(WorkDialog):
 			self._worker,
 			self._worker.engine.publish_queue.edit(self._item_id, draft),
 			self,
-			self.accept,
+			self._on_save_done,
 			self._on_save_failed,
 		)
+
+	def _on_save_done(self) -> None:
+		"""Правка принята: обновляем список и закрываем форму."""
+		self._on_saved()
+		self._on_close()
 
 	def _on_save_failed(self, message: str) -> None:
 		"""Движок отклонил правку — показываем причину, форму не теряем."""
@@ -322,24 +340,37 @@ class QueueItemEditDialog(WorkDialog):
 		return topic.id if topic is not None else None
 
 
-def open_queue_item_editor(
-	worker: EngineWorker, parent: QWidget, item_id: int, on_saved: object = None
+def mount_queue_item_editor(
+	worker: EngineWorker,
+	page: QWidget,
+	item_id: int,
+	body: QVBoxLayout,
+	collapse: Callable[[], None],
+	on_saved: Callable[[], None],
 ) -> None:
-	"""Читает данные элемента и открывает окно правки.
+	"""Наполняет тело раскрытой карточки формой правки элемента.
 
 	Цепочка чтений: черновик → сообщество → пределы длины текста → темы
-	форума (последние — только у форума с userbot-публикатором). Темы
-	не прочитались — окно всё равно откроется, но ряд выбора темы будет
-	скрыт, а пост сохранит свою прежнюю тему. Общая точка входа для панели очереди на «Публикации»
-	и для окна полного просмотра.
+	форума (последние — только у форума с userbot-публикатором). Пока
+	идёт чтение, в теле стоит заглушка: раскрытая пустота выглядит
+	поломкой. Темы не прочитались — форма всё равно откроется, но ряд
+	выбора темы будет скрыт, а пост сохранит свою прежнюю тему.
 
 	Args:
 		worker: мост к движку.
-		parent: окно-родитель для диалога и владелец колбэков.
+		page: страница-владелец (для колбэков моста).
 		item_id: элемент очереди.
-		on_saved: вызывается после сохранения (обновить панель).
+		body: компоновка тела карточки.
+		collapse: свернуть карточку (после сохранения или отмены).
+		on_saved: вызвать после сохранения (обновить панель).
 	"""
-	show_error = error_reporter(parent)
+	waiting = CaptionLabel("Читаю пост…", page)
+	body.addWidget(waiting)
+
+	def fail(message: str) -> None:
+		"""Данные не прочитались: честная причина вместо пустого тела."""
+		clear_layout(body)
+		body.addWidget(CaptionLabel(f"Не удалось открыть правку: {message}", page))
 
 	def show(
 		draft: PostDraft,
@@ -348,11 +379,21 @@ def open_queue_item_editor(
 		topics: list[ForumTopicInfo],
 		topics_error: str = "",
 	) -> None:
-		dialog = QueueItemEditDialog(
-			worker, parent, item_id, draft, community, limits, topics, topics_error
+		clear_layout(body)
+		body.addWidget(
+			QueueItemEditor(
+				worker,
+				page,
+				item_id,
+				draft,
+				community,
+				limits,
+				topics,
+				topics_error,
+				on_saved,
+				collapse,
+			)
 		)
-		if exec_dialog(dialog) and callable(on_saved):
-			on_saved()
 
 	def with_limits(draft: PostDraft, community: CommunityDto, limits: TextLimits) -> None:
 		caps = publish_capabilities(community.bot_id is not None, community.userbot_assigned)
@@ -362,7 +403,7 @@ def open_queue_item_editor(
 		run_in_engine(
 			worker,
 			worker.engine.posts.list_topics(community.id),
-			parent,
+			page,
 			lambda topics: show(draft, community, limits, topics),
 			lambda message: show(
 				draft,
@@ -377,20 +418,18 @@ def open_queue_item_editor(
 		run_in_engine(
 			worker,
 			worker.engine.posts.text_limits(community.id),
-			parent,
+			page,
 			lambda limits: with_limits(draft, community, limits),
-			show_error,
+			fail,
 		)
 
 	def with_draft(draft: PostDraft) -> None:
 		run_in_engine(
 			worker,
 			worker.engine.communities.get_community(draft.community_id),
-			parent,
+			page,
 			lambda community: with_community(draft, community),
-			show_error,
+			fail,
 		)
 
-	run_in_engine(
-		worker, worker.engine.publish_queue.get_draft(item_id), parent, with_draft, show_error
-	)
+	run_in_engine(worker, worker.engine.publish_queue.get_draft(item_id), page, with_draft, fail)

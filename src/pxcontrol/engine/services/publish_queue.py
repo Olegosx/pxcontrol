@@ -76,8 +76,13 @@ _PERSISTED = (QueueItemStatus.PENDING, QueueItemStatus.WAITING, QueueItemStatus.
 #: Статусы, в которых элемент правится (:meth:`PublishQueue.edit`): всё,
 #: что ещё не ушло в Telegram. Набор совпадает с ``_PERSISTED`` не случайно
 #: (в БД хранится именно неотправленное), но живёт отдельно: правила разные,
-#: и расходиться им ничто не мешает.
-_EDITABLE = (QueueItemStatus.PENDING, QueueItemStatus.WAITING, QueueItemStatus.ERROR)
+#: и расходиться им ничто не мешает. Публичный: по нему интерфейс решает,
+#: раскрывать ли карточку формой правки, — правило одно на движок и окно.
+EDITABLE_STATUSES = (
+	QueueItemStatus.PENDING,
+	QueueItemStatus.WAITING,
+	QueueItemStatus.ERROR,
+)
 
 #: Статусы, после которых элемент покинул очередь: строки в БД нет, файл
 #: вернулся в результаты или уехал в опубликованные. Ошибки среди них нет —
@@ -505,7 +510,7 @@ class PublishQueue:
 				continue
 			if item.status is QueueItemStatus.SENDING:
 				raise PostError("Пост уже отправляется — сначала отмените отправку, потом правьте.")
-			if item.status not in _EDITABLE:
+			if item.status not in EDITABLE_STATUSES:
 				raise PostError("Пост уже покинул очередь — править нечего.")
 			if item.editing:
 				raise PostError("Пост правится в другом окне — дождитесь сохранения.")

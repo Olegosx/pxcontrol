@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -46,7 +47,11 @@ from pxcontrol.engine.services.posts import (
 	TextLimits,
 	publish_capabilities,
 )
-from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
+from pxcontrol.engine.services.publish_queue import (
+	EDITABLE_STATUSES,
+	QueueItemDto,
+	QueueItemStatus,
+)
 from pxcontrol.engine.services.settings import (
 	PUBLISH_LAST_COMMUNITY_ID,
 	PUBLISH_TIMES,
@@ -84,7 +89,7 @@ from pxcontrol.ui.pages.common import (
 	visible_topics,
 )
 from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
-from pxcontrol.ui.pages.publish_queue_edit import open_queue_item_editor
+from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import QueueViewDialog, queue_subtitle
 
 logger = logging.getLogger(__name__)
@@ -294,16 +299,19 @@ class PublishPage(ScrollArea):
 			# длинный хвост ждущих слота (ADR-0016) не раздувает страницу;
 			# всё целиком — в диалоге «Вся очередь…»
 			max_cards=_QUEUE_MAX_CARDS,
-			on_edit=self._on_edit_item,
+			# правка — прямо в карточке (ADR-0016, п. 7): раскрывается
+			# кликом, как параметры файла на «Видео»
+			editable=lambda item: item.status in EDITABLE_STATUSES,
+			fill_body=self._fill_editor,
 		)
 
 	def _on_queue_view(self) -> None:
 		"""Открывает полный просмотр очереди (сортировка и фильтры)."""
 		exec_dialog(QueueViewDialog(self._worker, self.window()))
 
-	def _on_edit_item(self, item_id: int) -> None:
-		"""Открывает правку элемента очереди (ADR-0016)."""
-		open_queue_item_editor(self._worker, self.window(), item_id, self._queue.poll)
+	def _fill_editor(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
+		"""Наполняет раскрытую карточку очереди формой правки (ADR-0016)."""
+		mount_queue_item_editor(self._worker, self, item_id, body, collapse, self._queue.poll)
 
 	# --- поведение -----------------------------------------------------------------
 

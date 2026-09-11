@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -385,7 +386,13 @@ class CollapsibleCard(CardWidget):
 	и правятся редко). Свёрнутость — только про показ: виджеты скрытого
 	тела сохраняют значения, и :meth:`PresetForm.fields` читает их
 	как обычно.
+
+	Сигнал :attr:`expanded_changed` сообщает о раскрытии: карточка
+	элемента очереди наполняет тело формой правки лениво, при первом
+	раскрытии, а не для всего списка заранее.
 	"""
+
+	expanded_changed = Signal(bool)
 
 	def __init__(
 		self,
@@ -393,11 +400,15 @@ class CollapsibleCard(CardWidget):
 		parent: QWidget,
 		trailing: QWidget | None = None,
 		leading: QWidget | None = None,
+		keep_summary: bool = False,
 	) -> None:
 		"""``trailing`` — виджет с кнопками в правом краю шапки (например,
 		просмотр и удаление у карточки файла); ``leading`` — виджет перед
 		названием (например, чекбокс выбора). Клики по обоим остаются
-		их виджетам и карточку не сворачивают (Qt не передаёт их шапке)."""
+		их виджетам и карточку не сворачивают (Qt не передаёт их шапке).
+		``keep_summary`` — не прятать сводку у развёрнутой карточки: у
+		элемента очереди она говорит состояние («ждёт слота», «ошибка:…»),
+		и оно нужно как раз тогда, когда карточку раскрыли для правки."""
 		super().__init__(parent)
 		outer = QVBoxLayout(self)
 		outer.setContentsMargins(0, 0, 0, 0)
@@ -416,7 +427,10 @@ class CollapsibleCard(CardWidget):
 		if leading is not None:
 			leading.setParent(header)
 			head_row.addWidget(leading)
-		head_row.addWidget(StrongBodyLabel(title, header))
+		self._title = StrongBodyLabel(title, header)
+		head_row.addWidget(self._title)
+		self._keep_summary = keep_summary
+		self._expandable = True
 		self._summary_text = ""
 		self._summary = CaptionLabel("", header)
 		self._summary.setTextColor(*_SUMMARY_COLORS)
@@ -438,27 +452,55 @@ class CollapsibleCard(CardWidget):
 
 	def toggle(self) -> None:
 		"""Разворачивает свёрнутое и наоборот (клик по шапке или стрелке)."""
+		if not self._expandable:
+			return
 		self.set_expanded(not self._body.isVisible())
+
+	def set_title(self, title: str) -> None:
+		"""Меняет заголовок шапки (карточка живёт дольше своего названия)."""
+		self._title.setText(title)
+
+	def set_expandable(self, expandable: bool) -> None:
+		"""Разрешает или запрещает раскрытие карточки.
+
+		Запрет — для элементов, у которых внутри ничего нет: пост
+		в очереди отправки, который уже грузится в Telegram, править
+		нельзя, и стрелка, ведущая в пустоту, только обманывает.
+		Запрет сворачивает уже раскрытое.
+		"""
+		self._expandable = expandable
+		self._chevron.setVisible(expandable)
+		if not expandable and self.expanded():
+			self.set_expanded(False)
+
+	def expanded(self) -> bool:
+		"""Раскрыта ли карточка сейчас."""
+		return bool(self._body.isVisible())
 
 	def set_expanded(self, expanded: bool) -> None:
 		"""Показывает или прячет тело; стрелка отражает состояние."""
+		changed = self._body.isVisible() != expanded
 		self._body.setVisible(expanded)
 		icon = FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED
 		self._chevron.setIcon(icon)
 		self._refresh_summary()
+		if changed:
+			self.expanded_changed.emit(expanded)
 
 	def set_summary(self, text: str) -> None:
-		"""Сводка значений для шапки; видна только у свёрнутой карточки.
+		"""Сводка значений для шапки.
 
-		У развёрнутой сводка дублировала бы поля прямо под шапкой —
-		поэтому прячется.
+		По умолчанию видна только у свёрнутой карточки: у развёрнутой
+		она дублировала бы поля прямо под шапкой. Исключение —
+		``keep_summary`` (см. конструктор).
 		"""
 		self._summary_text = text
 		self._refresh_summary()
 
 	def _refresh_summary(self) -> None:
 		self._summary.setText(self._summary_text)
-		self._summary.setVisible(bool(self._summary_text) and not self._body.isVisible())
+		visible = bool(self._summary_text) and (self._keep_summary or not self._body.isVisible())
+		self._summary.setVisible(visible)
 
 
 def exec_dialog(dialog: QDialog) -> bool:
@@ -657,26 +699,64 @@ class DtoComboBox(ComboBox, Generic[_T]):
 QUEUE_POLL_MS = 500
 
 
-def queue_signature(items: Sequence[Any]) -> tuple[tuple[Any, ...], ...]:
-	"""Отпечаток видимого состава очереди — по нему решается пересборка карточек.
+def card_signature(item: Any) -> tuple[Any, ...]:
+	"""Отпечаток одного элемента — по нему решается обновление его карточки.
 
 	Входит всё, что карточка показывает и на что вешает действия:
-	состав и порядок, статус, заголовок, текст ошибки, пометка
-	состояния и путь вложения. Заголовок и путь тут не для красоты:
-	правка элемента очереди (ADR-0016, п. 7) меняет их, не трогая
-	статуса, — без них карточка осталась бы со старым именем, а кнопка
-	просмотра вела бы на прежний файл.
+	статус, заголовок, текст ошибки, пометка состояния и путь вложения.
+	Заголовок и путь тут не для красоты: правка элемента очереди
+	(ADR-0016, п. 7) меняет их, не трогая статуса, — без них карточка
+	осталась бы со старым именем, а кнопка просмотра вела бы
+	на прежний файл. Прогресс не входит: он обновляется точечно,
+	без участия отпечатка.
 	"""
-	return tuple(
-		(
-			item.id,
-			item.status,
-			item.title,
-			item.error,
-			getattr(item, "note", None),
-			getattr(item, "media_path", None),
-		)
-		for item in items
+	return (
+		item.status,
+		item.title,
+		item.error,
+		getattr(item, "note", None),
+		getattr(item, "media_path", None),
+	)
+
+
+@dataclass(frozen=True)
+class CardPlan:
+	"""Что сделать с карточками, чтобы список совпал со снимком очереди.
+
+	Attributes:
+		removed: карточки, которых в снимке больше нет.
+		added: новые карточки (в порядке показа).
+		changed: карточки, чьё содержимое изменилось.
+		order: итоговый порядок карточек.
+	"""
+
+	removed: list[int]
+	added: list[int]
+	changed: list[int]
+	order: list[int]
+
+
+def plan_cards(shown: Sequence[Any], known: Mapping[int, tuple[Any, ...]]) -> CardPlan:
+	"""План точечного обновления карточек по новому снимку очереди.
+
+	Прежняя панель пересобирала весь список, стоило измениться чему
+	угодно в любом элементе. Это и мигало на сотне карточек, и делало
+	невозможной правку прямо в карточке: форма с набранным текстом
+	умирала от того, что у соседнего поста сменился статус.
+
+	Args:
+		shown: элементы снимка в порядке показа.
+		known: отпечатки уже показанных карточек (``card_signature``).
+	"""
+	order = [item.id for item in shown]
+	target = set(order)
+	return CardPlan(
+		removed=[item_id for item_id in known if item_id not in target],
+		added=[item.id for item in shown if item.id not in known],
+		changed=[
+			item.id for item in shown if item.id in known and card_signature(item) != known[item.id]
+		],
+		order=order,
 	)
 
 
@@ -691,16 +771,127 @@ _ACTIVE_STATUSES = ("SENDING", "PROCESSING")
 _LEFT_STATUSES = ("DONE", "CANCELLED")
 
 
+class _QueueCard:
+	"""Карточка элемента очереди: шапка с действиями и тело для правки.
+
+	Часть реализации :class:`QueuePanel` — живёт столько же, сколько
+	элемент в очереди, и обновляется точечно: заголовок, состояние
+	и кнопки меняются на месте, а тело (форма правки) при этом
+	не пересоздаётся — иначе набранный текст умирал бы от того,
+	что у соседнего поста сменился статус.
+	"""
+
+	def __init__(self, panel: QueuePanel, item: Any) -> None:
+		self._panel = panel
+		self.item_id = int(item.id)
+		self._actions = QWidget(panel.page)
+		self._actions_box = QHBoxLayout(self._actions)
+		self._actions_box.setContentsMargins(0, 0, 0, 0)
+		self._bar: ProgressBar | None = None
+		self._filled = False  # тело уже наполнено формой правки
+		self.widget = CollapsibleCard(
+			item.title, panel.page, trailing=self._actions, keep_summary=True
+		)
+		self.widget.expanded_changed.connect(self._on_expanded)
+		self.update(item)
+
+	def update(self, item: Any) -> None:
+		"""Приводит карточку к новому снимку элемента."""
+		self.widget.set_title(item.title)
+		self.widget.set_summary(self._panel.subtitle(item))
+		editable = self._panel.can_edit(item)
+		self.widget.set_expandable(editable)
+		if not editable:
+			# пост ушёл в отправку: форма в теле уже не про него
+			self._reset_body()
+		self._fill_actions(item)
+
+	def set_progress(self, fraction: float) -> None:
+		"""Двигает полосу загрузки (без пересборки карточки)."""
+		if self._bar is not None:
+			self._bar.setValue(int(fraction * 100))
+
+	def editing(self) -> bool:
+		"""Открыта ли в карточке форма правки."""
+		return self._filled and self.widget.expanded()
+
+	def collapse(self) -> None:
+		"""Закрывает форму: сворачивает карточку и забывает её содержимое.
+
+		Зовётся самой формой — после сохранения (данные устарели)
+		и по «Отмене» (человек отказался от правки). Ручное сворачивание
+		кликом по шапке тело не трогает: значения полей переживают его,
+		как и у карточек параметров на «Видео».
+		"""
+		self.widget.set_expanded(False)
+		self._reset_body()
+
+	def _reset_body(self) -> None:
+		"""Забывает форму: следующее раскрытие прочитает свежие данные."""
+		if not self._filled:
+			return
+		clear_layout(self.widget.body)
+		self._filled = False
+
+	def _on_expanded(self, expanded: bool) -> None:
+		"""Первое раскрытие наполняет тело формой правки (лениво).
+
+		Форма тянет данные из движка (черновик, сообщество, пределы,
+		темы) — делать это для всех карточек списка заранее значило бы
+		десятки лишних запросов на каждый опрос.
+		"""
+		if not expanded or self._filled:
+			return
+		self._filled = True
+		self._panel.fill_body(self.item_id, self.widget.body, self.collapse)
+
+	def _fill_actions(self, item: Any) -> None:
+		"""Пересобирает кнопки шапки под текущий статус элемента."""
+		clear_layout(self._actions_box)
+		self._bar = None
+		panel = self._panel
+		media_path = getattr(item, "media_path", None)
+		if media_path:
+			# та же кнопка, что у карточек файлов на «Видео» и в пакете
+			play = TransparentToolButton(FluentIcon.PLAY, self._actions)
+			play.setToolTip("Посмотреть файл (системный плеер)")
+			play.clicked.connect(bind(panel.play, media_path))
+			self._actions_box.addWidget(play)
+		# полоса прогресса — только у активных (WAITING/PENDING не растут)
+		if item.status.name in _ACTIVE_STATUSES:
+			bar = ProgressBar(self._actions)
+			bar.setRange(0, 100)
+			bar.setValue(int(item.progress * 100))
+			bar.setFixedWidth(160)
+			self._actions_box.addWidget(bar)
+			self._bar = bar
+		if item.status.name == "ERROR":
+			retry = PushButton("Повторить", self._actions)
+			retry.clicked.connect(bind(panel.retry, item.id))
+			self._actions_box.addWidget(retry)
+			action = PushButton("Убрать", self._actions)
+			action.clicked.connect(bind(panel.dismiss, item.id))
+		else:
+			action = PushButton("Отмена", self._actions)
+			action.clicked.connect(bind(panel.cancel, item.id))
+		self._actions_box.addWidget(action)
+
+
 class QueuePanel:
 	"""Панель очереди движка: опрос, карточки, прогресс, действия.
 
 	Общий каркас панелей «Публикации» (очередь отправки, ADR-0016;
 	механика показа унаследована от ADR-0012) и «Видео» (очередь
-	обработки, ADR-0014): таймер опроса, снятие завершённых с показа,
-	пересборка карточек только при смене состава и точечное обновление
-	прогресса без пересборки. Опрос живёт всегда, не только при видимой
-	странице: завершения снимаются с показа, а кэш занятости нужен окну
-	для подтверждения выхода.
+	обработки, ADR-0014): таймер опроса, снятие завершённых с показа
+	и точечное обновление карточек — меняется только то, что изменилось.
+	Опрос живёт всегда, не только при видимой странице: завершения
+	снимаются с показа, а кэш занятости нужен окну для подтверждения
+	выхода.
+
+	Карточка элемента может раскрываться формой правки прямо в списке
+	(ADR-0016, п. 7): крючки ``editable`` и ``fill_body`` задаёт
+	владелец панели. Очередь обработки видео их не передаёт — правки
+	у неё нет, и её карточки не раскрываются.
 
 	Контракт сервиса очереди (оба сервиса движка ему следуют): корутины
 	``state()``, ``cancel(id)``, ``retry(id)``, ``dismiss(id)``; элементы
@@ -708,9 +899,10 @@ class QueuePanel:
 	значения PENDING/DONE/ERROR/CANCELLED + активное SENDING либо
 	PROCESSING; у очереди отправки есть ещё WAITING — «ждёт слота»,
 	не активный, ADR-0016), ``progress``, ``title``, ``error``.
-	Необязательное поле ``note`` (пометка состояния: авто-битрейт
-	у обработки видео, флуд-пауза у отправки) панель читает через
-	``getattr`` — сервису без него ничего делать не нужно.
+	Необязательные поля ``note`` (пометка состояния: авто-битрейт
+	у обработки видео, флуд-пауза у отправки) и ``media_path`` (путь
+	вложения: карточка даёт посмотреть файл) панель читает через
+	``getattr`` — сервису без них ничего делать не нужно.
 	"""
 
 	def __init__(
@@ -727,7 +919,8 @@ class QueuePanel:
 		max_cards: int | None = None,
 		transform: Callable[[list[Any]], list[Any]] | None = None,
 		dismiss_finished: bool = True,
-		on_edit: Callable[[int], None] | None = None,
+		editable: Callable[[Any], bool] | None = None,
+		fill_body: Callable[[int, QVBoxLayout, Callable[[], None]], None] | None = None,
 	) -> None:
 		"""Args:
 		worker: мост к движку.
@@ -753,26 +946,30 @@ class QueuePanel:
 			их только показывает. Две панели над одной очередью
 			не должны наперегонки снимать элементы — иначе итоговые
 			плашки страницы теряются.
-		on_edit: открыть правку элемента (получает его id). Задан —
-			у карточек появляется кнопка «Изменить…»: у всех, кроме
-			работающих прямо сейчас и покинувших очередь. Очередь
-			обработки видео крючок не передаёт — правки у неё нет.
+		editable: можно ли раскрыть карточку элемента (правка). Без него
+			карточки не раскрываются вовсе.
+		fill_body: наполняет тело раскрытой карточки формой правки —
+			получает id элемента, компоновку тела и «свернуть карточку».
+			Зовётся один раз, при первом раскрытии.
 		"""
 		self._worker = worker
-		self._page = page
+		#: страница-владелец: родитель карточек и плашек (читают карточки).
+		self.page = page
 		self._box = box
 		self._service = service
-		self._subtitle = subtitle
+		#: подпись карточки элемента (читают карточки).
+		self.subtitle = subtitle
 		self._on_finished = on_finished
 		self._on_refreshed = on_refreshed
 		self._on_drained = on_drained
 		self._max_cards = max_cards
 		self._transform = transform
 		self._dismiss_finished = dismiss_finished
-		self._on_edit = on_edit
+		self._editable = editable
+		self._fill_body = fill_body
 		self._show_error = error_reporter(page)
-		self._signature: tuple[tuple[Any, ...], ...] = ()
-		self._bars: dict[int, ProgressBar] = {}
+		self._cards: dict[int, _QueueCard] = {}
+		self._signatures: dict[int, tuple[Any, ...]] = {}
 		self._handled: set[int] = set()  # завершённые, уже учтённые
 		self._busy = False
 		self._active = False
@@ -795,21 +992,61 @@ class QueuePanel:
 		"""
 		return self._active
 
+	def can_edit(self, item: Any) -> bool:
+		"""Раскрывается ли карточка этого элемента (правка на месте)."""
+		return self._fill_body is not None and self._editable is not None and self._editable(item)
+
+	def fill_body(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
+		"""Наполняет тело раскрытой карточки (крючок владельца панели)."""
+		if self._fill_body is not None:
+			self._fill_body(item_id, body, collapse)
+
 	def poll(self) -> None:
 		"""Запрашивает состояние очереди (по таймеру и после постановки)."""
 		# ошибки опроса не показываем плашками: мост пишет их в лог,
 		# а раз в полсекунды спамить пользователя нечем и незачем
-		run_in_engine(self._worker, self._service().state(), self._page, self._show, noop)
+		run_in_engine(self._worker, self._service().state(), self.page, self._show, noop)
 
 	def dismiss(self, item_id: int) -> None:
 		"""Убирает завершённый элемент из состояния очереди."""
 		run_in_engine(
 			self._worker,
 			self._service().dismiss(item_id),
-			self._page,
+			self.page,
 			lambda *_a: self.poll(),
 			noop,
 		)
+
+	def retry(self, item_id: int) -> None:
+		"""Просит движок вернуть элемент с ошибкой в очередь на повтор."""
+		run_in_engine(
+			self._worker,
+			self._service().retry(item_id),
+			self.page,
+			lambda *_a: self.poll(),  # карточка обновляется сразу, не по таймеру
+			self._show_error,
+		)
+
+	def cancel(self, item_id: int) -> None:
+		"""Просит движок отменить элемент очереди."""
+		run_in_engine(
+			self._worker,
+			self._service().cancel(item_id),
+			self.page,
+			noop,
+			self._show_error,
+		)
+
+	def play(self, path: str) -> None:
+		"""Открывает вложение системным приложением.
+
+		Путь проверяется: файл ждущего поста мог уехать или быть удалён
+		мимо приложения, а безмолвный щелчок мимо цели выглядит поломкой.
+		"""
+		if not Path(path).is_file():
+			self._show_error(f"Файл не найден: {path}")
+			return
+		open_in_system(path)
 
 	# --- внутреннее ---------------------------------------------------------
 
@@ -831,14 +1068,7 @@ class QueuePanel:
 		self._active = any(item.status.name in _ACTIVE_STATUSES for item in visible)
 		if self._transform is not None:
 			visible = self._transform(visible)
-		signature = queue_signature(visible)
-		if signature != self._signature:
-			self._signature = signature
-			self._rebuild(visible)
-		for item in visible:  # прогресс — без пересборки карточек
-			bar = self._bars.get(item.id)
-			if bar is not None:
-				bar.setValue(int(item.progress * 100))
+		self._sync_cards(visible if self._max_cards is None else visible[: self._max_cards])
 		if self._on_refreshed is not None:
 			self._on_refreshed(visible)
 
@@ -856,81 +1086,41 @@ class QueuePanel:
 		if self._dismiss_finished:
 			self.dismiss(item.id)
 
-	def _rebuild(self, items: list[Any]) -> None:
-		"""Перестраивает карточки (только при смене состава/статусов)."""
-		clear_layout(self._box)
-		self._bars = {}
-		shown = items if self._max_cards is None else items[: self._max_cards]
-		for item in shown:
-			self._box.addWidget(self._row(item))
+	def _sync_cards(self, shown: list[Any]) -> None:
+		"""Приводит список карточек к снимку, трогая только изменившееся."""
+		plan = plan_cards(shown, self._signatures)
+		by_id = {item.id: item for item in shown}
+		for item_id in plan.removed:
+			self._drop_card(item_id)
+		for item_id in plan.added:
+			card = _QueueCard(self, by_id[item_id])
+			self._cards[item_id] = card
+			self._box.addWidget(card.widget)
+		for item_id in plan.changed:
+			self._cards[item_id].update(by_id[item_id])
+		self._signatures = {item.id: card_signature(item) for item in shown}
+		for index, item_id in enumerate(plan.order):
+			widget = self._cards[item_id].widget
+			if self._box.indexOf(widget) != index:
+				self._box.insertWidget(index, widget)
+		for item in shown:  # прогресс — без пересборки карточек
+			self._cards[item.id].set_progress(item.progress)
 
-	def _row(self, item: Any) -> CardWidget:
-		"""Карточка элемента: просмотр вложения, прогресс у активного,
-		«Отмена» у живого, «Повторить» и «Убрать» у ошибки."""
-		trailing = QWidget(self._page)
-		row = QHBoxLayout(trailing)
-		row.setContentsMargins(0, 0, 0, 0)
-		media_path = getattr(item, "media_path", None)
-		if media_path:
-			# та же кнопка, что у карточек файлов на «Видео» и в пакете
-			play = TransparentToolButton(FluentIcon.PLAY, trailing)
-			play.setToolTip("Посмотреть файл (системный плеер)")
-			play.clicked.connect(bind(self._play, media_path))
-			row.addWidget(play)
-		# полоса прогресса — только у активных (WAITING/PENDING не растут)
-		if item.status.name in _ACTIVE_STATUSES:
-			bar = ProgressBar(trailing)
-			bar.setRange(0, 100)
-			bar.setValue(int(item.progress * 100))
-			bar.setFixedWidth(160)
-			row.addWidget(bar)
-			self._bars[item.id] = bar
-		if self._on_edit is not None and item.status.name not in _ACTIVE_STATUSES + _LEFT_STATUSES:
-			edit = PushButton("Изменить…", trailing)
-			edit.clicked.connect(bind(self._on_edit, item.id))
-			row.addWidget(edit)
-		if item.status.name == "ERROR":
-			retry = PushButton("Повторить", trailing)
-			retry.clicked.connect(bind(self._retry, item.id))
-			row.addWidget(retry)
-			action = PushButton("Убрать", trailing)
-			action.clicked.connect(bind(self.dismiss, item.id))
-		else:
-			action = PushButton("Отмена", trailing)
-			action.clicked.connect(bind(self._cancel, item.id))
-		row.addWidget(action)
-		return row_card(self._page, item.title, self._subtitle(item), trailing=trailing)
+	def _drop_card(self, item_id: int) -> None:
+		"""Убирает карточку элемента, покинувшего показ.
 
-	def _play(self, path: str) -> None:
-		"""Открывает вложение системным приложением.
-
-		Путь проверяется: файл ждущего поста мог уехать или быть удалён
-		мимо приложения, а безмолвный щелчок мимо цели выглядит поломкой.
+		Если в ней правили пост, молчать нельзя: набранное пропадает
+		вместе с карточкой, и человек должен понимать, почему.
 		"""
-		if not Path(path).is_file():
-			self._show_error(f"Файл не найден: {path}")
+		card = self._cards.pop(item_id, None)
+		self._signatures.pop(item_id, None)
+		if card is None:
 			return
-		open_in_system(path)
-
-	def _retry(self, item_id: int) -> None:
-		"""Просит движок вернуть элемент с ошибкой в очередь на повтор."""
-		run_in_engine(
-			self._worker,
-			self._service().retry(item_id),
-			self._page,
-			lambda *_a: self.poll(),  # карточка обновляется сразу, не по таймеру
-			self._show_error,
-		)
-
-	def _cancel(self, item_id: int) -> None:
-		"""Просит движок отменить элемент очереди."""
-		run_in_engine(
-			self._worker,
-			self._service().cancel(item_id),
-			self._page,
-			noop,
-			self._show_error,
-		)
+		if card.editing():
+			self._show_error("Пост покинул очередь — незаконченная правка не сохранена.")
+		self._box.removeWidget(card.widget)
+		card.widget.setParent(None)
+		card.widget.deleteLater()
 
 
 def counter_text(length: int, limit: int) -> str:

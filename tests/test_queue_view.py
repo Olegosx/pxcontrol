@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
-from pxcontrol.ui.pages.common import queue_signature
+from pxcontrol.ui.pages.common import card_signature, plan_cards
 from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
 	QueueSort,
@@ -165,33 +165,71 @@ def test_summary_text_many_pages_with_filter_names_both_counts() -> None:
 	assert text == "Показаны 1–5 из 12 подходящих (в очереди 40)."
 
 
-# --- отпечаток состава (когда перестраивать карточки) ----------------------
+# --- точечное обновление карточек ------------------------------------------
 
 
-def test_signature_stable_for_same_items() -> None:
-	"""Ничего не изменилось — карточки не перестраиваются."""
-	items = [_item(1), _item(2)]
-	assert queue_signature(items) == queue_signature([_item(1), _item(2)])
+def test_signature_stable_for_same_item() -> None:
+	"""Ничего не изменилось — карточку не трогаем."""
+	assert card_signature(_item(1)) == card_signature(_item(1))
 
 
 def test_signature_notices_edited_title() -> None:
-	"""Правка текста меняет заголовок, не трогая статуса, — карточку надо перестроить."""
+	"""Правка текста меняет заголовок, не трогая статуса, — карточку надо обновить."""
 	before = _item(1)
-	after = replace(before, title="новый текст")
-	assert queue_signature([before]) != queue_signature([after])
+	assert card_signature(before) != card_signature(replace(before, title="новый текст"))
 
 
 def test_signature_notices_replaced_media() -> None:
 	"""Замена вложения меняет путь: кнопка просмотра не должна вести на старый файл."""
 	before = replace(_item(1), media_path="/видео/старый.mp4")
-	after = replace(before, media_path="/видео/новый.mp4")
-	assert queue_signature([before]) != queue_signature([after])
+	assert card_signature(before) != card_signature(replace(before, media_path="/видео/новый.mp4"))
 
 
-def test_signature_notices_status_and_order() -> None:
-	"""Статус и порядок — как раньше: смена любого перестраивает список."""
-	first, second = _item(1), _item(2)
-	assert queue_signature([first, second]) != queue_signature([second, first])
-	assert queue_signature([first]) != queue_signature(
-		[replace(first, status=QueueItemStatus.PENDING)]
-	)
+def test_signature_notices_status() -> None:
+	"""Статус меняет состав кнопок карточки — значит и отпечаток."""
+	before = _item(1)
+	assert card_signature(before) != card_signature(replace(before, status=QueueItemStatus.PENDING))
+
+
+def _known(items: list[QueueItemDto]) -> dict[int, tuple[object, ...]]:
+	"""Отпечатки показанных карточек (состояние панели)."""
+	return {item.id: card_signature(item) for item in items}
+
+
+def test_plan_cards_adds_and_removes() -> None:
+	"""Новые карточки добавляются, ушедшие — убираются; остальные не трогаются."""
+	known = _known([_item(1), _item(2)])
+	plan = plan_cards([_item(2), _item(3)], known)
+	assert plan.added == [3]
+	assert plan.removed == [1]
+	assert plan.changed == []
+	assert plan.order == [2, 3]
+
+
+def test_plan_cards_marks_only_changed() -> None:
+	"""Изменился один элемент — обновляется одна карточка, а не весь список."""
+	items = [_item(1), _item(2), _item(3)]
+	known = _known(items)
+	edited = replace(items[1], title="поправленный текст")
+	plan = plan_cards([items[0], edited, items[2]], known)
+	assert plan.changed == [2]
+	assert (plan.added, plan.removed) == ([], [])
+
+
+def test_plan_cards_reports_order_without_touching_cards() -> None:
+	"""Перестановка меняет только порядок: карточки живы, содержимое прежнее.
+
+	Это и позволяет держать открытую форму правки: сортировка очереди
+	не должна пересоздавать карточку, в которой набирают текст.
+	"""
+	items = [_item(1), _item(2)]
+	plan = plan_cards([items[1], items[0]], _known(items))
+	assert plan.order == [2, 1]
+	assert (plan.added, plan.removed, plan.changed) == ([], [], [])
+
+
+def test_plan_cards_from_empty_state() -> None:
+	"""Первый показ: всё новое, убирать нечего."""
+	plan = plan_cards([_item(1), _item(2)], {})
+	assert plan.added == [1, 2]
+	assert (plan.removed, plan.changed) == ([], [])
