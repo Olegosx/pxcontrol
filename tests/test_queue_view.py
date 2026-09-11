@@ -1,7 +1,7 @@
 """Тесты правила показа полного просмотра очереди (ADR-0016, без Qt).
 
-Импортируется только чистая функция ``apply_view`` и перечисления —
-виджеты диалога не создаются.
+Импортируются только чистые функции (``apply_view``, ``paginate``,
+``summary_text``) и перечисления — виджеты диалога не создаются.
 """
 
 from __future__ import annotations
@@ -9,7 +9,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
-from pxcontrol.ui.pages.publish_queue_view import QueueFilter, QueueSort, apply_view
+from pxcontrol.ui.pages.publish_queue_view import (
+	QueueFilter,
+	QueueSort,
+	apply_view,
+	paginate,
+	summary_text,
+)
 
 
 def _item(
@@ -79,3 +85,79 @@ def test_status_and_community_filters() -> None:
 	assert [item.id for item in community_b] == [3, 4]
 	both = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ERRORS, 1)
 	assert both == []
+
+
+# --- нарезка на страницы ---------------------------------------------------
+
+
+def test_paginate_slices_requested_page() -> None:
+	"""Страница отдаёт свой срез и номера элементов в общем счёте."""
+	items = [_item(i) for i in range(1, 13)]
+	view = paginate(items, page=2, per_page=5)
+	assert [item.id for item in view.items] == [6, 7, 8, 9, 10]
+	assert (view.page, view.pages, view.total) == (2, 3, 12)
+	assert (view.first, view.last) == (6, 10)
+
+
+def test_paginate_last_page_may_be_short() -> None:
+	"""Последняя страница короче остальных — счёт номеров это учитывает."""
+	view = paginate([_item(i) for i in range(1, 13)], page=3, per_page=5)
+	assert [item.id for item in view.items] == [11, 12]
+	assert (view.first, view.last) == (11, 12)
+
+
+def test_paginate_clamps_page_out_of_range() -> None:
+	"""Номер за границами зажимается: очередь живая, страница исчезает."""
+	items = [_item(i) for i in range(1, 8)]
+	assert paginate(items, page=99, per_page=5).page == 2  # ушла под пользователем
+	assert paginate(items, page=0, per_page=5).page == 1
+	assert paginate(items, page=-3, per_page=5).page == 1
+
+
+def test_paginate_empty_list_is_single_empty_page() -> None:
+	"""Пустой список — одна страница без элементов и без номеров."""
+	view = paginate([], page=3, per_page=5)
+	assert view.items == []
+	assert (view.page, view.pages, view.total) == (1, 1, 0)
+	assert (view.first, view.last) == (0, 0)
+
+
+def test_paginate_per_page_never_below_one() -> None:
+	"""Нулевой размер страницы не делит на ноль, а берётся за единицу."""
+	view = paginate([_item(1), _item(2)], page=2, per_page=0)
+	assert [item.id for item in view.items] == [2]
+	assert view.pages == 2
+
+
+# --- итоговая строка -------------------------------------------------------
+
+
+def test_summary_text_empty_queue() -> None:
+	"""Пустая очередь описывается собой, а не нулями."""
+	assert summary_text(paginate([], 1), 0) == "Очередь пуста."
+
+
+def test_summary_text_filter_hides_everything() -> None:
+	"""Фильтр отсеял всё: видно, что элементы в очереди есть."""
+	text = summary_text(paginate([], 1), 7)
+	assert text == "Ни один из 7 элементов очереди не подходит под фильтр."
+
+
+def test_summary_text_single_page_has_no_range() -> None:
+	"""Одна страница: диапазон номеров не показывается."""
+	items = [_item(i) for i in range(1, 5)]
+	assert summary_text(paginate(items, 1), 4) == "Показано 4 из 4 элементов очереди."
+
+
+def test_summary_text_many_pages_shows_range() -> None:
+	"""Несколько страниц: видно, какие именно элементы сейчас на экране."""
+	items = [_item(i) for i in range(1, 13)]
+	text = summary_text(paginate(items, page=2, per_page=5), 12)
+	assert text == "Показаны 6–10 из 12 элементов очереди."
+
+
+def test_summary_text_many_pages_with_filter_names_both_counts() -> None:
+	"""С фильтром названы оба числа: подходящих и всего в очереди."""
+	items = [_item(i) for i in range(1, 13)]
+	text = summary_text(paginate(items, page=1, per_page=5), 40)
+	assert text == "Показаны 1–5 из 12 подходящих (в очереди 40)."
