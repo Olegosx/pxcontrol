@@ -43,6 +43,8 @@ from pxcontrol.engine.telegram.types import (
 	OutgoingPost,
 	ScheduledMessage,
 	TelegramFloodError,
+	telegram_text_length,
+	text_length_limit,
 	userbot_max_file_bytes,
 )
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source, run_tool
@@ -112,6 +114,58 @@ def _dedup_scheduled(items: list[ScheduledPostDto]) -> list[ScheduledPostDto]:
 
 class PostError(EngineError):
 	"""Ошибка создания/отправки поста (с понятным человеку текстом)."""
+
+
+@dataclass(frozen=True)
+class TextLimits:
+	"""Пределы длины текста, действующие в конкретном сообществе.
+
+	Зависят от того, кто публикует (ADR-0011/0019): у Premium-аккаунта
+	пределы выше, у бота — всегда базовые. Пара отдаётся интерфейсу
+	одним запросом, чтобы переключение типа контента не ходило в движок
+	за каждым новым пределом.
+
+	Attributes:
+		text: предел для поста без вложения.
+		caption: предел для подписи к файлу (он меньше).
+	"""
+
+	text: int
+	caption: int
+
+	def for_draft(self, draft: PostDraft) -> int:
+		"""Предел, действующий для этого черновика."""
+		return self.caption if draft.media_path is not None else self.text
+
+
+def check_text_length(text: str, limit: int, with_media: bool) -> None:
+	"""Отклоняет текст длиннее предела Telegram.
+
+	Длина считается так же, как её считает Telegram
+	(:func:`telegram_text_length`) — иначе счётчик в интерфейсе
+	и проверка расходились бы на эмодзи.
+
+	Args:
+		text: текст поста или подпись к файлу.
+		limit: предел для этого поста (:func:`text_length_limit`).
+		with_media: пост с вложением — от этого зависит формулировка.
+
+	Raises:
+		PostError: Текст длиннее предела.
+	"""
+	length = telegram_text_length(text)
+	if length <= limit:
+		return
+	if with_media:
+		raise PostError(
+			f"Подпись к файлу длиннее предела Telegram: {length} символов "
+			f"при {limit}. Сократите подпись или отправьте текст "
+			"отдельным постом."
+		)
+	raise PostError(
+		f"Текст поста длиннее предела Telegram: {length} символов при {limit}. "
+		"Сократите текст или разбейте его на несколько постов."
+	)
 
 
 def text_preview(text: str, limit: int) -> str:
@@ -371,8 +425,13 @@ class PostsService:
 				"У канала нет способа публикации — проверьте доступы на странице «Каналы»."
 			)
 		media_path = draft.media_path
+		with_media = media_path is not None
 		if caps.userbot:
-			limit = userbot_max_file_bytes(self._gateway.userbot_premium(account_id))
+			premium = self._gateway.userbot_premium(account_id)
+			# длина — рядом с размером файла: оба предела зависят от того,
+			# чьей сессией уходит пост (Premium аккаунта канала, ADR-0019)
+			check_text_length(draft.text, text_length_limit(premium, with_media), with_media)
+			limit = userbot_max_file_bytes(premium)
 			if media_path is not None and self._file_size(media_path) > limit:
 				raise PostError(
 					f"Файл больше {limit // 10**9} ГБ — лимит Telegram на файл "
@@ -380,6 +439,8 @@ class PostsService:
 					"на странице «Видео»)."
 				)
 			return
+		# бот-путь: подписки у ботов не бывает — пределы всегда базовые
+		check_text_length(draft.text, text_length_limit(False, with_media), with_media)
 		if draft.when is not None:
 			raise PostError(
 				"Отложенные посты требуют userbot-админа в канале — "
@@ -784,6 +845,40 @@ class PostsService:
 			self._gateway.userbot_premium(community.default_tg_account_id)
 		)
 
+	async def text_limits(self, community_id: int) -> TextLimits:
+		"""Пределы длины текста, действующие в сообществе.
+
+		Зависят от публикатора: userbot с Premium — вчетверо больший
+		предел подписи, бот — всегда базовые (ADR-0011). Интерфейс
+		берёт пару разом: переключение типа контента не должно ходить
+		в движок за каждым новым пределом.
+
+		Raises:
+			PostError: Сообщество не найдено.
+		"""
+		community = await self._get_community(community_id)
+		premium = community.default_tg_account_id is not None and self._gateway.userbot_premium(
+			community.default_tg_account_id
+		)
+		return TextLimits(
+			text=text_length_limit(premium, with_media=False),
+			caption=text_length_limit(premium, with_media=True),
+		)
+
+	async def check_draft_limits(self, draft: PostDraft) -> None:
+		"""Проверяет черновик по фактическим пределам его сообщества.
+
+		Постановка в очередь зовёт её следом за :meth:`validate_draft`:
+		та знает только потолок Premium, а здесь уже виден публикатор
+		канала — и слишком длинный пост отвергается на месте, а не сырой
+		ошибкой Telegram после загрузки файла.
+
+		Raises:
+			PostError: Сообщество не найдено или текст длиннее предела.
+		"""
+		limits = await self.text_limits(draft.community_id)
+		check_text_length(draft.text, limits.for_draft(draft), draft.media_path is not None)
+
 	async def community_title(self, community_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).
 
@@ -806,17 +901,25 @@ class PostsService:
 
 	@staticmethod
 	def validate_draft(draft: PostDraft) -> None:
-		"""Отклоняет пустой черновик, битый путь, негодное имя переименования
-		и время «почти сейчас».
+		"""Отклоняет пустой черновик, битый путь, негодное имя переименования,
+		заведомо непроходимую длину текста и время «почти сейчас».
 
 		Публичная: очередь отправки проверяет черновик при постановке,
 		чтобы ошибка всплыла сразу, а не при отправке.
+
+		Длина проверяется по **потолку** — пределам Premium-аккаунта:
+		здесь нет ни канала, ни его публикатора, а отвергать по базовому
+		пределу значило бы запрещать то, что Telegram разрешает владельцу
+		Premium. Точный предел канала проверяют :meth:`check_draft_limits`
+		(постановка в очередь) и :meth:`_check_transport` (отправка).
 
 		Raises:
 			PostError: Черновик не готов к отправке.
 		"""
 		if not draft.text and draft.media_path is None:
 			raise PostError("Пост пуст — добавьте текст или файл.")
+		with_media = draft.media_path is not None
+		check_text_length(draft.text, text_length_limit(True, with_media), with_media)
 		if draft.rename_to:
 			PostsService.check_rename_name(draft.rename_to)
 		if draft.media_path is not None and draft.media_kind is MediaKind.NONE:

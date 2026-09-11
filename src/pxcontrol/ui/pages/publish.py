@@ -43,6 +43,7 @@ from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PublishCapabilities,
+	TextLimits,
 	publish_capabilities,
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
@@ -58,12 +59,14 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	MediaKind,
 	UserbotRole,
+	text_length_limit,
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
 	CONTENT_KINDS,
+	CharCounter,
 	DtoComboBox,
 	QueuePanel,
 	WhenRow,
@@ -142,6 +145,9 @@ class PublishPage(ScrollArea):
 		# канал прошлой публикации: предвыбор после загрузки списка
 		self._restore_community_id: int | None = None
 		self._kind = MediaKind.NONE
+		# пределы длины текста выбранного канала (None — канал не выбран
+		# или ответ движка ещё не пришёл: счётчик покажет базовый предел)
+		self._limits: TextLimits | None = None
 		self._build()
 		run_in_engine(
 			worker,
@@ -167,6 +173,7 @@ class PublishPage(ScrollArea):
 		self._text.setPlaceholderText("Текст поста…")
 		self._text.setMinimumHeight(120)
 		layout.addWidget(self._text)
+		self._counter = CharCounter(self, layout, self._text)
 		self._build_caption_tools(layout)
 		self._build_file_row(layout)
 		self._when_row = WhenRow(self, layout)
@@ -379,7 +386,16 @@ class PublishPage(ScrollArea):
 			self._caps_hint.setText("")
 			self._when_row.set_schedule_allowed(True)
 			self._when_row.set_times([])
+			self._limits = None
+			self._apply_text_limit()
 			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.posts.text_limits(community.id),
+			self,
+			partial(self._apply_limits, community.id),
+			noop,
+		)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get_for(PUBLISH_TIMES, community.id),
@@ -414,6 +430,25 @@ class PublishPage(ScrollArea):
 				"⚠ Нет способа публикации — проверьте доступы на странице «Каналы»."
 			)
 			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
+
+	def _apply_limits(self, community_id: int, limits: TextLimits) -> None:
+		"""Запоминает пределы длины канала, если он всё ещё выбран."""
+		if self._is_stale(community_id):
+			return
+		self._limits = limits
+		self._apply_text_limit()
+
+	def _apply_text_limit(self) -> None:
+		"""Ставит счётчику предел по типу поста и выбранному каналу.
+
+		Канал ещё не выбран (или пределы не приехали) — показываем
+		базовый предел Telegram: он не обещает лишнего.
+		"""
+		with_media = self._kind is not MediaKind.NONE
+		if self._limits is None:
+			self._counter.set_limit(text_length_limit(premium=False, with_media=with_media))
+			return
+		self._counter.set_limit(self._limits.caption if with_media else self._limits.text)
 
 	def _update_topic_row(self, community: CommunityDto, caps: PublishCapabilities) -> None:
 		"""Показывает и наполняет выбор темы форума (ADR-0021).
@@ -502,6 +537,8 @@ class PublishPage(ScrollArea):
 		self._text.setPlaceholderText(
 			"Текст поста…" if is_text else "Подпись к файлу (необязательно)…"
 		)
+		# подпись к файлу вчетверо короче поста без вложения
+		self._apply_text_limit()
 
 	def _pick_file(self) -> None:
 		"""Диалог выбора вложения с фильтром по текущему типу контента.
@@ -835,6 +872,12 @@ class PublishPage(ScrollArea):
 			used_values=setup.used_values,
 			community_times=setup.times,
 			limit_bytes=limit_bytes,
+			# предел подписи канала: у Premium-публикатора он выше базового
+			caption_limit=(
+				self._limits.caption
+				if self._limits is not None
+				else text_length_limit(premium=False, with_media=True)
+			),
 			schedule_allowed=schedule_allowed,
 			title_rules=setup.title_rules,
 			# отложки приходят из Telegram в UTC, раскладка живёт

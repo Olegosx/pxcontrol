@@ -39,6 +39,7 @@ from qfluentwidgets import (
 	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
+	TextEdit,
 	TransparentToolButton,
 )
 
@@ -47,10 +48,12 @@ from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.video import video_dialog_filter
 from pxcontrol.engine.telegram.types import (
 	GENERAL_TOPIC_ID,
+	TEXT_LENGTH_LIMIT,
 	CommunityKind,
 	ForumTopicInfo,
 	MediaKind,
 	UserbotRole,
+	telegram_text_length,
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -355,6 +358,10 @@ def file_action_buttons(
 #: Подпись, а не ошибка — единая точка цветов ошибок (``ErrorLabel``
 #: в ``common``) тут не подходит.
 _SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
+
+#: Цвета «это ошибка» для светлой и тёмной темы: подпись валидации
+#: (``ErrorLabel``) и счётчик символов при превышении предела.
+ERROR_COLORS = ("#c42b1c", "#ff99a4")
 
 
 class _CardHeader(QWidget):
@@ -883,6 +890,60 @@ class QueuePanel:
 		)
 
 
+def counter_text(length: int, limit: int) -> str:
+	"""Подпись счётчика символов под полем текста.
+
+	Превышение называется числом: «сократите» без цифры оставляет
+	пользователя считать самому.
+	"""
+	if length <= limit:
+		return f"{length} / {limit}"
+	return f"{length} / {limit} — на {length - limit} больше предела Telegram"
+
+
+class CharCounter:
+	"""Счётчик символов под полем текста поста.
+
+	Длина считается так же, как её считает Telegram
+	(:func:`telegram_text_length`): счётчик и проверка движка не должны
+	расходиться на эмодзи. Предел меняется на ходу — от типа контента
+	(подпись к файлу вчетверо короче поста без вложения) и от канала
+	(у Premium-публикатора пределы выше).
+	"""
+
+	def __init__(
+		self,
+		parent: QWidget,
+		layout: QVBoxLayout,
+		edit: TextEdit,
+		limit: int = TEXT_LENGTH_LIMIT,
+	) -> None:
+		"""Args:
+		parent: владелец подписи.
+		layout: компоновка, в которую встаёт счётчик (обычно под полем).
+		edit: поле текста, за которым он следит.
+		limit: стартовый предел (уточняется :meth:`set_limit`).
+		"""
+		self._edit = edit
+		self._limit = limit
+		self.label = CaptionLabel("", parent)
+		self.label.setAlignment(Qt.AlignmentFlag.AlignRight)
+		layout.addWidget(self.label)
+		edit.textChanged.connect(self.refresh)
+		self.refresh()
+
+	def set_limit(self, limit: int) -> None:
+		"""Меняет действующий предел и перерисовывает счётчик."""
+		self._limit = limit
+		self.refresh()
+
+	def refresh(self) -> None:
+		"""Пересчитывает длину и красит подпись по факту превышения."""
+		length = telegram_text_length(self._edit.toPlainText())
+		self.label.setText(counter_text(length, self._limit))
+		self.label.setTextColor(*(ERROR_COLORS if length > self._limit else _SUMMARY_COLORS))
+
+
 class ErrorLabel(CaptionLabel):
 	"""Красная подпись ошибки валидации диалога (единые цвета обеих тем).
 
@@ -898,7 +959,7 @@ class ErrorLabel(CaptionLabel):
 		# у подкласса это снова этот метод — бесконечная рекурсия
 		# (RecursionError, ловилось вживую на диалоге пакета).
 		super().__init__(parent)
-		self.setTextColor("#c42b1c", "#ff99a4")
+		self.setTextColor(*ERROR_COLORS)
 		self.hide()
 
 	def fail(self, message: str) -> bool:

@@ -36,6 +36,51 @@ USERBOT_MAX_FILE_BYTES = 4000 * 512 * 1024
 #: То же с подпиской Premium: 8000 частей (4000 МиБ).
 USERBOT_PREMIUM_MAX_FILE_BYTES = 8000 * 512 * 1024
 
+#: Лимиты Telegram на длину текста поста. Premium удваивает предел
+#: сообщения и учетверяет предел подписи к медиа: клиентский конфиг
+#: отдаёт пределы подписи ключами ``caption_length_limit_default``
+#: и ``caption_length_limit_premium``. Проверено 2026-09-11
+#: (core.telegram.org/api/config, core.telegram.org/api/premium,
+#: limits.tginfo.me).
+TEXT_LENGTH_LIMIT = 4096
+TEXT_LENGTH_LIMIT_PREMIUM = 8192
+CAPTION_LENGTH_LIMIT = 1024
+CAPTION_LENGTH_LIMIT_PREMIUM = 4096
+
+
+def text_length_limit(premium: bool, with_media: bool) -> int:
+	"""Предел длины текста поста по подписке аккаунта и типу поста.
+
+	Пост с вложением ограничен пределом подписи — он вчетверо меньше
+	предела обычного сообщения у не-Premium аккаунта.
+
+	Args:
+		premium: есть ли Premium у аккаунта-публикатора (бот — всегда
+			False: подписки у ботов не бывает).
+		with_media: пост с вложением (текст идёт подписью к файлу).
+	"""
+	if with_media:
+		return CAPTION_LENGTH_LIMIT_PREMIUM if premium else CAPTION_LENGTH_LIMIT
+	return TEXT_LENGTH_LIMIT_PREMIUM if premium else TEXT_LENGTH_LIMIT
+
+
+def telegram_text_length(text: str) -> int:
+	"""Длина текста в кодовых единицах UTF-16.
+
+	Именно в них Telegram считает смещения разметки сообщений, поэтому
+	для длины берётся та же единица: символы основной таблицы (включая
+	кириллицу и латиницу) считаются как ``len(text)``, а эмодзи и прочие
+	символы за её пределами — за два.
+
+	Оговорка честности: официальная документация называет пределы то
+	«символами», то «UTF-8 length» (core.telegram.org/api/config)
+	и однозначного определения единицы не даёт. Выбран счёт UTF-16 —
+	он совпадает с обычным на всём, кроме эмодзи, а на эмодзи строже,
+	то есть приложение откажет раньше сервера, а не позже.
+	"""
+	return len(text.encode("utf-16-le")) // 2
+
+
 #: Лимит Telegram на отложенные сообщения в одном чате/канале.
 #: Premium его НЕ увеличивает (даёт только повторяющиеся отложки);
 #: горизонт — до года вперёд. Превышение — ошибка API SCHEDULE_TOO_MUCH.

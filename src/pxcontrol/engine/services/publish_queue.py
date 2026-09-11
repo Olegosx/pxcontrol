@@ -36,6 +36,8 @@ from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
 	PostsService,
+	TextLimits,
+	check_text_length,
 	refresh_draft_media,
 	text_preview,
 )
@@ -286,10 +288,19 @@ class PublishQueue:
 		if not drafts:
 			raise PostError("Пакет пуст — отправлять нечего.")
 		titles: dict[int, str] = {}
+		# пределы длины — по одному чтению на канал, как и названия:
+		# у пакета из полусотни строк канал обычно один (ADR-0015)
+		limits: dict[int, TextLimits] = {}
 		for draft in drafts:
 			self._posts.validate_draft(draft)
 			if draft.community_id not in titles:
 				titles[draft.community_id] = await self._posts.community_title(draft.community_id)
+				limits[draft.community_id] = await self._posts.text_limits(draft.community_id)
+			check_text_length(
+				draft.text,
+				limits[draft.community_id].for_draft(draft),
+				draft.media_path is not None,
+			)
 		stashed, moved = await self._stash_all(drafts)
 		try:
 			rows = [
@@ -436,6 +447,8 @@ class PublishQueue:
 				"Канал поста в очереди не меняется — отмените его и создайте пост в нужном канале."
 			)
 		self._posts.validate_draft(draft)
+		# точный предел канала: validate_draft знает только потолок Premium
+		await self._posts.check_draft_limits(draft)
 		self._check_pipeline_kind(draft)
 		status = self._initial_status(draft)
 		# флаг взводится до первого ожидания: воркер выбирает элемент

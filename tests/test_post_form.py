@@ -16,6 +16,7 @@ from pxcontrol.engine.telegram.types import (
 )
 from pxcontrol.ui.pages.common import (
 	CONTENT_KINDS,
+	counter_text,
 	kind_file_filter,
 	kind_label,
 	topic_label,
@@ -81,3 +82,14 @@ def test_content_kinds_start_with_text() -> None:
 	"""Первый сегмент — «Текст»: пост без вложения (у него нет фильтра файлов)."""
 	label, kind, file_filter = CONTENT_KINDS[0]
 	assert (label, kind, file_filter) == ("Текст", MediaKind.NONE, "")
+
+
+def test_counter_text_within_limit() -> None:
+	"""В пределах лимита — просто «сколько из скольки»."""
+	assert counter_text(120, 1024) == "120 / 1024"
+	assert counter_text(1024, 1024) == "1024 / 1024"  # ровно предел — ещё не превышение
+
+
+def test_counter_text_names_the_overflow() -> None:
+	"""Превышение названо числом: «сократите» без цифры заставляет считать самому."""
+	assert counter_text(1100, 1024) == "1100 / 1024 — на 76 больше предела Telegram"

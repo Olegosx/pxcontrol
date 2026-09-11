@@ -1210,3 +1210,33 @@ async def test_get_draft_reports_missing_item(db: Database, make_queue: QueueFac
 	queue = make_queue(_SlowGateway())
 	with pytest.raises(PostError, match="не найден"):
 		await queue.get_draft(404)
+
+
+async def test_enqueue_rejects_text_over_community_limit(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Слишком длинный пост не попадает в очередь: отказ на постановке.
+
+	Иначе он ушёл бы в очередь и упал сырой ошибкой Telegram уже при
+	отправке — пользователь увидел бы её в карточке, а не в форме.
+	"""
+	queue = make_queue(_SlowGateway())
+	community_id = await _add_community(db)
+	with pytest.raises(PostError, match="Текст поста длиннее"):
+		await queue.enqueue(PostDraft(community_id, text="я" * 4097))
+	assert await queue.state() == []
+
+
+async def test_edit_rejects_text_over_community_limit(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Правка тоже сверяется с пределом канала, а не только постановка."""
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(PostDraft(community_id, text="было", when=_future(120)))
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	with pytest.raises(PostError, match="Текст поста длиннее"):
+		await queue.edit(item, PostDraft(community_id, text="я" * 4097, when=_future(120)))
+	assert (await queue.get_draft(item)).text == "было"

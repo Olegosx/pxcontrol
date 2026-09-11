@@ -29,12 +29,13 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import PostDraft, publish_capabilities
+from pxcontrol.engine.services.posts import PostDraft, TextLimits, publish_capabilities
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.types import ForumTopicInfo, MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	CONTENT_KINDS,
+	CharCounter,
 	DtoComboBox,
 	ErrorLabel,
 	WhenRow,
@@ -71,6 +72,7 @@ class QueueItemEditDialog(WorkDialog):
 		item_id: int,
 		draft: PostDraft,
 		community: CommunityDto,
+		limits: TextLimits,
 		topics: list[ForumTopicInfo],
 		topics_error: str = "",
 	) -> None:
@@ -80,6 +82,7 @@ class QueueItemEditDialog(WorkDialog):
 		item_id: элемент очереди, который правим.
 		draft: его текущий черновик (из ``PublishQueue.get_draft``).
 		community: канал-получатель (для тем, вида и возможностей).
+		limits: пределы длины текста канала (счётчик под полем).
 		topics: темы форума; пустой список — не форум или не прочитались.
 		topics_error: почему темы не прочитались (пусто — прочитались).
 		"""
@@ -88,6 +91,7 @@ class QueueItemEditDialog(WorkDialog):
 		self._item_id = item_id
 		self._draft = draft
 		self._community = community
+		self._limits = limits
 		self._caps = publish_capabilities(community.bot_id is not None, community.userbot_assigned)
 		self._kind = draft.media_kind
 		# тема, которую пост сохранит, если ряд выбора скрыт: правка
@@ -107,6 +111,7 @@ class QueueItemEditDialog(WorkDialog):
 		self._text = TextEdit(self)
 		self._text.setPlainText(self._draft.text)
 		layout.addWidget(self._text, stretch=1)
+		self._counter = CharCounter(self, layout, self._text)
 		self._when_row = WhenRow(self, layout)
 		self._when_row.set_schedule_allowed(self._caps.userbot, _BOT_ONLY_HINT)
 		self._when_row.set_when(self._draft.when)
@@ -218,6 +223,8 @@ class QueueItemEditDialog(WorkDialog):
 		self._text.setPlaceholderText(
 			"Текст поста…" if is_text else "Подпись к файлу (необязательно)…"
 		)
+		# подпись к файлу вчетверо короче поста без вложения
+		self._counter.set_limit(self._limits.text if is_text else self._limits.caption)
 
 	def _drop_file(self) -> None:
 		"""Убирает вложение: пост становится текстовым."""
@@ -320,10 +327,10 @@ def open_queue_item_editor(
 ) -> None:
 	"""Читает данные элемента и открывает окно правки.
 
-	Цепочка чтений: черновик → сообщество → темы форума (только у форума
-	с userbot-публикатором). Темы не прочитались — окно всё равно
-	откроется, но ряд выбора темы будет скрыт, а пост сохранит свою
-	прежнюю тему. Общая точка входа для панели очереди на «Публикации»
+	Цепочка чтений: черновик → сообщество → пределы длины текста → темы
+	форума (последние — только у форума с userbot-публикатором). Темы
+	не прочитались — окно всё равно откроется, но ряд выбора темы будет
+	скрыт, а пост сохранит свою прежнюю тему. Общая точка входа для панели очереди на «Публикации»
 	и для окна полного просмотра.
 
 	Args:
@@ -337,31 +344,42 @@ def open_queue_item_editor(
 	def show(
 		draft: PostDraft,
 		community: CommunityDto,
+		limits: TextLimits,
 		topics: list[ForumTopicInfo],
 		topics_error: str = "",
 	) -> None:
 		dialog = QueueItemEditDialog(
-			worker, parent, item_id, draft, community, topics, topics_error
+			worker, parent, item_id, draft, community, limits, topics, topics_error
 		)
 		if exec_dialog(dialog) and callable(on_saved):
 			on_saved()
 
-	def with_community(draft: PostDraft, community: CommunityDto) -> None:
+	def with_limits(draft: PostDraft, community: CommunityDto, limits: TextLimits) -> None:
 		caps = publish_capabilities(community.bot_id is not None, community.userbot_assigned)
 		if not community.forum or not caps.userbot:
-			show(draft, community, [])
+			show(draft, community, limits, [])
 			return
 		run_in_engine(
 			worker,
 			worker.engine.posts.list_topics(community.id),
 			parent,
-			lambda topics: show(draft, community, topics),
+			lambda topics: show(draft, community, limits, topics),
 			lambda message: show(
 				draft,
 				community,
+				limits,
 				[],
 				f"Темы форума не загрузились ({message}) — пост останется в своей теме.",
 			),
+		)
+
+	def with_community(draft: PostDraft, community: CommunityDto) -> None:
+		run_in_engine(
+			worker,
+			worker.engine.posts.text_limits(community.id),
+			parent,
+			lambda limits: with_limits(draft, community, limits),
+			show_error,
 		)
 
 	def with_draft(draft: PostDraft) -> None:

@@ -53,11 +53,12 @@ from pxcontrol.engine.services.schedule_plan import (
 )
 from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import ReadyVideo
-from pxcontrol.engine.telegram.types import MediaKind
+from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT, MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DEFAULT_SCHEDULE_OFFSET_S,
+	CharCounter,
 	CollapsibleCard,
 	ErrorLabel,
 	SelectionRow,
@@ -137,6 +138,7 @@ class _BatchRow:
 		video: ReadyVideo,
 		caption: str,
 		oversized: bool,
+		caption_limit: int = CAPTION_LENGTH_LIMIT,
 	) -> None:
 		self.video = video
 		self.card = CardWidget(dialog)
@@ -172,6 +174,9 @@ class _BatchRow:
 		self.caption.setPlainText(caption)
 		self.caption.setFixedHeight(_CAPTION_HEIGHT)
 		box.addWidget(self.caption)
+		# подписи собраны общим шаблоном: предел легко перерастает весь
+		# пакет сразу, и увидеть это лучше здесь, чем при постановке
+		self.counter = CharCounter(self.card, box, self.caption, caption_limit)
 		bottom = QHBoxLayout()
 		self.rename = LineEdit(self.card)
 		self.rename.setPlaceholderText("Переименовать при отправке (пусто — как есть)…")
@@ -199,6 +204,7 @@ class PublishBatchDialog(WorkDialog):
 		used_values: dict[int, list[str]] | None = None,
 		community_times: list[str] | None = None,
 		limit_bytes: int | None = None,
+		caption_limit: int = CAPTION_LENGTH_LIMIT,
 		schedule_allowed: bool = True,
 		busy: list[datetime] | None = None,
 		title_rules: TitleParseRules | None = None,
@@ -207,6 +213,8 @@ class PublishBatchDialog(WorkDialog):
 		подписей); ``filename_template_id`` — шаблон имени файла для
 		переименования (None — не предлагать); ``limit_bytes`` — лимит
 		файла выбранного канала (пометка и снятая галочка у больших);
+		``caption_limit`` — предел длины подписи канала (счётчик под
+		каждой подписью; у Premium-публикатора он выше базового);
 		``schedule_allowed`` — доступна ли отложка (у бот-канала — нет);
 		``busy`` — занятые моменты существующих отложек канала (местное
 		наивное время) — раскладка их пропускает; ``title_rules`` —
@@ -228,7 +236,7 @@ class PublishBatchDialog(WorkDialog):
 		self.content.addWidget(folder)
 		self._build_rules_card(title_rules or TitleParseRules())
 		self._build_strategy_row()
-		self._build_rows(files, caption_lines, limit_bytes)
+		self._build_rows(files, caption_lines, limit_bytes, caption_limit)
 		self._build_selection_row()
 		self._error = ErrorLabel(self)
 		self.content.addWidget(self._error)
@@ -529,6 +537,7 @@ class PublishBatchDialog(WorkDialog):
 		files: list[ReadyVideo],
 		caption_lines: list[CaptionLine] | None,
 		limit_bytes: int | None,
+		caption_limit: int,
 	) -> None:
 		"""Строки черновиков в прокручиваемом списке."""
 		area, box = list_area(self, spacing=density.spacing().list_spacing)
@@ -539,7 +548,7 @@ class PublishBatchDialog(WorkDialog):
 				else ""
 			)
 			oversized = limit_bytes is not None and video.size_bytes > limit_bytes
-			row = _BatchRow(self, video, caption, oversized)
+			row = _BatchRow(self, video, caption, oversized, caption_limit)
 			row.check.stateChanged.connect(self._update_summary)
 			box.addWidget(row.card)
 			self._rows.append(row)

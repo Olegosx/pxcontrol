@@ -900,3 +900,132 @@ async def test_list_scheduled_dedups_identical(db: Database) -> None:
 	gateway.per_account = {first: [same], second: [same]}
 	items = await service.list_scheduled()
 	assert [item.text_preview for item in items] == ["общая"]
+
+
+# --- пределы длины текста ---------------------------------------------------
+
+
+def _media_file(tmp_path: Path) -> str:
+	"""Маленький файл-вложение (проверки длины от размера не зависят)."""
+	video = tmp_path / "ролик.mp4"
+	video.write_bytes(b"video")
+	return str(video)
+
+
+def test_telegram_text_length_counts_utf16_units() -> None:
+	"""Длина считается в кодовых единицах UTF-16, как смещения Telegram."""
+	from pxcontrol.engine.telegram.types import telegram_text_length
+
+	assert telegram_text_length("абв") == 3  # кириллица — по одной единице
+	assert telegram_text_length("a" * 100) == 100
+	assert telegram_text_length("🙂") == 2  # эмодзи вне основной таблицы — две
+	assert telegram_text_length("") == 0
+
+
+def test_text_length_limits_match_telegram() -> None:
+	"""Пределы — значения Telegram; Premium поднимает оба."""
+	from pxcontrol.engine.telegram.types import (
+		CAPTION_LENGTH_LIMIT,
+		CAPTION_LENGTH_LIMIT_PREMIUM,
+		TEXT_LENGTH_LIMIT,
+		TEXT_LENGTH_LIMIT_PREMIUM,
+		text_length_limit,
+	)
+
+	assert (TEXT_LENGTH_LIMIT, TEXT_LENGTH_LIMIT_PREMIUM) == (4096, 8192)
+	assert (CAPTION_LENGTH_LIMIT, CAPTION_LENGTH_LIMIT_PREMIUM) == (1024, 4096)
+	assert text_length_limit(premium=False, with_media=False) == TEXT_LENGTH_LIMIT
+	assert text_length_limit(premium=True, with_media=False) == TEXT_LENGTH_LIMIT_PREMIUM
+	assert text_length_limit(premium=False, with_media=True) == CAPTION_LENGTH_LIMIT
+	assert text_length_limit(premium=True, with_media=True) == CAPTION_LENGTH_LIMIT_PREMIUM
+
+
+def test_validate_draft_allows_premium_ceiling_and_rejects_above() -> None:
+	"""Общая проверка знает только потолок: 8192 проходит, 8193 — нет.
+
+	Канала здесь нет, поэтому отвергать по базовому пределу нельзя —
+	у владельца Premium такой пост законен.
+	"""
+	PostsService.validate_draft(PostDraft(1, text="я" * 8192))
+	with pytest.raises(PostError, match="Текст поста длиннее"):
+		PostsService.validate_draft(PostDraft(1, text="я" * 8193))
+
+
+def test_validate_draft_caption_ceiling_is_lower(tmp_path: Path) -> None:
+	"""У поста с вложением предел другой: потолок подписи — 4096."""
+	media = _media_file(tmp_path)
+	PostsService.validate_draft(
+		PostDraft(1, text="я" * 4096, media_path=media, media_kind=MediaKind.VIDEO)
+	)
+	with pytest.raises(PostError, match="Подпись к файлу длиннее"):
+		PostsService.validate_draft(
+			PostDraft(1, text="я" * 4097, media_path=media, media_kind=MediaKind.VIDEO)
+		)
+
+
+async def test_text_limits_reflect_publisher_premium(db: Database) -> None:
+	"""Пределы канала зависят от Premium его публикатора."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	limits = await service.text_limits(community_id)
+	assert (limits.text, limits.caption) == (4096, 1024)
+	bound = await service.account_for_community(community_id)
+	assert bound is not None
+	gateway.premium_ids = {bound}
+	premium_limits = await service.text_limits(community_id)
+	assert (premium_limits.text, premium_limits.caption) == (8192, 4096)
+
+
+async def test_text_limits_for_draft_picks_caption_with_media(db: Database, tmp_path: Path) -> None:
+	"""Предел выбирается по наличию вложения у черновика."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db)
+	limits = await service.text_limits(community_id)
+	assert limits.for_draft(PostDraft(community_id, text="текст")) == limits.text
+	with_media = PostDraft(
+		community_id, media_path=_media_file(tmp_path), media_kind=MediaKind.VIDEO
+	)
+	assert limits.for_draft(with_media) == limits.caption
+
+
+async def test_publish_rejects_caption_over_channel_limit(db: Database, tmp_path: Path) -> None:
+	"""Подпись длиннее предела канала не уходит; у Premium та же проходит."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	draft = PostDraft(
+		community_id,
+		text="я" * 1025,
+		media_path=_media_file(tmp_path),
+		media_kind=MediaKind.VIDEO,
+	)
+	with pytest.raises(PostError, match="Подпись к файлу длиннее"):
+		await service.publish(draft)
+	assert gateway.published == []
+	bound = await service.account_for_community(community_id)
+	assert bound is not None
+	gateway.premium_ids = {bound}
+	await service.publish(draft)
+	assert len(gateway.published) == 1
+
+
+async def test_check_draft_limits_rejects_before_sending(db: Database) -> None:
+	"""Точная проверка канала доступна отдельно — очередь зовёт её при постановке."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db)
+	await service.check_draft_limits(PostDraft(community_id, text="я" * 4096))
+	with pytest.raises(PostError, match="Текст поста длиннее"):
+		await service.check_draft_limits(PostDraft(community_id, text="я" * 4097))
+
+
+async def test_bot_path_uses_base_limits(db: Database) -> None:
+	"""Бот-путь всегда базовый: подписки у ботов не бывает."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, userbot_assigned=False)
+	await service.publish(PostDraft(community_id, text="я" * 4096))
+	assert len(gateway.sent) == 1
+	with pytest.raises(PostError, match="Текст поста длиннее"):
+		await service.publish(PostDraft(community_id, text="я" * 4097))
+	assert len(gateway.sent) == 1
