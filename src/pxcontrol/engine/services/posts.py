@@ -554,6 +554,22 @@ class PostsService:
 		if self._relative_to_root(source_parent, VIDEO_PROCESSED_DIR) is not None:
 			prune_empty_dirs(source_parent, processed_root, mirror_root=queued_root)
 
+	def pipeline_file(self, media_path: str) -> bool:
+		"""Файл принадлежит конвейеру обработки видео (ADR-0016).
+
+		True — файл лежит в папке результатов или в папке очереди, то есть
+		движок водит его по маршруту ``processed → queued → published``.
+		Маршрут определён только для видео, поэтому такой файл нельзя
+		отправить фото или документом: правка очереди сверяется с этим
+		признаком до переноса файла (``stash_for_queue`` — та же проверка
+		на своей стороне, для постановки).
+		"""
+		path = Path(media_path)
+		return (
+			self._relative_to_root(path, VIDEO_PROCESSED_DIR) is not None
+			or self._relative_to_root(path, VIDEO_QUEUED_DIR) is not None
+		)
+
 	def _relative_to_root(self, path: Path, key: SettingKey[str]) -> Path | None:
 		"""Путь относительно корня папки видео; None — файл вне корня."""
 		root = video_base_dir(self._settings, key)

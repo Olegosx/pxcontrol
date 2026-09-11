@@ -71,6 +71,21 @@ class QueueItemStatus(StrEnum):
 #: отправки при загрузке очереди выглядит как PENDING и уходит повторно).
 _PERSISTED = (QueueItemStatus.PENDING, QueueItemStatus.WAITING, QueueItemStatus.ERROR)
 
+#: Статусы, в которых элемент правится (:meth:`PublishQueue.edit`): всё,
+#: что ещё не ушло в Telegram. Набор совпадает с ``_PERSISTED`` не случайно
+#: (в БД хранится именно неотправленное), но живёт отдельно: правила разные,
+#: и расходиться им ничто не мешает.
+_EDITABLE = (QueueItemStatus.PENDING, QueueItemStatus.WAITING, QueueItemStatus.ERROR)
+
+#: Статусы, после которых элемент покинул очередь: строки в БД нет, файл
+#: вернулся в результаты или уехал в опубликованные. Ошибки среди них нет —
+#: элемент с ней остаётся в очереди и ждёт правки или повтора (ADR-0016);
+#: по той же причине здесь не годится ``QueueItemStatus.finished()``: для неё
+#: ошибка — завершённый исход попытки, а для очереди — живой элемент.
+#: Публичная: тем же набором движок отвечает на вопрос «очередь пуста?»
+#: при смене папки очереди (``Engine.update_video_folders``).
+LEFT_QUEUE = (QueueItemStatus.DONE, QueueItemStatus.CANCELLED)
+
 
 @dataclass(frozen=True)
 class QueueItemDto:
@@ -119,6 +134,9 @@ class _Item:
 		self.note: str | None = None  # пометка карточки (флуд-пауза)
 		# отмену запросил пользователь (отличает её от остановки движка)
 		self.cancel_requested = False
+		# идёт сохранение правки: воркер и дозор слотов такой элемент
+		# не трогают, пока правка не завершится (см. PublishQueue.edit)
+		self.editing = False
 		# канал удаляется: по исходу элемент снимается и с показа
 		self.drop_on_finish = False
 
@@ -373,6 +391,130 @@ class PublishQueue:
 			logger.info("Элемент id=%s возвращён в очередь на повтор.", item_id)
 			return
 
+	async def get_draft(self, item_id: int) -> PostDraft:
+		"""Черновик элемента для окна правки.
+
+		Отдаётся с учётом уже выполненного переименования
+		(:func:`refresh_draft_media`): неудачная попытка могла оставить
+		файл под новым именем, и окно должно показывать тот путь,
+		который есть на диске.
+
+		Raises:
+			PostError: Элемент не найден или его нельзя править
+				(отправляется, уже ушёл).
+		"""
+		return refresh_draft_media(self._editable(item_id).draft)
+
+	async def edit(self, item_id: int, draft: PostDraft) -> None:
+		"""Заменяет черновик элемента очереди и возвращает его в работу.
+
+		Правятся неотправленные элементы: ждущий слота, стоящий
+		в очереди и остановленный ошибкой. Отправляющийся не правится — файл уже
+		грузится в Telegram (сначала «Отмена»). Канал-получатель
+		не меняется: у другого канала свои темы, лимит файла и права
+		на отложенную публикацию — это была бы другая публикация.
+
+		После сохранения элемент всегда возвращается в работу: «сейчас»
+		уходит в отправку, отложенный — ждать слота (просроченное время
+		снимается так же, как при повторе). Ошибка прошлой попытки
+		забывается — иначе на карточке висел бы неактуальный текст.
+
+		Файлы ездят по правилам ADR-0016: новое вложение из папки
+		результатов переносится в папку очереди, прежнее — возвращается
+		в результаты. Сбой на любом шаге откатывает перенос: элемент
+		остаётся с прежним черновиком, файлы — на своих местах.
+
+		Raises:
+			PostError: Элемент не найден или не правится; черновик
+				не годится к отправке; смена канала; файл конвейера
+				обработки отправляется не как видео; перенос не удался.
+		"""
+		item = self._editable(item_id)
+		current = refresh_draft_media(item.draft)
+		if draft.community_id != current.community_id:
+			raise PostError(
+				"Канал поста в очереди не меняется — отмените его и создайте пост в нужном канале."
+			)
+		self._posts.validate_draft(draft)
+		self._check_pipeline_kind(draft)
+		status = self._initial_status(draft)
+		# флаг взводится до первого ожидания: воркер выбирает элемент
+		# и помечает его SENDING без единой точки приостановки, поэтому
+		# элемент, помеченный здесь, он уже не подхватит
+		item.editing = True
+		try:
+			stashed_drafts, moved = await self._stash_all([draft])
+			stashed = stashed_drafts[0]
+			try:
+				if item.status in LEFT_QUEUE or item not in self._items:
+					# пока переносили файл, элемент отменили или канал удалили
+					raise PostError("Пост уже покинул очередь — правка не сохранена.")
+				await self._persist_draft(item.id, stashed, status)
+			except BaseException:
+				await self._unstash_moved(moved)
+				raise
+			if current.media_path is not None and current.media_path != stashed.media_path:
+				# прежнее вложение больше не принадлежит очереди
+				await self._posts.unstash_from_queue(current.media_path)
+			item.draft = stashed
+			item.status = status
+			item.progress = 0.0
+			item.error = None
+			# флаг мог взвестись отменой, совпавшей с ошибкой прошлой
+			# попытки (та же причина, что в retry)
+			item.cancel_requested = False
+		finally:
+			item.editing = False
+		self._ensure_worker()
+		self._request_slot_check()
+		logger.info(
+			"Элемент id=%s изменён: %s (%s).",
+			item_id,
+			_draft_title(stashed),
+			"ждёт слота отложек" if status is QueueItemStatus.WAITING else "в очереди",
+		)
+
+	def _editable(self, item_id: int) -> _Item:
+		"""Элемент, который можно править, — или понятный отказ.
+
+		Raises:
+			PostError: Элемент не найден, отправляется, уже завершён
+				или прямо сейчас правится другим окном.
+		"""
+		for item in self._items:
+			if item.id != item_id:
+				continue
+			if item.status is QueueItemStatus.SENDING:
+				raise PostError("Пост уже отправляется — сначала отмените отправку, потом правьте.")
+			if item.status not in _EDITABLE:
+				raise PostError("Пост уже покинул очередь — править нечего.")
+			if item.editing:
+				raise PostError("Пост правится в другом окне — дождитесь сохранения.")
+			return item
+		raise PostError("Элемент очереди не найден — обновите список.")
+
+	def _check_pipeline_kind(self, draft: PostDraft) -> None:
+		"""Отклоняет смену типа у файла конвейера обработки (ADR-0016).
+
+		Маршрут ``processed → queued → published`` определён только для
+		видео: тот же файл, объявленный фото или документом, после
+		отправки остался бы в папке очереди навсегда и блокировал уборку
+		её папок (инвариант зеркала). Постановка проверяет это со своей
+		стороны (``stash_for_queue``), правка — со своей: её файл уже
+		лежит в папке очереди, и переносить его никто не будет.
+
+		Raises:
+			PostError: Файл конвейера отправляется не как видео.
+		"""
+		if draft.media_path is None or draft.media_kind is MediaKind.VIDEO:
+			return
+		if self._posts.pipeline_file(draft.media_path):
+			raise PostError(
+				f"«{Path(draft.media_path).name}» — файл конвейера обработки видео, "
+				"отправить его можно только видео. Чтобы отправить его как фото "
+				"или документ, скопируйте файл в другую папку."
+			)
+
 	async def drop_community(self, community_id: int) -> None:
 		"""Снимает все элементы канала из очереди (канал удаляется).
 
@@ -578,6 +720,8 @@ class PublishQueue:
 					for item in self._items
 					if item.status is QueueItemStatus.WAITING
 					and item.draft.community_id == community_id
+					# правка сама поставит элементу статус по новому времени
+					and not item.editing
 				),
 				key=lambda item: item.draft.when or fallback,
 			)
@@ -647,6 +791,29 @@ class PublishQueue:
 			)
 			await session.commit()
 
+	async def _persist_draft(self, item_id: int, draft: PostDraft, status: QueueItemStatus) -> None:
+		"""Переписывает строку элемента новым черновиком и статусом.
+
+		Ошибка прошлой попытки стирается вместе с черновиком: правка
+		отменяет исход, к которому та ошибка относилась.
+		"""
+		async with self._db.session_factory() as session:
+			await session.execute(
+				update(PublishQueueItem)
+				.where(PublishQueueItem.id == item_id)
+				.values(
+					text=draft.text,
+					media_path=draft.media_path,
+					media_kind=str(draft.media_kind),
+					when=draft.when,
+					rename_to=draft.rename_to,
+					topic_id=draft.topic_id,
+					status=status.value,
+					error=None,
+				)
+			)
+			await session.commit()
+
 	async def _delete_row(self, item_id: int) -> None:
 		"""Удаляет строку элемента (отправлен или покинул очередь)."""
 		async with self._db.session_factory() as session:
@@ -678,9 +845,14 @@ class PublishQueue:
 			await self._send(item)
 
 	def _next_pending(self) -> _Item | None:
-		"""Первый готовый к отправке элемент (ждущие слота пропускаются)."""
+		"""Первый готовый к отправке элемент.
+
+		Пропускаются ждущие слота и тот, чья правка сейчас сохраняется
+		(:meth:`edit`): забрать его в отправку значило бы отправить
+		наполовину применённый черновик.
+		"""
 		for item in self._items:
-			if item.status is QueueItemStatus.PENDING:
+			if item.status is QueueItemStatus.PENDING and not item.editing:
 				return item
 		return None
 

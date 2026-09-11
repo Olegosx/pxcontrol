@@ -935,3 +935,278 @@ async def test_drop_community_during_prepare_cancels_not_errors(
 	await _wait_queue_empty(queue)  # исход — CANCELLED и снятие, не ERROR
 	assert gateway.published == []
 	await queue.shutdown()
+
+
+# --- правка элемента очереди -------------------------------------------------
+
+
+async def _statuses(queue: PublishQueue) -> dict[int, QueueItemDto]:
+	"""Снимок очереди по идентификаторам элементов."""
+	return {item.id: item for item in await queue.state()}
+
+
+async def test_edit_fixes_failed_item_and_sends_it(db: Database, make_queue: QueueFactory) -> None:
+	"""Правка поста с ошибкой возвращает его в работу с чистым исходом."""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	gateway.fail_texts = {"сбойный"}
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(PostDraft(community_id, text="сбойный"))
+	await _wait_status(queue, item, QueueItemStatus.ERROR)
+	gateway.fail_texts = set()
+	await queue.edit(item, PostDraft(community_id, text="исправленный"))
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert [post.text for post in gateway.published] == ["исправленный"]
+	assert (await _statuses(queue))[item].error is None
+
+
+async def test_edit_keeps_row_in_sync_with_new_draft(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Правка переписывает строку очереди: перезапуск увидит новый черновик."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(PostDraft(community_id, text="было", when=_future(120)))
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	when = _future(300)
+	await queue.edit(item, PostDraft(community_id, text="стало", when=when, topic_id=7))
+	async with db.session_factory() as session:
+		row = (
+			await session.execute(select(PublishQueueItem).where(PublishQueueItem.id == item))
+		).scalar_one()
+		assert row.text == "стало"
+		assert row.topic_id == 7
+		assert row.status == QueueItemStatus.WAITING.value
+		assert row.when.replace(tzinfo=UTC) == when.replace(microsecond=row.when.microsecond)
+
+
+async def test_edit_replaces_media_file(
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Замена вложения: новый файл уходит в очередь, прежний — в результаты."""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	replacement = _make_video(processed, "другой.mp4")
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	when = _future(120)
+	item = await queue.enqueue(
+		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=when)
+	)
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	queued_root = tmp_path / "media" / "queued" / "суб"
+	await queue.edit(
+		item,
+		PostDraft(
+			community_id,
+			media_path=str(replacement),
+			media_kind=MediaKind.VIDEO,
+			when=when,
+		),
+	)
+	assert (queued_root / "другой.mp4").is_file()
+	assert (queued_root / "другой.png").is_file()  # кадр-превью едет следом
+	assert not (queued_root / "ролик.mp4").exists()
+	assert video.is_file()  # прежний вернулся в «Готовые видео»
+
+
+async def test_edit_drops_media_and_returns_file(
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Удаление вложения делает пост текстовым, файл возвращается в результаты."""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	when = _future(120)
+	item = await queue.enqueue(
+		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=when)
+	)
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	await queue.edit(item, PostDraft(community_id, text="теперь просто текст", when=when))
+	assert video.is_file() and video.with_suffix(".png").is_file()
+	assert not (tmp_path / "media" / "queued" / "суб" / "ролик.mp4").exists()
+	draft = await queue.get_draft(item)
+	assert draft.media_path is None and draft.media_kind is MediaKind.NONE
+
+
+async def test_edit_adds_media_to_text_post(
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Текстовому посту можно добавить файл — он уезжает в папку очереди."""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	when = _future(120)
+	item = await queue.enqueue(PostDraft(community_id, text="подпись", when=when))
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	await queue.edit(
+		item,
+		PostDraft(
+			community_id,
+			text="подпись",
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+			when=when,
+		),
+	)
+	assert (tmp_path / "media" / "queued" / "суб" / "ролик.mp4").is_file()
+	assert not video.exists()
+
+
+async def test_edit_switches_between_now_and_scheduled(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Время решает статус: «сейчас» — в отправку, отложенное — ждать слота."""
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	held = await queue.enqueue(PostDraft(community_id, text="держит воркер"))
+	await _wait_status(queue, held, QueueItemStatus.SENDING)
+	item = await queue.enqueue(PostDraft(community_id, text="пост"))
+	assert (await _statuses(queue))[item].status is QueueItemStatus.PENDING
+	await queue.edit(item, PostDraft(community_id, text="пост", when=_future(120)))
+	await queue.settle()
+	assert (await _statuses(queue))[item].status is QueueItemStatus.WAITING
+	await queue.edit(item, PostDraft(community_id, text="пост"))
+	assert (await _statuses(queue))[item].status is QueueItemStatus.PENDING
+	gateway.release.set()
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert gateway.published[-1].when is None
+
+
+async def test_worker_skips_item_while_edit_is_saving(
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Пока правка сохраняется, воркер не забирает элемент в отправку.
+
+	Иначе в Telegram уехал бы наполовину применённый черновик: файл уже
+	перенесён, а текст и время — ещё прежние.
+	"""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlowGateway()
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	held = await queue.enqueue(PostDraft(community_id, text="держит воркер"))
+	await _wait_status(queue, held, QueueItemStatus.SENDING)
+	item = await queue.enqueue(PostDraft(community_id, text="правится"))
+	entered = asyncio.Event()
+	proceed = asyncio.Event()
+	original = queue._posts.stash_for_queue  # noqa: SLF001 — подмена долгого переноса
+
+	async def slow_stash(media_path: str, media_kind: MediaKind) -> str:
+		entered.set()
+		await proceed.wait()
+		return await original(media_path, media_kind)
+
+	monkeypatch.setattr(queue._posts, "stash_for_queue", slow_stash)  # noqa: SLF001
+	editing = asyncio.create_task(
+		queue.edit(
+			item,
+			PostDraft(
+				community_id,
+				text="правится",
+				media_path=str(video),
+				media_kind=MediaKind.VIDEO,
+			),
+		)
+	)
+	await entered.wait()
+	gateway.release.set()  # воркер дописывает первый и идёт за следующим
+	await _wait_status(queue, held, QueueItemStatus.DONE)
+	assert (await _statuses(queue))[item].status is QueueItemStatus.PENDING
+	proceed.set()
+	await editing
+	await _wait_status(queue, item, QueueItemStatus.DONE)
+	assert [post.media_path for post in gateway.published][-1] is not None
+
+
+async def test_edit_rejects_sending_item(db: Database, make_queue: QueueFactory) -> None:
+	"""Отправляющийся пост не правится — сначала отмена."""
+	gateway = _SlowGateway()
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(PostDraft(community_id, text="в полёте"))
+	await _wait_status(queue, item, QueueItemStatus.SENDING)
+	with pytest.raises(PostError, match="уже отправляется"):
+		await queue.edit(item, PostDraft(community_id, text="поздно"))
+	with pytest.raises(PostError, match="уже отправляется"):
+		await queue.get_draft(item)
+	gateway.release.set()
+
+
+async def test_edit_rejects_community_change(db: Database, make_queue: QueueFactory) -> None:
+	"""Канал-получатель правкой не меняется: у другого канала свои правила."""
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	other_id = await _add_community(db, tg_chat_id="-1002", title="Другой")
+	item = await queue.enqueue(PostDraft(community_id, text="пост", when=_future(120)))
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	with pytest.raises(PostError, match="не меняется"):
+		await queue.edit(item, PostDraft(other_id, text="пост", when=_future(120)))
+	assert (await queue.get_draft(item)).community_id == community_id
+
+
+async def test_edit_rejects_pipeline_file_as_document(
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Файл конвейера обработки нельзя переобъявить документом (ADR-0016)."""
+	processed = _media(tmp_path, monkeypatch)
+	video = _make_video(processed)
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	when = _future(120)
+	item = await queue.enqueue(
+		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=when)
+	)
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	queued = tmp_path / "media" / "queued" / "суб" / "ролик.mp4"
+	with pytest.raises(PostError, match="только видео"):
+		await queue.edit(
+			item,
+			PostDraft(
+				community_id, media_path=str(queued), media_kind=MediaKind.DOCUMENT, when=when
+			),
+		)
+	assert queued.is_file()  # отклонённая правка не трогает диск
+	assert (await queue.get_draft(item)).media_kind is MediaKind.VIDEO
+
+
+async def test_edit_rejects_empty_draft_and_keeps_item(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Негодный черновик отклоняется, прежний остаётся в силе."""
+	gateway = _SlotGateway()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(PostDraft(community_id, text="было", when=_future(120)))
+	await _wait_status(queue, item, QueueItemStatus.WAITING)
+	with pytest.raises(PostError, match="пуст"):
+		await queue.edit(item, PostDraft(community_id, when=_future(120)))
+	assert (await queue.get_draft(item)).text == "было"
+	assert (await _statuses(queue))[item].status is QueueItemStatus.WAITING
+
+
+async def test_get_draft_reports_missing_item(db: Database, make_queue: QueueFactory) -> None:
+	"""Элемента нет — понятный отказ вместо пустоты."""
+	queue = make_queue(_SlowGateway())
+	with pytest.raises(PostError, match="не найден"):
+		await queue.get_draft(404)
