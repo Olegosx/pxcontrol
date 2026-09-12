@@ -64,6 +64,16 @@ class UserbotAccessError(UserbotUnavailableError):
 	"""Подтверждённый отказ Telegram: нет прав или канал не виден."""
 
 
+class UserbotDeleteForbiddenError(UserbotUnavailableError):
+	"""Telegram отказался удалять сообщения (``MESSAGE_DELETE_FORBIDDEN``).
+
+	Отдельный класс: обслуживание по нему считает пачку пропущенной
+	и продолжает проход, а не валит задание (ADR-0026). Отказ приходит
+	на защищённых записях (создание сообщества, передача владения)
+	и на чужих сообщениях без права их удалять.
+	"""
+
+
 class UserbotScheduleFullError(UserbotUnavailableError):
 	"""Все слоты отложенных сообщений канала заняты (лимит 100, ADR-0016).
 
@@ -138,10 +148,11 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		| errors.UserDeactivatedError,
 	):
 		return UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
-	if isinstance(exc, errors.FloodWaitError):
-		return UserbotFloodError(
-			f"Telegram просит подождать {exc.seconds} с.", retry_after_s=exc.seconds
-		)
+	if isinstance(exc, errors.MessageDeleteForbiddenError):
+		# отказ в удалении — не сбой прохода, а пропуск записи (ADR-0026).
+		# Перевод живёт здесь, а не отдельной веткой except у операции:
+		# там его уже не поймать — этот маппер переводит раньше
+		return UserbotDeleteForbiddenError("Telegram не разрешает удалить эти записи.")
 	if isinstance(exc, errors.SlowModeWaitError):
 		# медленный режим группы действует на участников (ADR-0022):
 		# по природе это «подожди и повтори» — очередь умеет сама
@@ -149,6 +160,18 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 			f"Медленный режим группы: подождать {exc.seconds} с.",
 			retry_after_s=exc.seconds,
 		)
+	if isinstance(exc, errors.FloodError):
+		# всё семейство лимитов, назвавшее срок: обычный флуд-лимит,
+		# отдельный лимит на загрузку медиа у не-Premium аккаунта
+		# (FLOOD_PREMIUM_WAIT) и прочие «подождите N секунд».
+		# Перечислять классы поимённо нельзя: семейство пополняется,
+		# а в нём есть и бессрочные (FrozenMethodInvalidError) — срока
+		# они не называют и уходят в общую ветку ниже
+		seconds = getattr(exc, "seconds", None)
+		if isinstance(seconds, int):
+			return UserbotFloodError(
+				f"Telegram просит подождать {seconds} с.", retry_after_s=seconds
+			)
 	if isinstance(exc, errors.ScheduleTooMuchError):
 		return UserbotScheduleFullError(
 			f"Все слоты отложенных сообщений канала заняты (лимит Telegram — "
@@ -792,8 +815,13 @@ class MtprotoTransport:
 		return ServiceMessagesPage(
 			messages=found,
 			scanned=len(history),
-			# история кончилась, когда Telegram отдал меньше, чем просили
-			next_offset_id=oldest.id if oldest is not None and len(history) >= limit else None,
+			# история кончилась только на пустой странице. Короткая
+			# страница концом не считается: Telegram отдаёт меньше
+			# запрошенного и в середине истории (скрытые по местным
+			# законам записи, пропуски), а Telethon вдобавок выбрасывает
+			# пустышки — счёт занижается. Второй честный признак конца:
+			# самая старая запись с номером 1, раньше неё ничего нет
+			next_offset_id=oldest.id if oldest is not None and oldest.id > 1 else None,
 			oldest_date=oldest.date if oldest is not None else None,
 		)
 
@@ -811,9 +839,11 @@ class MtprotoTransport:
 			UserbotAccessError: Нет права удалять (подтверждённый отказ).
 			UserbotFloodError: Флуд-лимит — обход прекращается.
 			UserbotUnavailableError: Прочие отказы Telegram.
-		"""
-		from telethon import errors
 
+		Note:
+			:class:`UserbotDeleteForbiddenError` наружу не выходит —
+			это и есть пропуск пачки (0 удалённых).
+		"""
 		if not message_ids:
 			return 0
 		client = await self._connected_client()
@@ -821,9 +851,7 @@ class MtprotoTransport:
 		try:
 			async with _mtproto_errors():
 				await client.delete_messages(peer_id, message_ids)
-		except UserbotUnavailableError:
-			raise
-		except errors.MessageDeleteForbiddenError:
+		except UserbotDeleteForbiddenError:
 			logger.info(
 				"Удаление %d служебных записей чата %s отклонено Telegram — пропускаем.",
 				len(message_ids),
@@ -867,11 +895,17 @@ class MtprotoTransport:
 				)
 			)
 		users = list(getattr(result, "users", []))
+		# смещение двигают участники, а не карточки пользователей: у части
+		# участников карточки нет (вышедшие, заблокированные каналы),
+		# и счёт по `users` уводил бы смещение назад — часть списка
+		# читалась бы дважды, часть не читалась бы вовсе
+		step = len(getattr(result, "participants", users))
 		return ParticipantsPage(
 			deleted_ids=[user.id for user in users if getattr(user, "deleted", False)],
 			scanned=len(users),
-			# страница неполна — значит список кончился
-			next_offset=offset + len(users) if len(users) >= limit else None,
+			# список кончился, когда страница пуста; короткая страница
+			# концом не считается (см. `service_messages_page`)
+			next_offset=offset + step if step else None,
 			total=getattr(result, "count", None),
 		)
 

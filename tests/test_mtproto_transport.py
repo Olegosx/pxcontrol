@@ -12,6 +12,7 @@ import pytest
 
 from pxcontrol.engine.telegram.mtproto import (
 	MtprotoTransport,
+	UserbotFloodError,
 	UserbotNotConnectedError,
 	UserbotSessionExpiredError,
 	UserbotUnavailableError,
@@ -640,7 +641,7 @@ def test_translate_slow_mode_into_flood() -> None:
 	"""
 	from telethon import errors
 
-	from pxcontrol.engine.telegram.mtproto import UserbotFloodError, _translate_error
+	from pxcontrol.engine.telegram.mtproto import _translate_error
 
 	exc = errors.SlowModeWaitError(request=None)
 	exc.seconds = 30
@@ -679,7 +680,6 @@ async def test_gateway_flood_freezes_whole_account() -> None:
 	from telethon import errors
 
 	from pxcontrol.engine.telegram.gateway import TelegramGateway
-	from pxcontrol.engine.telegram.mtproto import UserbotFloodError
 
 	class _FloodingClient(_FakeClient):
 		"""Клиент, на котором Telegram просит подождать; считает обращения."""
@@ -722,3 +722,215 @@ async def test_gateway_flood_freezes_whole_account() -> None:
 	await gateway.publish(20, "-1002", OutgoingPost(text="два"))
 	assert len(calm.sent) == 1
 	await gateway.stop()
+
+
+# --- операции обслуживания сообщества (ADR-0026) ------------------------------
+
+
+class _MaintenanceClient(_FakeClient):
+	"""Подставной клиент для чистки: история, участники, удаление."""
+
+	def __init__(self) -> None:
+		super().__init__()
+		#: страницы истории в порядке выдачи (каждая — список сообщений)
+		self.history_pages: list[list[Any]] = []
+		#: страницы участников: пары «участники, карточки пользователей»
+		self.participant_pages: list[tuple[list[Any], list[Any]]] = []
+		self.history_calls: list[tuple[int, int]] = []
+		self.participant_offsets: list[int] = []
+		self.deleted: list[list[int]] = []
+		self.delete_error: Exception | None = None
+
+	async def get_messages(self, entity: Any, limit: int, offset_id: int) -> list[Any]:
+		self.history_calls.append((limit, offset_id))
+		if not self.history_pages:
+			return []
+		return self.history_pages.pop(0)
+
+	async def delete_messages(self, entity: Any, message_ids: list[int]) -> None:
+		if self.delete_error is not None:
+			raise self.delete_error
+		self.deleted.append(list(message_ids))
+
+	async def __call__(self, request: Any) -> Any:
+		if type(request).__name__ == "GetParticipantsRequest":
+			self.participant_offsets.append(request.offset)
+			if not self.participant_pages:
+				return SimpleNamespace(participants=[], users=[], count=0)
+			participants, users = self.participant_pages.pop(0)
+			return SimpleNamespace(participants=participants, users=users, count=99)
+		return await super().__call__(request)
+
+
+def _service_message(message_id: int, action: Any) -> Any:
+	"""Служебная запись Telegram с заданным действием."""
+	from telethon.tl import types
+
+	return types.MessageService(
+		id=message_id,
+		peer_id=types.PeerChannel(1),
+		date=datetime(2026, 9, 1, tzinfo=UTC),
+		action=action,
+	)
+
+
+def _plain_message(message_id: int) -> Any:
+	"""Обычный пост (не служебный) — чистка его не трогает."""
+	from telethon.tl import types
+
+	return types.Message(id=message_id, peer_id=types.PeerChannel(1), message="пост")
+
+
+async def test_service_page_picks_only_service_messages() -> None:
+	"""Со страницы истории отбираются только служебные записи."""
+	from telethon.tl import types
+
+	fake = _MaintenanceClient()
+	fake.history_pages = [
+		[
+			_service_message(30, types.MessageActionPinMessage()),
+			_plain_message(29),
+			_service_message(28, types.MessageActionChatEditTitle(title="новое")),
+		]
+	]
+	transport = _transport(fake)
+
+	page = await transport.service_messages_page("-1001", offset_id=0, limit=100)
+
+	assert [m.id for m in page.messages] == [30, 28]
+	assert page.scanned == 3  # просмотрены все, включая обычный пост
+	assert page.oldest_date == datetime(2026, 9, 1, tzinfo=UTC)
+
+
+async def test_short_history_page_is_not_the_end() -> None:
+	"""Короткая страница концом истории не считается.
+
+	Telegram отдаёт меньше запрошенного и в середине истории — опора
+	на «пришло меньше, чем просили» обрывала проход раньше времени
+	и давала отчёт с недосчитанными записями (ADR-0026, п. 7).
+	"""
+	from telethon.tl import types
+
+	fake = _MaintenanceClient()
+	fake.history_pages = [[_service_message(50, types.MessageActionPinMessage())]]
+	transport = _transport(fake)
+
+	page = await transport.service_messages_page("-1001", offset_id=0, limit=100)
+
+	assert page.next_offset_id == 50  # проход продолжится от самой старой
+
+
+async def test_empty_history_page_ends_the_scan() -> None:
+	"""Пустая страница — честный конец истории."""
+	fake = _MaintenanceClient()
+	fake.history_pages = [[]]
+	transport = _transport(fake)
+
+	page = await transport.service_messages_page("-1001", offset_id=7, limit=100)
+
+	assert page.next_offset_id is None
+	assert page.scanned == 0
+	assert page.oldest_date is None
+
+
+async def test_first_message_ends_the_scan() -> None:
+	"""Дошли до записи номер 1 — раньше неё в чате ничего нет."""
+	from telethon.tl import types
+
+	fake = _MaintenanceClient()
+	fake.history_pages = [[_service_message(1, types.MessageActionPinMessage())]]
+	transport = _transport(fake)
+
+	page = await transport.service_messages_page("-1001", offset_id=5, limit=100)
+
+	assert page.next_offset_id is None
+
+
+async def test_delete_refusal_is_a_skip_not_a_failure() -> None:
+	"""Отказ Telegram удалять — пропуск пачки, а не сбой задания (ADR-0026)."""
+	from telethon import errors
+
+	fake = _MaintenanceClient()
+	fake.delete_error = errors.MessageDeleteForbiddenError(request=None)
+	transport = _transport(fake)
+
+	gone = await transport.delete_messages("-1001", [11, 12, 13])
+
+	assert gone == 0  # ни одна не удалена, но исключения нет
+	assert fake.deleted == []
+
+
+async def test_delete_reports_flood_to_the_caller() -> None:
+	"""Флуд-лимит при удалении доходит до вызывающего — проход прекращается."""
+	from telethon import errors
+
+	fake = _MaintenanceClient()
+	fake.delete_error = errors.FloodWaitError(request=None, capture=33)
+	transport = _transport(fake)
+
+	with pytest.raises(UserbotFloodError) as flood:
+		await transport.delete_messages("-1001", [11])
+	assert flood.value.retry_after_s == 33
+
+
+async def test_participants_page_picks_deleted_and_steps_by_participants() -> None:
+	"""Отбираются удалённые учётки, а смещение двигают участники.
+
+	Карточка пользователя есть не у каждого участника, поэтому шаг
+	по ``users`` уводил бы смещение назад — часть списка читалась бы
+	дважды, часть не читалась бы вовсе.
+	"""
+	from telethon.tl import types
+
+	fake = _MaintenanceClient()
+	participants = [
+		types.ChannelParticipant(user_id=n, date=datetime(2026, 9, 1, tzinfo=UTC))
+		for n in (1, 2, 3)
+	]
+	users = [
+		types.User(id=1, deleted=True, first_name=None),
+		types.User(id=2, deleted=False, first_name="Жив"),
+	]
+	fake.participant_pages = [(participants, users)]
+	transport = _transport(fake)
+
+	page = await transport.participants_page("-1001", offset=10, limit=200)
+
+	assert page.deleted_ids == [1]
+	assert page.scanned == 2
+	assert page.next_offset == 13  # 10 + три участника, а не две карточки
+	assert page.total == 99
+
+
+async def test_empty_participants_page_ends_the_walk() -> None:
+	"""Пустая страница участников — конец списка."""
+	fake = _MaintenanceClient()
+	fake.participant_pages = []
+	transport = _transport(fake)
+
+	page = await transport.participants_page("-1001", offset=200, limit=200)
+
+	assert page.next_offset is None
+	assert page.deleted_ids == []
+
+
+async def test_premium_upload_limit_is_a_wait_not_an_error() -> None:
+	"""Лимит загрузки медиа у не-Premium аккаунта — «подождать», а не сбой.
+
+	FLOOD_PREMIUM_WAIT приходит отдельным классом Telethon; пока его
+	не узнавали, очередь хоронила пост ошибкой вместо ожидания.
+	"""
+	from telethon import errors
+
+	class _PremiumLimited(_FakeClient):
+		async def send_file(self, entity: Any, file: str, **kwargs: Any) -> None:
+			raise errors.FloodPremiumWaitError(request=None, capture=17)
+
+	fake = _PremiumLimited()
+	transport = _transport(fake)
+
+	with pytest.raises(UserbotFloodError) as flood:
+		await transport.publish(
+			"-1001", OutgoingPost(text="видео", media_path="/tmp/x.mp4", media_kind=MediaKind.VIDEO)
+		)
+	assert flood.value.retry_after_s == 17
