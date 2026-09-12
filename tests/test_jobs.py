@@ -368,3 +368,110 @@ async def test_deferred_job_can_return_to_queue() -> None:
 	await queue.wait_idle()
 	assert job.status is JobStatus.DONE
 	assert attempts == 2  # вернулось в очередь и ушло со второй попытки
+
+
+# --- крючки очереди: record, ready, cooldown -----------------------------------
+
+
+async def test_record_runs_before_status_appears_in_memory() -> None:
+	"""Исход сначала сохраняется, потом виден в памяти (ADR-0016).
+
+	Порядок именно такой: наблюдатель, увидевший исход в памяти,
+	должен быть уверен, что хранилище о нём уже знает.
+	"""
+	seen: list[tuple[JobStatus, JobStatus]] = []
+
+	async def execute(job: _TestJob) -> None:
+		return None
+
+	async def record(job: _TestJob, status: JobStatus, error: str | None) -> None:
+		# в момент записи память ещё хранит прежний статус
+		seen.append((status, job.status))
+
+	queue = _queue(execute, record=record)
+	_put(queue, "раз")
+	queue.ensure_worker()
+	await queue.wait_idle()
+
+	assert seen == [(JobStatus.DONE, JobStatus.RUNNING)]
+
+
+async def test_storage_failure_does_not_kill_the_worker() -> None:
+	"""Сбой записи исхода не роняет очередь и не прячется.
+
+	Иначе задание навсегда осталось бы «выполняется», а следующие
+	не начались бы вовсе: воркер умирал молча.
+	"""
+	done: list[str] = []
+
+	async def execute(job: _TestJob) -> None:
+		done.append(job.label)
+
+	async def record(job: _TestJob, status: JobStatus, error: str | None) -> None:
+		if job.label == "первое":
+			raise RuntimeError("база заблокирована")
+
+	queue = _queue(execute, record=record)
+	broken = _put(queue, "первое")
+	following = _put(queue, "второе")
+	queue.ensure_worker()
+	await queue.wait_idle()
+
+	assert done == ["первое", "второе"]  # очередь не встала
+	assert broken.status is JobStatus.DONE  # исход применён
+	assert broken.note is not None  # и помечен как несохранённый
+	assert following.status is JobStatus.DONE
+	assert following.note is None
+
+
+async def test_ready_holds_a_job_without_blocking_the_rest() -> None:
+	"""Неготовое задание пропускается, а не задерживает очередь."""
+	done: list[str] = []
+	held = True
+
+	async def execute(job: _TestJob) -> None:
+		done.append(job.label)
+
+	def ready(job: _TestJob) -> bool:
+		return not (held and job.label == "придержанное")
+
+	queue = _queue(execute, ready=ready)
+	_put(queue, "придержанное")
+	_put(queue, "обычное")
+	queue.ensure_worker()
+	await queue.wait_idle()
+
+	assert done == ["обычное"]
+
+	held = False  # условие снято — задание берётся следующим заходом
+	queue.ensure_worker()
+	await queue.wait_idle()
+	assert done == ["обычное", "придержанное"]
+
+
+async def test_cooldown_paces_only_between_jobs() -> None:
+	"""Пауза выдерживается после задания, у которого она задана."""
+	paused: list[float] = []
+
+	async def execute(job: _TestJob) -> None:
+		return None
+
+	def cooldown(job: _TestJob) -> float:
+		return 5.0 if job.label == "щадящее" else 0.0
+
+	async def sleep(seconds: float) -> None:
+		paused.append(seconds)
+
+	queue = _queue(execute, cooldown=cooldown, sleep=sleep)
+	_put(queue, "щадящее")
+	_put(queue, "обычное")
+	queue.ensure_worker()
+	await queue.wait_idle()
+
+	assert paused == [5.0]  # обычное задание паузы не просило
+
+	# одинокое щадящее задание паузу не держит: ждать нечего и некого
+	_put(queue, "щадящее")
+	queue.ensure_worker()
+	await queue.wait_idle()
+	assert paused == [5.0]
