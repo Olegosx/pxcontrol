@@ -32,6 +32,7 @@ from typing import Protocol
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
 from pxcontrol.engine.services.communities import CommunitiesService, CommunityDto
+from pxcontrol.engine.telegram.mtproto import UserbotAccessError
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	DeletedAccount,
@@ -161,6 +162,9 @@ class MembersReport:
 		total: сколько участников всего, по мнению Telegram (None —
 			не сказал).
 		removed: сколько удалённых аккаунтов исключено (просмотр — 0).
+		skipped: сколько исключить не удалось — Telegram отказал
+			по конкретной учётке. Не сбой прохода: остальные убираются
+			(ADR-0026, то же правило, что у отказа в удалении записи).
 		service_left: сколько служебных записей об исключении осталось
 			в ленте — их не удалось убрать без права удалять сообщения.
 		limited: чистка остановилась о потолок за проход.
@@ -176,6 +180,7 @@ class MembersReport:
 	scanned: int = 0
 	total: int | None = None
 	removed: int = 0
+	skipped: int = 0
 	service_left: int = 0
 	limited: bool = False
 	exhausted: bool = False
@@ -642,7 +647,7 @@ class MaintenanceService:
 		в конце: удалять их по одной — лишний запрос на каждого
 		исключённого.
 		"""
-		found = removed = scanned = 0
+		found = removed = skipped = scanned = 0
 		offset = 0
 		total: int | None = None
 		exhausted = False
@@ -664,9 +669,23 @@ class MaintenanceService:
 							limited = True
 							break
 						self._check_stop(job)
-						service_id = await self._gateway.kick_participant(
-							job.account_id, job.community.tg_chat_id, account
-						)
+						try:
+							service_id = await self._gateway.kick_participant(
+								job.account_id, job.community.tg_chat_id, account
+							)
+						except UserbotAccessError as exc:
+							# Telegram отказал по этой учётке (её не видно,
+							# она администратор, хеш доступа устарел). Это
+							# пропуск, а не конец прохода: остальные мёртвые
+							# души убрать всё ещё можно (ADR-0026)
+							skipped += 1
+							logger.info(
+								"Обслуживание id=%s: аккаунт id=%s исключить не удалось (%s).",
+								job.id,
+								account.user_id,
+								exc,
+							)
+							continue
 						removed += 1
 						if service_id is not None:
 							service_ids.append(service_id)
@@ -685,12 +704,14 @@ class MaintenanceService:
 			# исключение участника необратимо: итог в журнал при любом
 			# исходе, включая отмену и флуд-лимит
 			logger.info(
-				"Обслуживание id=%s: участников просмотрено %d из %s, мёртвых %d, исключено %d.",
+				"Обслуживание id=%s: участников просмотрено %d из %s, мёртвых %d, "
+				"исключено %d, пропущено %d.",
 				job.id,
 				scanned,
 				total if total is not None else "?",
 				found,
 				removed,
+				skipped,
 			)
 			if not completed and service_ids:
 				# уборка за собой идёт после прохода, и обрыв её отменяет:
@@ -709,6 +730,7 @@ class MaintenanceService:
 			scanned=scanned,
 			total=total,
 			removed=removed,
+			skipped=skipped,
 			service_left=left,
 			limited=limited,
 			exhausted=exhausted,

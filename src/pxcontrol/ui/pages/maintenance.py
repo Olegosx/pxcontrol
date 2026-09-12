@@ -103,8 +103,10 @@ def service_summary(report: ServiceReport) -> str:
 
 def members_summary(report: MembersReport) -> str:
 	"""Итог прохода по участникам одной строкой."""
-	if report.removed:
+	if report.removed or report.skipped:
 		parts = [f"Исключено удалённых аккаунтов: {report.removed}"]
+		if report.skipped:
+			parts.append(f"Telegram не дал исключить: {report.skipped}")
 		if report.limited:
 			parts.append("сработал предел за проход — повторите, чтобы продолжить")
 		if report.service_left:

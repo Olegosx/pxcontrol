@@ -21,7 +21,11 @@ from pxcontrol.engine.services.maintenance import (
 	ServiceReport,
 	selectable_kinds,
 )
-from pxcontrol.engine.telegram.mtproto import UserbotFloodError, service_message_kind
+from pxcontrol.engine.telegram.mtproto import (
+	UserbotAccessError,
+	UserbotFloodError,
+	service_message_kind,
+)
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	CommunityKind,
@@ -705,3 +709,42 @@ async def test_deleting_community_stops_its_maintenance(db: Database) -> None:
 	assert items[waiting].status is JobStatus.CANCELLED  # ждавшее снято сразу
 	assert items[running].status is JobStatus.CANCELLED  # идущее остановлено
 	assert len(gateway.requested) == 1  # вторая страница не запрашивалась
+
+
+async def test_clean_members_skips_account_telegram_refuses(db: Database) -> None:
+	"""Отказ по одной учётке — пропуск, а не конец прохода (ADR-0026).
+
+	Telegram может не дать исключить конкретного участника (он
+	администратор, ссылка устарела). Ронять из-за этого всю уборку
+	нельзя: остальные мёртвые души убрать всё ещё можно.
+	"""
+
+	class _PickyGateway(_FakeGateway):
+		async def kick_participant(
+			self, account_id: int, chat_id: str, account: DeletedAccount
+		) -> int | None:
+			if account.user_id == 12:
+				raise UserbotAccessError("Этого участника исключить нельзя.")
+			return await super().kick_participant(account_id, chat_id, account)
+
+	gateway = _PickyGateway(
+		member_pages=[_members(deleted=[11, 12, 13], scanned=10, next_offset=None, total=10)]
+	)
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	await service.clean_deleted_accounts(community_id, limit=10)
+	await service.settle()
+	item = (await service.state())[0]
+	assert item.status is JobStatus.DONE  # проход не провалился
+	assert item.members is not None
+	assert (item.members.removed, item.members.skipped) == (2, 1)
+	assert gateway.kicked == [11, 13]
+
+
+def test_members_summary_reports_refusals() -> None:
+	"""Итог по участникам называет и отказы Telegram."""
+	from pxcontrol.ui.pages.maintenance import members_summary
+
+	text = members_summary(MembersReport(found=3, removed=2, skipped=1))
+	assert "Исключено удалённых аккаунтов: 2" in text
+	assert "не дал исключить: 1" in text
