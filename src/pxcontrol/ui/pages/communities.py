@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from functools import partial
 
 from PySide6.QtCore import Qt, Signal
@@ -92,6 +93,45 @@ _STAT_TILE_HEIGHT = 72
 _STAT_TILE_WIDTH = 160
 
 
+@dataclass(frozen=True)
+class QueueCounts:
+	"""Сводка очереди одного сообщества для плитки дашборда.
+
+	Attributes:
+		planned: неотправленное без ошибок — включая ждущих слота.
+		waiting: из них ждут слота отложек (ADR-0016) — второе число.
+		errors: элементы с ошибкой: они ждут повтора и требуют внимания,
+			поэтому в «запланировано» не входят.
+	"""
+
+	planned: int = 0
+	waiting: int = 0
+	errors: int = 0
+
+
+def queue_counts(items: list[QueueItemDto]) -> dict[int, QueueCounts]:
+	"""Считает сводку очереди по сообществам (чистая функция).
+
+	Правило показа — предметное (ADR-0016), поэтому живёт отдельно
+	от вёрстки и закрыто тестом: в вёрстке его проверить нечем.
+	"""
+	counts: dict[int, QueueCounts] = {}
+	for item in items:
+		if item.status.left_queue():
+			continue
+		current = counts.get(item.community_id, QueueCounts())
+		if item.status is JobStatus.ERROR:
+			current = replace(current, errors=current.errors + 1)
+		else:
+			current = replace(
+				current,
+				planned=current.planned + 1,
+				waiting=current.waiting + (item.status is JobStatus.WAITING),
+			)
+		counts[item.community_id] = current
+	return counts
+
+
 class CommunityCard(CardWidget):
 	"""Плитка сообщества: шапка с аватаром, ряд метрик, нижняя строка.
 
@@ -103,11 +143,11 @@ class CommunityCard(CardWidget):
 	def __init__(
 		self,
 		community: CommunityDto,
-		queue_counts: tuple[int, int, int],
+		counts: QueueCounts,
 		stats: CommunityStatsDto | None,
 		parent: QWidget,
 	) -> None:
-		"""``queue_counts`` — (запланировано, из них ждут слота, ошибки);
+		"""``counts`` — сводка очереди сообщества (:class:`QueueCounts`);
 		``stats`` — снимок кэша статистики (None — ещё не собирался)."""
 		super().__init__(parent)
 		# высота фиксирована наравне с шириной: сетка из одинаковых плиток
@@ -117,7 +157,7 @@ class CommunityCard(CardWidget):
 		layout.setContentsMargins(_CARD_MARGIN, 12, _CARD_MARGIN, 12)
 		layout.setSpacing(10)
 		layout.addWidget(self._header(community, stats))
-		layout.addWidget(self._metrics(community, queue_counts, stats))
+		layout.addWidget(self._metrics(community, counts, stats))
 		layout.addStretch()
 		layout.addWidget(self._bottom(community))
 
@@ -151,7 +191,7 @@ class CommunityCard(CardWidget):
 	def _metrics(
 		self,
 		community: CommunityDto,
-		queue_counts: tuple[int, int, int],
+		counts: QueueCounts,
 		stats: CommunityStatsDto | None,
 	) -> QWidget:
 		"""Ряд метрик: подписчики · запланировано (ждут слота) · отложено · ошибки.
@@ -160,7 +200,7 @@ class CommunityCard(CardWidget):
 		подписей, ряд не переносится и высоту карточки не меняет.
 		«—» — данные из Telegram ещё не приезжали (кэш пуст).
 		"""
-		planned, waiting, errors = queue_counts
+		planned, waiting, errors = counts.planned, counts.waiting, counts.errors
 		participants = stats.participants if stats is not None else None
 		scheduled = stats.scheduled_count if stats is not None else None
 		box = QWidget(self)
@@ -338,7 +378,7 @@ class CommunitiesPage(ScrollArea):
 		self._show_error = error_reporter(self)
 		self._communities: list[CommunityDto] = []
 		# счётчики очереди сообщества: (запланировано, ждут слота, ошибки)
-		self._queue_counts: dict[int, tuple[int, int, int]] = {}
+		self._queue_counts: dict[int, QueueCounts] = {}
 		self._stats_cache: dict[int, CommunityStatsDto] = {}
 		self._stats_refreshing = False
 		self._build()
@@ -411,19 +451,7 @@ class CommunitiesPage(ScrollArea):
 		ждущие слота отложек — они выделяются вторым числом); ошибки —
 		отдельно: они ждут повтора и требуют внимания.
 		"""
-		counts: dict[int, tuple[int, int, int]] = {}
-		for item in items:
-			if item.status in (JobStatus.DONE, JobStatus.CANCELLED):
-				continue
-			planned, waiting, errors = counts.get(item.community_id, (0, 0, 0))
-			if item.status is JobStatus.ERROR:
-				errors += 1
-			else:
-				planned += 1
-				if item.status is JobStatus.WAITING:
-					waiting += 1
-			counts[item.community_id] = (planned, waiting, errors)
-		self._queue_counts = counts
+		self._queue_counts = queue_counts(items)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.community_stats.snapshot(),
@@ -499,7 +527,7 @@ class CommunitiesPage(ScrollArea):
 		for community in shown:
 			card = CommunityCard(
 				community,
-				self._queue_counts.get(community.id, (0, 0, 0)),
+				self._queue_counts.get(community.id, QueueCounts()),
 				self._stats_cache.get(community.id),
 				self._cards_box,
 			)
@@ -521,7 +549,7 @@ class CommunitiesPage(ScrollArea):
 			(str(sum(1 for c in communities if c.enabled)), "активных"),
 			(str(without_publisher), "без публикатора"),
 			(
-				str(sum(planned + errors for planned, _w, errors in self._queue_counts.values())),
+				str(sum(item.planned + item.errors for item in self._queue_counts.values())),
 				"в очереди отправки",
 			),
 		]

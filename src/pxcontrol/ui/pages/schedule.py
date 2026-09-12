@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from functools import partial
+from time import monotonic
 
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
@@ -31,6 +32,11 @@ from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import clear_layout, error_reporter, format_local, page_layout
 
+#: Сколько список считается свежим: повторный показ вкладки в этот срок
+#: не запускает новый обход Telegram. Минута — переключился и вернулся,
+#: а отложенные за это время меняются редко (их создаёт сам человек).
+_FRESH_FOR_S = 60.0
+
 
 class SchedulePage(ScrollArea):
 	"""Отложенные записи каналов (читаются из Telegram)."""
@@ -50,19 +56,36 @@ class SchedulePage(ScrollArea):
 		# по текущему списку не чистится намеренно (временное отсутствие
 		# отложенных не должно сбрасывать выбор пользователя)
 		self._unchecked: set[int] = set()
+		# идёт ли обход прямо сейчас и когда он закончился в прошлый раз:
+		# показ вкладки не должен запускать второй обход поверх первого
+		self._loading = False
+		self._loaded_at: float | None = None
 		self._build()
 		# первичной загрузки здесь нет: её делает showEvent при первом
 		# показе — Telegram не опрашивается, пока страницу не открыли
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — имя Qt
-		"""Перечитывает список при каждом показе страницы.
+		"""Перечитывает список при показе страницы, но не чаще нужного.
 
 		Истина — сам канал (ADR-0010): отложенные создаются на соседней
 		«Публикации» и правятся из любого клиента Telegram, поэтому
 		страница обновляется при открытии, как «Видео» и «Публикация».
+
+		Но обход дорогой: он опрашивает **каждое** включённое сообщество,
+		а группу — каждым её участником (ADR-0022). Безусловная
+		перезагрузка означала, что праздное листание вкладок ставит
+		обходы один поверх другого; флуд-лимит, пойманный на таком
+		обходе, замораживает дорожку аккаунта целиком — и ждать его
+		будет уже публикация (ADR-0024). Поэтому свежий список
+		не перечитывается, а идущий обход не дублируется; кнопка
+		«Обновить» перечитывает всегда — это явная воля человека.
 		"""
 		super().showEvent(event)
-		self._reload()
+		if self._loading:
+			return
+		fresh = self._loaded_at is not None and monotonic() - self._loaded_at < _FRESH_FOR_S
+		if not fresh:
+			self._reload()
 
 	def _build(self) -> None:
 		"""Шапка с кнопками, фильтр по каналам и область списка."""
@@ -92,16 +115,25 @@ class SchedulePage(ScrollArea):
 	# --- список отложенных (из Telegram) ---------------------------------------
 
 	def _reload(self) -> None:
+		"""Запускает обход Telegram (кнопка «Обновить» и первый показ)."""
+		self._loading = True
 		run_in_engine(
 			self._worker,
 			self._worker.engine.posts.list_scheduled(),
 			self,
 			self._show_scheduled,
-			self._show_error,
+			self._on_failed,
 		)
+
+	def _on_failed(self, message: str) -> None:
+		"""Обход не удался: показываем причину и снимаем признак «идёт»."""
+		self._loading = False
+		self._show_error(message)
 
 	def _show_scheduled(self, scheduled: ScheduledList) -> None:
 		"""Принимает свежий список: перестраивает фильтр и карточки."""
+		self._loading = False
+		self._loaded_at = monotonic()
 		self._items = scheduled.items
 		self._unread = scheduled.unread
 		self._rebuild_filter()

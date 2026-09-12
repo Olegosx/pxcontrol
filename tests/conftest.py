@@ -52,6 +52,36 @@ class MemoryKeyring(KeyringBackend):
 		self._data.pop((service, username), None)
 
 
+@pytest.fixture(autouse=True)
+def logs_to_tmp(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+	"""Уводит журнал прогона из рабочего каталога приложения.
+
+	``run_headless`` настраивает корневой логгер на боевой
+	``logs/pxcontrol.log``, и дальше в него пишет весь прогон: в файле
+	оседали сотни записей о создании временных схем, а история ротацией
+	вытеснялась. Разбирать по такому журналу инцидент («почему пост
+	не ушёл») нечем — а именно ради этого он и ведётся.
+	"""
+	from pxcontrol import logging_config
+
+	original = logging_config.setup_logging
+	log_dir = tmp_path_factory.mktemp("logs")
+
+	def _to_tmp(level: str = "INFO", directory: Path | None = None) -> Path:
+		return original(level, directory or log_dir)
+
+	logging_config.setup_logging = _to_tmp  # type: ignore[assignment]
+	import pxcontrol.app as app_module
+
+	app_original = app_module.setup_logging
+	app_module.setup_logging = _to_tmp  # type: ignore[assignment]
+	try:
+		yield
+	finally:
+		logging_config.setup_logging = original  # type: ignore[assignment]
+		app_module.setup_logging = app_original  # type: ignore[assignment]
+
+
 @pytest.fixture
 async def db(tmp_path: Path) -> AsyncIterator[Database]:
 	"""Временная БД с применёнными миграциями (общая для всех файлов тестов)."""

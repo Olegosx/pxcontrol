@@ -17,6 +17,7 @@ EXPECTED_TABLES = {
 	"video_presets",
 	"communities",
 	"community_members",
+	"community_stats",
 	"publish_queue_items",
 	"caption_fields",
 	"caption_values",
@@ -35,8 +36,10 @@ async def test_migrations_create_all_tables(tmp_path: Path) -> None:
 	with sqlite3.connect(db_file) as conn:
 		rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
 	tables = {name for (name,) in rows}
-	assert tables >= EXPECTED_TABLES
 	assert "alembic_version" in tables
+	# равенство, а не «не меньше»: иначе список молча устаревает —
+	# так и потерялась таблица кэша статистики, добавленная миграцией
+	assert tables - {"alembic_version"} == EXPECTED_TABLES
 
 
 def _upgrade(db_file: Path, revision: str) -> None:

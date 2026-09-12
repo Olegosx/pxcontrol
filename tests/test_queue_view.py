@@ -292,3 +292,29 @@ def test_apply_view_filters_by_slot() -> None:
 	now_only = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, None, SLOT_NOW)
 	assert [item.id for item in now_only] == [3]
 	assert len(apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, None, None)) == 3
+
+
+def test_queue_counts_splits_planned_waiting_and_errors() -> None:
+	"""Сводка очереди для плитки сообщества считается по правилам ADR-0016.
+
+	Правило предметное: «запланировано» — всё неотправленное без ошибок,
+	включая ждущих слота (они же считаются вторым числом); ошибки ждут
+	повтора и в план не входят. В вёрстке это было нечем проверить.
+	"""
+	from pxcontrol.ui.pages.communities import QueueCounts, queue_counts
+
+	items = [
+		_item(1, status=JobStatus.PENDING, community_id=10),
+		_item(2, status=JobStatus.WAITING, community_id=10),
+		_item(3, status=JobStatus.RUNNING, community_id=10),
+		_item(4, status=JobStatus.ERROR, community_id=10),
+		_item(5, status=JobStatus.DONE, community_id=10),  # покинул очередь
+		_item(6, status=JobStatus.CANCELLED, community_id=10),  # тоже
+		_item(7, status=JobStatus.PENDING, community_id=20),
+	]
+
+	counts = queue_counts(items)
+
+	assert counts[10] == QueueCounts(planned=3, waiting=1, errors=1)
+	assert counts[20] == QueueCounts(planned=1, waiting=0, errors=0)
+	assert queue_counts([]) == {}
