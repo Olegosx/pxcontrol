@@ -665,3 +665,51 @@ async def test_check_community_reports_role() -> None:
 	client.permissions = _group_member(admin=True)
 	info = await transport.check_community("@grp2")
 	assert info.role is UserbotRole.ADMIN
+
+
+async def test_gateway_flood_freezes_whole_account() -> None:
+	"""Флуд-лимит замораживает аккаунт целиком, а не одну операцию (ADR-0024).
+
+	Пойманный при публикации лимит действует на аккаунт: следующая
+	операция того же аккаунта отказывает сразу, не тревожа Telegram
+	(настойчивость удлиняет срок), а соседний аккаунт работает.
+	Класс отказа — ``UserbotFloodError``: обработчики временной
+	недоступности userbot продолжают его узнавать.
+	"""
+	from telethon import errors
+
+	from pxcontrol.engine.telegram.gateway import TelegramGateway
+	from pxcontrol.engine.telegram.mtproto import UserbotFloodError
+
+	class _FloodingClient(_FakeClient):
+		"""Клиент, на котором Telegram просит подождать."""
+
+		async def send_message(self, *args: Any, **kwargs: Any) -> None:
+			raise errors.FloodWaitError(request=None, capture=45)
+
+	flooding = _FloodingClient()
+	calm = _FakeClient()
+	clients: list[_FakeClient] = [flooding, calm]
+	gateway = TelegramGateway()
+	gateway.transport_factory = lambda: MtprotoTransport(
+		client_factory=lambda a, b, c: clients.pop(0)
+	)
+	await gateway.activate_userbot(10, 1, "h", "s1")
+	await gateway.activate_userbot(20, 1, "h", "s2")
+
+	with pytest.raises(UserbotFloodError) as first:
+		await gateway.publish(10, "-1001", OutgoingPost(text="раз"))
+	assert first.value.retry_after_s == 45
+	assert gateway.account_frozen_for(10) > 0
+
+	# вторая попытка тем же аккаунтом — отказ без обращения к Telegram
+	with pytest.raises(UserbotFloodError) as second:
+		await gateway.get_scheduled(10, "-1001")
+	assert second.value.retry_after_s <= 45
+	assert isinstance(second.value, UserbotUnavailableError)  # прежние ветки узнают
+
+	# соседний аккаунт не страдает: лимит пер-аккаунтный (ADR-0019)
+	await gateway.publish(20, "-1002", OutgoingPost(text="два"))
+	assert len(calm.sent) == 1
+	assert gateway.account_frozen_for(20) == 0.0
+	await gateway.stop()

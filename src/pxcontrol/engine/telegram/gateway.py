@@ -9,12 +9,22 @@ Userbot-аккаунтов может быть несколько — по од�
 (ADR-0019): шлюз держит пул клиентов MTProto «id аккаунта → транспорт»,
 и каждая userbot-операция адресуется конкретному аккаунту. Лимиты
 Telegram (флуд, Premium) — пер-аккаунтные, транспорты независимы.
+
+Рядом с пулом транспортов — пул **дорожек** (ADR-0024,
+:mod:`pxcontrol.engine.telegram.lane`): все userbot-операции аккаунта
+идут по его дорожке, то есть по очереди, с зазором между запросами
+и с общей заморозкой после флуд-лимита. Приоритет операции задаёт сам
+шлюз — он знает, что публикация важнее фонового чтения (ADR-0017);
+вызывающему указывать его не нужно. Жизненный цикл соединения
+(:meth:`activate_userbot`, :meth:`deactivate_userbot`) дорожкой
+не регулируется: она про поток запросов, а не про подключение.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 
 from pxcontrol.engine.telegram.bot_api import (
 	check_community,
@@ -24,9 +34,11 @@ from pxcontrol.engine.telegram.bot_api import (
 	send_media,
 	send_text,
 )
+from pxcontrol.engine.telegram.lane import AccountLane, TelegramPriority
 from pxcontrol.engine.telegram.mtproto import (
 	MtprotoLoginManager,
 	MtprotoTransport,
+	UserbotFloodError,
 	UserbotNotConnectedError,
 )
 from pxcontrol.engine.telegram.types import (
@@ -36,6 +48,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
+	TelegramFloodError,
 	UserbotProfile,
 )
 
@@ -50,6 +63,10 @@ class TelegramGateway:
 		# движок активирует userbot-аккаунты при старте, боты — по токену
 		# на операцию. Пул транспортов: id аккаунта → клиент MTProto.
 		self._userbots: dict[int, MtprotoTransport] = {}
+		# дорожки (ADR-0024) живут отдельно от транспортов и переживают
+		# их замену: флуд-лимит Telegram назначает аккаунту, а не сессии,
+		# и повторный вход не должен стирать знание о нём
+		self._lanes: dict[int, AccountLane] = {}
 		self.login = MtprotoLoginManager()
 		# точка подмены в тестах: фабрика транспорта с подставным клиентом
 		self.transport_factory: Callable[[], MtprotoTransport] = MtprotoTransport
@@ -60,6 +77,7 @@ class TelegramGateway:
 		for transport in self._userbots.values():
 			await transport.stop()
 		self._userbots.clear()
+		self._lanes.clear()
 
 	async def activate_userbot(
 		self, account_id: int, api_id: int, api_hash: str, session: str
@@ -89,6 +107,56 @@ class TelegramGateway:
 		transport = self._userbots.pop(account_id, None)
 		if transport is not None:
 			await transport.stop()
+		# дорожка аккаунта намеренно остаётся: действующая заморозка
+		# принадлежит аккаунту Telegram, а не нашему соединению с ним
+
+	def account_frozen_for(self, account_id: int) -> float:
+		"""Сколько секунд аккаунт ещё под флуд-лимитом (0.0 — свободен).
+
+		Позволяет потребителям не тратить обращение впустую: массовый
+		обход пропускает замороженный аккаунт целиком, вместо того чтобы
+		ловить отказ на каждом его сообществе по отдельности (ADR-0017).
+		"""
+		lane = self._lanes.get(account_id)
+		return lane.frozen_for() if lane is not None else 0.0
+
+	def _lane(self, account_id: int) -> AccountLane:
+		"""Дорожка аккаунта (заводится при первом обращении)."""
+		lane = self._lanes.get(account_id)
+		if lane is None:
+			lane = AccountLane(account_id)
+			self._lanes[account_id] = lane
+		return lane
+
+	@asynccontextmanager
+	async def _userbot_slot(
+		self, account_id: int, priority: TelegramPriority
+	) -> AsyncIterator[MtprotoTransport]:
+		"""Транспорт аккаунта на занятой дорожке — обвязка всех операций.
+
+		Проверка «аккаунт активирован» идёт до дорожки: занимать очередь
+		ради заведомо невозможной операции незачем.
+
+		Отказ дорожки переводится в таксономию userbot
+		(:class:`UserbotFloodError`): дорожка — механизм транспортно
+		нейтральный и знает только общий :class:`TelegramFloodError`,
+		а потребители userbot-операций разбирают исходы по
+		``UserbotUnavailableError`` и его подклассам. Без перевода
+		отказ дорожки пролетал бы мимо их обработчиков.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован.
+			UserbotFloodError: Аккаунт под флуд-лимитом (ADR-0024) —
+				в ``retry_after_s`` остаток названного сервером срока.
+		"""
+		transport = self._userbot(account_id)
+		try:
+			async with self._lane(account_id).slot(priority):
+				yield transport
+		except UserbotFloodError:
+			raise  # флуд от самого Telegram — уже в нужном классе
+		except TelegramFloodError as exc:
+			raise UserbotFloodError(str(exc), retry_after_s=exc.retry_after_s) from exc
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		"""Есть ли у аккаунта подписка Premium (лимит файла 2000/4000 МиБ).
@@ -192,7 +260,8 @@ class TelegramGateway:
 			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
 			UserbotUnavailableError: Прочие отказы Telegram (включая флуд).
 		"""
-		return await self._userbot(account_id).me()
+		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
+			return await transport.me()
 
 	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		"""Проверяет канал и права аккаунта (админ + право публиковать).
@@ -204,7 +273,8 @@ class TelegramGateway:
 			UserbotAccessError: Прав нет или канал не виден (подтверждено).
 			UserbotUnavailableError: Прочие отказы Telegram (включая флуд).
 		"""
-		return await self._userbot(account_id).check_community(chat_ref)
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.check_community(chat_ref)
 
 	async def publish(
 		self,
@@ -228,7 +298,8 @@ class TelegramGateway:
 				отправки ждёт названный срок и повторяет сама.
 			UserbotUnavailableError: Прочие отказы Telegram (лимиты и т.п.).
 		"""
-		await self._userbot(account_id).publish(chat_id, post, on_progress)
+		async with self._userbot_slot(account_id, TelegramPriority.PUBLISH) as transport:
+			await transport.publish(chat_id, post, on_progress)
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
 		"""Читает темы форума аккаунтом сообщества (только userbot, ADR-0021).
@@ -238,7 +309,8 @@ class TelegramGateway:
 			UserbotSessionExpiredError: Сессия отозвана — нужен вход заново.
 			UserbotUnavailableError: Прочие отказы Telegram (не форум и т.п.).
 		"""
-		return await self._userbot(account_id).get_forum_topics(chat_id)
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.get_forum_topics(chat_id)
 
 	async def userbot_community_stats(self, account_id: int, chat_id: str) -> CommunityStatsInfo:
 		"""Подписчики и онлайн сообщества аккаунтом (один запрос).
@@ -249,14 +321,16 @@ class TelegramGateway:
 			UserbotFloodError: Флуд-лимит — вызывающий пропускает аккаунт.
 			UserbotUnavailableError: Прочие отказы Telegram.
 		"""
-		return await self._userbot(account_id).community_stats(chat_id)
+		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
+			return await transport.community_stats(chat_id)
 
 	async def userbot_avatar(self, account_id: int, chat_id: str, target: str) -> str | None:
 		"""Скачивает аватар сообщества аккаунтом (None — аватара нет).
 
 		Raises: как у :meth:`userbot_community_stats`.
 		"""
-		return await self._userbot(account_id).download_avatar(chat_id, target)
+		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
+			return await transport.download_avatar(chat_id, target)
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала из Telegram (его аккаунтом).
@@ -269,4 +343,5 @@ class TelegramGateway:
 				остальные каналы аккаунта до конца прохода (ADR-0017).
 			UserbotUnavailableError: Прочие отказы Telegram.
 		"""
-		return await self._userbot(account_id).get_scheduled(chat_id)
+		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
+			return await transport.get_scheduled(chat_id)
