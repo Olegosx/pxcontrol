@@ -936,11 +936,12 @@ class PostsService:
 		Канал опрашивается аккаунтом-умолчанием (все админы видят одни
 		и те же отложки), группа — **всеми участниками** (ADR-0022:
 		отложку в группе видит только её создатель — подтверждено живым
-		прогоном 2026-09-06; запрос на аккаунт, флуд-бюджет ADR-0017).
+		прогоном 2026-09-06; запрос на аккаунт, темп держит дорожка
+		аккаунта — ADR-0024).
 		У бот-сообщества отложенных быть не может (Bot API их не умеет,
 		ADR-0010/0011). Выключенные (``enabled`` = False)
 		не опрашиваются. Ошибка одного опроса не роняет весь список —
-		пропуск с предупреждением в логе.
+		пропуск со следом в логе.
 		"""
 		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
 		async with self._db.session_factory() as session:
@@ -956,23 +957,20 @@ class PostsService:
 				.all()
 			)
 		items: list[ScheduledPostDto] = []
-		flooded: set[int] = set()  # аккаунты, поймавшие флуд-лимит в этом проходе
 		for community in communities:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
 			for account_id in self._scheduled_readers(community):
-				if account_id in flooded:
-					continue
 				try:
 					messages = await self._gateway.get_scheduled(account_id, community.tg_chat_id)
 				except TelegramFloodError as exc:
-					# флуд-лимит — на весь аккаунт (ADR-0017): стучаться в его
-					# остальные сообщества значит удлинять срок, который ждёт
-					# и очередь отправки; пропускаем их до конца прохода
-					# (та же дисциплина, что у дозора слотов)
-					flooded.add(account_id)
-					logger.warning(
-						"Отложенные: флуд-лимит аккаунта id=%s (%s) — его опросы пропущены.",
+					# флуд-лимит действует на аккаунт целиком, и помнит об этом
+					# дорожка аккаунта (ADR-0024): остальные его сообщества
+					# получат такой же мгновенный отказ, не тревожа Telegram, —
+					# своего списка «провинившихся» проходу вести не нужно
+					logger.info(
+						"Отложенные «%s» пропущены: аккаунт id=%s под флуд-лимитом (%s).",
+						community.title,
 						account_id,
 						exc,
 					)
@@ -1028,18 +1026,6 @@ class PostsService:
 			community.default_tg_account_id, community.tg_chat_id
 		)
 		return [message.scheduled_at for message in messages]
-
-	async def account_for_community(self, community_id: int) -> int | None:
-		"""Аккаунт-публикатор сообщества по умолчанию (None — не назначен).
-
-		Нужен дозору слотов очереди отправки (ADR-0016/0019/0022):
-		флуд-лимит действует на аккаунт, и тик прекращает опрос только
-		сообществ провинившегося аккаунта.
-
-		Raises:
-			PostError: Сообщество не найдено.
-		"""
-		return (await self._get_community(community_id)).default_tg_account_id
 
 	async def _get_community(self, community_id: int) -> Community:
 		"""Возвращает канал с ботом или объясняет, что канал не найден."""

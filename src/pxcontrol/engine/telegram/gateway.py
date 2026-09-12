@@ -110,16 +110,6 @@ class TelegramGateway:
 		# дорожка аккаунта намеренно остаётся: действующая заморозка
 		# принадлежит аккаунту Telegram, а не нашему соединению с ним
 
-	def account_frozen_for(self, account_id: int) -> float:
-		"""Сколько секунд аккаунт ещё под флуд-лимитом (0.0 — свободен).
-
-		Позволяет потребителям не тратить обращение впустую: массовый
-		обход пропускает замороженный аккаунт целиком, вместо того чтобы
-		ловить отказ на каждом его сообществе по отдельности (ADR-0017).
-		"""
-		lane = self._lanes.get(account_id)
-		return lane.frozen_for() if lane is not None else 0.0
-
 	def _lane(self, account_id: int) -> AccountLane:
 		"""Дорожка аккаунта (заводится при первом обращении)."""
 		lane = self._lanes.get(account_id)

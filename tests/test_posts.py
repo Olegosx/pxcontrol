@@ -104,6 +104,19 @@ async def _add_account(db: Database, label: str = "@ub") -> int:
 		return account.id
 
 
+async def _bound_account(db: Database, community_id: int) -> int | None:
+	"""Публикатор сообщества по умолчанию — прямо из БД.
+
+	Сервис постов такого метода не имеет: единственным его потребителем
+	был дозор слотов, а тот больше не ведёт своего списка замороженных
+	аккаунтов — дисциплину держит дорожка шлюза (ADR-0024).
+	"""
+	async with db.session_factory() as session:
+		community = await session.get(Community, community_id)
+		assert community is not None
+		return community.default_tg_account_id
+
+
 async def _add_community(
 	db: Database,
 	with_bot: bool = True,
@@ -152,7 +165,7 @@ async def test_publish_text_now_and_scheduled(db: Database) -> None:
 		("-1001", OutgoingPost(text="позже", when=when)),
 	]
 	# публикация адресована аккаунту, привязанному к каналу (ADR-0019)
-	bound = await service.account_for_community(community_id)
+	bound = await _bound_account(db, community_id)
 	assert [acc for acc, _chat, _post in gateway.published] == [bound, bound]
 
 
@@ -509,7 +522,7 @@ async def test_publish_userbot_rejects_oversized_file(
 		await service.publish(draft)
 	assert gateway.published == []
 	# тот же файл у Premium-аккаунта канала проходит (лимит выше)
-	bound = await service.account_for_community(community_id)
+	bound = await _bound_account(db, community_id)
 	assert bound is not None
 	gateway.premium_ids = {bound}
 	await service.publish(draft)
@@ -711,35 +724,41 @@ async def test_scheduled_times_for_batch_planning(db: Database) -> None:
 	assert await service.scheduled_times(other.id) == []
 
 
-async def test_list_scheduled_flood_skips_rest_of_account(db: Database) -> None:
-	"""Флуд-лимит — на аккаунт: его остальные каналы пропускаются (ADR-0017).
+async def test_list_scheduled_isolates_flooded_account(db: Database) -> None:
+	"""Флуд-лимит одного аккаунта не мешает читать отложки другого.
 
-	Стучаться в лимитированный аккаунт дальше — удлинять срок, который
-	ждёт и очередь отправки; дисциплина та же, что у дозора слотов.
+	Своего списка «провинившихся» проход не ведёт: лимит помнит дорожка
+	аккаунта (ADR-0024) и отказывает его операциям сама, не тревожа
+	Telegram. От чтения требуется пережить отказ — пропустить сообщество
+	и собрать всё остальное.
 	"""
-	calls: list[str] = []
 
-	class _FloodedGateway(_FakeGateway):
+	class _PartlyFloodedGateway(_FakeGateway):
+		"""Первый аккаунт под лимитом, второй отвечает нормально."""
+
+		def __init__(self, flooded_id: int) -> None:
+			super().__init__()
+			self.flooded_id = flooded_id
+
 		async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
-			calls.append(chat_id)
-			raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+			if account_id == self.flooded_id:
+				raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+			return [ScheduledMessage(text="жив", scheduled_at=datetime.now(UTC))]
 
-	service = PostsService(db, _FloodedGateway())
-	first_account = await _add_community(db)  # канал «-1001», аккаунт 1
-	async with db.session_factory() as session:  # второй канал того же аккаунта
-		community = (await session.get(Community, first_account)) or None
-		assert community is not None
+	flooded_community = await _add_community(db)
+	flooded_id = await _bound_account(db, flooded_community)
+	assert flooded_id is not None
+	async with db.session_factory() as session:  # сообщество другого аккаунта
+		account = TgAccount(label="@ub2", phone="+7901", session="s")
+		session.add(account)
+		await session.flush()
 		session.add(
-			Community(
-				title="Второй",
-				tg_chat_id="-1002",
-				bot_id=None,
-				default_tg_account_id=community.default_tg_account_id,
-			)
+			Community(title="Свободный", tg_chat_id="-1002", default_tg_account_id=account.id)
 		)
 		await session.commit()
-	assert await service.list_scheduled() == []  # ни ошибок, ни данных
-	assert len(calls) == 1  # после флуда второй канал аккаунта не опрашивался
+	service = PostsService(db, _PartlyFloodedGateway(flooded_id))
+	items = await service.list_scheduled()
+	assert [item.community_title for item in items] == ["Свободный"]
 
 
 async def test_topic_requires_forum(db: Database) -> None:
@@ -970,7 +989,7 @@ async def test_text_limits_reflect_publisher_premium(db: Database) -> None:
 	community_id = await _add_community(db)
 	limits = await service.text_limits(community_id)
 	assert (limits.text, limits.caption) == (4096, 1024)
-	bound = await service.account_for_community(community_id)
+	bound = await _bound_account(db, community_id)
 	assert bound is not None
 	gateway.premium_ids = {bound}
 	premium_limits = await service.text_limits(community_id)
@@ -1003,7 +1022,7 @@ async def test_publish_rejects_caption_over_channel_limit(db: Database, tmp_path
 	with pytest.raises(PostError, match="Подпись к файлу длиннее"):
 		await service.publish(draft)
 	assert gateway.published == []
-	bound = await service.account_for_community(community_id)
+	bound = await _bound_account(db, community_id)
 	assert bound is not None
 	gateway.premium_ids = {bound}
 	await service.publish(draft)

@@ -1,9 +1,10 @@
 """Кэш статистики сообществ: подписчики, онлайн, отложенные, аватар.
 
 Дашборд рисует карточки мгновенно из этого кэша; обновление идёт фоном
-с TTL и флуд-дисциплиной ADR-0017 (флуд-лимит — на весь аккаунт: его
-остальные сообщества пропускаются до конца прохода). Сбои сети кэш
-не затирают — остаются прежние значения.
+с TTL. Флуд-лимит действует на аккаунт целиком, и помнит об этом дорожка
+аккаунта (ADR-0024): остальные его сообщества получат мгновенный отказ,
+не тревожа Telegram, — своего списка «провинившихся» проходу вести
+не нужно. Сбои сети кэш не затирают — остаются прежние значения.
 
 Аватары хранятся файлами в каталоге кэша (в БД — только путь); файл
 перекачивается, когда его нет или он старше суток (аватары меняются
@@ -153,18 +154,13 @@ class CommunityStatsService:
 				if community.bot is not None
 			}
 		changed = False
-		flooded: set[int] = set()  # аккаунты, поймавшие флуд-лимит в этом проходе
 		for community in communities:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
 			if community.id in fresh_ids:
 				continue
 			account_id = community.default_tg_account_id
-			if account_id is not None and account_id in flooded:
-				continue
-			update = await self._collect(
-				community, account_id, bot_tokens.get(community.id), flooded
-			)
+			update = await self._collect(community, account_id, bot_tokens.get(community.id))
 			if update is None:
 				continue
 			await self._store(community.id, update, now)
@@ -185,13 +181,11 @@ class CommunityStatsService:
 		community: Community,
 		account_id: int | None,
 		bot_token: str | None,
-		flooded: set[int],
 	) -> dict[str, object] | None:
 		"""Собирает свежие значения; None — не удалось ничего.
 
-		Каждый источник независим: сбой одного не отменяет остальные.
-		Флуд-лимит аккаунта прекращает его опросы до конца прохода
-		(ADR-0017) — уже собранное сообществу засчитывается.
+		Каждый источник независим: сбой одного не отменяет остальные —
+		уже собранное сообществу засчитывается.
 		"""
 		update: dict[str, object] = {}
 		if account_id is not None:
@@ -207,9 +201,11 @@ class CommunityStatsService:
 				if avatar_changed:
 					update["avatar_path"] = avatar_path
 			except TelegramFloodError as exc:
-				flooded.add(account_id)
-				logger.warning(
-					"Статистика: флуд-лимит аккаунта id=%s (%s) — его опросы пропущены.",
+				# дорожка аккаунта уже заморожена этим лимитом (ADR-0024):
+				# остальные его сообщества получат отказ, не дойдя до сети
+				logger.info(
+					"Статистика «%s» пропущена: аккаунт id=%s под флуд-лимитом (%s).",
+					community.title,
 					account_id,
 					exc,
 				)

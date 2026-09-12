@@ -783,46 +783,62 @@ async def test_catchup_paces_expired_posts(db: Database, make_queue: QueueFactor
 
 
 class _FloodOnReadGateway(_SlotGateway):
-	"""Чтение отложек упирается во флуд-лимит; счётчик обращений — для теста."""
+	"""Чтение отложек упирается во флуд-лимит у выбранных аккаунтов.
 
-	def __init__(self) -> None:
+	Так ведёт себя дорожка аккаунта (ADR-0024): поймав лимит, она
+	отказывает всем последующим операциям этого аккаунта — мгновенно
+	и не обращаясь к Telegram.
+	"""
+
+	def __init__(self, flooded_accounts: set[int] | None = None) -> None:
 		super().__init__()
+		self.flooded_accounts = flooded_accounts
 		self.read_calls = 0
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[object]:
 		self.read_calls += 1
-		raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+		if self.flooded_accounts is None or account_id in self.flooded_accounts:
+			raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+		return []
 
 
-async def test_flood_on_slot_check_skips_rest_of_account(
-	db: Database, make_queue: QueueFactory
-) -> None:
-	"""Флуд-лимит на чтении слотов глушит остальные каналы ТОГО ЖЕ аккаунта:
-	лимит действует на аккаунт (ADR-0017/0019), настойчивость растит сроки."""
-	gateway = _FloodOnReadGateway()
-	queue = make_queue(gateway)
-	# оба канала — на одном аккаунте: флуд первого отменяет чтение второго
+async def test_flood_on_slot_check_isolates_account(db: Database, make_queue: QueueFactory) -> None:
+	"""Флуд-лимит одного аккаунта не задевает каналы другого (ADR-0019).
+
+	Дозор своего списка «провинившихся» не ведёт: лимит помнит дорожка
+	аккаунта (ADR-0024) и отказывает его операциям сама, не обращаясь
+	к Telegram. От дозора требуется другое — пережить отказ: каналы
+	лимитированного аккаунта остаются ждать (а не падают в ошибку),
+	каналы остальных аккаунтов проверяются и выпускаются.
+	"""
 	async with db.session_factory() as session:
-		account = TgAccount(label="@ub", phone="+7900", session="s")
-		session.add(account)
+		flooded_account = TgAccount(label="@ub1", phone="+7900", session="s")
+		free_account = TgAccount(label="@ub2", phone="+7901", session="s")
+		session.add_all([flooded_account, free_account])
 		await session.flush()
-		first = Community(title="Первый", tg_chat_id="-1001", default_tg_account_id=account.id)
-		other = Community(title="Второй", tg_chat_id="-1002", default_tg_account_id=account.id)
+		first = Community(
+			title="Под лимитом", tg_chat_id="-1001", default_tg_account_id=flooded_account.id
+		)
+		other = Community(
+			title="Свободный", tg_chat_id="-1002", default_tg_account_id=free_account.id
+		)
 		session.add_all([first, other])
 		await session.commit()
 		await session.refresh(first)
 		await session.refresh(other)
+		flooded_id = flooded_account.id
+	gateway = _FloodOnReadGateway(flooded_accounts={flooded_id})
+	queue = make_queue(gateway)
 	a = await queue.enqueue(PostDraft(first.id, text="ждущий А", when=_future(120)))
 	b = await queue.enqueue(PostDraft(other.id, text="ждущий Б", when=_future(180)))
 	await _wait_status(queue, a, QueueItemStatus.WAITING)
-	await _wait_status(queue, b, QueueItemStatus.WAITING)
 	await queue.settle()  # фоновые проверки постановки — завершены (ADR-0020)
-	gateway.read_calls = 0  # изолируем замер от фоновых тиков постановки
 	await queue._release_slots()  # noqa: SLF001 — тик дозора напрямую
-	assert gateway.read_calls == 1  # после флуда — ни одного канала аккаунта больше
 	state = {item.id: item for item in await queue.state()}
-	assert state[a].status is QueueItemStatus.WAITING  # никто не в ошибке
-	assert state[b].status is QueueItemStatus.WAITING
+	assert state[a].status is QueueItemStatus.WAITING  # отказ — не ошибка элемента
+	assert state[a].error is None
+	# канал свободного аккаунта дозор проверил и выпустил: слоты есть
+	assert state[b].status is not QueueItemStatus.WAITING
 
 
 # --- разделение подготовки и передачи (ADR-0020) -----------------------------

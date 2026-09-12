@@ -671,7 +671,7 @@ async def test_gateway_flood_freezes_whole_account() -> None:
 	"""Флуд-лимит замораживает аккаунт целиком, а не одну операцию (ADR-0024).
 
 	Пойманный при публикации лимит действует на аккаунт: следующая
-	операция того же аккаунта отказывает сразу, не тревожа Telegram
+	операция того же аккаунта отказывает, **не дойдя до Telegram**
 	(настойчивость удлиняет срок), а соседний аккаунт работает.
 	Класс отказа — ``UserbotFloodError``: обработчики временной
 	недоступности userbot продолжают его узнавать.
@@ -682,10 +682,19 @@ async def test_gateway_flood_freezes_whole_account() -> None:
 	from pxcontrol.engine.telegram.mtproto import UserbotFloodError
 
 	class _FloodingClient(_FakeClient):
-		"""Клиент, на котором Telegram просит подождать."""
+		"""Клиент, на котором Telegram просит подождать; считает обращения."""
+
+		def __init__(self) -> None:
+			super().__init__()
+			self.requests = 0
 
 		async def send_message(self, *args: Any, **kwargs: Any) -> None:
+			self.requests += 1
 			raise errors.FloodWaitError(request=None, capture=45)
+
+		async def get_input_entity(self, entity_id: Any) -> str:
+			self.requests += 1
+			return await super().get_input_entity(entity_id)
 
 	flooding = _FloodingClient()
 	calm = _FakeClient()
@@ -700,16 +709,16 @@ async def test_gateway_flood_freezes_whole_account() -> None:
 	with pytest.raises(UserbotFloodError) as first:
 		await gateway.publish(10, "-1001", OutgoingPost(text="раз"))
 	assert first.value.retry_after_s == 45
-	assert gateway.account_frozen_for(10) > 0
+	requests_after_flood = flooding.requests
 
 	# вторая попытка тем же аккаунтом — отказ без обращения к Telegram
 	with pytest.raises(UserbotFloodError) as second:
 		await gateway.get_scheduled(10, "-1001")
 	assert second.value.retry_after_s <= 45
 	assert isinstance(second.value, UserbotUnavailableError)  # прежние ветки узнают
+	assert flooding.requests == requests_after_flood  # клиента не потревожили
 
 	# соседний аккаунт не страдает: лимит пер-аккаунтный (ADR-0019)
 	await gateway.publish(20, "-1002", OutgoingPost(text="два"))
 	assert len(calm.sent) == 1
-	assert gateway.account_frozen_for(20) == 0.0
 	await gateway.stop()
