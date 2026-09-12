@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from pxcontrol.engine.errors import EngineError
-from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
+from pxcontrol.engine.jobs import Job, JobCancelled, JobDeferred, JobQueue, JobStatus
 
 
 class _TestJob(Job):
@@ -152,7 +152,7 @@ async def test_executor_reports_its_own_cancellation() -> None:
 
 
 async def test_soft_cancel_only_sets_flag() -> None:
-	"""Без ``hard_cancel`` отмена лишь взводит флаг — работу гасит сам исполнитель.
+	"""Отмена лишь взводит флаг — работу гасит сам исполнитель.
 
 	Так устроена обработка видео: посторонний процесс ffmpeg отменой
 	задачи не остановить, его убивает колбэк прогресса.
@@ -320,3 +320,51 @@ async def test_shutdown_does_not_look_like_user_cancel() -> None:
 	assert job.cancel_requested is False
 	release.set()
 	await shutdown
+
+
+async def test_deferred_job_waits_instead_of_failing() -> None:
+	"""Отсрочка — четвёртый исход: задание ждёт, а не падает в ошибку.
+
+	Так очередь отправки поступает, когда кончились слоты отложек
+	или Telegram попросил подождать (ADR-0016): ошибкой это не считается,
+	на карточке появляется пометка состояния, а пауза не досиживается
+	при остановке движка.
+	"""
+	slept: list[float] = []
+	attempts = 0
+
+	async def sleep(seconds: float) -> None:
+		slept.append(seconds)
+
+	async def execute(job: _TestJob) -> None:
+		nonlocal attempts
+		attempts += 1
+		if attempts == 1:
+			raise JobDeferred(JobStatus.WAITING, note="ждёт слота", delay_s=30)
+
+	queue = _queue(execute, sleep=sleep)
+	job = _put(queue, "отложенное")
+	queue.ensure_worker()
+	await queue.wait_idle()
+	assert job.status is JobStatus.WAITING  # не ERROR
+	assert job.error is None
+	assert slept == [30]
+	assert job.note is None  # пометка снята после паузы
+
+
+async def test_deferred_job_can_return_to_queue() -> None:
+	"""Отсрочка с возвратом в очередь: задание повторится само."""
+	attempts = 0
+
+	async def execute(job: _TestJob) -> None:
+		nonlocal attempts
+		attempts += 1
+		if attempts == 1:
+			raise JobDeferred(JobStatus.PENDING)
+
+	queue = _queue(execute)
+	job = _put(queue, "повторимое")
+	queue.ensure_worker()
+	await queue.wait_idle()
+	assert job.status is JobStatus.DONE
+	assert attempts == 2  # вернулось в очередь и ушло со второй попытки

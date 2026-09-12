@@ -423,7 +423,7 @@ async def test_scan_and_clean_queue_up(db: Database) -> None:
 # --- тексты интерфейса (чистые функции окна) ------------------------------------
 
 
-def test_scan_summary_tells_what_was_seen() -> None:
+def test_service_summary_tells_what_was_seen() -> None:
 	"""Итог просмотра называет число, глубину и границу по дате."""
 	from pxcontrol.ui.pages.maintenance import service_summary
 
@@ -440,7 +440,7 @@ def test_scan_summary_tells_what_was_seen() -> None:
 	assert "2026" in text  # и до какого числа дошли
 
 
-def test_scan_summary_says_history_is_over() -> None:
+def test_service_summary_says_history_is_over() -> None:
 	"""Кончившаяся история — отдельная формулировка, а не «просмотрено N»."""
 	from pxcontrol.ui.pages.maintenance import service_summary
 
@@ -450,14 +450,14 @@ def test_scan_summary_says_history_is_over() -> None:
 	assert "целиком" in service_summary(report)
 
 
-def test_scan_summary_for_empty_result() -> None:
+def test_service_summary_for_empty_result() -> None:
 	"""Пустой результат не притворяется находкой."""
 	from pxcontrol.ui.pages.maintenance import service_summary
 
 	assert "не найдено" in service_summary(ServiceReport(scanned=500))
 
 
-def test_clean_summary_reports_skipped_and_limit() -> None:
+def test_service_summary_reports_skipped_and_limit() -> None:
 	"""Итог чистки честен про пропуски и про упёршийся потолок."""
 	from pxcontrol.ui.pages.maintenance import service_summary
 

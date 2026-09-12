@@ -151,7 +151,7 @@
   `ServiceMessageInfo`, `ServiceMessagesPage`. Сырые объекты Telethon
   до сервисов не доезжают.
 - `ui/pages/maintenance.py` — рабочее окно; человеческие названия видов
-  и тексты итогов (`kind_title`, `scan_summary`, `clean_summary`) —
+  и тексты итогов (`kind_title`, `service_summary`, `members_summary`) —
   чистые функции, они тестируются как обычный код.
 
 ## Отложено

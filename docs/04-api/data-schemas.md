@@ -30,7 +30,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `CommunityDto`, `CommunityAccess` | `communities.py` | канал и итог перепроверки доступов |
 | `PostDraft` | `posts.py` | черновик публикации — единый вход для всех типов контента |
 | `PublishCapabilities`, `ScheduledPostDto` | `posts.py` | возможности канала; отложенная запись из Telegram |
-| `QueueItemDto`, `QueueItemStatus` | `publish_queue.py` | элемент очереди отправки и его статус |
+| `QueueItemDto` | `publish_queue.py` | элемент очереди отправки (статус — общий `JobStatus`) |
 | `PresetDto`, `PresetFields`, `FrameCandidate` | `video.py` | пресет обработки видео и кадры-кандидаты |
 | `BitrateAdvice` | `video.py` | рекомендация битрейта для исходника больше лимита Telegram |
 | `ProcessedVideo`, `ProcessedListing` | `video.py` | готовое видео и содержимое подпапки результатов |
@@ -40,7 +40,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `VideoItemDto` | `video_queue.py` | элемент очереди обработки (статус — общий `JobStatus`) |
 | `JobStatus` | `jobs.py` | состояние задания любой очереди движка (ADR-0025) |
 | `SchedulePlan`, `PlanKind` | `schedule_plan.py` | раскладка времени пакета отправки: стратегия и параметры (ADR-0015) |
-| `MaintenanceItemDto`, `ServiceScanReport`, `ServiceCleanReport` | `maintenance.py` | задание обслуживания и итоги просмотра/чистки (ADR-0026) |
+| `MaintenanceItemDto`, `ServiceReport`, `MembersReport`, `MaintenanceTarget` | `maintenance.py` | задание обслуживания, итоги по служебным записям и по участникам (ADR-0026) |
 | `FieldDto`, `TemplateDto`, `TemplateFieldDto`, `CaptionLine` | `captions.py` | поля со словарями и шаблоны подписей |
 | `ValueDto` | `captions.py` | значение словаря поля (с привязкой к родительскому значению) |
 
@@ -53,6 +53,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `OutgoingPost` | исходящий пост для транспорта |
 | `ScheduledMessage` | отложенная запись, прочитанная из Telegram |
 | `ServiceMessageKind`, `ServiceMessageInfo`, `ServiceMessagesPage` | вид служебной записи, сама запись и страница истории (ADR-0026) |
+| `ParticipantsPage` | страница списка участников с удалёнными аккаунтами (ADR-0026) |
 
 ### Видео-конвейер (`engine/video/*`) — чистый модуль без Telegram
 

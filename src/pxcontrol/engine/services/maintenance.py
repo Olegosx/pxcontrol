@@ -185,8 +185,6 @@ class MaintenanceItemDto:
 		progress: доля выполнения 0.0..1.0 (по глубине просмотра).
 		error: текст ошибки (для статуса ERROR).
 		note: пометка состояния (ход просмотра).
-		target: что обслуживаем — записи или участников.
-		clean: задание чистит (True) или только смотрит (False).
 		service: итог по служебным записям; None — задание про участников
 			или ещё не закончено.
 		members: итог по участникам; None — задание про записи или ещё
@@ -200,8 +198,6 @@ class MaintenanceItemDto:
 	progress: float
 	error: str | None
 	note: str | None
-	target: MaintenanceTarget = MaintenanceTarget.SERVICE_MESSAGES
-	clean: bool = False
 	service: ServiceReport | None = None
 	members: MembersReport | None = None
 
@@ -251,8 +247,6 @@ class _MaintenanceJob(Job):
 			progress=self.progress,
 			error=self.error,
 			note=self.note,
-			target=self.target,
-			clean=self.clean,
 			service=self.service_report,
 			members=self.members_report,
 		)

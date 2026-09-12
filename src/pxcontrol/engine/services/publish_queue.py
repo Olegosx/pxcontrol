@@ -831,18 +831,6 @@ class PublishQueue:
 
 	# --- отправка -------------------------------------------------------------
 
-	def _next_pending(self) -> _PublishJob | None:
-		"""Первый готовый к отправке элемент (для проверки «есть ли ещё»).
-
-		Пропускается тот, чья правка сейчас сохраняется (:meth:`edit`):
-		забрать его в отправку значило бы отправить наполовину
-		применённый черновик.
-		"""
-		for item in self._jobs.all():
-			if item.status is JobStatus.PENDING and not item.editing:
-				return item
-		return None
-
 	def _catchup_pause(self, item: _PublishJob) -> float:
 		"""Пауза после догоняющего поста (ADR-0016): щадящий темп.
 
