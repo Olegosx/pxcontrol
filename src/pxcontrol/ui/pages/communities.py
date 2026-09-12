@@ -34,10 +34,11 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
-from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
+from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.telegram.types import CommunityKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -411,14 +412,14 @@ class CommunitiesPage(ScrollArea):
 		"""
 		counts: dict[int, tuple[int, int, int]] = {}
 		for item in items:
-			if item.status in (QueueItemStatus.DONE, QueueItemStatus.CANCELLED):
+			if item.status in (JobStatus.DONE, JobStatus.CANCELLED):
 				continue
 			planned, waiting, errors = counts.get(item.community_id, (0, 0, 0))
-			if item.status is QueueItemStatus.ERROR:
+			if item.status is JobStatus.ERROR:
 				errors += 1
 			else:
 				planned += 1
-				if item.status is QueueItemStatus.WAITING:
+				if item.status is JobStatus.WAITING:
 					waiting += 1
 			counts[item.community_id] = (planned, waiting, errors)
 		self._queue_counts = counts

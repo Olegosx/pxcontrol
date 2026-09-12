@@ -20,11 +20,11 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, CaptionLabel, ComboBox, PushButton, StrongBodyLabel
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.publish_queue import (
 	EDITABLE_STATUSES,
 	QueueItemDto,
-	QueueItemStatus,
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -81,11 +81,11 @@ def queue_subtitle(item: QueueItemDto) -> str:
 	времени — как пользователь вводил его в форме.
 	"""
 	when_text = "сейчас" if item.when is None else format_local(item.when)
-	if item.status is QueueItemStatus.SENDING:
+	if item.status is JobStatus.RUNNING:
 		status = "отправляется"
-	elif item.status is QueueItemStatus.ERROR:
+	elif item.status is JobStatus.ERROR:
 		status = f"ошибка: {item.error}"
-	elif item.status is QueueItemStatus.WAITING:
+	elif item.status is JobStatus.WAITING:
 		# лимит Telegram — 100 отложек на канал (ADR-0016). Приписки
 		# «уйдёт при запущенном приложении» здесь нет намеренно: она
 		# повторялась в каждой строке списка, ничего не добавляя
@@ -150,12 +150,12 @@ def apply_view(
 	if slot is not None:
 		items = [item for item in items if slot_label(item.when) == slot]
 	if status is QueueFilter.SENDABLE:
-		wanted = (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
+		wanted = (JobStatus.PENDING, JobStatus.RUNNING)
 		items = [item for item in items if item.status in wanted]
 	elif status is QueueFilter.WAITING:
-		items = [item for item in items if item.status is QueueItemStatus.WAITING]
+		items = [item for item in items if item.status is JobStatus.WAITING]
 	elif status is QueueFilter.ERRORS:
-		items = [item for item in items if item.status is QueueItemStatus.ERROR]
+		items = [item for item in items if item.status is JobStatus.ERROR]
 	nearest = datetime.min.replace(tzinfo=UTC)  # «сейчас» — раньше любых дат
 	if sort is QueueSort.NEAREST:
 		return sorted(items, key=lambda item: (item.when or nearest, item.id))

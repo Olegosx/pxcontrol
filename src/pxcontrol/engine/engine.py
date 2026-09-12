@@ -12,7 +12,7 @@ from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.communities import CommunitiesService
 from pxcontrol.engine.services.community_stats import CommunityStatsService
 from pxcontrol.engine.services.posts import PostsService
-from pxcontrol.engine.services.publish_queue import LEFT_QUEUE, PublishQueue
+from pxcontrol.engine.services.publish_queue import PublishQueue
 from pxcontrol.engine.services.settings import (
 	FFMPEG_PATH,
 	VIDEO_QUEUED_DIR,
@@ -80,7 +80,7 @@ class Engine:
 		)
 		if new_queued is not None:
 			current = await self.settings.get(VIDEO_QUEUED_DIR)
-			live = [i for i in await self.publish_queue.state() if i.status not in LEFT_QUEUE]
+			live = [i for i in await self.publish_queue.state() if not i.status.left_queue()]
 			if new_queued.strip() != (current or "").strip() and live:
 				raise EngineError(
 					f"Папку очереди отправки нельзя менять: в очереди "

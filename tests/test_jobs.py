@@ -121,27 +121,32 @@ async def test_cancelled_job_is_not_an_error() -> None:
 	assert job.error is None
 
 
-async def test_hard_cancel_interrupts_running_job() -> None:
-	"""С ``hard_cancel`` активное задание обрывается отменой его задачи.
+async def test_executor_reports_its_own_cancellation() -> None:
+	"""Работу рвёт тот, кто её ведёт; каркасу он сообщает это исходом.
 
-	Так гасится сетевая загрузка: ждать её завершения незачем —
-	недосланное Telegram не публикует.
+	Так гасится сетевая загрузка: очередь отправки отменяет собственную
+	задачу передачи (запрос к БД при этом не рвётся, ADR-0020)
+	и сообщает каркасу отмену броском ``JobCancelled``.
 	"""
 	started = asyncio.Event()
+	inner: list[asyncio.Task[None]] = []
 
 	async def execute(job: _TestJob) -> None:
+		task: asyncio.Task[None] = asyncio.create_task(asyncio.Event().wait())  # type: ignore[arg-type]
+		inner.append(task)
 		started.set()
 		try:
-			await asyncio.Event().wait()  # «висим на сети»
+			await task
 		except asyncio.CancelledError:
 			raise JobCancelled from None
 
-	queue = _queue(execute, hard_cancel=True)
+	queue = _queue(execute)
 	job = _put(queue, "загрузка")
 	queue.ensure_worker()
 	await started.wait()
 	assert queue.active_id == job.id
 	queue.request_cancel(job)
+	inner[0].cancel()  # очередь рвёт свою сетевую часть сама
 	await queue.wait_idle()
 	assert job.status is JobStatus.CANCELLED
 
@@ -180,7 +185,7 @@ async def test_shutdown_cancels_pending_when_asked() -> None:
 	async def execute(job: _TestJob) -> None:
 		await release.wait()
 
-	queue = _queue(execute, cancel_pending_on_shutdown=True, hard_cancel=True)
+	queue = _queue(execute, cancel_pending_on_shutdown=True)
 	first = _put(queue, "идёт")
 	waiting = _put(queue, "ждёт")
 	queue.ensure_worker()
@@ -190,10 +195,10 @@ async def test_shutdown_cancels_pending_when_asked() -> None:
 	release.set()
 	await shutdown
 	assert waiting.status is JobStatus.CANCELLED
-	# активному статус в памяти не дописывается: движок останавливается,
-	# и запись исхода — дело следующего запуска (у персистентной очереди
-	# он уйдёт повторно, у остальных очереди просто не будет)
-	assert first.status is JobStatus.RUNNING
+	# активное задание каркас не рвёт, а дожидается — в этом и состоит
+	# кооперативная остановка (ADR-0020): прервать работу может только
+	# тот, кто её ведёт, и здесь она успела закончиться штатно
+	assert first.status is JobStatus.DONE
 	assert queue.stopping is True
 
 
@@ -272,32 +277,46 @@ def test_status_predicates(status: JobStatus, finished: bool, active: bool, left
 	assert status.left_queue() is left
 
 
-async def test_hard_cancel_by_user_lets_queue_continue() -> None:
-	"""Отмена человеком — исход задания: очередь берётся за следующее.
-
-	Тем же обрывом задачи гасит работу и остановка движка, поэтому
-	каркас различает их по паре «флаг задания + состояние очереди».
-	"""
-	started: list[str] = []
+async def test_cancelled_job_does_not_stop_the_queue() -> None:
+	"""Отмена одного задания — его исход: очередь берётся за следующее."""
 	done: list[str] = []
 
 	async def execute(job: _TestJob) -> None:
-		started.append(job.label)
-		if job.label == "первое":
-			try:
-				await asyncio.Event().wait()
-			except asyncio.CancelledError:
-				raise
+		if job.cancel_requested:
+			raise JobCancelled
 		done.append(job.label)
 
-	queue = _queue(execute, hard_cancel=True)
+	queue = _queue(execute)
 	first = _put(queue, "первое")
 	second = _put(queue, "второе")
+	first.cancel_requested = True
 	queue.ensure_worker()
-	while not started:
-		await asyncio.sleep(0)
-	queue.request_cancel(first)
 	await queue.wait_idle()
 	assert first.status is JobStatus.CANCELLED
-	assert second.status is JobStatus.DONE  # очередь не остановилась
+	assert second.status is JobStatus.DONE
 	assert done == ["второе"]
+
+
+async def test_shutdown_does_not_look_like_user_cancel() -> None:
+	"""Остановка движка не взводит флаг отмены человеком.
+
+	Флаг означает «человек передумал», и исход у него другой: задание
+	покидает очередь. У остановки исход не записывается вовсе —
+	недоделанное уйдёт после перезапуска (ADR-0020).
+	"""
+	started = asyncio.Event()
+	release = asyncio.Event()
+
+	async def execute(job: _TestJob) -> None:
+		started.set()
+		await release.wait()
+
+	queue = _queue(execute)
+	job = _put(queue, "идёт")
+	queue.ensure_worker()
+	await started.wait()
+	shutdown = asyncio.create_task(queue.shutdown())
+	await asyncio.sleep(0)
+	assert job.cancel_requested is False
+	release.set()
+	await shutdown

@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
+from pxcontrol.engine.jobs import JobStatus
+from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.ui.pages.common import SLOT_NOW, card_signature, plan_cards, slot_color, slot_label
 from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
@@ -31,7 +32,7 @@ def _item(
 	community: str = "Канал",
 	community_id: int = 1,
 	when_minutes: int | None = 60,
-	status: QueueItemStatus = QueueItemStatus.WAITING,
+	status: JobStatus = JobStatus.WAITING,
 ) -> QueueItemDto:
 	when = None if when_minutes is None else _BASE + timedelta(minutes=when_minutes)
 	return QueueItemDto(
@@ -42,7 +43,7 @@ def _item(
 		when=when,
 		status=status,
 		progress=0.0,
-		error="сбой" if status is QueueItemStatus.ERROR else None,
+		error="сбой" if status is JobStatus.ERROR else None,
 	)
 
 
@@ -50,7 +51,7 @@ def test_sort_nearest_puts_now_first() -> None:
 	"""«Ближайшие сначала»: посты «сейчас» — раньше любых дат, потом по дате."""
 	items = [
 		_item(1, when_minutes=120),
-		_item(2, when_minutes=None, status=QueueItemStatus.PENDING),
+		_item(2, when_minutes=None, status=JobStatus.PENDING),
 		_item(3, when_minutes=30),
 	]
 	shown = apply_view(items, QueueSort.NEAREST, QueueFilter.ALL, None)
@@ -78,10 +79,10 @@ def test_sort_by_community_then_date() -> None:
 def test_status_and_community_filters() -> None:
 	"""Фильтры: по статусу («к отправке» включает отправляющийся) и каналу."""
 	items = [
-		_item(1, community="А", community_id=1, status=QueueItemStatus.WAITING),
-		_item(2, community="А", community_id=1, status=QueueItemStatus.PENDING),
-		_item(3, community="Б", community_id=2, status=QueueItemStatus.SENDING),
-		_item(4, community="Б", community_id=2, status=QueueItemStatus.ERROR),
+		_item(1, community="А", community_id=1, status=JobStatus.WAITING),
+		_item(2, community="А", community_id=1, status=JobStatus.PENDING),
+		_item(3, community="Б", community_id=2, status=JobStatus.RUNNING),
+		_item(4, community="Б", community_id=2, status=JobStatus.ERROR),
 	]
 	sendable = apply_view(items, QueueSort.ENQUEUED, QueueFilter.SENDABLE, None)
 	assert [item.id for item in sendable] == [2, 3]
@@ -194,7 +195,7 @@ def test_signature_notices_replaced_media() -> None:
 def test_signature_notices_status() -> None:
 	"""Статус меняет состав кнопок карточки — значит и отпечаток."""
 	before = _item(1)
-	assert card_signature(before) != card_signature(replace(before, status=QueueItemStatus.PENDING))
+	assert card_signature(before) != card_signature(replace(before, status=JobStatus.PENDING))
 
 
 def _known(items: list[QueueItemDto]) -> dict[int, tuple[object, ...]]:
@@ -267,7 +268,7 @@ def test_slot_color_of_now_is_neutral() -> None:
 def test_queue_slots_lists_now_first_then_times() -> None:
 	"""Список слотов очереди: «сейчас» первым, времена — по возрастанию."""
 	items = [
-		_item(1, when_minutes=None, status=QueueItemStatus.PENDING),
+		_item(1, when_minutes=None, status=JobStatus.PENDING),
 		_item(2, when_minutes=600),
 		_item(3, when_minutes=60),
 		_item(4, when_minutes=60),  # тот же слот, что у 3 — не дублируется
@@ -283,7 +284,7 @@ def test_apply_view_filters_by_slot() -> None:
 	items = [
 		_item(1, when_minutes=60),
 		_item(2, when_minutes=600),
-		_item(3, when_minutes=None, status=QueueItemStatus.PENDING),
+		_item(3, when_minutes=None, status=JobStatus.PENDING),
 	]
 	slot = slot_label(items[0].when)
 	shown = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, None, slot)

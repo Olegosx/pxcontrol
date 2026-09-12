@@ -34,6 +34,7 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.captions import (
 	CaptionLine,
 	TemplateDto,
@@ -51,7 +52,6 @@ from pxcontrol.engine.services.posts import (
 from pxcontrol.engine.services.publish_queue import (
 	EDITABLE_STATUSES,
 	QueueItemDto,
-	QueueItemStatus,
 )
 from pxcontrol.engine.services.settings import (
 	PUBLISH_LAST_COMMUNITY_ID,
@@ -1032,11 +1032,9 @@ class PublishPage(ScrollArea):
 		if not items:
 			self._queue_summary.hide()
 			return
-		waiting = sum(1 for item in items if item.status is QueueItemStatus.WAITING)
-		pending = sum(
-			1 for item in items if item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
-		)
-		errors = sum(1 for item in items if item.status is QueueItemStatus.ERROR)
+		waiting = sum(1 for item in items if item.status is JobStatus.WAITING)
+		pending = sum(1 for item in items if item.status in (JobStatus.PENDING, JobStatus.RUNNING))
+		errors = sum(1 for item in items if item.status is JobStatus.ERROR)
 		parts = []
 		if pending:
 			parts.append(f"к отправке {pending}")

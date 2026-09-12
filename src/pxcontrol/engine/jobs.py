@@ -82,6 +82,29 @@ class JobCancelled(Exception):  # noqa: N818 — сигнал исхода, а �
 	"""
 
 
+class JobDeferred(Exception):  # noqa: N818 — сигнал исхода, а не ошибка
+	"""Задание не выполнено и не провалено — его нужно отложить.
+
+	Исполнитель бросает его, когда работа упёрлась во внешнее условие,
+	снять которое он не может: свободных слотов отложек не осталось
+	(задание ждёт, ADR-0016), Telegram попросил подождать (задание
+	возвращается в очередь и повторится само). Это не ошибка: карточке
+	показывать нечего, кроме пометки состояния.
+
+	Attributes:
+		status: куда перевести задание (WAITING — ждать условия,
+			PENDING — вернуться в очередь).
+		note: пометка состояния для карточки на время ожидания.
+		delay_s: пауза перед возвратом к работе (0 — без паузы).
+	"""
+
+	def __init__(self, status: JobStatus, *, note: str | None = None, delay_s: float = 0.0) -> None:
+		super().__init__(f"задание отложено: {status}")
+		self.status = status
+		self.note = note
+		self.delay_s = delay_s
+
+
 class Job:
 	"""Задание очереди: общее состояние выполнения.
 
@@ -123,29 +146,49 @@ class JobQueue(Generic[_J]):
 		execute: Callable[[_J], Coroutine[Any, Any, None]],
 		*,
 		name: str,
-		hard_cancel: bool = False,
 		cancel_pending_on_shutdown: bool = False,
 		shutdown_timeout_s: float = DEFAULT_SHUTDOWN_TIMEOUT_S,
+		cooldown: Callable[[_J], float] | None = None,
+		ready: Callable[[_J], bool] | None = None,
+		sleep: Callable[[float], Coroutine[Any, Any, None]] | None = None,
+		record: Callable[[_J, JobStatus, str | None], Coroutine[Any, Any, None]] | None = None,
 	) -> None:
 		"""Args:
 		execute: исполнитель одного задания. Ошибку переводит сам
 			(её текст попадёт на карточку), отмену сообщает броском
-			:class:`JobCancelled`.
+			:class:`JobCancelled`, а нужду подождать — броском
+			:class:`JobDeferred`.
 		name: имя очереди для сообщений в логе («обработка», «отправка»).
-		hard_cancel: отменять ли активное задание отменой его задачи.
-			Нужно там, где работа висит на сетевом вызове (отправка);
-			там, где работу ведёт посторонний процесс (ffmpeg), отмена
-			задачи его не остановит — такая очередь полагается только
-			на флаг ``cancel_requested``.
+		cooldown: сколько секунд подождать после успешного задания,
+			прежде чем брать следующее (0 — не ждать). Щадящий темп —
+			предметное правило очереди: догон просроченных постов
+			не должен выглядеть залпом (ADR-0016).
+		ready: можно ли брать это задание в работу прямо сейчас
+			(по умолчанию — да). Правило предметное: очередь отправки
+			придерживает элемент, пока сохраняется его правка, иначе
+			ушёл бы наполовину применённый черновик (ADR-0016, п. 7).
+		sleep: чем держатся паузы. По умолчанию — ожидание, которое
+			прерывает остановка движка; подменяется в тестах, чтобы
+			прогон не ждал настоящие минуты.
 		cancel_pending_on_shutdown: помечать ли ожидающие задания
 			отменёнными при остановке движка. Для очереди без
 			персистентности это честно (после перезапуска её нет),
 			для персистентной — нет: там задания переживают выход.
 		shutdown_timeout_s: сколько ждать активное задание при остановке.
+		record: крючок «запиши исход» — зовётся **до** того, как новый
+			статус появится в памяти. Порядок именно такой: наблюдатель,
+			увидевший исход в памяти, должен быть уверен, что хранилище
+			о нём уже знает, а обрыв между шагами (остановка движка)
+			оставляет хранилище в состоянии «не доделано» — это
+			переживаемо, в отличие от обратного (ADR-0016). Очередь
+			без хранилища крючка не передаёт.
 		"""
 		self._execute = execute
+		self._record = record
 		self._name = name
-		self._hard_cancel = hard_cancel
+		self._cooldown = cooldown
+		self._ready = ready
+		self._sleep = sleep
 		self._cancel_pending_on_shutdown = cancel_pending_on_shutdown
 		self._shutdown_timeout_s = shutdown_timeout_s
 		self._jobs: list[_J] = []
@@ -199,14 +242,14 @@ class JobQueue(Generic[_J]):
 	def request_cancel(self, job: _J) -> None:
 		"""Взводит отмену задания; исход запишет само выполнение.
 
-		Ожидающее задание отменяет вызывающая очередь (у неё свои
-		побочные действия — вернуть файл, удалить строку); здесь —
-		только активное: флаг всегда, отмена задачи — если очередь
-		заведена с ``hard_cancel``.
+		Каркас ставит только флаг — прервать работу может лишь тот,
+		кто её ведёт: один исполнитель гасит посторонний процесс
+		(ffmpeg отменой задачи не остановить), другой рвёт сетевую
+		загрузку, но не запрос к БД, которым она подготовлена
+		(ADR-0020). Граница отменяемого предметна, и каркасу
+		её знать неоткуда.
 		"""
 		job.cancel_requested = True
-		if self._hard_cancel and self._active is not None and self._active[0] == job.id:
-			self._active[1].cancel()
 
 	def ensure_worker(self) -> None:
 		"""Запускает фоновую задачу выполнения, если она не крутится."""
@@ -236,12 +279,11 @@ class JobQueue(Generic[_J]):
 			for job in self._jobs:
 				if job.status is JobStatus.PENDING:
 					job.status = JobStatus.CANCELLED
-		if self._active is not None:
-			active = self.get(self._active[0])
-			if active is not None:
-				active.cancel_requested = True
-			if self._hard_cancel:
-				self._active[1].cancel()
+		# флаг отмены активному заданию здесь не взводится: он значит
+		# «отмену запросил человек», и исход у неё другой (задание
+		# покидает очередь). Остановку движка исполнитель узнаёт
+		# по `stopping`, а сетевую часть рвёт сама очередь — её
+		# недоделанное задание уйдёт после перезапуска (ADR-0020)
 		if self._worker is not None:
 			with suppress(TimeoutError, asyncio.CancelledError):
 				await asyncio.wait_for(self._worker, timeout=self._shutdown_timeout_s)
@@ -256,6 +298,17 @@ class JobQueue(Generic[_J]):
 		with suppress(TimeoutError):
 			await asyncio.wait_for(self._stop.wait(), timeout=seconds)
 
+	async def _pause(self, seconds: float) -> None:
+		"""Держит паузу очереди (флуд, щадящий темп) — подменяемо в тестах.
+
+		Отдельно от :meth:`wait_stop`: то — чистое ожидание остановки,
+		и подменять его нельзя, иначе подмена зациклилась бы на себе.
+		"""
+		if self._sleep is not None:
+			await self._sleep(seconds)
+			return
+		await self.wait_stop(seconds)
+
 	async def _run(self) -> None:
 		"""Выполняет задания по одному, пока есть готовые.
 
@@ -267,26 +320,30 @@ class JobQueue(Generic[_J]):
 			await self._run_one(job)
 
 	def _next_pending(self) -> _J | None:
-		"""Первое задание, готовое к выполнению."""
+		"""Первое задание, готовое к выполнению.
+
+		Задание, которое очередь придерживает (``ready``), пропускается:
+		причина у неё предметная, каркасу знать её незачем.
+		"""
 		for job in self._jobs:
-			if job.status is JobStatus.PENDING:
+			if job.status is JobStatus.PENDING and (self._ready is None or self._ready(job)):
 				return job
 		return None
 
 	async def _run_one(self, job: _J) -> None:
 		"""Выполняет одно задание и записывает исход в его статус.
 
-		Исходов три: успех (DONE), отмена (CANCELLED) и ошибка (ERROR
-		с текстом для человека). Недоменные исключения сворачиваются
-		так же, как это делает мост интерфейса, — карточка показывает
-		текст как есть (контракт ``errors.py``).
+		Исходов четыре: успех (DONE), отмена (CANCELLED), ошибка (ERROR
+		с текстом для человека) и отсрочка (:class:`JobDeferred` —
+		задание возвращается ждать, ошибкой это не считается).
+		Недоменные исключения сворачиваются так же, как это делает мост
+		интерфейса, — карточка показывает текст как есть (контракт
+		``errors.py``).
 
-		Об отмене исполнитель сообщает броском :class:`JobCancelled`.
-		Но у очереди с ``hard_cancel`` работа обрывается отменой самой
-		задачи, и тогда отмену от остановки движка отличает пара
-		«флаг задания + состояние очереди»: первое — исход задания
-		(очередь идёт дальше), второе — конец работы очереди, и статус
-		в памяти дописывать некому (ADR-0020).
+		Об отмене исполнитель сообщает броском :class:`JobCancelled` —
+		в том числе когда её причиной была отмена его собственной
+		сетевой задачи. Отмена, дошедшая до каркаса, означает другое:
+		движок останавливается или сносится цикл событий.
 		"""
 		job.status = JobStatus.RUNNING
 		task = asyncio.create_task(self._execute(job))
@@ -294,27 +351,66 @@ class JobQueue(Generic[_J]):
 		try:
 			await task
 		except JobCancelled:
-			job.status = JobStatus.CANCELLED
+			await self._apply(job, JobStatus.CANCELLED)
 			logger.info("%s id=%s: отменено.", self._name, job.id)
+		except JobDeferred as deferred:
+			await self._defer(job, deferred)
 		except asyncio.CancelledError:
+			# отменили сам воркер: остановка движка или снос цикла
+			# событий. Отмену, запрошенную человеком, исполнитель
+			# сообщает броском JobCancelled — сюда она не доходит.
+			# Очередь не продолжается, а исход недоделанного задания
+			# запишет следующий запуск: в памяти его дописывать некому
 			task.cancel()
-			if job.cancel_requested and not self.stopping:
-				# отмену запросил человек, и работа висела на сетевом
-				# вызове (`hard_cancel`): это исход задания, а не беда
-				# очереди — она продолжает со следующего
-				job.status = JobStatus.CANCELLED
-				logger.info("%s id=%s: отменено.", self._name, job.id)
-				return
-			# остановка движка или снос цикла событий: очередь
-			# не продолжается, а исход недоделанного задания запишет
-			# следующий запуск — в памяти его дописывать некому
 			raise
 		except Exception as exc:  # noqa: BLE001 — исход задания, не очереди
-			job.status = JobStatus.ERROR
-			job.error = user_message(exc)
+			await self._apply(job, JobStatus.ERROR, user_message(exc))
 			logger.exception("%s id=%s: не удалось.", self._name, job.id)
 		else:
-			job.status = JobStatus.DONE
+			await self._apply(job, JobStatus.DONE)
 			job.progress = 1.0
+			await self._cool_down(job)
 		finally:
 			self._active = None
+
+	async def _apply(self, job: _J, status: JobStatus, error: str | None = None) -> None:
+		"""Переводит задание в новый статус, сперва сохранив исход.
+
+		Порядок «хранилище → память» — инвариант очередей с БД
+		(ADR-0016): статус, видный в памяти, уже сохранён.
+		"""
+		if self._record is not None:
+			await self._record(job, status, error)
+		job.status = status
+		job.error = error
+
+	async def _defer(self, job: _J, deferred: JobDeferred) -> None:
+		"""Возвращает задание в ожидание (и держит паузу, если просили).
+
+		Пауза идёт после записи статуса: карточка всё это время
+		показывает пометку состояния, а остановка движка прерывает
+		ожидание, не заставляя `shutdown` досиживать чужой срок.
+		"""
+		await self._apply(job, deferred.status)
+		job.progress = 0.0
+		job.note = deferred.note
+		logger.info("%s id=%s: отложено (%s).", self._name, job.id, deferred.status)
+		if deferred.delay_s > 0:
+			try:
+				await self._pause(deferred.delay_s)
+			finally:
+				job.note = None
+
+	async def _cool_down(self, job: _J) -> None:
+		"""Держит паузу перед следующим заданием, если очередь так просит.
+
+		Пауза идёт при уже записанном исходе: карточка показывает
+		«готово», а не мнимую работу. Ждать незачем, если следующего
+		задания нет.
+		"""
+		if self._cooldown is None:
+			return
+		delay = self._cooldown(job)
+		if delay > 0 and self._next_pending() is not None:
+			logger.info("%s: пауза %.0f с перед следующим заданием.", self._name, delay)
+			await self._pause(delay)

@@ -19,18 +19,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete, select, update
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import PublishQueueItem
-from pxcontrol.engine.errors import user_message
+from pxcontrol.engine.jobs import Job, JobCancelled, JobDeferred, JobQueue, JobStatus
 from pxcontrol.engine.services.posts import (
 	MIN_SCHEDULE_AHEAD,
 	PostDraft,
@@ -54,24 +54,9 @@ logger = logging.getLogger(__name__)
 _TITLE_PREVIEW_CHARS = 60
 
 
-class QueueItemStatus(StrEnum):
-	"""Статус элемента очереди отправки."""
-
-	PENDING = "pending"  # ждёт своей очереди на отправку
-	WAITING = "waiting"  # ждёт свободного слота отложек канала (ADR-0016)
-	SENDING = "sending"  # загружается в Telegram
-	DONE = "done"  # отправлен
-	ERROR = "error"  # отправка не удалась (текст — в error)
-	CANCELLED = "cancelled"  # отменён пользователем
-
-	def finished(self) -> bool:
-		"""Завершён ли элемент (в любом исходе)."""
-		return self in (self.DONE, self.ERROR, self.CANCELLED)
-
-
-#: Статусы, которые хранятся в БД (SENDING не пишется: падение во время
+#: Статусы, которые хранятся в БД (RUNNING не пишется: падение во время
 #: отправки при загрузке очереди выглядит как PENDING и уходит повторно).
-_PERSISTED = (QueueItemStatus.PENDING, QueueItemStatus.WAITING, QueueItemStatus.ERROR)
+_PERSISTED = (JobStatus.PENDING, JobStatus.WAITING, JobStatus.ERROR)
 
 #: Статусы, в которых элемент правится (:meth:`PublishQueue.edit`): всё,
 #: что ещё не ушло в Telegram. Набор совпадает с ``_PERSISTED`` не случайно
@@ -79,19 +64,10 @@ _PERSISTED = (QueueItemStatus.PENDING, QueueItemStatus.WAITING, QueueItemStatus.
 #: и расходиться им ничто не мешает. Публичный: по нему интерфейс решает,
 #: раскрывать ли карточку формой правки, — правило одно на движок и окно.
 EDITABLE_STATUSES = (
-	QueueItemStatus.PENDING,
-	QueueItemStatus.WAITING,
-	QueueItemStatus.ERROR,
+	JobStatus.PENDING,
+	JobStatus.WAITING,
+	JobStatus.ERROR,
 )
-
-#: Статусы, после которых элемент покинул очередь: строки в БД нет, файл
-#: вернулся в результаты или уехал в опубликованные. Ошибки среди них нет —
-#: элемент с ней остаётся в очереди и ждёт правки или повтора (ADR-0016);
-#: по той же причине здесь не годится ``QueueItemStatus.finished()``: для неё
-#: ошибка — завершённый исход попытки, а для очереди — живой элемент.
-#: Публичная: тем же набором движок отвечает на вопрос «очередь пуста?»
-#: при смене папки очереди (``Engine.update_video_folders``).
-LEFT_QUEUE = (QueueItemStatus.DONE, QueueItemStatus.CANCELLED)
 
 
 @dataclass(frozen=True)
@@ -121,7 +97,7 @@ class QueueItemDto:
 	community_id: int
 	community_title: str
 	when: datetime | None
-	status: QueueItemStatus
+	status: JobStatus
 	progress: float
 	error: str | None
 	note: str | None = None
@@ -133,21 +109,21 @@ class QueueItemDto:
 		return self.when is not None
 
 
-class _Item:
-	"""Внутреннее состояние элемента очереди (изменяемое)."""
+class _PublishJob(Job):
+	"""Задание отправки: черновик поста и его канал.
+
+	Общее состояние (статус, доля загрузки, ошибка, пометка, флаг
+	отмены) живёт в базовом классе каркаса (ADR-0025); здесь —
+	предметное: сам черновик и два признака, которых нет у других
+	очередей.
+	"""
 
 	def __init__(self, item_id: int, draft: PostDraft, community_title: str) -> None:
-		self.id = item_id
+		super().__init__(item_id)
 		self.draft = draft
 		self.community_title = community_title
-		self.status = QueueItemStatus.PENDING
-		self.progress = 0.0
-		self.error: str | None = None
-		self.note: str | None = None  # пометка карточки (флуд-пауза)
-		# отмену запросил пользователь (отличает её от остановки движка)
-		self.cancel_requested = False
-		# идёт сохранение правки: воркер и дозор слотов такой элемент
-		# не трогают, пока правка не завершится (см. PublishQueue.edit)
+		# идёт сохранение правки: рабочий цикл и дозор слотов такой
+		# элемент не трогают, пока правка не завершится (см. edit)
 		self.editing = False
 		# канал удаляется: по исходу элемент снимается и с показа
 		self.drop_on_finish = False
@@ -218,15 +194,30 @@ class PublishQueue:
 		self._posts = posts
 		self._db = db
 		self._settings = settings if settings is not None else SettingsService(db)
-		self._items: list[_Item] = []
-		# кооперативная остановка (ADR-0020): задачи проверяют событие
-		# в безопасных точках, отмена не застаёт их посреди запроса к БД
-		self._stop = asyncio.Event()
-		# точка подмены в тестах: реальные паузы (флуд, догон) в тестах
-		# растянули бы прогон на минуты
-		self._sleep: Callable[[float], Awaitable[None]] = self._wait_stop
-		self._worker: asyncio.Task[None] | None = None
-		self._active: tuple[int, asyncio.Task[None]] | None = None
+		self._jobs: JobQueue[_PublishJob] = JobQueue(
+			self._send,
+			name="Отправка",
+			# очередь персистентна (ADR-0016): ожидающие переживают
+			# выход и уйдут после следующего запуска
+			cancel_pending_on_shutdown=False,
+			shutdown_timeout_s=_SHUTDOWN_TIMEOUT_S,
+			# порядок «БД → память» держит каркас: статус, видный
+			# в памяти, уже сохранён (см. _record_outcome)
+			record=self._record_outcome,
+			# щадящий догон просроченных постов (ADR-0016)
+			cooldown=self._catchup_pause,
+			# элемент, чья правка сохраняется, в отправку не берётся
+			ready=lambda item: not item.editing,
+			# точка подмены в тестах: настоящие паузы (флуд, догон)
+			# растянули бы прогон на минуты
+			sleep=lambda seconds: self._sleep(seconds),
+		)
+		self._sleep: Callable[[float], Coroutine[Any, Any, None]] = self._wait_stop
+		# элементы, ушедшие догоном: им положена пауза перед следующим
+		self._catchup: set[int] = set()
+		# задача передачи активного элемента — единственное, что можно
+		# рвать отменой: подготовка ходит в БД и обрываться не должна
+		self._transmit: asyncio.Task[None] | None = None
 		self._watcher: asyncio.Task[None] | None = None
 		self._slot_check: asyncio.Task[None] | None = None
 
@@ -259,13 +250,13 @@ class PublishQueue:
 					topic_id=row.topic_id,
 				)
 			)
-			item = _Item(row.id, draft, titles[row.community_id])
-			item.status = QueueItemStatus(row.status)
+			item = _PublishJob(row.id, draft, titles[row.community_id])
+			item.status = JobStatus(row.status)
 			item.error = row.error
-			self._items.append(item)
+			self._jobs.add(item)
 		if rows:
 			logger.info("Очередь отправки восстановлена: элементов %d.", len(rows))
-		self._ensure_worker()
+		self._jobs.ensure_worker()
 		self._request_slot_check()
 
 	async def enqueue(self, draft: PostDraft) -> int:
@@ -335,43 +326,43 @@ class PublishQueue:
 			raise
 		ids: list[int] = []
 		for row, draft in zip(rows, stashed, strict=True):
-			item = _Item(row.id, draft, titles[draft.community_id])
-			item.status = QueueItemStatus(row.status)
-			self._items.append(item)
+			item = _PublishJob(row.id, draft, titles[draft.community_id])
+			item.status = JobStatus(row.status)
+			self._jobs.add(item)
 			ids.append(item.id)
 			logger.info(
 				"Пост «%s» → «%s»: %s (id=%s).",
 				_draft_title(draft),
 				item.community_title,
-				"ждёт слота отложек" if item.status is QueueItemStatus.WAITING else "в очереди",
+				"ждёт слота отложек" if item.status is JobStatus.WAITING else "в очереди",
 				item.id,
 			)
-		self._ensure_worker()
+		self._jobs.ensure_worker()
 		self._request_slot_check()
 		return ids
 
-	def _request_cancel(self, item: _Item) -> None:
+	def _request_cancel(self, item: _PublishJob) -> None:
 		"""Взводит отмену активного элемента; исход запишет ``_send``.
 
-		Сеть обрывается отменой задачи; если идёт ещё подготовка
-		(задачи нет — ADR-0020), флаг увидит сам ``_send`` сразу
-		после неё. Общая точка для «Отмены» и ``drop_community``.
+		Сеть обрывается отменой задачи передачи; если идёт ещё
+		подготовка (задачи нет — ADR-0020), флаг увидит сам ``_send``
+		сразу после неё. Общая точка для «Отмены» и ``drop_community``.
 		"""
-		item.cancel_requested = True
-		if self._active is not None and self._active[0] == item.id:
-			self._active[1].cancel()
+		self._jobs.request_cancel(item)
+		if self._jobs.active_id == item.id and self._transmit is not None:
+			self._transmit.cancel()
 
 	async def cancel(self, item_id: int) -> None:
 		"""Отменяет элемент: ожидающий убирается, отправляющийся обрывается."""
-		cancellable = (QueueItemStatus.PENDING, QueueItemStatus.WAITING)
-		for item in self._items:
+		cancellable = (JobStatus.PENDING, JobStatus.WAITING)
+		for item in self._jobs.all():
 			if item.id != item_id:
 				continue
-			if item.status is QueueItemStatus.SENDING:
+			if item.status is JobStatus.RUNNING:
 				self._request_cancel(item)
 				return
 			if item.status in cancellable:
-				item.status = QueueItemStatus.CANCELLED
+				item.status = JobStatus.CANCELLED
 				await self._leave_queue(item)
 				logger.info("Элемент очереди id=%s отменён (ждал).", item_id)
 				return
@@ -391,8 +382,8 @@ class PublishQueue:
 			PostError: Черновик больше не годен к отправке — элемент
 				остаётся в ошибке с прежним текстом.
 		"""
-		for item in self._items:
-			if item.id != item_id or item.status is not QueueItemStatus.ERROR:
+		for item in self._jobs.all():
+			if item.id != item_id or item.status is not JobStatus.ERROR:
 				continue
 			item.draft = refresh_draft_media(item.draft)
 			if _expired(item.draft.when, datetime.now(UTC)):
@@ -408,7 +399,7 @@ class PublishQueue:
 			# была бы принята за отмену пользователем (см. _send)
 			item.cancel_requested = False
 			await self._persist(item)
-			self._ensure_worker()
+			self._jobs.ensure_worker()
 			self._request_slot_check()
 			logger.info("Элемент id=%s возвращён в очередь на повтор.", item_id)
 			return
@@ -470,7 +461,7 @@ class PublishQueue:
 			stashed_drafts, moved = await self._stash_all([draft])
 			stashed = stashed_drafts[0]
 			try:
-				if item.status in LEFT_QUEUE or item not in self._items:
+				if item.status.left_queue() or self._jobs.get(item.id) is None:
 					# пока переносили файл, элемент отменили или канал удалили
 					raise PostError("Пост уже покинул очередь — правка не сохранена.")
 				await self._persist_draft(item.id, stashed, status)
@@ -489,26 +480,26 @@ class PublishQueue:
 			item.cancel_requested = False
 		finally:
 			item.editing = False
-		self._ensure_worker()
+		self._jobs.ensure_worker()
 		self._request_slot_check()
 		logger.info(
 			"Элемент id=%s изменён: %s (%s).",
 			item_id,
 			_draft_title(stashed),
-			"ждёт слота отложек" if status is QueueItemStatus.WAITING else "в очереди",
+			"ждёт слота отложек" if status is JobStatus.WAITING else "в очереди",
 		)
 
-	def _editable(self, item_id: int) -> _Item:
+	def _editable(self, item_id: int) -> _PublishJob:
 		"""Элемент, который можно править, — или понятный отказ.
 
 		Raises:
 			PostError: Элемент не найден, отправляется, уже завершён
 				или прямо сейчас правится другим окном.
 		"""
-		for item in self._items:
+		for item in self._jobs.all():
 			if item.id != item_id:
 				continue
-			if item.status is QueueItemStatus.SENDING:
+			if item.status is JobStatus.RUNNING:
 				raise PostError("Пост уже отправляется — сначала отмените отправку, потом правьте.")
 			if item.status not in EDITABLE_STATUSES:
 				raise PostError("Пост уже покинул очередь — править нечего.")
@@ -549,10 +540,10 @@ class PublishQueue:
 		в результаты), активная отправка обрывается, завершённые
 		уходят с показа.
 		"""
-		for item in list(self._items):
+		for item in self._jobs.all():
 			if item.draft.community_id != community_id:
 				continue
-			if item.status is QueueItemStatus.SENDING:
+			if item.status is JobStatus.RUNNING:
 				# исход запишет _send: CANCELLED, файл вернётся в результаты;
 				# пометка drop_on_finish снимет элемент и с показа — гарантия
 				# «зомби-элементов нет» держится движком, а не панелью
@@ -560,9 +551,9 @@ class PublishQueue:
 				item.drop_on_finish = True
 				continue
 			if not item.status.finished():
-				item.status = QueueItemStatus.CANCELLED
+				item.status = JobStatus.CANCELLED
 				await self._leave_queue(item)
-			self._items.remove(item)
+			self._jobs.remove(item)
 		logger.info("Элементы канала id=%s сняты из очереди перед удалением.", community_id)
 
 	async def dismiss(self, item_id: int) -> None:
@@ -571,13 +562,13 @@ class PublishQueue:
 		Снятая с показа ошибка покидает очередь навсегда: строка удаляется,
 		файл возвращается из папки очереди в результаты.
 		"""
-		for item in self._items:
-			if item.id == item_id and item.status is QueueItemStatus.ERROR:
+		for item in self._jobs.all():
+			if item.id == item_id and item.status is JobStatus.ERROR:
 				await self._leave_queue(item)
 				break
-		self._items = [
-			item for item in self._items if not (item.id == item_id and item.status.finished())
-		]
+		for item in self._jobs.all():
+			if item.id == item_id and item.status.finished():
+				self._jobs.remove(item)
 
 	async def state(self) -> list[QueueItemDto]:
 		"""Снимок очереди для интерфейса.
@@ -587,8 +578,8 @@ class PublishQueue:
 		и уйдут — интерфейс показывает ближайшие).
 		"""
 		fallback = datetime.max.replace(tzinfo=UTC)
-		waiting = [item for item in self._items if item.status is QueueItemStatus.WAITING]
-		others = [item for item in self._items if item.status is not QueueItemStatus.WAITING]
+		waiting = [item for item in self._jobs.all() if item.status is JobStatus.WAITING]
+		others = [item for item in self._jobs.all() if item.status is not JobStatus.WAITING]
 		waiting.sort(key=lambda item: item.draft.when or fallback)
 		return [item.dto() for item in [*others, *waiting]]
 
@@ -611,41 +602,39 @@ class PublishQueue:
 		их запросы к БД не обрываются — иначе соединение aiosqlite
 		бросалось бы с запросом «в полёте» и его поток стрелял бы
 		в закрытый цикл событий. Жёстко отменяется только активная
-		отправка (обрыв недосланной загрузки — доменное поведение,
+		передача (обрыв недосланной загрузки — доменное поведение,
 		сетевая операция без БД); статусы в БД дочищать не нужно:
-		SENDING не персистится, при следующем запуске элемент уйдёт
+		RUNNING не персистится, при следующем запуске элемент уйдёт
 		повторно. Задача, не завершившаяся за страховочный таймаут,
 		отменяется — последнее средство.
 		"""
-		self._stop.set()
-		if self._active is not None:
-			self._active[1].cancel()
-		for task in (self._worker, self._watcher, self._slot_check):
+		if self._transmit is not None:
+			self._transmit.cancel()
+		await self._jobs.shutdown()
+		for task in (self._watcher, self._slot_check):
 			if task is not None:
 				with suppress(asyncio.CancelledError, TimeoutError):
 					await asyncio.wait_for(task, timeout=_SHUTDOWN_TIMEOUT_S)
-		self._worker = None
 		self._watcher = None
 		self._slot_check = None
 
 	async def _wait_stop(self, seconds: float) -> None:
 		"""Ждёт срок или остановку движка — смотря что наступит раньше.
 
-		Все паузы фоновых задач идут через это ожидание: остановка
-		прерывает их немедленно, не оставляя `shutdown` ждать флуд-паузу
-		(до минут) или тик дозора.
+		Паузы фоновых задач (дозор слотов) идут через это ожидание:
+		остановка прерывает их немедленно, не оставляя `shutdown`
+		ждать целый тик.
 		"""
-		with suppress(TimeoutError):
-			await asyncio.wait_for(self._stop.wait(), timeout=seconds)
+		await self._jobs.wait_stop(seconds)
 
 	# --- слоты отложек (ADR-0016) --------------------------------------------
 
 	@staticmethod
-	def _initial_status(draft: PostDraft) -> QueueItemStatus:
+	def _initial_status(draft: PostDraft) -> JobStatus:
 		"""Стартовый статус черновика: «сейчас» слота не ждёт."""
 		if draft.when is None or _expired(draft.when, datetime.now(UTC)):
-			return QueueItemStatus.PENDING
-		return QueueItemStatus.WAITING
+			return JobStatus.PENDING
+		return JobStatus.WAITING
 
 	def _ensure_watcher(self) -> None:
 		"""Запускает периодическую проверку слотов, если она не крутится."""
@@ -658,7 +647,7 @@ class PublishQueue:
 		Дозор поднимается здесь же: пока ждущих нет, фоновая задача
 		не нужна вовсе (и не мешает коротким жизням очереди в тестах).
 		"""
-		if not any(item.status is QueueItemStatus.WAITING for item in self._items):
+		if not any(item.status is JobStatus.WAITING for item in self._jobs.all()):
 			return
 		self._ensure_watcher()
 		if self._slot_check is None or self._slot_check.done():
@@ -672,13 +661,13 @@ class PublishQueue:
 		поднимут её заново (``_ensure_watcher``). Остановка движка
 		прерывает сон и выводит из цикла в безопасной точке (ADR-0020).
 		"""
-		while not self._stop.is_set() and any(
-			item.status is QueueItemStatus.WAITING for item in self._items
+		while not self._jobs.stopping and any(
+			item.status is JobStatus.WAITING for item in self._jobs.all()
 		):
 			minutes = await self._settings.get(QUEUE_SLOT_POLL_MINUTES)
 			await self._wait_stop(max(1, minutes) * 60)
-			if not self._stop.is_set() and any(
-				item.status is QueueItemStatus.WAITING for item in self._items
+			if not self._jobs.stopping and any(
+				item.status is JobStatus.WAITING for item in self._jobs.all()
 			):
 				await self._release_slots()
 
@@ -695,12 +684,10 @@ class PublishQueue:
 		now = datetime.now(UTC)
 		fallback = datetime.max.replace(tzinfo=UTC)
 		communities = {
-			item.draft.community_id
-			for item in self._items
-			if item.status is QueueItemStatus.WAITING
+			item.draft.community_id for item in self._jobs.all() if item.status is JobStatus.WAITING
 		}
 		for community_id in communities:
-			if self._stop.is_set():
+			if self._jobs.stopping:
 				# остановка движка: недопроверенные каналы подождут запуска —
 				# дозор перепроверит слоты при восстановлении очереди
 				return
@@ -724,9 +711,9 @@ class PublishQueue:
 				continue
 			in_flight = sum(
 				1
-				for item in self._items
+				for item in self._jobs.all()
 				if item.draft.community_id == community_id
-				and item.status in (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
+				and item.status in (JobStatus.PENDING, JobStatus.RUNNING)
 				and item.draft.when is not None
 				and not _expired(item.draft.when, now)
 			)
@@ -734,8 +721,8 @@ class PublishQueue:
 			waiting = sorted(
 				(
 					item
-					for item in self._items
-					if item.status is QueueItemStatus.WAITING
+					for item in self._jobs.all()
+					if item.status is JobStatus.WAITING
 					and item.draft.community_id == community_id
 					# правка сама поставит элементу статус по новому времени
 					and not item.editing
@@ -748,7 +735,7 @@ class PublishQueue:
 					if free <= 0:
 						break
 					free -= 1
-				item.status = QueueItemStatus.PENDING
+				item.status = JobStatus.PENDING
 				await self._persist(item)
 				released += 1
 			if released:
@@ -758,7 +745,7 @@ class PublishQueue:
 					released,
 					taken,
 				)
-		self._ensure_worker()
+		self._jobs.ensure_worker()
 
 	# --- персистентность и файлы ---------------------------------------------
 
@@ -790,15 +777,13 @@ class PublishQueue:
 		for path in moved:
 			await self._posts.unstash_from_queue(path)
 
-	async def _persist(self, item: _Item) -> None:
+	async def _persist(self, item: _PublishJob) -> None:
 		"""Пишет статус/ошибку элемента в таблицу (только хранимые статусы)."""
 		if item.status not in _PERSISTED:
 			return
 		await self._persist_values(item.id, item.status, item.error)
 
-	async def _persist_values(
-		self, item_id: int, status: QueueItemStatus, error: str | None
-	) -> None:
+	async def _persist_values(self, item_id: int, status: JobStatus, error: str | None) -> None:
 		"""Пишет статус/ошибку строки элемента (до правки состояния в памяти)."""
 		async with self._db.session_factory() as session:
 			await session.execute(
@@ -808,7 +793,7 @@ class PublishQueue:
 			)
 			await session.commit()
 
-	async def _persist_draft(self, item_id: int, draft: PostDraft, status: QueueItemStatus) -> None:
+	async def _persist_draft(self, item_id: int, draft: PostDraft, status: JobStatus) -> None:
 		"""Переписывает строку элемента новым черновиком и статусом.
 
 		Ошибка прошлой попытки стирается вместе с черновиком: правка
@@ -837,7 +822,7 @@ class PublishQueue:
 			await session.execute(delete(PublishQueueItem).where(PublishQueueItem.id == item_id))
 			await session.commit()
 
-	async def _leave_queue(self, item: _Item) -> None:
+	async def _leave_queue(self, item: _PublishJob) -> None:
 		"""Элемент покидает очередь без отправки: строка — долой, файл — назад."""
 		await self._delete_row(item.id)
 		if item.draft.media_path is not None:
@@ -846,136 +831,129 @@ class PublishQueue:
 
 	# --- отправка -------------------------------------------------------------
 
-	def _ensure_worker(self) -> None:
-		"""Запускает фоновую задачу отправки, если она не крутится."""
-		if self._worker is None or self._worker.done():
-			self._worker = asyncio.create_task(self._run())
+	def _next_pending(self) -> _PublishJob | None:
+		"""Первый готовый к отправке элемент (для проверки «есть ли ещё»).
 
-	async def _run(self) -> None:
-		"""Отправляет элементы по одному, пока есть готовые к отправке.
-
-		Остановка движка выводит из цикла между элементами (ADR-0020);
-		начатый элемент дорабатывается — его обрывает отмена активной
-		отправки в ``shutdown``, а не отмена воркера.
+		Пропускается тот, чья правка сейчас сохраняется (:meth:`edit`):
+		забрать его в отправку значило бы отправить наполовину
+		применённый черновик.
 		"""
-		while not self._stop.is_set() and (item := self._next_pending()) is not None:
-			await self._send(item)
-
-	def _next_pending(self) -> _Item | None:
-		"""Первый готовый к отправке элемент.
-
-		Пропускаются ждущие слота и тот, чья правка сейчас сохраняется
-		(:meth:`edit`): забрать его в отправку значило бы отправить
-		наполовину применённый черновик.
-		"""
-		for item in self._items:
-			if item.status is QueueItemStatus.PENDING and not item.editing:
+		for item in self._jobs.all():
+			if item.status is JobStatus.PENDING and not item.editing:
 				return item
 		return None
 
-	async def _send(self, item: _Item) -> None:
-		"""Отправляет один элемент; исход пишется в его статус."""
+	def _catchup_pause(self, item: _PublishJob) -> float:
+		"""Пауза после догоняющего поста (ADR-0016): щадящий темп.
+
+		После простоя приложения очередь не строчит залпом: подписчики
+		видят «канал ожил», а не пулемётную ленту. Обычный пост паузы
+		не требует.
+		"""
+		return CATCHUP_INTERVAL_S if item.id in self._catchup else 0.0
+
+	async def _record_outcome(
+		self, item: _PublishJob, status: JobStatus, error: str | None
+	) -> None:
+		"""Записывает исход элемента до того, как он появится в памяти.
+
+		Порядок «БД → память» — инвариант очереди (ADR-0016):
+		наблюдатель, увидевший исход, знает, что хранилище о нём уже
+		знает; обрыв между шагами (остановка движка) оставляет в БД
+		«не доделано», и элемент просто уйдёт после перезапуска.
+
+		Исходы разные по существу: отправленный и отменённый покидают
+		очередь (строка — долой, файл отменённого возвращается
+		в результаты), ошибка и ожидание — остаются строкой.
+		"""
+		if status is JobStatus.DONE:
+			await self._delete_row(item.id)
+		elif status is JobStatus.CANCELLED:
+			await self._leave_queue(item)
+		else:
+			await self._persist_values(item.id, status, error)
+		if item.drop_on_finish and status.finished():
+			# канал удалён (drop_community): исход записан — элемент
+			# уходит и с показа, без участия панели интерфейса
+			self._jobs.remove(item)
+
+	async def _send(self, item: _PublishJob) -> None:
+		"""Отправляет один пост; исход записывает каркас заданий.
+
+		Подготовка (проверки, чтения БД, переименование файла) идёт
+		здесь же, но **вне отменяемой части**: отменяется только задача
+		передачи — сеть и файлы (ADR-0020). Жёсткая отмена не должна
+		застать запрос к БД: соединение aiosqlite бросилось бы
+		с запросом «в полёте».
+
+		Raises:
+			JobCancelled: Отправку отменил человек (или остановка
+				движка застала её на подготовке).
+			JobDeferred: Слоты отложек кончились (элемент ждёт снова)
+				или Telegram просит подождать (повтор после паузы).
+			PostError: Отправка не удалась — текст уйдёт на карточку.
+		"""
 
 		def _on_progress(fraction: float) -> None:
 			item.progress = fraction
 
 		draft = item.draft
-		catchup = _expired(draft.when, datetime.now(UTC))
-		if catchup:
+		if _expired(draft.when, datetime.now(UTC)):
 			# желаемый момент прошёл — это уже не отложка: публикуем
 			# обычным сообщением, слота не занимая (ADR-0016)
 			draft = replace(draft, when=None)
 			# снимок для интерфейса честен: карточка и итоговая плашка
 			# показывают «сейчас», а не несуществующую отложку
 			item.draft = draft
-		item.status = QueueItemStatus.SENDING
-		task: asyncio.Task[None] | None = None
+			self._catchup.add(item.id)
 		try:
-			# подготовка (проверки, чтения БД, переименование) — в самом
-			# воркере: его не отменяют (ADR-0020), запросы к БД не рвутся;
-			# отменяемая задача ниже — только сеть и файлы
 			plan = await self._posts.prepare_publish(draft)
-			if item.cancel_requested or self._stop.is_set():
-				# отмена или остановка пришла на подготовке: сети ещё
-				# не было, обрывать нечего — исход тот же, что у обрыва
-				# отправки, и обрабатывается той же веткой ниже
+			if item.cancel_requested:
+				# отмена пришла на подготовке: сети ещё не было,
+				# обрывать нечего — исход тот же, что у обрыва передачи
+				raise JobCancelled
+			if self._jobs.stopping:
+				# остановка движка — не исход элемента: он остаётся
+				# PENDING в БД и уйдёт после перезапуска (ADR-0020)
 				raise asyncio.CancelledError
 			task = asyncio.create_task(self._posts.transmit(plan, on_progress=_on_progress))
-			self._active = (item.id, task)
-			await task
+			self._transmit = task
+			try:
+				await task
+			finally:
+				self._transmit = None
 		except asyncio.CancelledError:
+			# отменена задача передачи: человеком (`cancel`) или
+			# остановкой движка (`shutdown`). Второе — не исход
+			# элемента: он остаётся PENDING в БД и уйдёт после
+			# перезапуска, поэтому отмену пробрасываем дальше
 			if not item.cancel_requested:
-				# не пользователь — остановка: shutdown отменил активную
-				# отправку (ADR-0020) либо воркер отменили извне (снос
-				# цикла). Гасим отправку и пробрасываем отмену дальше —
-				# очередь не продолжается; элемент остаётся PENDING в БД
-				# и уйдёт после перезапуска.
-				if task is not None:
-					task.cancel()
 				raise
-			item.status = QueueItemStatus.CANCELLED
-			await self._leave_queue(item)
-			logger.info("Отправка id=%s отменена пользователем.", item.id)
-		except UserbotScheduleFullError:
-			# гонка: слоты заняли руками из клиента Telegram между проверкой
-			# и отправкой — не ошибка, элемент возвращается ждать (ADR-0016).
-			# Сначала БД, потом память: обрыв между шагами (остановка движка)
-			# оставит в БД pending — при перезапуске элемент просто уйдёт снова
-			await self._persist_values(item.id, QueueItemStatus.WAITING, None)
-			item.status = QueueItemStatus.WAITING
-			item.progress = 0.0
-			self._ensure_watcher()  # дозор вернёт элемент, когда слот освободится
+			raise JobCancelled from None
+		except UserbotScheduleFullError as exc:
+			# гонка: слоты заняли руками из клиента Telegram между
+			# проверкой и отправкой — не ошибка, элемент ждёт снова
+			self._ensure_watcher()  # дозор вернёт его, когда слот освободится
 			logger.info("Отправка id=%s: слоты кончились — элемент снова ждёт.", item.id)
+			raise JobDeferred(JobStatus.WAITING) from exc
 		except TelegramFloodError as exc:
-			# флуд-лимит — временное состояние, не исход элемента: сервер
-			# сам назвал срок повтора (ср. ветку «слоты кончились» выше).
-			# Порядок «БД → память» — тот же
-			await self._persist_values(item.id, QueueItemStatus.PENDING, None)
-			item.status = QueueItemStatus.PENDING
-			item.progress = 0.0
-			item.note = f"{exc} Очередь ждёт и повторит сама."
+			# флуд-лимит — временное состояние, не исход элемента:
+			# сервер сам назвал срок повтора
 			logger.warning(
 				"Отправка id=%s: флуд-лимит — очередь ждёт %d с.", item.id, exc.retry_after_s
 			)
-			try:
-				await self._sleep(exc.retry_after_s)
-			finally:
-				item.note = None
-		except Exception as exc:  # noqa: BLE001 — исход элемента, не очереди
+			raise JobDeferred(
+				JobStatus.PENDING,
+				note=f"{exc} Очередь ждёт и повторит сама.",
+				delay_s=exc.retry_after_s,
+			) from exc
+		except Exception as exc:
 			if item.cancel_requested:
 				# ошибка на фоне взведённой отмены — типовой случай:
 				# drop_community уже удалил канал, и подготовка падает
 				# «Канал не найден». Честный исход — отмена, не ошибка:
 				# иначе файл застрял бы в папке очереди, а «Повторить»
 				# вечно падал тем же текстом
-				item.status = QueueItemStatus.CANCELLED
-				await self._leave_queue(item)
 				logger.info("Отправка id=%s отменена (ошибка на фоне отмены: %s).", item.id, exc)
-			else:
-				# карточка очереди показывает этот текст как есть — сворачиваем
-				# недоменные исключения, как мост интерфейса (контракт errors.py).
-				# Порядок «БД → память» — как у ветки выше
-				message = user_message(exc)
-				await self._persist_values(item.id, QueueItemStatus.ERROR, message)
-				item.status = QueueItemStatus.ERROR
-				item.error = message
-				logger.exception("Отправка id=%s не удалась.", item.id)
-		else:
-			# порядок «БД → память» — как у остальных веток (ADR-0020):
-			# наблюдатель, увидевший DONE, знает, что запросов в полёте
-			# нет; заодно нет окна дубля — падение до удаления строки
-			# оставляло pending, и пост уходил после рестарта повторно
-			await self._delete_row(item.id)
-			item.status = QueueItemStatus.DONE
-			item.progress = 1.0
-			if catchup and self._next_pending() is not None:
-				# щадящий догон: пауза между просроченными постами
-				logger.info("Догон: пауза %d с перед следующим постом.", CATCHUP_INTERVAL_S)
-				await self._sleep(CATCHUP_INTERVAL_S)
-		finally:
-			self._active = None
-			if item.drop_on_finish and item.status.finished():
-				# канал удалён (drop_community): исход записан — элемент
-				# уходит и с показа, без участия панели интерфейса
-				with suppress(ValueError):
-					self._items.remove(item)
+				raise JobCancelled from exc
+			raise

@@ -53,6 +53,7 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.video import video_dialog_filter
 from pxcontrol.engine.telegram.types import (
@@ -877,20 +878,6 @@ def plan_cards(shown: Sequence[Any], known: Mapping[int, tuple[Any, ...]]) -> Ca
 	)
 
 
-#: статусы «работа идёт прямо сейчас» обеих очередей; ждущие
-#: (PENDING/WAITING) активными не считаются. Обработка видео уже
-#: на общем каркасе заданий (ADR-0025) — у неё это RUNNING; очередь
-#: отправки со своим SENDING переедет следующей, и набор схлопнется
-#: в вызов ``status.active()``.
-_ACTIVE_STATUSES = ("SENDING", "RUNNING")
-
-#: статусы «элемент покинул очередь»: снимаются с показа, действий у них нет.
-#: Ошибки здесь нет намеренно — элемент с ней остаётся живым (его правят,
-#: повторяют или убирают руками); ``status.finished()`` для этого не годится:
-#: там ошибка считается завершённым исходом попытки.
-_LEFT_STATUSES = ("DONE", "CANCELLED")
-
-
 class _QueueCard:
 	"""Карточка элемента очереди: шапка с действиями и тело для правки.
 
@@ -1000,14 +987,14 @@ class _QueueCard:
 			play.clicked.connect(bind(panel.play, media_path))
 			self._actions_box.addWidget(play)
 		# полоса прогресса — только у активных (WAITING/PENDING не растут)
-		if item.status.name in _ACTIVE_STATUSES:
+		if item.status.active():
 			bar = ProgressBar(self._actions)
 			bar.setRange(0, 100)
 			bar.setValue(int(item.progress * 100))
 			bar.setFixedWidth(160)
 			self._actions_box.addWidget(bar)
 			self._bar = bar
-		if item.status.name == "ERROR":
+		if item.status is JobStatus.ERROR:
 			retry = PushButton("Повторить", self._actions)
 			retry.clicked.connect(bind(panel.retry, item.id))
 			self._actions_box.addWidget(retry)
@@ -1037,10 +1024,10 @@ class QueuePanel:
 
 	Контракт сервиса очереди (оба сервиса движка ему следуют): корутины
 	``state()``, ``cancel(id)``, ``retry(id)``, ``dismiss(id)``; элементы
-	с полями ``id``, ``status`` (перечисление с методом ``finished()``;
-	значения PENDING/DONE/ERROR/CANCELLED + активное SENDING либо
-	PROCESSING; у очереди отправки есть ещё WAITING — «ждёт слота»,
-	не активный, ADR-0016), ``progress``, ``title``, ``error``.
+	с полями ``id``, ``status`` (общий :class:`JobStatus`, ADR-0025 —
+	панель спрашивает его признаками ``active()`` / ``finished()`` /
+	``left_queue()``, а не сверяет имена), ``progress``, ``title``,
+	``error``.
 	Необязательные поля ``note`` (пометка состояния: авто-битрейт
 	у обработки видео, флуд-пауза у отправки) и ``media_path`` (путь
 	вложения: карточка даёт посмотреть файл) панель читает через
@@ -1215,8 +1202,8 @@ class QueuePanel:
 		"""Обновляет панель; завершённые получают реакцию и снимаются с показа."""
 		visible: list[Any] = []
 		for item in items:
-			if item.status.name in _LEFT_STATUSES:
-				self._finish(item, done=item.status.name == "DONE")
+			if item.status.left_queue():
+				self._finish(item, done=item.status is JobStatus.DONE)
 			else:
 				visible.append(item)
 		# id, исчезнувшие из состояния движка (после dismiss), больше
@@ -1226,7 +1213,7 @@ class QueuePanel:
 		if self._busy and not busy and self._on_drained is not None:
 			self._on_drained(visible)
 		self._busy = busy
-		self._active = any(item.status.name in _ACTIVE_STATUSES for item in visible)
+		self._active = any(item.status.active() for item in visible)
 		if self._transform is not None:
 			visible = self._transform(visible)
 		self._sync_cards(visible if self._max_cards is None else visible[: self._max_cards])

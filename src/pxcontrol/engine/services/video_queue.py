@@ -133,9 +133,6 @@ class ProcessingQueue:
 		self._jobs: JobQueue[_VideoJob] = JobQueue(
 			self._process,
 			name="Обработка",
-			# ffmpeg — посторонний процесс: отмена задачи его не остановит,
-			# работает только кооперативный флаг (см. докстринг модуля)
-			hard_cancel=False,
 			# очередь не переживает перезапуск (ADR-0014) — честно сказать
 			# об этом ожидающим элементам при остановке движка
 			cancel_pending_on_shutdown=True,
