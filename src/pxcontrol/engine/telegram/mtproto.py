@@ -25,6 +25,7 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
+	ParticipantsPage,
 	ScheduledMessage,
 	ServiceMessageInfo,
 	ServiceMessageKind,
@@ -362,6 +363,18 @@ def _can_delete_messages(perms: Any) -> bool:
 	return bool(getattr(admin_rights, "delete_messages", False))
 
 
+def _can_ban_users(perms: Any) -> bool:
+	"""Может ли аккаунт исключать участников (право админа).
+
+	Чистка удалённых аккаунтов — это исключение участников, и права
+	на неё у роли «админ» может не быть (ADR-0026).
+	"""
+	if getattr(perms, "is_creator", False):
+		return True
+	admin_rights = getattr(getattr(perms, "participant", None), "admin_rights", None)
+	return bool(getattr(admin_rights, "ban_users", False))
+
+
 def _peer_id(chat_id: str) -> int:
 	"""Числовой ID из строки БД (:func:`refs.numeric_chat_id` с нашим классом)."""
 	return numeric_chat_id(chat_id, UserbotUnavailableError)
@@ -641,8 +654,9 @@ class MtprotoTransport:
 			forum=bool(getattr(entity, "forum", False)),
 			# роль — бесплатный побочный продукт зонда (ADR-0022)
 			role=UserbotRole.ADMIN if perms.is_admin else UserbotRole.MEMBER,
-			# право удалять чужие сообщения — тоже (ADR-0026)
+			# права, нужные обслуживанию, — тоже (ADR-0026)
 			can_delete=_can_delete_messages(perms),
+			can_ban=_can_ban_users(perms),
 		)
 
 	async def get_forum_topics(self, chat_id: str) -> list[ForumTopicInfo]:
@@ -817,6 +831,70 @@ class MtprotoTransport:
 			)
 			return 0
 		return len(message_ids)
+
+	async def participants_page(self, chat_id: str, offset: int, limit: int) -> ParticipantsPage:
+		"""Читает страницу участников и отбирает удалённые аккаунты.
+
+		Список участников Telegram отдаёт только администратору
+		и порциями (до 200 за запрос). Одна страница — один запрос:
+		темп держит дорожка аккаунта (ADR-0024).
+
+		Returns:
+			Страницу: идентификаторы удалённых учёток, число
+			просмотренных участников и смещение для продолжения
+			(None — список кончился).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Список участников недоступен (нужен админ).
+			UserbotFloodError: Флуд-лимит — обход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.channels import GetParticipantsRequest
+		from telethon.tl.types import ChannelParticipantsRecent
+
+		client = await self._connected_client()
+		peer_id = _peer_id(chat_id)
+		async with _mtproto_errors():
+			entity = await client.get_input_entity(peer_id)
+			result = await client(
+				GetParticipantsRequest(
+					channel=entity,
+					filter=ChannelParticipantsRecent(),
+					offset=offset,
+					limit=limit,
+					hash=0,
+				)
+			)
+		users = list(getattr(result, "users", []))
+		return ParticipantsPage(
+			deleted_ids=[user.id for user in users if getattr(user, "deleted", False)],
+			scanned=len(users),
+			# страница неполна — значит список кончился
+			next_offset=offset + len(users) if len(users) >= limit else None,
+			total=getattr(result, "count", None),
+		)
+
+	async def kick_participant(self, chat_id: str, user_id: int) -> int | None:
+		"""Исключает участника; возвращает id порождённой служебной записи.
+
+		Исключение — это блокировка со снятием: иначе учётка осела бы
+		в списке заблокированных. В супергруппе Telegram пишет об этом
+		служебную запись («X удалил Y») — её идентификатор и
+		возвращается, чтобы чистка убрала за собой (ADR-0026).
+		None — записи не было (так ведут себя каналы).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Нет права исключать (подтверждённый отказ).
+			UserbotFloodError: Флуд-лимит — обход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		client = await self._connected_client()
+		peer_id = _peer_id(chat_id)
+		async with _mtproto_errors():
+			message = await client.kick_participant(peer_id, user_id)
+		return int(message.id) if message is not None else None
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""

@@ -199,6 +199,30 @@ class ServiceMessagesPage:
 
 
 @dataclass(frozen=True)
+class ParticipantsPage:
+	"""Страница списка участников: удалённые аккаунты и место продолжения.
+
+	Список участников Telegram отдаёт порциями и только администратору;
+	«удалённый аккаунт» — учётка, которую владелец удалил, у неё поднят
+	флаг ``deleted`` (ADR-0026). Наружу отдаются только их
+	идентификаторы: живые участники обслуживанию не нужны, а тащить их
+	через границу слоёв незачем.
+
+	Attributes:
+		deleted_ids: удалённые аккаунты этой страницы.
+		scanned: сколько участников просмотрено (включая живых).
+		next_offset: смещение следующей страницы; None — список кончился.
+		total: сколько участников всего, по мнению Telegram
+			(None — не сказал).
+	"""
+
+	deleted_ids: list[int]
+	scanned: int
+	next_offset: int | None
+	total: int | None
+
+
+@dataclass(frozen=True)
 class CommunityInfo:
 	"""Сообщество, проверенное любым транспортом (бот или userbot).
 
@@ -215,6 +239,9 @@ class CommunityInfo:
 			``delete_messages`` или владение сообществом). Нужно
 			обслуживанию (ADR-0026): роль «админ» сама по себе такого
 			права не гарантирует. Бот-путь его не вычисляет — False.
+		can_ban: аккаунт может исключать участников (право админа
+			``ban_users`` или владение). Тоже нужно обслуживанию:
+			чистка удалённых аккаунтов — это исключение участников.
 	"""
 
 	chat_id: str
@@ -224,6 +251,7 @@ class CommunityInfo:
 	forum: bool = False
 	role: UserbotRole | None = None
 	can_delete: bool = False
+	can_ban: bool = False
 
 
 @dataclass(frozen=True)

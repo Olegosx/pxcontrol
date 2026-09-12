@@ -47,6 +47,7 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
+	ParticipantsPage,
 	ScheduledMessage,
 	ServiceMessagesPage,
 	TelegramFloodError,
@@ -356,6 +357,35 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.delete_messages(chat_id, message_ids)
+
+	async def participants_page(
+		self, account_id: int, chat_id: str, offset: int, limit: int
+	) -> ParticipantsPage:
+		"""Читает страницу участников, отбирая удалённые аккаунты (ADR-0026).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Список участников недоступен (нужен админ).
+			UserbotFloodError: Флуд-лимит — обход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			return await transport.participants_page(chat_id, offset, limit)
+
+	async def kick_participant(self, account_id: int, chat_id: str, user_id: int) -> int | None:
+		"""Исключает участника; отдаёт id служебной записи об этом.
+
+		None — записи не было. В супергруппе она есть всегда, и чистка
+		удалённых аккаунтов убирает её за собой (ADR-0026).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Нет права исключать (подтверждённый отказ).
+			UserbotFloodError: Флуд-лимит — обход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			return await transport.kick_participant(chat_id, user_id)
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала из Telegram (его аккаунтом).
