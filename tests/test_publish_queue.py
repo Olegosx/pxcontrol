@@ -1282,3 +1282,37 @@ async def test_state_carries_media_path_from_queue_folder(
 	assert shown.media_path == str(tmp_path / "media" / "queued" / "суб" / "ролик.mp4")
 	text_item = await queue.enqueue(PostDraft(community_id, text="без файла", when=_future(180)))
 	assert (await _statuses(queue))[text_item].media_path is None
+
+
+async def test_cancel_during_file_settling_keeps_the_post_published(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Отмена в момент раскладки файлов не объявляет пост отменённым.
+
+	Раскладка идёт после того, как задача передачи отцеплена: пост
+	уже в канале, отменять нечего. Раньше этот шаг жил внутри
+	отменяемой задачи — отмена возвращала файл опубликованного поста
+	в результаты навстречу копирующему потоку, а карточка показывала
+	«отменено» вместо «отправлено».
+	"""
+	gateway = _SlowGateway()
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item_id = await queue.enqueue(PostDraft(community_id, text="уже в канале"))
+	settled = asyncio.Event()
+
+	async def _settle_and_cancel(plan: PublishPlan) -> None:
+		# человек жмёт «Отменить» ровно в этот момент
+		await queue.cancel(item_id)
+		settled.set()
+
+	queue._posts.settle_published = _settle_and_cancel  # type: ignore[method-assign]  # noqa: SLF001
+	gateway.release.set()
+	await asyncio.wait_for(settled.wait(), timeout=5)
+	item = await _wait_status(queue, item_id, JobStatus.DONE)
+
+	assert len(gateway.published) == 1  # пост ушёл
+	assert item.error is None  # и засчитан отправленным, а не отменённым
+	async with db.session_factory() as session:
+		rows = (await session.execute(select(PublishQueueItem))).scalars().all()
+	assert rows == []  # строка удалена — повтора после перезапуска не будет

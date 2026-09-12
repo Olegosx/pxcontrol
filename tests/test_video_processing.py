@@ -727,6 +727,71 @@ def test_successful_encode_moves_part_to_output(
 	assert not Path(f"{out}.part").exists()
 
 
+def test_cover_encode_stays_in_the_results_folder(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	"""При вшивании обложки тяжёлый файл не уходит в системную tmp.
+
+	Промежуточный результат кодирования — то же гигабайтное видео;
+	системная временная папка на Linux часто живёт в оперативной
+	памяти, и большому ролику там места может не хватить.
+	"""
+	from pxcontrol.engine.video import pipeline
+
+	out = tmp_path / "res.mp4"
+	monkeypatch.setattr(pipeline, "probe_video", lambda _p, _b: INFO)
+	monkeypatch.setattr(pipeline, "prepare_still", lambda *a, **k: Path(a[3]).write_bytes(b"png"))
+	monkeypatch.setattr(pipeline, "extract_still", lambda *a, **k: None)
+	encoded: list[str] = []
+
+	def _encode(cmd: list[str], _what: str, _total: float, _cb: object) -> None:
+		encoded.append(cmd[-1])
+		Path(cmd[-1]).write_bytes(b"ok")
+
+	def _attach(_bin: str, source: str, _still: str, target: str) -> None:
+		Path(target).write_bytes(Path(source).read_bytes())
+
+	monkeypatch.setattr(pipeline, "run_streaming", _encode)
+	monkeypatch.setattr(pipeline, "_attach_cover", _attach)
+	pipeline.process(_options(input="src.mp4", output=str(out), cover=True))
+
+	assert len(encoded) == 1
+	written = Path(encoded[0]).resolve()
+	# имя промежуточного файла производно от результата — значит он
+	# живёт в папке результатов, а не в папке, которую конвейер завёл
+	# под мелочи вроде кадра заставки
+	assert written.parent == tmp_path.resolve()
+	assert written.name.startswith(out.name)
+	assert out.read_bytes() == b"ok"
+	# в папке — только результат и его превью: оба промежуточных
+	# имени («.part» и «.main.part») убраны
+	assert sorted(p.name for p in tmp_path.iterdir()) == ["res.mp4", "res.png"]
+
+
+def test_failed_cover_encode_leaves_no_leftovers(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	"""Упавшая обработка с обложкой не оставляет обрезков.
+
+	Ветка с обложкой пишет два промежуточных файла вместо одного —
+	убраться обязаны оба.
+	"""
+	from pxcontrol.engine.video import pipeline
+
+	out = tmp_path / "res.mp4"
+	monkeypatch.setattr(pipeline, "probe_video", lambda _p, _b: INFO)
+	monkeypatch.setattr(pipeline, "prepare_still", lambda *a, **k: Path(a[3]).write_bytes(b"png"))
+
+	def _crash(cmd: list[str], _what: str, _total: float, _cb: object) -> None:
+		Path(cmd[-1]).write_bytes(b"partial")  # ffmpeg успел записать кусок
+		raise RuntimeError("кончилось место")
+
+	monkeypatch.setattr(pipeline, "run_streaming", _crash)
+	with pytest.raises(RuntimeError, match="кончилось место"):
+		pipeline.process(_options(input="src.mp4", output=str(out), cover=True))
+	assert list(tmp_path.iterdir()) == []
+
+
 def test_probe_rejects_unknown_duration(monkeypatch: pytest.MonkeyPatch) -> None:
 	"""«N/A» и отсутствие длительности — понятная ошибка, не 0.0 и не дамп."""
 	from pxcontrol.engine.video import probe

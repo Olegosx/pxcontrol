@@ -329,16 +329,18 @@ class PostsService:
 		возможностям канала (:func:`publish_capabilities`): userbot —
 		полный набор; только бот — текст и медиа до 50 МБ, «сейчас».
 		``on_progress`` получает долю загрузки файла 0.0..1.0
-		(бот-путь прогресс не отдаёт). Композиция двух фаз (ADR-0020):
+		(бот-путь прогресс не отдаёт). Композиция трёх фаз (ADR-0020):
 		очередь отправки вызывает их раздельно, чтобы отменяемой была
-		только передача.
+		только передача, а раскладка файлов шла уже вне отмены.
 
 		Raises:
 			PostError: Черновик/канал/файл не годятся, канал выключен
 				или у канала нет способа публикации.
 			UserbotUnavailableError: Userbot отвалился по дороге.
 		"""
-		await self.transmit(await self.prepare_publish(draft), on_progress)
+		plan = await self.prepare_publish(draft)
+		await self.transmit(plan, on_progress)
+		await self.settle_published(plan)
 
 	async def prepare_publish(self, draft: PostDraft) -> PublishPlan:
 		"""Подготовка публикации: проверки, чтения БД, переименование.
@@ -382,10 +384,14 @@ class PostsService:
 	async def transmit(
 		self, plan: PublishPlan, on_progress: ProgressCallback | None = None
 	) -> None:
-		"""Передача подготовленного поста: сеть и файлы, без запросов к БД.
+		"""Передача подготовленного поста: только сеть, без запросов к БД.
 
 		Отменяемая фаза публикации (ADR-0020): обрыв здесь безопасен —
 		недосланное Telegram не публикует, соединений с БД в полёте нет.
+		Раскладку файлов после удачной отправки делает
+		:meth:`settle_published` — отдельно и вне отмены: пост к тому
+		моменту уже опубликован, и обрывать перекладывание гигабайтов
+		посреди работы нельзя.
 
 		Raises:
 			PostError: Транспорт отклонил отправку.
@@ -396,8 +402,6 @@ class PostsService:
 			await self._publish_userbot(plan.community, draft, plan.media_path, on_progress)
 		else:
 			await self._publish_bot(plan.community, draft, plan.media_path)
-		if draft.media_kind is MediaKind.VIDEO and plan.media_path is not None:
-			await self._move_to_published(plan.media_path)
 		logger.info(
 			"Пост (%s) → «%s» (%s, %s).",
 			draft.media_kind if draft.media_path else "текст",
@@ -405,6 +409,22 @@ class PostsService:
 			"userbot" if plan.use_userbot else "бот",
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
+
+	async def settle_published(self, plan: PublishPlan) -> None:
+		"""Раскладывает файлы после состоявшейся отправки.
+
+		Третья фаза публикации, неотменяемая: пост уже в канале, и
+		вопрос лишь в том, где лежит его видео. Раньше этот шаг жил
+		внутри :meth:`transmit`, то есть внутри отменяемой задачи —
+		отмена, пришедшая в момент переноса, объявляла опубликованный
+		пост отменённым и возвращала файл в результаты навстречу
+		копирующему потоку.
+
+		Сбой переноса публикацию не отменяет: он вспомогательный,
+		и след о нём остаётся в журнале.
+		"""
+		if plan.draft.media_kind is MediaKind.VIDEO and plan.media_path is not None:
+			await self._move_to_published(plan.media_path)
 
 	def _check_transport(
 		self, caps: PublishCapabilities, draft: PostDraft, account_id: int | None

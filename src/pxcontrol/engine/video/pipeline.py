@@ -11,7 +11,6 @@ import logging
 import os
 import shutil
 import tempfile
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,6 +84,23 @@ class ProcessingOptions:
 	meta_comment: str | None
 	ffmpeg_bin: str = "ffmpeg"
 	ffprobe_bin: str = "ffprobe"
+
+
+def _drop_leftovers(*paths: str | None) -> None:
+	"""Убирает промежуточные файлы обработки.
+
+	На успешном пути их уже нет (переехали в конечное имя) — это
+	штатно и молчаливо. А вот настоящий отказ удаления (нет прав,
+	файл занят просмотрщиком) виден в журнале: иначе обрезок
+	на гигабайты остался бы в «Готовых видео» незамеченным.
+	"""
+	for path in paths:
+		if path is None or not os.path.exists(path):
+			continue
+		try:
+			os.remove(path)
+		except OSError:
+			logger.warning("Не удалось убрать промежуточный файл %s.", path, exc_info=True)
 
 
 def _fps_arg(fps: float) -> str:
@@ -346,14 +362,18 @@ def process(opts: ProcessingOptions, on_progress: ProgressCallback | None = None
 		# и переезжает в конечное имя атомарно и только при успехе —
 		# упавшее кодирование не оставляет обрезок в «Готовых видео»
 		part = f"{opts.output}.part"
-		main_output = os.path.join(tmp, "main.mp4") if opts.cover else part
+		# при вшивании обложки кодирование идёт в отдельное имя, а второй
+		# проход перекладывает его в `part` вместе с обложкой. Это тот же
+		# гигабайтный файл, поэтому и он живёт в папке результатов:
+		# в системной tmp (часто это ОЗУ) ему места может не хватить
+		main_part = f"{opts.output}.main.part" if opts.cover else None
+		main_output = main_part if main_part is not None else part
 		try:
 			_run_main(opts, work_info, still_path, main_output, on_progress)
 			if opts.cover:
 				_attach_cover(opts.ffmpeg_bin, main_output, str(still_path), part)
 			os.replace(part, opts.output)
 		finally:
-			with suppress(OSError):
-				os.remove(part)
+			_drop_leftovers(part, main_part)
 		_save_preview(opts, work_info, still_path)
 	logger.info("Готово: %s", opts.output)
