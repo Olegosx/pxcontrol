@@ -42,7 +42,7 @@ class CommunityCheckError(EngineError):
 async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	"""Переводит исключения aiogram в понятные человеку ошибки.
 
-	Единый маппер для всех операций бота (аналог ``_map_post_error``
+	Единый маппер для всех операций бота (парный ``_mtproto_errors``
 	в mtproto): неверный токен и сеть переводятся одинаково, а тексты
 	для «нет прав» (Forbidden) и «отклонено» (BadRequest) зависят
 	от операции и передаются параметрами.

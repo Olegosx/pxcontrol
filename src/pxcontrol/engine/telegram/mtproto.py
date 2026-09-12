@@ -18,6 +18,7 @@ from typing import Any
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.types import (
+	FORUM_TOPICS_PAGE,
 	TELEGRAM_MAX_SCHEDULED,
 	CommunityInfo,
 	CommunityKind,
@@ -222,6 +223,26 @@ _NOT_ADMIN_TEXT = (
 )
 
 
+def has_admin_right(perms: Any, right: str) -> bool:
+	"""Есть ли у аккаунта конкретное право администратора.
+
+	Одно правило на все проверки прав userbot: владельцу сообщества
+	можно всё, администратору — только то, что ему выдали поимённо.
+	Роль «администратор» сама по себе не гарантирует ни удаления чужих
+	сообщений, ни исключения участников (ADR-0026), поэтому каждое
+	право спрашивается отдельно — но одним способом.
+
+	Args:
+		perms: ответ Telegram о правах аккаунта в сообществе.
+		right: имя права в наборе ``admin_rights`` (``post_messages``,
+			``delete_messages``, ``ban_users``).
+	"""
+	if getattr(perms, "is_creator", False):
+		return True
+	admin_rights = getattr(getattr(perms, "participant", None), "admin_rights", None)
+	return bool(getattr(admin_rights, right, False))
+
+
 def ensure_userbot_can_post(perms: Any) -> None:
 	"""Требует права админа с публикацией (владельцу можно всё).
 
@@ -234,8 +255,7 @@ def ensure_userbot_can_post(perms: Any) -> None:
 	"""
 	if not perms.is_admin:
 		raise UserbotAccessError(_NOT_ADMIN_TEXT)
-	rights = getattr(perms.participant, "admin_rights", None)
-	if not perms.is_creator and not getattr(rights, "post_messages", False):
+	if not has_admin_right(perms, "post_messages"):
 		raise UserbotAccessError("У userbot нет права публиковать сообщения в канале.")
 
 
@@ -379,11 +399,7 @@ def _can_delete_messages(perms: Any) -> bool:
 	``delete_messages``. Роль сама по себе его не гарантирует
 	(ADR-0026), поэтому обслуживание спрашивает именно это.
 	"""
-	if getattr(perms, "is_creator", False):
-		return True
-	rights = getattr(perms, "participant", None)
-	admin_rights = getattr(rights, "admin_rights", None)
-	return bool(getattr(admin_rights, "delete_messages", False))
+	return has_admin_right(perms, "delete_messages")
 
 
 def _can_ban_users(perms: Any) -> bool:
@@ -392,10 +408,7 @@ def _can_ban_users(perms: Any) -> bool:
 	Чистка удалённых аккаунтов — это исключение участников, и права
 	на неё у роли «админ» может не быть (ADR-0026).
 	"""
-	if getattr(perms, "is_creator", False):
-		return True
-	admin_rights = getattr(getattr(perms, "participant", None), "admin_rights", None)
-	return bool(getattr(admin_rights, "ban_users", False))
+	return has_admin_right(perms, "ban_users")
 
 
 def _peer_id(chat_id: str) -> int:
@@ -525,6 +538,24 @@ class MtprotoTransport:
 				"Userbot не подключён — войдите в аккаунт: Настройки → Аккаунты."
 			)
 		return self._client
+
+	async def _client_and_entity(self, chat_id: str) -> tuple[Any, Any]:
+		"""Подключённый клиент и сущность сообщества — общий пролог операций.
+
+		Шесть операций транспорта начинались одинаковой четвёркой строк
+		(подключиться → разобрать chat_id → спросить у Telegram сущность).
+		Любое изменение правила — кэш сущностей, отдельный перевод ошибки
+		разрешения — пришлось бы вносить в шесть мест.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		client = await self._connected_client()
+		async with _mtproto_errors():
+			entity = await client.get_input_entity(_peer_id(chat_id))
+		return client, entity
 
 	async def _connected_client(self) -> Any:
 		"""Возвращает клиента с живым соединением, при обрыве — переподключает.
@@ -696,13 +727,15 @@ class MtprotoTransport:
 		"""
 		from telethon.tl.functions.messages import GetForumTopicsRequest
 
-		client = await self._connected_client()
-		peer_id = _peer_id(chat_id)
+		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
-			entity = await client.get_input_entity(peer_id)
 			result = await client(
 				GetForumTopicsRequest(
-					peer=entity, offset_date=None, offset_id=0, offset_topic=0, limit=100
+					peer=entity,
+					offset_date=None,
+					offset_id=0,
+					offset_topic=0,
+					limit=FORUM_TOPICS_PAGE,
 				)
 			)
 		topics = [
@@ -739,10 +772,8 @@ class MtprotoTransport:
 		"""
 		from telethon.tl.functions.channels import GetFullChannelRequest
 
-		client = await self._connected_client()
-		peer_id = _peer_id(chat_id)
+		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
-			entity = await client.get_input_entity(peer_id)
 			result = await client(GetFullChannelRequest(channel=entity))
 		full = result.full_chat
 		return CommunityStatsInfo(
@@ -762,10 +793,8 @@ class MtprotoTransport:
 			UserbotFloodError: Флуд-лимит — вызывающий пропускает аккаунт.
 			UserbotUnavailableError: Прочие отказы Telegram.
 		"""
-		client = await self._connected_client()
-		peer_id = _peer_id(chat_id)
+		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
-			entity = await client.get_input_entity(peer_id)
 			path = await client.download_profile_photo(entity, file=target)
 		return str(path) if path else None
 
@@ -797,10 +826,8 @@ class MtprotoTransport:
 		"""
 		from telethon.tl.types import MessageService
 
-		client = await self._connected_client()
-		peer_id = _peer_id(chat_id)
+		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
-			entity = await client.get_input_entity(peer_id)
 			history = await client.get_messages(entity, limit=limit, offset_id=offset_id)
 		found = [
 			ServiceMessageInfo(
@@ -881,10 +908,8 @@ class MtprotoTransport:
 		from telethon.tl.functions.channels import GetParticipantsRequest
 		from telethon.tl.types import ChannelParticipantsRecent
 
-		client = await self._connected_client()
-		peer_id = _peer_id(chat_id)
+		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
-			entity = await client.get_input_entity(peer_id)
 			result = await client(
 				GetParticipantsRequest(
 					channel=entity,
@@ -934,10 +959,8 @@ class MtprotoTransport:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""
 		from telethon.tl.functions.messages import GetScheduledHistoryRequest
 
-		client = await self._connected_client()
-		peer_id = _peer_id(chat_id)
+		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
-			entity = await client.get_input_entity(peer_id)
 			result = await client(GetScheduledHistoryRequest(peer=entity, hash=0))
 		return [
 			ScheduledMessage(
