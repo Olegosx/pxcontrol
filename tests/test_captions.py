@@ -683,3 +683,30 @@ async def test_delete_parent_field_keeps_dependent_dictionary(db: Database) -> N
 	assert character.parent_field_id is None  # поле стало независимым
 	assert character.names() == ["Lara"]  # словарь цел
 	assert character.values[0].parent_id is None  # привязка снята, не каскад
+
+
+def test_filename_complaint_matches_template_rules() -> None:
+	"""Имя, набранное человеком, проверяется по правилам сборки по шаблону.
+
+	Замок единой точки: раньше «переименовать при отправке» проверяло
+	только путь, и Telegram молча урезал слишком длинное имя на сервере,
+	а файловая система отвергала длинное имя сырой ошибкой.
+	"""
+	from pxcontrol.engine.services.captions import (
+		MAX_FILENAME_BYTES,
+		TELEGRAM_MAX_STEM_CHARS,
+		filename_complaint,
+	)
+
+	assert filename_complaint("Обычное имя.mp4") is None
+	# запрещённые символы — те же, что чистит sanitize_filename
+	complaint = filename_complaint("Плохое: имя?.mp4")
+	assert complaint is not None and "недопустимы символы" in complaint
+	# предел Telegram считается по стему, без расширения
+	long_stem = "я" * (TELEGRAM_MAX_STEM_CHARS + 1)
+	complaint = filename_complaint(f"{long_stem}.mp4")
+	assert complaint is not None and "предела Telegram" in complaint
+	# байтовый предел файловых систем: кириллица — два байта на букву
+	assert filename_complaint("я" * (MAX_FILENAME_BYTES // 2 + 1)) is not None
+	# имя ровно по пределу проходит
+	assert filename_complaint("я" * TELEGRAM_MAX_STEM_CHARS + ".mp4") is None

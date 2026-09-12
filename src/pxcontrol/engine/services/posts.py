@@ -26,6 +26,7 @@ from sqlalchemy.orm import selectinload
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.services.captions import filename_complaint
 from pxcontrol.engine.services.settings import (
 	COMMUNITY_ENABLED,
 	VIDEO_PROCESSED_DIR,
@@ -926,13 +927,25 @@ class PostsService:
 	def check_rename_name(rename_to: str) -> None:
 		"""Отклоняет негодное имя для «переименовать при отправке».
 
+		Проверка та же, что и у имени, собранного по шаблону подписи
+		(:func:`filename_complaint`): один набор запрещённых символов,
+		один предел файловых систем, один предел Telegram на стем.
+		Раньше набранное человеком имя проходило мягче — только
+		проверка на путь, — и Telegram молча урезал его на сервере,
+		а переименование длинного имени падало сырой ошибкой
+		файловой системы.
+
 		Raises:
-			PostError: Имя содержит путь или служебное («.», «..»).
+			PostError: Имя содержит путь, служебное («.», «..»),
+				запрещённые символы или не проходит по длине.
 		"""
 		if "/" in rename_to or "\\" in rename_to:
 			raise PostError("Новое имя файла не должно содержать путь.")
 		if rename_to in (".", ".."):
 			raise PostError("Укажите настоящее имя файла («.» и «..» — служебные).")
+		complaint = filename_complaint(rename_to)
+		if complaint is not None:
+			raise PostError(complaint)
 
 	@staticmethod
 	def validate_draft(draft: PostDraft) -> None:

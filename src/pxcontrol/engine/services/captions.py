@@ -491,6 +491,40 @@ def sanitize_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:
 	return cut.strip()
 
 
+def filename_complaint(name: str) -> str | None:
+	"""Претензия к имени файла, набранному человеком (None — имя годное).
+
+	Правила те же, по которым чистится имя, собранное по шаблону
+	подписи (:func:`sanitize_filename`, :data:`TELEGRAM_MAX_STEM_CHARS`):
+	один набор запрещённых символов, один байтовый предел файловых
+	систем, один предел Telegram на стем. Разница лишь в том, что
+	собранное имя чистится молча, а набранное человеком — отклоняется
+	с объяснением: незаметно менять то, что человек только что напечатал,
+	хуже, чем попросить поправить.
+
+	Returns:
+		Текст претензии для показа человеку или None, если имя годное.
+	"""
+	found = sorted(set(_FORBIDDEN_IN_FILENAME.findall(name)))
+	if found:
+		visible = " ".join(ch if ch.isprintable() else "·" for ch in found)
+		return f"В имени файла недопустимы символы: {visible}"
+	size = len(name.encode("utf-8"))
+	if size > MAX_FILENAME_BYTES:
+		return (
+			f"Имя файла слишком длинное: {size} байт при пределе "
+			f"{MAX_FILENAME_BYTES} (кириллица — два байта на букву)."
+		)
+	stem = Path(name).stem
+	if len(stem) > TELEGRAM_MAX_STEM_CHARS:
+		return (
+			f"Имя файла длиннее предела Telegram: {len(stem)} символов "
+			f"при {TELEGRAM_MAX_STEM_CHARS} (без расширения) — сервер "
+			"молча урезал бы его сам."
+		)
+	return None
+
+
 def _parents_first(fields: dict[int, CaptionField]) -> list[int]:
 	"""Идентификаторы полей в порядке «родитель раньше зависимого».
 

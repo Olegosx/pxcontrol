@@ -452,6 +452,31 @@ class MaintenanceService:
 		elif job.status is JobStatus.RUNNING:
 			self._jobs.request_cancel(job)
 
+	async def drop_community(self, community_id: int) -> None:
+		"""Снимает задания удалённого сообщества (ADR-0026).
+
+		Задание держит снимок сообщества и работает по его
+		``tg_chat_id``, от строки в БД не завися: без этого шага уборка
+		продолжала бы удалять записи и исключать участников в Telegram
+		для сущности, которой в приложении уже нет, а её окно закрыто.
+		Ожидающие снимаются сразу, идущему взводится отмена — оно
+		остановится между страницами (как и по кнопке «Отменить»).
+		"""
+		for job in self._jobs.all():
+			if job.community.id != community_id:
+				continue
+			if job.status is JobStatus.PENDING:
+				job.status = JobStatus.CANCELLED
+			elif job.status is JobStatus.RUNNING:
+				self._jobs.request_cancel(job)
+			else:
+				continue
+			logger.info(
+				"Обслуживание id=%s снято: сообщество «%s» удалено.",
+				job.id,
+				job.community.title,
+			)
+
 	async def retry(self, item_id: int) -> None:
 		"""Повторяет задание с ошибкой (границы и виды — прежние)."""
 		job = self._jobs.get(item_id)

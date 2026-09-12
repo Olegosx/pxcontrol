@@ -663,3 +663,38 @@ def test_members_summary_mentions_cap_and_leftovers() -> None:
 	assert "список не отдаёт" in capped
 	left = members_summary(MembersReport(found=3, removed=3, service_left=3))
 	assert "осталось в ленте: 3" in left
+
+
+async def test_deleting_community_stops_its_maintenance(db: Database) -> None:
+	"""Удаление сообщества снимает его задания обслуживания.
+
+	Задание держит снимок сообщества и работает по его ``tg_chat_id``,
+	от строки в БД не завися: без снятия уборка продолжала бы удалять
+	записи в Telegram для сущности, которой в приложении уже нет.
+	"""
+	release = asyncio.Event()
+
+	class _SlowGateway(_FakeGateway):
+		async def service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			self.requested.append(offset_id)
+			await release.wait()
+			return _page(kinds=[ServiceMessageKind.MEMBERS], scanned=1, next_offset_id=90)
+
+	gateway = _SlowGateway()
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	running = await service.scan_service_messages(community_id)
+	waiting = await service.scan_service_messages(community_id)
+	while not gateway.requested:
+		await asyncio.sleep(0)
+
+	await service.drop_community(community_id)
+	release.set()
+	await service.settle()
+
+	items = {item.id: item for item in await service.state()}
+	assert items[waiting].status is JobStatus.CANCELLED  # ждавшее снято сразу
+	assert items[running].status is JobStatus.CANCELLED  # идущее остановлено
+	assert len(gateway.requested) == 1  # вторая страница не запрашивалась
