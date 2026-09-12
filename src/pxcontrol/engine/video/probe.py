@@ -9,6 +9,10 @@ from typing import Any
 
 from pxcontrol.engine.video.ffmpeg import run_tool
 
+#: Предел ожидания ffprobe: чтение метаданных — доли секунды, минута
+#: с запасом ловит зависший процесс (файл на отвалившемся сетевом диске).
+_PROBE_TIMEOUT_S = 60.0
+
 
 def ffprobe_bin_for(ffmpeg_bin: str) -> str:
 	"""Путь к ffprobe: рядом с заданным ffmpeg или по имени в PATH.
@@ -82,7 +86,7 @@ def _run_ffprobe(path: str, ffprobe_bin: str) -> dict[str, Any]:
 	]
 	# чтение метаданных — секунды даже для больших файлов; предел ловит
 	# зависший ffprobe (файл на отвалившемся сетевом диске)
-	return dict(json.loads(run_tool(cmd, f"чтение метаданных '{path}'", timeout=60.0)))
+	return dict(json.loads(run_tool(cmd, f"чтение метаданных '{path}'", timeout=_PROBE_TIMEOUT_S)))
 
 
 def _parse_fps(rate: str) -> float:

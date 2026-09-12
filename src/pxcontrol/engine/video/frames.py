@@ -18,6 +18,10 @@ MIDDLE_TO = 0.75
 CHOICE_FROM = 0.05
 CHOICE_TO = 0.95
 
+#: Предел ожидания извлечения одного кадра: перемотка в длинном
+#: ролике занимает секунды, две минуты — запас на медленный диск.
+_STILL_TIMEOUT_S = 120.0
+
 
 def resolve_timestamp(source: str, info: VideoInfo) -> float:
 	"""Вычисляет момент времени (сек), из которого брать кадр заставки.
@@ -86,7 +90,7 @@ def extract_still(
 		output_path,
 	]
 	# один кадр — секунды; предел ловит зависший ffmpeg (недоступный диск)
-	run_tool(cmd, f"извлечение кадра на {timestamp:.3f} с", timeout=120.0)
+	run_tool(cmd, f"извлечение кадра на {timestamp:.3f} с", timeout=_STILL_TIMEOUT_S)
 
 
 def still_from_video(

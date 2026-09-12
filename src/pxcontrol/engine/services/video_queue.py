@@ -46,10 +46,6 @@ from pxcontrol.engine.services.video import (
 
 logger = logging.getLogger(__name__)
 
-#: Сколько ждать завершения текущей обработки при остановке движка (сек):
-#: ffmpeg гаснет на первой строке прогресса, страховка — на фазы без него.
-_SHUTDOWN_TIMEOUT = 30.0
-
 
 @dataclass(frozen=True)
 class ProcessingRequest:
@@ -136,7 +132,6 @@ class ProcessingQueue:
 			# очередь не переживает перезапуск (ADR-0014) — честно сказать
 			# об этом ожидающим элементам при остановке движка
 			cancel_pending_on_shutdown=True,
-			shutdown_timeout_s=_SHUTDOWN_TIMEOUT,
 		)
 		self._frames_dir: str | None = None  # выбранные кадры заставки пакета
 		self._next_frame = 1

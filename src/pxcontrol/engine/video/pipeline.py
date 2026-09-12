@@ -31,6 +31,11 @@ from pxcontrol.engine.video.probe import VideoInfo, probe_video, trimmed_info
 
 logger = logging.getLogger(__name__)
 
+#: Предел ожидания вшивания обложки: перепаковка идёт без
+#: перекодирования, но гигабайтный файл переписывается целиком —
+#: полчаса с запасом.
+_COVER_TIMEOUT_S = 1800.0
+
 # Запас длительности входа-заставки сверх hold+xfade: ffmpeg обрезает
 # зацикленную картинку по -t, и без запаса последний кадр перехода
 # мог не попасть в поток.
@@ -295,7 +300,7 @@ def _attach_cover(ffmpeg_bin: str, video_path: str, cover_path: str, output: str
 	]
 	# ремукс без перекодирования — минуты даже для файлов в гигабайты;
 	# щедрый предел ловит только по-настоящему зависший процесс
-	run_tool(cmd, "вшивание обложки", timeout=1800.0)
+	run_tool(cmd, "вшивание обложки", timeout=_COVER_TIMEOUT_S)
 
 
 def _save_preview(opts: ProcessingOptions, info: VideoInfo, still_path: str | None) -> None:

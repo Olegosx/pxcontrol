@@ -46,6 +46,10 @@ from pxcontrol.engine.services.captions import (
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import PostDraft
 from pxcontrol.engine.services.schedule_plan import (
+	DAYS_STEP_RANGE,
+	DEFAULT_HOURS_STEP,
+	FALLBACK_START_TIME,
+	HOURS_STEP_RANGE,
 	PlanError,
 	PlanKind,
 	SchedulePlan,
@@ -485,11 +489,11 @@ class PublishBatchDialog(WorkDialog):
 		self._at.setText(self._default_at())
 		self._days_label = BodyLabel("шаг, дней:", self)
 		self._days = SpinBox(self)
-		self._days.setRange(2, 30)
+		self._days.setRange(*DAYS_STEP_RANGE)
 		self._hours_label = BodyLabel("шаг, часов:", self)
 		self._hours = SpinBox(self)
-		self._hours.setRange(1, 48)
-		self._hours.setValue(3)
+		self._hours.setRange(*HOURS_STEP_RANGE)
+		self._hours.setValue(DEFAULT_HOURS_STEP)
 		self._start_label = BodyLabel("старт:", self)
 		self._start = LineEdit(self)
 		self._start.setFixedWidth(220)
@@ -530,7 +534,7 @@ class PublishBatchDialog(WorkDialog):
 			except ValueError:
 				continue
 			return f"{hours:02d}:{minutes:02d}"
-		return "12:00"
+		return FALLBACK_START_TIME
 
 	def _build_rows(
 		self,

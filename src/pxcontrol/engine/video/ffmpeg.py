@@ -17,6 +17,11 @@ from typing import IO
 
 logger = logging.getLogger(__name__)
 
+#: Сколько ждать поток чтения журнала ffmpeg после конца процесса.
+#: Процесс уже завершился — остаток журнала приходит мгновенно;
+#: предел страхует от зависшего потока.
+_STDERR_JOIN_TIMEOUT_S = 10.0
+
 #: Колбэк прогресса: доля готовности 0.0..1.0.
 ProgressCallback = Callable[[float], None]
 
@@ -164,7 +169,11 @@ def run_streaming(
 			proc.kill()
 			raise
 		proc.wait()
-	reader.join(timeout=10.0)
+	reader.join(timeout=_STDERR_JOIN_TIMEOUT_S)
+	if reader.is_alive():
+		# журнал ffmpeg не дочитан: текст ошибки будет беднее, и молчать
+		# об этом нельзя — причина сбоя иначе выглядит как «журнала нет»
+		logger.warning("Журнал ffmpeg не дочитан за %.0f с.", _STDERR_JOIN_TIMEOUT_S)
 	if proc.returncode != 0:
 		stderr = "".join(stderr_chunks)
 		logger.error(

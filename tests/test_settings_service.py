@@ -194,3 +194,19 @@ async def test_set_for_many_atomic(db: Database) -> None:
 	assert await service.get_for(COMMUNITY_ENABLED, community_id) is False
 	with pytest.raises(SettingsError, match="не найден"):
 		await service.set_for_many(999, [(COMMUNITY_ENABLED, True)])
+
+
+def test_ui_defaults_match_library_stock_values() -> None:
+	"""Умолчания размеров интерфейса равны штатным значениям библиотеки.
+
+	Равенство несущее: при штатных значениях приложение не переопределяет
+	стили библиотеки вовсе. Разойдись числа — оно начнёт патчить её
+	на умолчаниях, то есть поведение изменится молча. Одной константой
+	не обойтись (движок не знает про слой интерфейса), поэтому связку
+	сторожит этот замок.
+	"""
+	from pxcontrol.engine.services.settings import UI_CONTROL_HEIGHT, UI_FONT_SIZE
+	from pxcontrol.ui.density import STOCK_CONTROL_HEIGHT, STOCK_FONT_SIZE
+
+	assert UI_CONTROL_HEIGHT.default == STOCK_CONTROL_HEIGHT
+	assert UI_FONT_SIZE.default == STOCK_FONT_SIZE

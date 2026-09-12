@@ -66,6 +66,12 @@ DEFAULT_KINDS = (ServiceMessageKind.MEMBERS,)
 #: Сколько участников читать одним запросом (предел Telegram — 200).
 MEMBERS_PAGE_SIZE = 200
 
+#: Сколько сообщений удалять одним запросом (предел Telegram — 100).
+#: Численно совпадает с размером страницы чтения, но это другой предел
+#: того же сервера: измени Telegram один — второй останется прежним,
+#: и общая константа сломала бы соседнюю операцию молча.
+DELETE_BATCH_SIZE = 100
+
 #: Сколько удалённых аккаунтов исключать за проход по умолчанию.
 #: Умолчание намеренно скромное: число участников — видимая всем
 #: величина, и резкое падение бьёт по охватам сообщества.
@@ -722,8 +728,8 @@ class MaintenanceService:
 		if not job.can_delete:
 			return len(ids)
 		left = 0
-		for start in range(0, len(ids), PAGE_SIZE):
-			batch = ids[start : start + PAGE_SIZE]
+		for start in range(0, len(ids), DELETE_BATCH_SIZE):
+			batch = ids[start : start + DELETE_BATCH_SIZE]
 			gone = await self._gateway.delete_messages(
 				job.account_id, job.community.tg_chat_id, batch
 			)
