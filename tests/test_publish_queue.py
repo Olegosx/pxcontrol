@@ -213,7 +213,7 @@ async def test_enqueue_validates_immediately(db: Database, make_queue: QueueFact
 	community_id = await _add_community(db)
 	with pytest.raises(PostError, match="пуст"):
 		await queue.enqueue(PostDraft(community_id))
-	with pytest.raises(PostError, match="Канал не найден"):
+	with pytest.raises(PostError, match="Сообщество не найдено"):
 		await queue.enqueue(PostDraft(999, text="x"))
 	assert await queue.state() == []
 
@@ -985,7 +985,7 @@ async def test_drop_community_during_prepare_cancels_not_errors(
 	"""Гонка «канал удалён во время подготовки»: исход — отмена, не ошибка.
 
 	Порядок Engine.delete_community: сначала drop_community, затем удаление
-	строки канала; подготовка, упавшая «Канал не найден» на фоне
+	строки канала; подготовка, упавшая «Сообщество не найдено» на фоне
 	взведённой отмены, не должна хоронить элемент в ERROR.
 	"""
 	gateway = _SlowGateway()
@@ -999,7 +999,7 @@ async def test_drop_community_during_prepare_cancels_not_errors(
 	async with db.session_factory() as session:  # Engine удаляет строку канала
 		await session.execute(delete(Community).where(Community.id == community_id))
 		await session.commit()
-	proceed.set()  # подготовка продолжится и упадёт «Канал не найден»
+	proceed.set()  # подготовка продолжится и упадёт «Сообщество не найдено»
 	await _wait_queue_empty(queue)  # исход — CANCELLED и снятие, не ERROR
 	assert gateway.published == []
 	await queue.shutdown()

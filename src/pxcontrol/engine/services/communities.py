@@ -73,7 +73,7 @@ class _ProbeResult:
 class _CommunityChecker(Protocol):
 	"""Часть шлюза Telegram, нужная сервису (для подмены в тестах)."""
 
-	async def check_community(self, token: str, chat_ref: str) -> CommunityInfo: ...
+	async def bot_check_community(self, token: str, chat_ref: str) -> CommunityInfo: ...
 
 	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo: ...
 
@@ -197,7 +197,7 @@ class CommunitiesService:
 			bot.username,
 			bot.id,
 		)
-		info = await self._gateway.check_community(bot.token, chat_ref)
+		info = await self._gateway.bot_check_community(bot.token, chat_ref)
 		# «не удалось проверить» при подключении равносильно «публикатора
 		# нет»: участника добавит перепроверка, когда аккаунт появится
 		found = await self._find_userbot_publisher(info.chat_id)
@@ -588,7 +588,7 @@ class CommunitiesService:
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			chat_id = community.tg_chat_id
-		info = await self._gateway.check_community(bot.token, chat_id)
+		info = await self._gateway.bot_check_community(bot.token, chat_id)
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			community.bot_id = bot.id
@@ -602,7 +602,7 @@ class CommunitiesService:
 		"""Отвязывает бота от канала (сам бот остаётся в приложении).
 
 		Raises:
-			CommunityError: Канал не найден.
+			CommunityError: Сообщество не найдено.
 		"""
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
@@ -622,7 +622,7 @@ class CommunitiesService:
 		правам из-за пропавшей сети.
 		"""
 		try:
-			info = await self._gateway.check_community(token, chat_id)
+			info = await self._gateway.bot_check_community(token, chat_id)
 		except CommunityCheckError as exc:
 			logger.info("Бот не может публиковать в сообществе %s: %s", chat_id, exc)
 			return _ProbeResult(ok=False)
@@ -687,18 +687,18 @@ class CommunitiesService:
 			community = await session.get(Community, community_id)
 			if community is None:
 				# идемпотентность сознательная (повторный клик), но след нужен
-				logger.info("Канал id=%s уже отсутствует — удалять нечего.", community_id)
+				logger.info("Сообщество id=%s уже отсутствует — удалять нечего.", community_id)
 				return
 			title = community.title
 			await session.delete(community)
 			await session.commit()
-		logger.info("Канал «%s» (id=%s) удалён из приложения.", title, community_id)
+		logger.info("Сообщество «%s» (id=%s) удалено из приложения.", title, community_id)
 
 	async def _fresh_dto(self, community_id: int) -> CommunityDto:
 		"""Снимок канала из БД с подгруженными публикаторами и настройками.
 
 		Raises:
-			CommunityError: Канал не найден.
+			CommunityError: Сообщество не найдено.
 		"""
 		enabled = await self._settings.get_for(COMMUNITY_ENABLED, community_id)
 		async with self._db.session_factory() as session:
@@ -709,7 +709,7 @@ class CommunitiesService:
 	async def _community_in_session(
 		session: AsyncSession, community_id: int, *, with_refs: bool = False
 	) -> Community:
-		"""Канал по id в переданной сессии — или «не найден» понятным текстом.
+		"""Сообщество по id в переданной сессии — или «не найдено» понятным текстом.
 
 		``with_refs=True`` подгружает бота и userbot-аккаунт сразу: ``_dto``
 		работает на отсоединённом объекте, и ленивое обращение упало бы
@@ -724,7 +724,7 @@ class CommunitiesService:
 		else:
 			community = await session.get(Community, community_id)
 		if community is None:
-			raise CommunityError("Канал не найден — обновите список.")
+			raise CommunityError("Сообщество не найдено — обновите список.")
 		return community
 
 	async def _get_bot(self, bot_id: int) -> Bot:

@@ -258,7 +258,7 @@ class _PostPort(Protocol):
 
 	def userbot_premium(self, account_id: int | None) -> bool: ...
 
-	async def send_text(
+	async def bot_send_text(
 		self, token: str, chat_id: str, text: str, topic_id: int | None = None
 	) -> int: ...
 
@@ -272,7 +272,7 @@ class _PostPort(Protocol):
 		on_progress: ProgressCallback | None,
 	) -> None: ...
 
-	async def send_media(
+	async def bot_send_media(
 		self,
 		token: str,
 		chat_id: str,
@@ -367,7 +367,7 @@ class PostsService:
 
 		Raises:
 			PostError: Черновик/канал/файл не годятся, канал выключен
-				или у канала нет способа публикации.
+				или у сообщества нет способа публикации.
 			UserbotUnavailableError: Userbot отвалился по дороге.
 		"""
 		plan = await self.prepare_publish(draft)
@@ -409,7 +409,7 @@ class PostsService:
 
 		Raises:
 			PostError: Черновик/канал/файл не годятся, канал выключен
-				или у канала нет способа публикации.
+				или у сообщества нет способа публикации.
 		"""
 		self.validate_draft(draft)
 		community = await self._get_community(draft.community_id)
@@ -584,13 +584,13 @@ class PostsService:
 		(:meth:`_check_transport`).
 		"""
 		if community.bot is None:  # publish() сюда без бота не приводит
-			raise PostError("У канала не назначен бот — переподключите канал.")
+			raise PostError("У сообщества не назначен бот — переподключите его.")
 		if media_path is None:
-			await self._gateway.send_text(
+			await self._gateway.bot_send_text(
 				community.bot.token, community.tg_chat_id, draft.text, draft.topic_id
 			)
 			return
-		await self._gateway.send_media(
+		await self._gateway.bot_send_media(
 			community.bot.token,
 			community.tg_chat_id,
 			draft.media_kind,
@@ -618,7 +618,7 @@ class PostsService:
 		if community.default_tg_account_id is None:
 			raise PostError(
 				f"Темы «{community.title}» может прочитать только userbot — "
-				"привяжите аккаунт на странице «Каналы»."
+				"привяжите аккаунт на странице сообщества → «Участники…»."
 			)
 		return await self._gateway.get_forum_topics(
 			community.default_tg_account_id, community.tg_chat_id
@@ -919,7 +919,7 @@ class PostsService:
 		канал без привязки — меньший, безопасный лимит.
 
 		Raises:
-			PostError: Канал не найден.
+			PostError: Сообщество не найдено.
 		"""
 		return limit_gb(await self.userbot_limit_bytes(community_id))
 
@@ -931,7 +931,7 @@ class PostsService:
 		между 2 ГБ и фактическими 2000 МиБ.
 
 		Raises:
-			PostError: Канал не найден.
+			PostError: Сообщество не найдено.
 		"""
 		community = await self._get_community(community_id)
 		return userbot_max_file_bytes(
@@ -976,7 +976,7 @@ class PostsService:
 		"""Название канала (для заголовков элементов очереди отправки).
 
 		Raises:
-			PostError: Канал не найден.
+			PostError: Сообщество не найдено.
 		"""
 		return (await self._get_community(community_id)).title
 
@@ -1133,7 +1133,7 @@ class PostsService:
 		userbot-админа отложек иметь не может — пустой список.
 
 		Raises:
-			PostError: Канал не найден.
+			PostError: Сообщество не найдено.
 			UserbotUnavailableError: Отложки прочитать не удалось —
 				вызывающая сторона решает, продолжать ли без них.
 		"""
@@ -1156,7 +1156,7 @@ class PostsService:
 				)
 			).scalar_one_or_none()
 		if community is None:
-			raise PostError("Канал не найден — обновите список каналов.")
+			raise PostError("Сообщество не найдено — обновите список.")
 		return community
 
 	@staticmethod

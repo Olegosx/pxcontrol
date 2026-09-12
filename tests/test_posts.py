@@ -47,14 +47,14 @@ class _FakeGateway:
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return account_id in self.premium_ids
 
-	async def send_text(
+	async def bot_send_text(
 		self, token: str, chat_id: str, text: str, topic_id: int | None = None
 	) -> int:
 		self.sent.append((token, chat_id, text))
 		self.sent_topics.append(topic_id)
 		return 42
 
-	async def send_media(
+	async def bot_send_media(
 		self,
 		token: str,
 		chat_id: str,

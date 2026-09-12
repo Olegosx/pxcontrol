@@ -308,13 +308,13 @@ class VideoPage(ScrollArea):
 	def _build_community_row(self, layout: QVBoxLayout) -> None:
 		"""Канал: выбор подставляет его пресет по умолчанию (настройка канала)."""
 		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Канал:", self))
+		row.addWidget(BodyLabel("Сообщество:", self))
 		self._community_combo: DtoComboBox[CommunityDto] = DtoComboBox(
 			self, placeholder="(не выбран)"
 		)
 		self._community_combo.setToolTip(
 			"Выбор канала загружает его пресет по умолчанию "
-			"(задаётся на странице «Каналы» → «Пресет…»)"
+			"(задаётся на странице сообщества → «Настройки…»)"
 		)
 		self._community_combo.currentIndexChanged.connect(self._on_community_selected)
 		row.addWidget(self._community_combo, stretch=1)
@@ -416,7 +416,7 @@ class VideoPage(ScrollArea):
 		return not self._community_combo.is_current_id(community_id)
 
 	def _apply_community_preset(self, community: CommunityDto, preset_id: int | None) -> None:
-		"""Подставляет пресет канала; нет пресета — форма не трогается.
+		"""Подставляет пресет сообщества; нет пресета — форма не трогается.
 
 		Выбор в списке вызывает ``_on_preset_selected`` — панель заполнится.
 		Ссылка на удалённый пресет равнозначна «не задан».
@@ -429,8 +429,8 @@ class VideoPage(ScrollArea):
 			show_info(
 				self,
 				"Пресет не задан",
-				f"У канала «{community.title}» нет пресета по умолчанию — "
-				"задайте его на странице «Каналы» → «Пресет…».",
+				f"У «{community.title}» нет пресета по умолчанию — "
+				"задайте его на странице сообщества → «Настройки…».",
 			)
 
 	def _update_preset_buttons(self) -> None:
@@ -959,7 +959,9 @@ class VideoPage(ScrollArea):
 		"""Выбранный канал или подсказка (имя — как на «Публикации»)."""
 		community = self._community_combo.selected()
 		if community is None:
-			self._show_error("Выберите канал (список над пресетом) — пакет публикуется в него.")
+			self._show_error(
+				"Выберите сообщество (список над пресетом) — пакет публикуется в него."
+			)
 		return community
 
 	def _publish_all_processed(self) -> None:

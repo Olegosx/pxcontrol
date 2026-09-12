@@ -190,14 +190,22 @@ class TelegramGateway:
 	# (см. Raises одноимённых функций bot_api): InvalidBotTokenError /
 	# TelegramFloodError / CommunityCheckError / ConnectionError.
 
-	async def check_bot_token(self, token: str) -> str:
+	# --- запасной путь: Bot API ------------------------------------------------
+	#
+	# Правило имён: методы бот-пути начинаются с ``bot_``, методы
+	# основного пути (userbot, ADR-0011) — нет. Прежде часть бот-методов
+	# звалась без пометки (``send_text``, ``check_community``), и по
+	# вызову в сервисе нельзя было понять, основной это путь или
+	# запасной — при том что у них разные лимиты и разные возможности.
+
+	async def bot_check_token(self, token: str) -> str:
 		"""Проверяет токен бота через getMe и возвращает его @имя.
 
 		Raises: см. :func:`bot_api.check_token`.
 		"""
 		return await check_token(token)
 
-	async def check_community(self, token: str, chat_ref: str) -> CommunityInfo:
+	async def bot_check_community(self, token: str, chat_ref: str) -> CommunityInfo:
 		"""Проверяет канал и права бота в нём (getChat + getChatMember).
 
 		Raises: см. :func:`bot_api.check_community` (+ ``ChatRefError``).
@@ -211,7 +219,7 @@ class TelegramGateway:
 		"""
 		return await get_bot_events(token)
 
-	async def send_text(
+	async def bot_send_text(
 		self, token: str, chat_id: str, text: str, topic_id: int | None = None
 	) -> int:
 		"""Публикует текстовый пост «сейчас» через бота.
@@ -220,7 +228,7 @@ class TelegramGateway:
 		"""
 		return await send_text(token, chat_id, text, topic_id)
 
-	async def send_media(
+	async def bot_send_media(
 		self,
 		token: str,
 		chat_id: str,

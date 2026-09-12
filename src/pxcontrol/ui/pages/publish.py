@@ -435,7 +435,7 @@ class PublishPage(ScrollArea):
 			self._when_row.set_schedule_allowed(False, "Отложенные требуют userbot-админа в канале")
 		else:
 			self._caps_hint.setText(
-				"⚠ Нет способа публикации — проверьте доступы на странице «Каналы»."
+				"⚠ Нет способа публикации — проверьте доступы на странице сообщества."
 			)
 			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
 
@@ -677,7 +677,7 @@ class PublishPage(ScrollArea):
 			return
 		caps = community.capabilities
 		if not (caps.userbot or caps.bot):
-			self._show_error("Нет способа публикации — проверьте доступы на странице «Каналы».")
+			self._show_error("Нет способа публикации — проверьте доступы на странице сообщества.")
 			return
 		run_in_engine(
 			self._worker,

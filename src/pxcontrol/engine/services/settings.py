@@ -285,7 +285,7 @@ class SettingsService:
 		"""Сохраняет настройку канала (None — сброс к умолчанию).
 
 		Raises:
-			SettingsError: Канал не найден или значение не подходит по типу.
+			SettingsError: Сообщество не найдено или значение не подходит по типу.
 		"""
 		await self.set_for_many(community_id, [(key, value)])
 
@@ -299,7 +299,7 @@ class SettingsService:
 		а не цепочкой отдельных вызовов из интерфейса.
 
 		Raises:
-			SettingsError: Канал не найден или значение не подходит
+			SettingsError: Сообщество не найдено или значение не подходит
 				по типу — не записывается ничего.
 		"""
 		for key, value in items:
@@ -307,7 +307,7 @@ class SettingsService:
 			self._require_valid(key, value)
 		async with self._db.session_factory() as session:
 			if await session.get(Community, community_id) is None:
-				raise SettingsError("Канал не найден — обновите список.")
+				raise SettingsError("Сообщество не найдено — обновите список.")
 			for key, value in items:
 				row = await session.get(CommunitySetting, (community_id, key.name))
 				if value is None:

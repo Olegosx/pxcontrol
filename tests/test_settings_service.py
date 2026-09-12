@@ -97,7 +97,7 @@ async def test_community_scope_roundtrip_and_cleanup(db: Database) -> None:
 async def test_community_scope_requires_existing_community(db: Database) -> None:
 	"""Запись настройки несуществующему каналу — понятная ошибка."""
 	service = SettingsService(db)
-	with pytest.raises(SettingsError, match="Канал не найден"):
+	with pytest.raises(SettingsError, match="Сообщество не найдено"):
 		await service.set_for(COMMUNITY_DEFAULT_PRESET, 999, 1)
 
 

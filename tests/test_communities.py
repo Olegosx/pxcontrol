@@ -44,10 +44,10 @@ class _FakeGateway:
 		self.title = "Тестовый канал"  # название в ответе проверки
 		self.username: str | None = "testchan"  # @имя (None — приватное)
 
-	async def check_bot_token(self, token: str) -> str:
+	async def bot_check_token(self, token: str) -> str:
 		return "test_bot"
 
-	async def check_community(self, token: str, chat_ref: str) -> CommunityInfo:
+	async def bot_check_community(self, token: str, chat_ref: str) -> CommunityInfo:
 		if chat_ref == "@notfound":
 			raise CommunityCheckError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_is_admin:
@@ -597,7 +597,7 @@ async def test_bot_probe_separates_refusal_from_no_connection(db: Database) -> N
 			super().__init__()
 			self.failure = failure
 
-		async def check_community(self, token: str, chat_ref: str) -> CommunityInfo:
+		async def bot_check_community(self, token: str, chat_ref: str) -> CommunityInfo:
 			raise self.failure
 
 	bot_id = await _make_bot(db)

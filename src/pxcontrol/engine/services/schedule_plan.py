@@ -217,8 +217,8 @@ def _community_times(plan: SchedulePlan, now: datetime) -> Iterator[datetime]:
 	slots = [parsed for item in plan.community_times if (parsed := try_hhmm(str(item))) is not None]
 	if not slots:
 		raise PlanError(
-			"У канала нет стандартных времён публикации — задайте их "
-			"на странице «Каналы» или выберите другую стратегию."
+			"У сообщества нет стандартных времён публикации — задайте их "
+			"на странице сообщества → «Настройки…» или выберите другую стратегию."
 		)
 	slots = sorted(set(slots))
 	day = _start_day(plan, now)

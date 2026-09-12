@@ -616,7 +616,7 @@ class FieldsDialog(WorkDialog):
 		community_title: str,
 		parent: QWidget,
 	) -> None:
-		super().__init__(f"Подписи канала «{community_title}»", parent, size=(720, 760))
+		super().__init__(f"Подписи сообщества «{community_title}»", parent, size=(720, 760))
 		self._worker = worker
 		self._community_id = community_id
 		self._show_error = error_reporter(self)

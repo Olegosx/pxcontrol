@@ -385,7 +385,7 @@ class AccountsPage(ScrollArea):
 		if bound:
 			names = ", ".join(f"«{title}»" for title in bound)
 			text += (
-				f"\n\nБез userbot-админа останутся каналы: {names} — "
+				f"\n\nБез userbot-публикатора останутся сообщества: {names} — "
 				"им будут недоступны отложенные посты и большие файлы."
 			)
 		if not confirm_delete(self, text):

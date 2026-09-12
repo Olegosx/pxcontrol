@@ -34,8 +34,8 @@ def numeric_chat_id(chat_id: str, error: type[Exception]) -> int:
 		return int(chat_id)
 	except ValueError as exc:
 		raise error(
-			f"Некорректный ID канала в базе: {chat_id!r} — переподключите "
-			"канал на странице «Каналы»."
+			f"Некорректный ID сообщества в базе: {chat_id!r} — переподключите "
+			"сообщество на его странице."
 		) from exc
 
 

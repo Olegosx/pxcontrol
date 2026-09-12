@@ -57,7 +57,7 @@ class _TelegramPort(Protocol):
 	@property
 	def login(self) -> _LoginFlow: ...
 
-	async def check_bot_token(self, token: str) -> str: ...
+	async def bot_check_token(self, token: str) -> str: ...
 
 	async def bot_events(self, token: str) -> list[str]: ...
 
@@ -178,7 +178,7 @@ class AccountsService:
 			InvalidBotTokenError: Токен отклонён — в БД ничего не пишется.
 			ConnectionError: Нет связи с Telegram.
 		"""
-		username = await self._gateway.check_bot_token(token)
+		username = await self._gateway.bot_check_token(token)
 		async with self._db.session_factory() as session:
 			bot = Bot(label=label, token=token, username=username)
 			session.add(bot)

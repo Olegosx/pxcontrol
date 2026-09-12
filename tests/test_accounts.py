@@ -72,7 +72,7 @@ class _FakeGateway:
 		self.deactivations.append(account_id)
 		self.activated.pop(account_id, None)
 
-	async def check_bot_token(self, token: str) -> str:
+	async def bot_check_token(self, token: str) -> str:
 		if token == "bad-token":
 			raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).")
 		return "test_bot"
