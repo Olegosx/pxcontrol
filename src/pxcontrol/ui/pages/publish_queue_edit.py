@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -49,8 +48,6 @@ from pxcontrol.ui.pages.common import (
 	topic_row,
 	visible_topics,
 )
-
-logger = logging.getLogger(__name__)
 
 #: Подсказка под временем, когда канал публикует только ботом: у бота
 #: нет отложенных (ADR-0010/0011), остаётся «сейчас».

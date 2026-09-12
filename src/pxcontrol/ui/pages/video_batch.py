@@ -29,8 +29,6 @@ from pxcontrol.ui.pages.common import (
 	show_error,
 )
 
-#: Высота списка найденных файлов (прокрутка внутри, а не рост диалога).
-
 
 class BatchScanDialog(WorkDialog):
 	"""Выбор видео для пакета из рекурсивно просканированной папки."""

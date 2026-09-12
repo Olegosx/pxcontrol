@@ -1755,9 +1755,11 @@ class WorkDialog(QDialog):
 			Кнопку принятия — окна включают и выключают её по мере
 			готовности (например, пока не выбран ни один файл).
 		"""
-		self.cancel_button = PushButton(cancel_text, self)
-		self.cancel_button.clicked.connect(self.reject)
-		self.buttons.addWidget(self.cancel_button)
+		# кнопка отмены окну потом не нужна — её состоянием никто
+		# не управляет, в отличие от кнопки принятия
+		cancel = PushButton(cancel_text, self)
+		cancel.clicked.connect(self.reject)
+		self.buttons.addWidget(cancel)
 		self.accept_button = PrimaryPushButton(accept_text, self)
 		self.accept_button.clicked.connect(self.accept)
 		self.buttons.addWidget(self.accept_button)

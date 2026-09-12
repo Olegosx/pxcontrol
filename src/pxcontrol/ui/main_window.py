@@ -49,7 +49,7 @@ class MainWindow(FluentWindow):
 		"""
 		try:
 			saved = self._worker.submit(self._worker.engine.settings.get(WINDOW_GEOMETRY)).result(
-				timeout=5
+				timeout=_SETTINGS_SYNC_TIMEOUT_S
 			)
 			# применение — тоже под защитой: битое значение из БД (не-ASCII,
 			# мусор вместо base64) не должно валить создание окна
@@ -173,7 +173,7 @@ class MainWindow(FluentWindow):
 		data = bytes(self.saveGeometry().toBase64()).decode("ascii")
 		try:
 			self._worker.submit(self._worker.engine.settings.set(WINDOW_GEOMETRY, data)).result(
-				timeout=5
+				timeout=_SETTINGS_SYNC_TIMEOUT_S
 			)
 		except Exception:  # noqa: BLE001 — потеря геометрии не мешает выходу
 			logger.warning("Не удалось сохранить состояние окна.", exc_info=True)

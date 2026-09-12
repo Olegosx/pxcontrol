@@ -206,28 +206,6 @@ async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> N
 	assert access.community.default_account_id == account_id  # привязка не тронута
 
 
-async def test_assign_and_unassign_userbot(db: Database) -> None:
-	"""Каналу привязывается аккаунт (с проверкой прав) и отвязывается."""
-	bot_id = await _make_bot(db)
-	account_id = await _make_account(db)
-	gateway = _FakeGateway()
-	service = CommunitiesService(db, gateway)
-	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.default_account_id is None
-	# без прав — не привязывается
-	with pytest.raises(UserbotUnavailableError, match="не администратор"):
-		await service.assign_userbot(dto.id, account_id)
-	# с правами — привязывается
-	gateway.userbot_admins = {account_id}
-	updated = await service.assign_userbot(dto.id, account_id)
-	assert updated.default_account_id == account_id and updated.default_account_label == "@ub"
-	# отвязка: аккаунт исчезает из канала, но остаётся в приложении
-	updated = await service.unassign_userbot(dto.id)
-	assert updated.default_account_id is None and updated.userbot_assigned is False
-	with pytest.raises(CommunityError, match="Аккаунт не найден"):
-		await service.assign_userbot(dto.id, 999)
-
-
 async def test_assign_and_unassign_bot(db: Database) -> None:
 	"""Каналу без бота назначается бот (с проверкой прав) и отвязывается."""
 	bot_id = await _make_bot(db)

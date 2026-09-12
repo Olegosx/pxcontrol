@@ -921,7 +921,7 @@ class VideoService:
 	async def extract_random_frames(
 		self,
 		source_path: str,
-		count: int = 6,
+		count: int,
 		trim_start: float = 0.0,
 		trim_end: float = 0.0,
 		*,

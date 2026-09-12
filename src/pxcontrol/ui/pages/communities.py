@@ -65,9 +65,6 @@ _KIND_FILTERS: list[tuple[str, Callable[[CommunityDto], bool]]] = [
 	("Группы", lambda community: community.kind is CommunityKind.GROUP),
 ]
 
-#: Палитра подложек логотипа-заглушки (в духе цветов аватаров Telegram);
-#: цвет выбирается по id сообщества — стабилен между перерисовками.
-
 #: Размер квадрата логотипа в шапке карточки (пиксели).
 _LOGO_SIZE = 44
 

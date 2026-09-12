@@ -314,53 +314,6 @@ def compile_step(step: TitleStep) -> re.Pattern[str] | None:
 #: Токен шага: JSON-пара «выражение, замена».
 _STEP_PREFIX = "sub:"
 
-#: Токен шага прежней модели — только выражение.
-_LEGACY_STEP_PREFIX = "step:"
-
-#: Замена шагов прежних моделей: пробел (другой они не знали).
-_LEGACY_REPLACEMENT = " "
-
-#: Прежние правила-галочки → выражения. Порядок фиксирован и повторяет
-#: порядок применения старой версии: настройка канала, записанная ею,
-#: должна разбирать имена ровно так же, как разбирала.
-_LEGACY_STEPS: tuple[tuple[str, str], ...] = (
-	("brackets", BRACKETS_STEP),
-	("dates", DATE_STEP),
-	("separators", "_"),  # одна галочка на оба разделителя
-	("underscores", "_"),
-	("hyphens", "-"),
-	("edge_numbers", EDGE_NUMBERS_STEP),
-	("digit_words", DIGIT_WORDS_STEP),
-)
-
-
-def _legacy_steps(tokens: Collection[str]) -> list[TitleStep]:
-	"""Шаги из токенов прежней модели (галочки и список слов).
-
-	Токены прежних версий читаются, а не отбрасываются: у каналов
-	сохранены наборы правил, и после обновления они обязаны продолжать
-	работать — уже шагами. Замена у всех — пробел: прежняя модель
-	другой и не знала.
-	"""
-	steps: list[TitleStep] = []
-	for name, pattern in _LEGACY_STEPS:
-		if name in tokens:
-			steps.append(TitleStep(pattern, _LEGACY_REPLACEMENT))
-			if name == "separators":
-				# прежняя галочка меняла оба разделителя сразу
-				steps.append(TitleStep("-", _LEGACY_REPLACEMENT))
-	words = [
-		word
-		for token in tokens
-		if token.startswith("remove:") and (word := token.removeprefix("remove:").strip())
-	]
-	if words:
-		# прежнее удаление слов не различало регистр и работало по целым
-		# словам — то же самое выражением
-		pattern = r"(?i)\b(?:" + "|".join(re.escape(word) for word in words) + r")\b"
-		steps.append(TitleStep(pattern, _LEGACY_REPLACEMENT))
-	return steps
-
 
 def _step_from_token(raw: str) -> TitleStep | None:
 	"""Шаг из JSON-пары токена; None — токен испорчен (след в логе)."""
@@ -413,36 +366,29 @@ class TitleParseRules:
 		"""Правила из списка токенов; незнакомые токены игнорируются.
 
 		Терпимость к незнакомому — прямая совместимость: настройка,
-		записанная более новой версией, не ломает старую. Токены
-		прежних моделей превращаются в шаги: галочки и список слов —
-		:func:`_legacy_steps`, шаги-выражения без замены
-		(``step:``) — с заменой на пробел, как они и работали.
+		записанная более новой версией, не ломает старую.
+
+		Поддержки двух прежних поколений формата (галочки ``brackets``/
+		``separators``/``remove:…`` и шаги ``step:``) здесь больше нет:
+		приложение не выходило за пределы машины автора, и в рабочей
+		базе таких настроек не оказалось ни одной (проверено
+		2026-09-12). Незнакомый токен теперь просто отмечается в логе.
 		"""
 		case = TitleCaseMode.KEEP
 		steps: list[TitleStep] = []
-		legacy: list[str] = []
 		for token in tokens:
 			if token.startswith(_STEP_PREFIX):
 				step = _step_from_token(token.removeprefix(_STEP_PREFIX))
 				if step is not None:
 					steps.append(step)
-			elif token.startswith(_LEGACY_STEP_PREFIX):
-				# прежняя модель заменяла совпадения пробелом и другой
-				# замены не знала — сохраняем смысл сохранённых настроек
-				steps.append(
-					TitleStep(token.removeprefix(_LEGACY_STEP_PREFIX), _LEGACY_REPLACEMENT)
-				)
 			elif token.startswith("case:"):
 				try:
 					case = TitleCaseMode(token.removeprefix("case:"))
 				except ValueError:
 					logger.warning("Неизвестный режим регистра в настройке: %s", token)
-			elif token.startswith("remove:") or token in {name for name, _ in _LEGACY_STEPS}:
-				legacy.append(token)
 			else:
 				logger.warning("Неизвестный токен правил разбора: %s", token)
-		# шаги прежней модели идут первыми: своих у неё быть не могло
-		return cls(steps=tuple(_legacy_steps(legacy) + steps), case=case)
+		return cls(steps=tuple(steps), case=case)
 
 
 def parse_title(raw: str, rules: TitleParseRules) -> str:

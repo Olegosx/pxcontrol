@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -98,8 +97,6 @@ from pxcontrol.ui.pages.publish_queue_view import (
 	queue_leading,
 	queue_subtitle,
 )
-
-logger = logging.getLogger(__name__)
 
 #: Сколько карточек очереди показывать на странице (хвост ждущих —
 #: в сводке числом; всё целиком — кнопка «Вся очередь…», ADR-0016).

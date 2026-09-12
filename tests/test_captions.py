@@ -231,37 +231,6 @@ def test_parse_title_rules_tokens_round_trip() -> None:
 	assert survived.steps == (_SPACES,)
 
 
-def test_parse_title_rules_read_steps_without_replacement() -> None:
-	"""Шаги прежней модели (без замены) читаются как замена пробелом.
-
-	У каналов сохранены цепочки, записанные версией, которая заменяла
-	совпадение пробелом всегда. Прочитать их как удаление значило бы
-	молча склеить слова во всех сохранённых наборах.
-	"""
-	rules = TitleParseRules.from_tokens(["step:_", "step:-"])
-	assert rules.steps == (_SPACES, TitleStep("-", " "))
-	assert parse_title("lara_croft-tomb", rules) == "lara croft tomb"
-
-
-def test_parse_title_rules_convert_legacy_tokens() -> None:
-	"""Настройка прежней модели читается шагами и разбирает так же.
-
-	У каналов сохранены наборы галочек; после обновления они обязаны
-	продолжать работать, а не молча обнулиться.
-	"""
-	legacy = TitleParseRules.from_tokens(
-		["separators", "brackets", "dates", "edge_numbers", "remove:official", "case:first_word"]
-	)
-	assert legacy.case is TitleCaseMode.FIRST_WORD
-	assert legacy.steps  # галочки превратились в выражения
-	assert parse_title("01. Фильм_2024-01-31 [1080p] OFFICIAL", legacy) == "Фильм"
-	# одна галочка «_ и -» покрывает оба разделителя
-	both = TitleParseRules.from_tokens(["separators"])
-	assert parse_title("lara_croft-tomb", both) == "lara croft tomb"
-	# галочки прежней модели заменяли пробелом, а не удаляли
-	assert all(step.replacement == " " for step in both.steps)
-
-
 def test_sanitize_filename_limits_bytes_not_chars() -> None:
 	"""Предел имени — в байтах UTF-8; обрезка не рвёт символ посередине."""
 	from pxcontrol.engine.services.captions import (
@@ -710,3 +679,16 @@ def test_filename_complaint_matches_template_rules() -> None:
 	assert filename_complaint("я" * (MAX_FILENAME_BYTES // 2 + 1)) is not None
 	# имя ровно по пределу проходит
 	assert filename_complaint("я" * TELEGRAM_MAX_STEM_CHARS + ".mp4") is None
+
+
+def test_parse_title_rules_ignore_unknown_tokens() -> None:
+	"""Незнакомый токен пропускается, а не ломает разбор.
+
+	Прямая совместимость: настройка, записанная более новой версией,
+	не должна ронять старую. Поддержки двух прежних поколений формата
+	здесь больше нет — в рабочей базе таких настроек не осталось
+	(проверено 2026-09-12), и слой перевода снят.
+	"""
+	rules = TitleParseRules.from_tokens(["из-будущего", "case:first_word"])
+	assert rules.case is TitleCaseMode.FIRST_WORD
+	assert rules.steps == ()

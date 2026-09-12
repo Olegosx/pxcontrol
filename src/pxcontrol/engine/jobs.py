@@ -199,7 +199,8 @@ class JobQueue(Generic[_J]):
 		self._jobs: list[_J] = []
 		self._next_id = 1
 		self._worker: asyncio.Task[None] | None = None
-		self._active: tuple[int, asyncio.Task[None]] | None = None
+		#: номер задания, выполняющегося прямо сейчас (None — нет такого)
+		self._active_id: int | None = None
 		# кооперативная остановка (ADR-0020): задачи выходят в безопасных
 		# точках, запросы к БД не обрываются посреди работы
 		self._stop = asyncio.Event()
@@ -240,7 +241,7 @@ class JobQueue(Generic[_J]):
 	@property
 	def active_id(self) -> int | None:
 		"""Номер задания, выполняющегося прямо сейчас (None — нет такого)."""
-		return self._active[0] if self._active is not None else None
+		return self._active_id
 
 	# --- выполнение -----------------------------------------------------------
 
@@ -378,7 +379,7 @@ class JobQueue(Generic[_J]):
 		"""
 		job.status = JobStatus.RUNNING
 		task = asyncio.create_task(self._execute(job))
-		self._active = (job.id, task)
+		self._active_id = job.id
 		try:
 			await task
 		except JobCancelled:
@@ -402,7 +403,7 @@ class JobQueue(Generic[_J]):
 			job.progress = 1.0
 			await self._cool_down(job)
 		finally:
-			self._active = None
+			self._active_id = None
 
 	async def _apply(self, job: _J, status: JobStatus, error: str | None = None) -> None:
 		"""Переводит задание в новый статус, сперва сохранив исход.

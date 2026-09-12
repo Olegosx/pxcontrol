@@ -539,44 +539,6 @@ class CommunitiesService:
 		logger.info("Публикатор «%s» по умолчанию: аккаунт id=%s.", dto.title, account_id)
 		return dto
 
-	async def assign_userbot(self, community_id: int, account_id: int) -> CommunityDto:
-		"""Мост прежнего интерфейса: участник + умолчание одним действием.
-
-		Страница этапа B заменит его диалогом «Участники…»; до тех пор
-		кнопка «Привязать userbot…» работает через членства честно.
-
-		Raises:
-			CommunityError: Сообщество/аккаунт не найдены.
-			UserbotUnavailableError: Аккаунт не подключён или прав нет.
-		"""
-		account = await self._get_account(account_id)
-		async with self._db.session_factory() as session:
-			community = await self._community_in_session(session, community_id)
-			chat_id = community.tg_chat_id
-		info = await self._gateway.check_community_userbot(account_id, chat_id)
-		await self._adopt_member(
-			community_id, (account_id, info.role or UserbotRole.MEMBER), make_default=False
-		)
-		dto = await self.set_default(community_id, account_id)
-		await self._refresh_mutable(community_id, info)
-		logger.info("«%s»: публикатор userbot «%s».", dto.title, self._account_display(account))
-		return await self._fresh_dto(community_id)
-
-	async def unassign_userbot(self, community_id: int) -> CommunityDto:
-		"""Мост прежнего интерфейса: убирает умолчание вместе с членством.
-
-		Raises:
-			CommunityError: Сообщество не найдено.
-		"""
-		async with self._db.session_factory() as session:
-			community = await self._community_in_session(session, community_id)
-			default_id = community.default_tg_account_id
-		if default_id is not None:
-			await self._drop_member(community_id, default_id)
-		dto = await self._fresh_dto(community_id)
-		logger.info("У «%s» снят публикатор userbot.", dto.title)
-		return dto
-
 	async def assign_bot(self, community_id: int, bot_id: int) -> CommunityDto:
 		"""Назначает каналу бота (с проверкой его прав в канале).
 
