@@ -304,6 +304,21 @@ class ScheduledPostDto:
 	scheduled_at: datetime
 
 
+@dataclass(frozen=True)
+class ScheduledList:
+	"""Отложенные записи и сообщества, которые прочитать не удалось.
+
+	Истина об отложенных живёт на сервере Telegram (ADR-0010), и обход
+	сообществ может оказаться неполным: аккаунт под флуд-лимитом,
+	userbot отвалился. Молчать об этом нельзя — пустой список тогда
+	читался бы как «отложенных нет», хотя их просто не спросили.
+	"""
+
+	items: list[ScheduledPostDto]
+	#: названия сообществ, чьи отложенные прочитать не удалось
+	unread: tuple[str, ...] = ()
+
+
 class PostsService:
 	"""Публикация постов: userbot в приоритете, бот — запасной путь."""
 
@@ -950,7 +965,7 @@ class PostsService:
 		if when is not None and when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
 			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
 
-	async def list_scheduled(self) -> list[ScheduledPostDto]:
+	async def list_scheduled(self) -> ScheduledList:
 		"""Собирает отложенные записи активных userbot-сообществ из Telegram.
 
 		Канал опрашивается аккаунтом-умолчанием (все админы видят одни
@@ -961,7 +976,15 @@ class PostsService:
 		У бот-сообщества отложенных быть не может (Bot API их не умеет,
 		ADR-0010/0011). Выключенные (``enabled`` = False)
 		не опрашиваются. Ошибка одного опроса не роняет весь список —
-		пропуск со следом в логе.
+		сообщество пропускается, его название попадает в ``unread``,
+		а подробности — в лог. Пустой список с непустым ``unread``
+		означает «не спросили», а не «отложенных нет»: истина живёт
+		на сервере Telegram (ADR-0010), и выдавать одно за другое
+		нельзя.
+
+		Returns:
+			Записи всех опрошенных сообществ и названия тех, чьи
+			отложенные прочитать не удалось.
 		"""
 		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
 		async with self._db.session_factory() as session:
@@ -977,6 +1000,7 @@ class PostsService:
 				.all()
 			)
 		items: list[ScheduledPostDto] = []
+		unread: list[str] = []
 		for community in communities:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
@@ -994,6 +1018,7 @@ class PostsService:
 						account_id,
 						exc,
 					)
+					unread.append(community.title)
 					continue
 				except UserbotUnavailableError as exc:
 					logger.warning(
@@ -1002,12 +1027,15 @@ class PostsService:
 						account_id,
 						exc,
 					)
+					unread.append(community.title)
 					continue
 				for message in messages:
 					items.append(self._dto(community, message))
 		items = _dedup_scheduled(items)
 		items.sort(key=lambda item: item.scheduled_at)
-		return items
+		# сообщество группы опрашивают несколько участников — в списке
+		# непрочитанных оно должно встретиться один раз
+		return ScheduledList(items=items, unread=tuple(dict.fromkeys(unread)))
 
 	@staticmethod
 	def _scheduled_readers(community: Community) -> list[int]:

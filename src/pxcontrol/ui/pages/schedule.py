@@ -26,7 +26,7 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.posts import ScheduledPostDto
+from pxcontrol.engine.services.posts import ScheduledList, ScheduledPostDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import clear_layout, error_reporter, format_local, page_layout
@@ -41,6 +41,9 @@ class SchedulePage(ScrollArea):
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		self._items: list[ScheduledPostDto] = []
+		# сообщества, чьи отложенные прочитать не удалось: пустой список
+		# при непустом наборе означает «не спросили», а не «записей нет»
+		self._unread: tuple[str, ...] = ()
 		# снятые галки фильтра (id каналов): выбор переживает «Обновить».
 		# Оговорка: канал, пропавший из списка и вернувшийся позже,
 		# останется скрытым, пока галку не поставят заново, — набор
@@ -97,9 +100,10 @@ class SchedulePage(ScrollArea):
 			self._show_error,
 		)
 
-	def _show_scheduled(self, items: list[ScheduledPostDto]) -> None:
+	def _show_scheduled(self, scheduled: ScheduledList) -> None:
 		"""Принимает свежий список: перестраивает фильтр и карточки."""
-		self._items = items
+		self._items = scheduled.items
+		self._unread = scheduled.unread
 		self._rebuild_filter()
 		self._render()
 
@@ -138,10 +142,20 @@ class SchedulePage(ScrollArea):
 	def _render(self) -> None:
 		"""Перерисовывает карточки с учётом фильтра."""
 		clear_layout(self._list)
+		if self._unread:
+			# честность важнее краткости: часть сообществ опросить
+			# не удалось, и список заведомо неполон (ADR-0010 —
+			# истина живёт на сервере Telegram)
+			names = ", ".join(f"«{title}»" for title in self._unread)
+			warning = CaptionLabel(f"Не удалось прочитать отложенные: {names}.", self)
+			warning.setWordWrap(True)
+			self._list.addWidget(warning)
 		if not self._items:
 			self._list.addWidget(
 				CaptionLabel(
-					"Отложенных записей нет. Создайте пост на странице «Публикация».",
+					"Отложенных записей нет. Создайте пост на странице «Публикация»."
+					if not self._unread
+					else "У остальных сообществ отложенных записей нет.",
 					self,
 				)
 			)

@@ -29,6 +29,7 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.maintenance import (
 	DEFAULT_DELETE_LIMIT,
@@ -130,7 +131,10 @@ class MaintenanceDialog(WorkDialog):
 		self._community = community
 		self._show_error = error_reporter(self)
 		self._boxes: dict[ServiceMessageKind, CheckBox] = {}
-		self._jobs: dict[int, str] = {}  # id задания → раздел, который его ждёт
+		# id задания → метка раздела, который ждёт его исхода. Чужие
+		# задания (окно открывали для другого сообщества) в словарь
+		# не попадают и на этот экран не влияют
+		self._jobs: dict[int, BodyLabel] = {}
 		self._build()
 
 	# --- каркас -------------------------------------------------------------------
@@ -157,6 +161,10 @@ class MaintenanceDialog(WorkDialog):
 			service=lambda: self._worker.engine.maintenance,
 			subtitle=self._job_subtitle,
 			on_finished=self._on_job_finished,
+			# задание с ошибкой очередь не покидает — до `on_finished`
+			# оно не доходит, и без этой сверки метка раздела навсегда
+			# осталась бы «Просмотр идёт…»
+			on_refreshed=self._on_jobs_refreshed,
 		)
 
 	def _add_page(self, key: str, title: str, page: QWidget) -> None:
@@ -390,27 +398,59 @@ class MaintenanceDialog(WorkDialog):
 
 	def _track(self, job_id: int, section: str, label: BodyLabel, text: str) -> None:
 		"""Запоминает, какой раздел ждёт исхода этого задания."""
-		self._jobs[job_id] = section
+		self._jobs[job_id] = label
 		label.setText(text)
 
 	def _on_job_finished(self, item: MaintenanceItemDto, done: bool) -> None:
 		"""Панель сообщила об исходе задания — забираем отчёт.
 
 		Панель снимает завершённые с показа, поэтому отчёт берётся
-		здесь: иначе он исчез бы вместе с карточкой.
+		здесь: иначе он исчез бы вместе с карточкой. Сюда доходят
+		только исходы, покидающие очередь (готово и отменено);
+		ошибку ловит :meth:`_on_jobs_refreshed`.
 		"""
-		section = self._jobs.pop(item.id, None)
-		if not done or section is None:
+		label = self._jobs.pop(item.id, None)
+		if label is None:
+			return  # задание другого окна
+		if not done:
+			label.setText("Отменено — числа не обновлялись.")
 			return
 		if item.service is not None:
 			self._show_service(item.service)
 		elif item.members is not None:
 			self._show_members(item.members)
 
+	def _on_jobs_refreshed(self, items: list[Any]) -> None:
+		"""Замечает задание, остановившееся на ошибке.
+
+		Элемент с ошибкой остаётся в очереди (его повторяют или
+		убирают руками), поэтому реакции на завершение панель для него
+		не зовёт. Без этой сверки раздел показывал бы «идёт…» до
+		закрытия окна, а причина отказа была бы видна только в журнале.
+		"""
+		for item in items:
+			if item.status is not JobStatus.ERROR:
+				continue
+			label = self._jobs.pop(item.id, None)
+			if label is not None:
+				label.setText(f"Не удалось: {item.error}")
+
 	@staticmethod
 	def _job_subtitle(item: Any) -> str:
-		"""Подпись карточки задания в панели хода работы."""
-		return str(item.note) if item.note else "идёт обращение к Telegram"
+		"""Подпись карточки задания в панели хода работы.
+
+		Показывает исход, а не только ход работы: у задания с ошибкой
+		причина обязана быть на карточке — рядом с кнопкой «Повторить».
+		"""
+		if item.status is JobStatus.ERROR:
+			return f"ошибка: {item.error}"
+		if item.status is JobStatus.CANCELLED:
+			return "отменено"
+		if item.status is JobStatus.DONE:
+			return "готово"
+		if item.note:
+			return str(item.note)
+		return "идёт обращение к Telegram"
 
 
 def open_maintenance(worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:

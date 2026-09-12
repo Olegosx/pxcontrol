@@ -13,6 +13,7 @@ from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
 	PostsService,
+	ScheduledList,
 	ScheduledPostDto,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
@@ -433,8 +434,8 @@ async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
 	"""Список отложенных собирается из Telegram по активным каналам."""
 	service = PostsService(db, _FakeGateway())
 	community_id = await _add_community(db)
-	items = await service.list_scheduled()
-	assert items == [
+	scheduled = await service.list_scheduled()
+	assert scheduled.items == [
 		ScheduledPostDto(
 			community_id,
 			"Канал",
@@ -442,15 +443,17 @@ async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
 			datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
 		)
 	]
+	assert scheduled.unread == ()  # все сообщества опрошены
 
 
 async def test_list_scheduled_skips_disabled_community(db: Database) -> None:
 	"""Выключенный канал (настройка enabled = False) не опрашивается."""
 	service = PostsService(db, _FakeGateway())
 	community_id = await _add_community(db)
-	assert len(await service.list_scheduled()) == 1
+	assert len((await service.list_scheduled()).items) == 1
 	await SettingsService(db).set_for(COMMUNITY_ENABLED, community_id, False)
-	assert await service.list_scheduled() == []
+	# выключенный не опрашивают намеренно — это не «не удалось прочитать»
+	assert await service.list_scheduled() == ScheduledList(items=[], unread=())
 
 
 async def test_list_scheduled_skips_bot_only_community(db: Database) -> None:
@@ -460,7 +463,7 @@ async def test_list_scheduled_skips_bot_only_community(db: Database) -> None:
 	"""
 	service = PostsService(db, _FakeGateway())
 	await _add_community(db, with_bot=True, userbot_assigned=False)
-	assert await service.list_scheduled() == []
+	assert await service.list_scheduled() == ScheduledList(items=[], unread=())
 
 
 async def test_list_scheduled_isolates_community_failure(db: Database) -> None:
@@ -485,8 +488,10 @@ async def test_list_scheduled_isolates_community_failure(db: Database) -> None:
 			)
 		)
 		await session.commit()
-	items = await service.list_scheduled()
-	assert [item.community_title for item in items] == ["Второй"]
+	scheduled = await service.list_scheduled()
+	assert [item.community_title for item in scheduled.items] == ["Второй"]
+	# упавшее сообщество названо: «нет отложенных» о нём утверждать нельзя
+	assert scheduled.unread == ("Канал",)
 
 
 async def test_publish_rejects_disabled_community(db: Database) -> None:
@@ -757,8 +762,9 @@ async def test_list_scheduled_isolates_flooded_account(db: Database) -> None:
 		)
 		await session.commit()
 	service = PostsService(db, _PartlyFloodedGateway(flooded_id))
-	items = await service.list_scheduled()
-	assert [item.community_title for item in items] == ["Свободный"]
+	scheduled = await service.list_scheduled()
+	assert [item.community_title for item in scheduled.items] == ["Свободный"]
+	assert scheduled.unread == ("Канал",)  # про него честно сказано «не прочитано»
 
 
 async def test_topic_requires_forum(db: Database) -> None:
@@ -869,9 +875,10 @@ async def test_list_scheduled_group_reads_all_members(db: Database) -> None:
 		first: [ScheduledMessage("от первого", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))],
 		second: [ScheduledMessage("от второго", datetime(2026, 7, 13, 11, 0, tzinfo=UTC))],
 	}
-	items = await service.list_scheduled()
-	assert [item.text_preview for item in items] == ["от второго", "от первого"]
+	scheduled = await service.list_scheduled()
+	assert [item.text_preview for item in scheduled.items] == ["от второго", "от первого"]
 	assert sorted(gateway.polled) == sorted([first, second])
+	assert scheduled.unread == ()
 
 
 async def test_list_scheduled_channel_polls_only_default(db: Database) -> None:
@@ -906,8 +913,10 @@ async def test_list_scheduled_flood_of_member_spares_others(db: Database) -> Non
 	gateway.per_account = {
 		second: [ScheduledMessage("живой", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))],
 	}
-	items = await service.list_scheduled()
-	assert [item.text_preview for item in items] == ["живой"]
+	scheduled = await service.list_scheduled()
+	assert [item.text_preview for item in scheduled.items] == ["живой"]
+	# группу опрашивают двое: непрочитанной она названа один раз
+	assert scheduled.unread == ("Группа",)
 
 
 async def test_list_scheduled_dedups_identical(db: Database) -> None:
@@ -917,8 +926,8 @@ async def test_list_scheduled_dedups_identical(db: Database) -> None:
 	_community_id, (first, second) = await _add_group_with_members(db)
 	same = ScheduledMessage("общая", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))
 	gateway.per_account = {first: [same], second: [same]}
-	items = await service.list_scheduled()
-	assert [item.text_preview for item in items] == ["общая"]
+	scheduled = await service.list_scheduled()
+	assert [item.text_preview for item in scheduled.items] == ["общая"]
 
 
 # --- пределы длины текста ---------------------------------------------------

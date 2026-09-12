@@ -547,39 +547,53 @@ class MaintenanceService:
 		oldest_date: datetime | None = None
 		exhausted = False
 		limited = False
-		while scanned < job.depth:
-			self._check_stop(job)
-			page = await self._gateway.service_messages_page(
-				job.account_id,
-				job.community.tg_chat_id,
-				offset_id,
-				min(PAGE_SIZE, job.depth - scanned),
-			)
-			scanned += page.scanned
-			oldest_date = page.oldest_date or oldest_date
-			for message in page.messages:
-				found[message.kind] = found.get(message.kind, 0) + 1
-			if job.clean:
-				batch = [m.id for m in page.messages if m.kind in job.kinds]
-				room = job.limit - deleted
-				if len(batch) > room:
-					batch = batch[:room]
+		try:
+			while scanned < job.depth:
+				self._check_stop(job)
+				page = await self._gateway.service_messages_page(
+					job.account_id,
+					job.community.tg_chat_id,
+					offset_id,
+					min(PAGE_SIZE, job.depth - scanned),
+				)
+				scanned += page.scanned
+				oldest_date = page.oldest_date or oldest_date
+				for message in page.messages:
+					found[message.kind] = found.get(message.kind, 0) + 1
+				if job.clean:
+					batch = [m.id for m in page.messages if m.kind in job.kinds]
+					room = job.limit - deleted
+					if len(batch) > room:
+						batch = batch[:room]
+						limited = True
+					if batch:
+						gone = await self._gateway.delete_messages(
+							job.account_id, job.community.tg_chat_id, batch
+						)
+						deleted += gone
+						skipped += len(batch) - gone
+				job.progress = min(1.0, scanned / job.depth)
+				job.note = f"просмотрено {scanned}"
+				if page.next_offset_id is None:
+					exhausted = True
+					break
+				if job.clean and deleted >= job.limit:
 					limited = True
-				if batch:
-					gone = await self._gateway.delete_messages(
-						job.account_id, job.community.tg_chat_id, batch
-					)
-					deleted += gone
-					skipped += len(batch) - gone
-			job.progress = min(1.0, scanned / job.depth)
-			job.note = f"просмотрено {scanned}"
-			if page.next_offset_id is None:
-				exhausted = True
-				break
-			if job.clean and deleted >= job.limit:
-				limited = True
-				break
-			offset_id = page.next_offset_id
+					break
+				offset_id = page.next_offset_id
+		finally:
+			# итог в журнал при любом исходе, включая отмену и флуд-лимит:
+			# удаление необратимо, и разбирать инцидент по «ничего
+			# не сохранилось» нечем. Отчёт при обрыве не строится
+			# намеренно (ADR-0026, п. 7), но след обязан остаться
+			logger.info(
+				"Обслуживание id=%s: просмотрено %d, служебных %d, удалено %d, пропущено %d.",
+				job.id,
+				scanned,
+				sum(found.values()),
+				deleted,
+				skipped,
+			)
 		job.note = None
 		job.service_report = ServiceReport(
 			found=found,
@@ -589,14 +603,6 @@ class MaintenanceService:
 			limited=limited,
 			exhausted=exhausted,
 			oldest_date=oldest_date,
-		)
-		logger.info(
-			"Обслуживание id=%s: просмотрено %d, служебных %d, удалено %d, пропущено %d.",
-			job.id,
-			scanned,
-			sum(found.values()),
-			deleted,
-			skipped,
 		)
 
 	async def _run_deleted_accounts(self, job: _MaintenanceJob) -> None:
@@ -613,36 +619,60 @@ class MaintenanceService:
 		exhausted = False
 		limited = False
 		service_ids: list[int] = []
-		while True:
-			self._check_stop(job)
-			page = await self._gateway.participants_page(
-				job.account_id, job.community.tg_chat_id, offset, MEMBERS_PAGE_SIZE
+		completed = False
+		try:
+			while True:
+				self._check_stop(job)
+				page = await self._gateway.participants_page(
+					job.account_id, job.community.tg_chat_id, offset, MEMBERS_PAGE_SIZE
+				)
+				scanned += page.scanned
+				total = page.total if page.total is not None else total
+				found += len(page.deleted_ids)
+				if job.clean:
+					for user_id in page.deleted_ids:
+						if removed >= job.limit:
+							limited = True
+							break
+						self._check_stop(job)
+						service_id = await self._gateway.kick_participant(
+							job.account_id, job.community.tg_chat_id, user_id
+						)
+						removed += 1
+						if service_id is not None:
+							service_ids.append(service_id)
+				job.note = f"просмотрено участников {scanned}"
+				if total:
+					job.progress = min(1.0, scanned / total)
+				if page.next_offset is None:
+					exhausted = True
+					break
+				if job.clean and removed >= job.limit:
+					limited = True
+					break
+				offset = page.next_offset
+			completed = True
+		finally:
+			# исключение участника необратимо: итог в журнал при любом
+			# исходе, включая отмену и флуд-лимит
+			logger.info(
+				"Обслуживание id=%s: участников просмотрено %d из %s, мёртвых %d, исключено %d.",
+				job.id,
+				scanned,
+				total if total is not None else "?",
+				found,
+				removed,
 			)
-			scanned += page.scanned
-			total = page.total if page.total is not None else total
-			found += len(page.deleted_ids)
-			if job.clean:
-				for user_id in page.deleted_ids:
-					if removed >= job.limit:
-						limited = True
-						break
-					self._check_stop(job)
-					service_id = await self._gateway.kick_participant(
-						job.account_id, job.community.tg_chat_id, user_id
-					)
-					removed += 1
-					if service_id is not None:
-						service_ids.append(service_id)
-			job.note = f"просмотрено участников {scanned}"
-			if total:
-				job.progress = min(1.0, scanned / total)
-			if page.next_offset is None:
-				exhausted = True
-				break
-			if job.clean and removed >= job.limit:
-				limited = True
-				break
-			offset = page.next_offset
+			if not completed and service_ids:
+				# уборка за собой идёт после прохода, и обрыв её отменяет:
+				# записи «X удалил Y» остаются в ленте. Молчать об этом
+				# нельзя — обещание «чистка убирает за собой» не сбылось
+				logger.warning(
+					"Обслуживание id=%s прервано: %d служебных записей об исключении "
+					"остались в ленте — уберите их чисткой служебных записей.",
+					job.id,
+					len(service_ids),
+				)
 		left = await self._sweep_service_notes(job, service_ids)
 		job.note = None
 		job.members_report = MembersReport(
@@ -655,14 +685,6 @@ class MaintenanceService:
 			exhausted=exhausted,
 			# Telegram перестал отдавать участников раньше конца списка
 			capped=exhausted and total is not None and scanned < total,
-		)
-		logger.info(
-			"Обслуживание id=%s: участников просмотрено %d из %s, мёртвых %d, исключено %d.",
-			job.id,
-			scanned,
-			total if total is not None else "?",
-			found,
-			removed,
 		)
 
 	async def _sweep_service_notes(self, job: _MaintenanceJob, ids: list[int]) -> int:

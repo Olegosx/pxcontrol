@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -418,6 +419,46 @@ async def test_scan_and_clean_queue_up(db: Database) -> None:
 	assert items[first].service is not None
 	assert items[second].service is not None
 	assert all(item.status is JobStatus.DONE for item in items.values())
+
+
+async def test_interrupted_clean_leaves_a_trace_in_the_log(
+	db: Database, caplog: pytest.LogCaptureFixture
+) -> None:
+	"""Прерванная чистка сообщает журналу, что успела удалить.
+
+	Отчёт при обрыве не строится намеренно (ADR-0026, п. 7 — лучше
+	«не получилось», чем правдоподобная неправда), но удаление
+	необратимо: без записи в журнале разбирать инцидент нечем.
+	"""
+	release = asyncio.Event()
+
+	class _SlowGateway(_FakeGateway):
+		async def service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			self.requested.append(offset_id)
+			if len(self.requested) > 1:
+				await release.wait()
+			return _page(kinds=[ServiceMessageKind.MEMBERS], scanned=1, next_offset_id=90)
+
+	gateway = _SlowGateway()
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	job_id = await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	while len(gateway.requested) < 2:
+		await asyncio.sleep(0)
+	with caplog.at_level("INFO", logger="pxcontrol.engine.services.maintenance"):
+		await service.cancel(job_id)
+		release.set()
+		await service.settle()
+
+	item = (await service.state())[0]
+	assert item.status is JobStatus.CANCELLED
+	assert item.service is None  # неполный отчёт не сохраняется
+	# зато в журнале осталось, сколько записей успели удалить
+	summaries = [msg for r in caplog.records if "удалено" in (msg := r.getMessage())]
+	assert len(summaries) == 1
+	assert re.search(r"удалено ([1-9]\d*)", summaries[0])
 
 
 # --- тексты интерфейса (чистые функции окна) ------------------------------------
