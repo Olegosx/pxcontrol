@@ -25,6 +25,7 @@ from pxcontrol.engine.telegram.types import (
 	CommunityKind,
 	MediaKind,
 	TelegramFloodError,
+	limit_mb,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 		# наследует сетевую ошибку — ветка обязана стоять раньше неё,
 		# иначе «файл велик» превратился бы в ложное «нет связи»
 		raise CommunityCheckError(
-			f"Файл больше лимита Bot API ({BOT_MAX_FILE_BYTES // 2**20} МБ) — уменьшите файл."
+			f"Файл больше лимита Bot API ({limit_mb(BOT_MAX_FILE_BYTES)} МБ) — уменьшите файл."
 		) from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc

@@ -58,13 +58,14 @@ from pxcontrol.engine.services.settings import (
 	PUBLISH_TIMES,
 	TITLE_PARSE_RULES,
 )
-from pxcontrol.engine.services.video import ReadyVideo, VideoDirs
+from pxcontrol.engine.services.video import VideoDirs, VideoFile
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityKind,
 	ForumTopicInfo,
 	MediaKind,
 	UserbotRole,
+	limit_mb,
 	text_length_limit,
 )
 from pxcontrol.ui import density
@@ -115,7 +116,7 @@ class _BatchSetup:
 
 	community: CommunityDto
 	root: str
-	files: list[ReadyVideo] = field(default_factory=list)
+	files: list[VideoFile] = field(default_factory=list)
 	caption_lines: list[CaptionLine] | None = None
 	filename_template_id: int | None = None
 	used_values: dict[int, list[str]] = field(default_factory=dict)
@@ -453,7 +454,7 @@ class PublishPage(ScrollArea):
 			self._when_row.set_schedule_allowed(True)
 		elif caps.bot:
 			self._caps_hint.setText(
-				f"Публикация через бота: файлы до {BOT_MAX_FILE_BYTES // 2**20} "
+				f"Публикация через бота: файлы до {limit_mb(BOT_MAX_FILE_BYTES)} "
 				"МБ, только «сейчас» (для отложенных нужен userbot-админ)."
 			)
 			self._when_row.set_schedule_allowed(False, "Отложенные требуют userbot-админа в канале")
@@ -758,7 +759,7 @@ class PublishPage(ScrollArea):
 			self._show_error,
 		)
 
-	def _on_batch_files_ready(self, community: CommunityDto, files: list[ReadyVideo]) -> None:
+	def _on_batch_files_ready(self, community: CommunityDto, files: list[VideoFile]) -> None:
 		"""Список собран движком — дальше обычная цепочка пакета."""
 		if not files:
 			self._show_error("Файлы не найдены на диске — публиковать нечего.")
@@ -791,7 +792,7 @@ class PublishPage(ScrollArea):
 			)
 		return community
 
-	def _on_batch_scanned(self, setup: _BatchSetup, files: list[ReadyVideo]) -> None:
+	def _on_batch_scanned(self, setup: _BatchSetup, files: list[VideoFile]) -> None:
 		"""Файлы найдены — общий шаблон подписи (если шаблоны настроены)."""
 		if not files:
 			InfoBar.info(

@@ -46,9 +46,9 @@ from pxcontrol.engine.services.video import (
 	PresetDto,
 	PresetFields,
 	ProcessedListing,
-	ProcessedVideo,
 	SourceAdvice,
 	VideoDirs,
+	VideoFile,
 	batch_subdir_name,
 	build_intro_source,
 	parse_intro_source,
@@ -175,7 +175,7 @@ class VideoPage(ScrollArea):
 		self._show_error = error_reporter(self)
 		self._session_done = 0  # готовых с последней итоговой плашки
 		self._entries: list[_FileEntry] = []  # карточки файлов к обработке
-		self._processed_checks: list[tuple[CheckBox, ProcessedVideo]] = []
+		self._processed_checks: list[tuple[CheckBox, VideoFile]] = []
 		self._processed_dir = ""  # папка текущего списка готовых видео
 		self._build()
 		self._reload_presets()
@@ -925,7 +925,7 @@ class VideoPage(ScrollArea):
 		for item in listing.items:
 			self._result_box.addWidget(self._processed_card(item))
 
-	def _processed_card(self, item: ProcessedVideo) -> QWidget:
+	def _processed_card(self, item: VideoFile) -> QWidget:
 		"""Карточка готового видео: размер, дата и действия над файлом."""
 		open_btn = PushButton(FluentIcon.PLAY, "Открыть", self)
 		open_btn.clicked.connect(bind(open_in_system, item.path))
@@ -977,7 +977,7 @@ class VideoPage(ScrollArea):
 			picked = [item for _check, item in self._processed_checks]
 		self._emit_publish_files(picked)
 
-	def _emit_publish_files(self, items: list[ProcessedVideo]) -> None:
+	def _emit_publish_files(self, items: list[VideoFile]) -> None:
 		"""Передаёт файлы пакетом на «Публикацию» (через главное окно)."""
 		if not items:
 			self._show_error("Готовых видео нет — публиковать нечего.")
@@ -1001,7 +1001,7 @@ class VideoPage(ScrollArea):
 		if root:
 			self.publish_folder_requested.emit(root, community.id)
 
-	def _on_delete_processed(self, item: ProcessedVideo) -> None:
+	def _on_delete_processed(self, item: VideoFile) -> None:
 		"""Удаляет готовое видео с диска (вместе с кадром-превью)."""
 		if not confirm_delete(
 			self,

@@ -35,13 +35,22 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 	SettingsService,
 )
-from pxcontrol.engine.telegram.types import userbot_max_file_bytes
+from pxcontrol.engine.telegram.types import limit_gb, userbot_max_file_bytes
 from pxcontrol.engine.video import ProcessingOptions, process
-from pxcontrol.engine.video.constants import AUDIO_KBPS, DEFAULT_RESOLUTION, scaled_size
+from pxcontrol.engine.video.constants import (
+	AUDIO_KBPS,
+	DEFAULT_RESOLUTION,
+	preview_path,
+)
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
-from pxcontrol.engine.video.frames import extract_still, resolve_timestamp
+from pxcontrol.engine.video.frames import extract_candidates
 from pxcontrol.engine.video.pipeline import ProgressCallback
-from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video, trimmed_info
+from pxcontrol.engine.video.probe import (
+	VideoInfo,
+	ffprobe_bin_for,
+	probe_video,
+	trimmed_info,
+)
 from pxcontrol.paths import media_dir
 
 logger = logging.getLogger(__name__)
@@ -154,14 +163,25 @@ def video_dialog_filter() -> str:
 
 
 @dataclass(frozen=True)
-class ProcessedVideo:
-	"""Готовое видео в папке результатов (для списка на странице «Видео»).
+class VideoFile:
+	"""Видеофайл на диске: всё, что известно о нём без пробы ffprobe.
+
+	Один тип на обе задачи — список готовых видео на странице «Видео»
+	и источник пакетной отправки (ADR-0015). Прежде их было два
+	(``ProcessedVideo`` и ``ReadyVideo``), причём второй — строгое
+	подмножество первого: одно понятие с двумя именами и двумя
+	сканерами папки, которые приходилось править парой.
+
+	От :class:`FoundVideo` отличается по существу: там есть данные
+	пробы ffprobe (длительность, размер кадра) — ради них сканирование
+	источников идёт минутами, а здесь достаточно обхода каталога.
 
 	Attributes:
 		name: путь относительно папки списка (файл в подпапке пакета
 			показывается как «пакет/файл.mp4»).
 		path: полный путь (контракт с публикацией — путь к файлу).
-		size_bytes: размер файла.
+		size_bytes: размер файла (в том числе для пометки «больше
+			лимита сообщества»).
 		modified_at: время последнего изменения (местное).
 	"""
 
@@ -200,24 +220,6 @@ ScanProgress = Callable[[int, int], None]
 
 
 @dataclass(frozen=True)
-class ReadyVideo:
-	"""Готовое видео для пакетной отправки (ADR-0015).
-
-	В отличие от :class:`FoundVideo` — без длительности: отправке она
-	не нужна, а без ffprobe сканирование мгновенно.
-
-	Attributes:
-		name: путь относительно выбранной папки (для показа в списке).
-		path: полный путь к файлу.
-		size_bytes: размер файла (для пометки «больше лимита канала»).
-	"""
-
-	name: str
-	path: str
-	size_bytes: int
-
-
-@dataclass(frozen=True)
 class ProcessedListing:
 	"""Содержимое папки результатов: сама папка и её видео.
 
@@ -226,7 +228,7 @@ class ProcessedListing:
 	"""
 
 	directory: str
-	items: list[ProcessedVideo]
+	items: list[VideoFile]
 
 
 @dataclass(frozen=True)
@@ -482,6 +484,23 @@ class VideoService:
 		self._userbot_premium = userbot_premium
 		self._candidates_dir: str | None = None  # партия кадров-кандидатов
 
+	def _bitrate_for(
+		self, info: VideoInfo, limit: int, trim_start: float, trim_end: float
+	) -> BitrateAdvice:
+		"""Совет по битрейту для исходника, не влезающего в лимит.
+
+		Общий шаг двух подсказок (:meth:`bitrate_advice` для очереди
+		обработки и :meth:`source_advice` для карточки файла). Сами
+		подсказки различаются тем, как относятся к невозможности совета:
+		одна поднимает ошибку, другая молча показывает размеры кадра —
+		и это различие сознательное, закреплённое тестом.
+
+		Raises:
+			VideoError: Даже минимальный битрейт не впишет видео в лимит.
+		"""
+		duration = trimmed_info(info, trim_start, trim_end).duration
+		return BitrateAdvice(limit_gb(limit), recommended_bitrate_kbps(duration, limit))
+
 	async def bitrate_advice(
 		self, source_path: str, trim_start: float = 0.0, trim_end: float = 0.0
 	) -> BitrateAdvice | None:
@@ -512,8 +531,7 @@ class VideoService:
 				exc_info=True,
 			)
 			return None
-		duration = trimmed_info(info, trim_start, trim_end).duration
-		return BitrateAdvice(limit // 10**9, recommended_bitrate_kbps(duration, limit))
+		return self._bitrate_for(info, limit, trim_start, trim_end)
 
 	async def source_advice(
 		self, source_path: str, trim_start: float = 0.0, trim_end: float = 0.0
@@ -546,8 +564,7 @@ class VideoService:
 		bitrate: BitrateAdvice | None = None
 		if (await asyncio.to_thread(path.stat)).st_size > limit:
 			try:
-				duration = trimmed_info(info, trim_start, trim_end).duration
-				bitrate = BitrateAdvice(limit // 10**9, recommended_bitrate_kbps(duration, limit))
+				bitrate = self._bitrate_for(info, limit, trim_start, trim_end)
 			except (VideoError, ValueError):
 				# «не вписать даже минимальным качеством» и «обрезка съела
 				# всё видео» — не повод скрывать размеры кадра: обе причины
@@ -635,33 +652,38 @@ class VideoService:
 		чтобы не останавливать цикл событий движка.
 		"""
 		directory = video_base_dir(self._settings, VIDEO_PROCESSED_DIR) / sanitize_subdir(subdir)
-		items = await asyncio.to_thread(self._scan_processed, directory)
+		items = await asyncio.to_thread(self._scan_videos, directory)
+		items.sort(key=lambda item: item.modified_at, reverse=True)
 		return ProcessedListing(str(directory), items)
 
 	@staticmethod
-	def _scan_processed(directory: Path) -> list[ProcessedVideo]:
-		"""Блокирующий рекурсивный обход папки результатов (в потоке).
+	def _scan_videos(directory: Path) -> list[VideoFile]:
+		"""Блокирующий рекурсивный обход папки с видео (в потоке).
 
-		Несуществующая папка — пустой список: подпапка создаётся при
-		первой обработке, и до неё показывать нечего.
+		Один обход на оба списка — готовые результаты и источник пакета
+		отправки: прежде это были два почти одинаковых сканера, и любая
+		правка правил обхода требовала помнить про второй.
+		Несуществующая папка — пустой список: подпапка результатов
+		создаётся при первой обработке, и до неё показывать нечего.
+		Порядок — как отдал обход; сортировку выбирает вызывающий.
 		"""
 		if not directory.is_dir():
 			return []
-		items: list[ProcessedVideo] = []
+		items: list[VideoFile] = []
 		for path in _walk_videos(directory):
 			try:
 				stat = path.stat()
 			except OSError:  # файл исчез между обходом и stat()
+				logger.warning("Файл %s исчез во время обхода — пропущен.", path)
 				continue
 			items.append(
-				ProcessedVideo(
+				VideoFile(
 					path.relative_to(directory).as_posix(),
 					str(path),
 					stat.st_size,
 					datetime.fromtimestamp(stat.st_mtime),
 				)
 			)
-		items.sort(key=lambda item: item.modified_at, reverse=True)
 		return items
 
 	# --- сканирование исходников (пакетная обработка) --------------------------
@@ -689,7 +711,7 @@ class VideoService:
 		await asyncio.to_thread(self._require_ffmpeg)
 		return await asyncio.to_thread(self._scan_sources, directory, on_progress)
 
-	async def scan_ready(self, root: str) -> list[ReadyVideo]:
+	async def scan_ready(self, root: str) -> list[VideoFile]:
 		"""Рекурсивно ищет видео в готовой папке (для пакетной отправки).
 
 		В отличие от :meth:`scan_sources` папки результатов не исключаются
@@ -704,21 +726,9 @@ class VideoService:
 		directory = Path(root)
 		if not await asyncio.to_thread(directory.is_dir):  # диск — вне цикла
 			raise VideoError(f"Папка не найдена: {root}")
-		return await asyncio.to_thread(self._scan_ready, directory)
+		return await asyncio.to_thread(self._scan_videos, directory)
 
-	@staticmethod
-	def _scan_ready(directory: Path) -> list[ReadyVideo]:
-		"""Блокирующий обход готовой папки (выполняется в потоке)."""
-		found: list[ReadyVideo] = []
-		for path in _walk_videos(directory):
-			try:
-				size = path.stat().st_size
-			except OSError:  # файл исчез между обходом и stat()
-				continue
-			found.append(ReadyVideo(path.relative_to(directory).as_posix(), str(path), size))
-		return found
-
-	async def ready_from_paths(self, paths: list[str]) -> list[ReadyVideo]:
+	async def ready_from_paths(self, paths: list[str]) -> list[VideoFile]:
 		"""Готовые видео из явного списка путей (выбор на странице «Видео»).
 
 		Парный вход к :meth:`scan_ready` — источник пакета публикации
@@ -730,15 +740,22 @@ class VideoService:
 		обработанным.
 		"""
 
-		def build() -> list[ReadyVideo]:
-			files: list[ReadyVideo] = []
+		def build() -> list[VideoFile]:
+			files: list[VideoFile] = []
 			for path in paths:
 				try:
-					size = Path(path).stat().st_size
+					stat = Path(path).stat()
 				except OSError:
 					logger.warning("Пакет публикации: файл %s исчез — пропущен.", path)
 					continue
-				files.append(ReadyVideo(Path(path).name, path, size))
+				files.append(
+					VideoFile(
+						Path(path).name,
+						path,
+						stat.st_size,
+						datetime.fromtimestamp(stat.st_mtime),
+					)
+				)
 			files.sort(key=lambda video: video.name.casefold())
 			return files
 
@@ -803,7 +820,7 @@ class VideoService:
 		"""
 		try:
 			target.unlink(missing_ok=True)
-			target.with_suffix(".png").unlink(missing_ok=True)
+			preview_path(target).unlink(missing_ok=True)
 		except OSError as exc:
 			raise VideoError(f"Не удалось удалить файл: {exc.strerror or exc}") from exc
 
@@ -957,22 +974,18 @@ class VideoService:
 		"""
 		info = probe_video(source_path, ffprobe_bin_for(self._ffmpeg()))
 		work_info = trimmed_info(info, trim_start, trim_end)
-		width, height = scaled_size(work_info.width, work_info.height, target_resolution)
-		stamps = sorted(resolve_timestamp("random-choice", work_info) for _ in range(count))
-		frames: list[FrameCandidate] = []
-		for index, timestamp in enumerate(stamps):
-			path = str(Path(out_dir) / f"frame_{index:02d}.png")
-			# извлечение — из исходника, время кандидата — от обрезанной версии
-			extract_still(
-				source_path,
-				trim_start + timestamp,
-				path,
-				width,
-				height,
-				self._ffmpeg(),
-			)
-			frames.append(FrameCandidate(timestamp, path))
-		return frames
+		# правило «размер от обрезанной версии, кадр из исходника» —
+		# в чистом модуле, одно на заставку и на выбор кадра человеком
+		frames = extract_candidates(
+			source_path,
+			work_info,
+			count,
+			out_dir,
+			target_resolution,
+			self._ffmpeg(),
+			trim_start,
+		)
+		return [FrameCandidate(timestamp, path) for timestamp, path in frames]
 
 	async def ensure_ready(self, source_paths: Sequence[str]) -> None:
 		"""Пакетно проверяет: ffmpeg доступен, каждый исходник существует.

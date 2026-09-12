@@ -94,6 +94,22 @@ TELEGRAM_MAX_SCHEDULED = 100
 FORUM_TOPICS_PAGE = 100
 
 
+def limit_gb(limit_bytes: int) -> int:
+	"""Предел на файл в гигабайтах — так его называют человеку.
+
+	Гигабайт здесь десятичный (10⁹), как в текстах самого Telegram
+	про «2 ГБ» и «4 ГБ», хотя лимит задан двоичными частями. Правило
+	перевода одно на движок и интерфейс: врозь тексты уже расходились
+	бы с проверкой, которую они объясняют.
+	"""
+	return limit_bytes // 10**9
+
+
+def limit_mb(limit_bytes: int) -> int:
+	"""Предел на файл в мегабайтах (двоичных) — для бот-пути."""
+	return limit_bytes // 2**20
+
+
 def userbot_max_file_bytes(premium: bool) -> int:
 	"""Лимит на файл через userbot по статусу подписки аккаунта."""
 	return USERBOT_PREMIUM_MAX_FILE_BYTES if premium else USERBOT_MAX_FILE_BYTES

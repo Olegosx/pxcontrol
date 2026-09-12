@@ -52,7 +52,7 @@ from pxcontrol.engine.services.schedule_plan import (
 	plan_times,
 )
 from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
-from pxcontrol.engine.services.video import ReadyVideo
+from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT, MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -135,7 +135,7 @@ class _BatchRow:
 	def __init__(
 		self,
 		dialog: PublishBatchDialog,
-		video: ReadyVideo,
+		video: VideoFile,
 		caption: str,
 		oversized: bool,
 		caption_limit: int = CAPTION_LENGTH_LIMIT,
@@ -197,7 +197,7 @@ class PublishBatchDialog(WorkDialog):
 		worker: EngineWorker,
 		community: CommunityDto,
 		root: str,
-		files: list[ReadyVideo],
+		files: list[VideoFile],
 		parent: QWidget,
 		caption_lines: list[CaptionLine] | None = None,
 		filename_template_id: int | None = None,
@@ -534,7 +534,7 @@ class PublishBatchDialog(WorkDialog):
 
 	def _build_rows(
 		self,
-		files: list[ReadyVideo],
+		files: list[VideoFile],
 		caption_lines: list[CaptionLine] | None,
 		limit_bytes: int | None,
 		caption_limit: int,

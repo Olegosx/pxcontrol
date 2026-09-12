@@ -13,7 +13,6 @@ import asyncio
 import logging
 import shutil
 import tempfile
-from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -44,11 +43,19 @@ from pxcontrol.engine.telegram.types import (
 	OutgoingPost,
 	ScheduledMessage,
 	TelegramFloodError,
+	limit_gb,
+	limit_mb,
 	telegram_text_length,
 	text_length_limit,
 	userbot_max_file_bytes,
 )
-from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source, run_tool
+from pxcontrol.engine.video.constants import preview_path
+from pxcontrol.engine.video.ffmpeg import (
+	FfmpegSource,
+	ProgressCallback,
+	ffmpeg_source,
+	run_tool,
+)
 from pxcontrol.engine.video.frames import resolve_timestamp
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
 
@@ -68,9 +75,6 @@ _THUMBNAIL_TIMEOUT_S = 120.0
 
 #: Длина превью текста отложенной записи на странице «Расписание».
 _SCHEDULED_PREVIEW_CHARS = 80
-
-#: Колбэк прогресса загрузки: доля 0.0..1.0.
-ProgressCallback = Callable[[float], None]
 
 
 @dataclass(frozen=True)
@@ -508,7 +512,7 @@ class PostsService:
 			limit = userbot_max_file_bytes(premium)
 			if media_path is not None and self._file_size(media_path) > limit:
 				raise PostError(
-					f"Файл больше {limit // 10**9} ГБ — лимит Telegram на файл "
+					f"Файл больше {limit_gb(limit)} ГБ — лимит Telegram на файл "
 					"для этого аккаунта. Уменьшите файл (например, битрейтом "
 					"на странице «Видео»)."
 				)
@@ -524,7 +528,7 @@ class PostsService:
 			)
 		if media_path is not None and self._file_size(media_path) > BOT_MAX_FILE_BYTES:
 			raise PostError(
-				f"Файл больше {BOT_MAX_FILE_BYTES // 2**20} МБ — лимит "
+				f"Файл больше {limit_mb(BOT_MAX_FILE_BYTES)} МБ — лимит "
 				"отправки ботом. Добавьте userbot администратором канала "
 				"или уменьшите файл."
 			)
@@ -657,9 +661,9 @@ class PostsService:
 		"""Блокирующий перенос файла с соседом-превью ``.png`` (в потоке)."""
 		target.parent.mkdir(parents=True, exist_ok=True)
 		shutil.move(str(source), str(target))
-		preview = source.with_suffix(".png")
+		preview = preview_path(source)
 		if preview.is_file():
-			shutil.move(str(preview), str(target.with_suffix(".png")))
+			shutil.move(str(preview), str(preview_path(target)))
 
 	def _move_with_preview_and_prune(self, source: Path, target: Path) -> None:
 		"""Перенос с уборкой опустевших папок за источником (в потоке).
@@ -853,10 +857,10 @@ class PostsService:
 			raise PostError(
 				f"Не удалось переименовать файл в «{rename_to}»: {exc.strerror or exc}"
 			) from exc
-		preview = source.with_suffix(".png")
+		preview = preview_path(source)
 		try:
 			if preview.is_file():
-				preview.rename(target.with_suffix(".png"))
+				preview.rename(preview_path(target))
 		except OSError as exc:
 			# пара «файл + превью» переименовывается атомарно: без отката
 			# превью осталось бы под старым стемом и потерялось бы при
@@ -878,7 +882,7 @@ class PostsService:
 		вспомогательная: любой сбой не мешает публикации (None + лог).
 		"""
 		thumb = str(Path(tmp_dir) / "thumb.jpg")
-		preview = Path(video_path).with_suffix(".png")
+		preview = preview_path(video_path)
 		try:
 			if preview.is_file():
 				_make_thumbnail(str(preview), thumb, self._ffmpeg())
@@ -904,7 +908,7 @@ class PostsService:
 		Raises:
 			PostError: Канал не найден.
 		"""
-		return (await self.userbot_limit_bytes(community_id)) // 10**9
+		return limit_gb(await self.userbot_limit_bytes(community_id))
 
 	async def userbot_limit_bytes(self, community_id: int) -> int:
 		"""Точный лимит на файл канала в байтах (2000/4000 МиБ по Premium).

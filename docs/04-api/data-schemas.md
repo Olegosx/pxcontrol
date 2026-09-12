@@ -33,8 +33,8 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `QueueItemDto` | `publish_queue.py` | элемент очереди отправки (статус — общий `JobStatus`) |
 | `PresetDto`, `PresetFields`, `FrameCandidate` | `video.py` | пресет обработки видео и кадры-кандидаты |
 | `BitrateAdvice` | `video.py` | рекомендация битрейта для исходника больше лимита Telegram |
-| `ProcessedVideo`, `ProcessedListing` | `video.py` | готовое видео и содержимое подпапки результатов |
-| `FoundVideo`, `ReadyVideo` | `video.py` | найденное при сканировании исходников; готовое к отправке (`scan_ready`/`ready_from_paths`, ADR-0015) |
+| `VideoFile`, `ProcessedListing` | `video.py` | видеофайл на диске (имя, путь, размер, дата) и содержимое подпапки результатов. Один тип на список готовых видео и на источник пакетной отправки (`scan_ready`/`ready_from_paths`, ADR-0015) |
+| `FoundVideo` | `video.py` | найденное при сканировании исходников — с данными пробы ffprobe (длительность, размер кадра) |
 | `VideoDirs`, `IntroSourceKind` | `video.py` | действующие папки видео; вид источника кадра заставки |
 | `ProcessingRequest` | `video_queue.py` | заявка очереди обработки: файл со своими параметрами (ADR-0014) |
 | `VideoItemDto` | `video_queue.py` | элемент очереди обработки (статус — общий `JobStatus`) |

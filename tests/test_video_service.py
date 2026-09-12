@@ -377,7 +377,9 @@ async def test_extract_random_frames(
 		assert 5.0 <= timestamp <= 95.0
 		Path(out).write_bytes(b"png")
 
-	monkeypatch.setattr("pxcontrol.engine.services.video.extract_still", _fake_extract)
+	# извлечение кадра живёт в чистом модуле: правило «размер от
+	# обрезанной версии, кадр из исходника» там одно на всех
+	monkeypatch.setattr("pxcontrol.engine.video.frames.extract_still", _fake_extract)
 	source = tmp_path / "v.mp4"
 	source.write_bytes(b"v")
 	service = VideoService(db, "ffmpeg", processor=FakeProcessor())
@@ -417,7 +419,9 @@ async def test_extract_random_frames_respects_trim(
 		extracted.append(timestamp)
 		Path(out).write_bytes(b"png")
 
-	monkeypatch.setattr("pxcontrol.engine.services.video.extract_still", _fake_extract)
+	# извлечение кадра живёт в чистом модуле: правило «размер от
+	# обрезанной версии, кадр из исходника» там одно на всех
+	monkeypatch.setattr("pxcontrol.engine.video.frames.extract_still", _fake_extract)
 	source = tmp_path / "v.mp4"
 	source.write_bytes(b"v")
 	service = VideoService(db, "ffmpeg", processor=FakeProcessor())

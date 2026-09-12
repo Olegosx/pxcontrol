@@ -21,6 +21,7 @@ from pxcontrol.engine.video.constants import (
 	FALLBACK_CRF,
 	TARGET_PIX_FMT,
 	VIDEO_CODEC,
+	preview_path,
 	scaled_size,
 )
 from pxcontrol.engine.video.ffmpeg import ProgressCallback, run_streaming, run_tool
@@ -305,7 +306,7 @@ def _save_preview(opts: ProcessingOptions, info: VideoInfo, still_path: str | No
 	его отказ не роняет успешную обработку, только предупреждение в лог.
 	Слой публикации режет из него миниатюру видео.
 	"""
-	preview = str(Path(opts.output).with_suffix(".png"))
+	preview = str(preview_path(opts.output))
 	try:
 		if still_path is not None:
 			shutil.copyfile(still_path, preview)

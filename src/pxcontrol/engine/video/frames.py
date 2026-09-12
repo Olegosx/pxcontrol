@@ -89,6 +89,62 @@ def extract_still(
 	run_tool(cmd, f"извлечение кадра на {timestamp:.3f} с", timeout=120.0)
 
 
+def still_from_video(
+	input_path: str,
+	timestamp: float,
+	info: VideoInfo,
+	output_path: str,
+	target_resolution: int | None,
+	ffmpeg_bin: str = "ffmpeg",
+	start_offset: float = 0.0,
+) -> None:
+	"""Достаёт кадр видео под размер итогового кадра.
+
+	Здесь живёт правило, общее для заставки и для выбора кадра
+	человеком: размер считается от **обрезанной** версии (``info``),
+	а извлекается кадр из **исходника** — поэтому момент сдвигается
+	на ``start_offset`` (сколько обрезано в начале). Разойдись эти две
+	реализации, и склейка xfade упала бы на несовпадении размеров
+	входов — а поймать это тестом врозь было бы нечем.
+	"""
+	width, height = scaled_size(info.width, info.height, target_resolution)
+	extract_still(input_path, start_offset + timestamp, output_path, width, height, ffmpeg_bin)
+
+
+def extract_candidates(
+	input_path: str,
+	info: VideoInfo,
+	count: int,
+	out_dir: str,
+	target_resolution: int | None,
+	ffmpeg_bin: str = "ffmpeg",
+	start_offset: float = 0.0,
+) -> list[tuple[float, str]]:
+	"""Извлекает ``count`` случайных кадров для выбора заставки человеком.
+
+	Моменты — от обрезанной версии (``info``), извлечение — из исходника
+	со сдвигом ``start_offset``: то же правило, что у заставки
+	(:func:`still_from_video`).
+
+	Returns:
+		Пары «момент в обрезанной версии, путь к файлу кадра»,
+		по возрастанию момента.
+
+	Raises:
+		ValueError: Обрезка не оставляет от ролика ничего.
+		RuntimeError: ffmpeg не смог извлечь кадр.
+	"""
+	stamps = sorted(resolve_timestamp("random-choice", info) for _ in range(count))
+	frames: list[tuple[float, str]] = []
+	for index, timestamp in enumerate(stamps):
+		path = str(Path(out_dir) / f"frame_{index:02d}.png")
+		still_from_video(
+			input_path, timestamp, info, path, target_resolution, ffmpeg_bin, start_offset
+		)
+		frames.append((timestamp, path))
+	return frames
+
+
 def prepare_still(
 	input_path: str,
 	source: str,
@@ -116,14 +172,16 @@ def prepare_still(
 		RuntimeError: Если ffmpeg не смог подготовить картинку.
 		ValueError: Режим источника не распознан или картинка не найдена.
 	"""
-	width, height = scaled_size(info.width, info.height, target_resolution)
 	if source.startswith("image:"):
 		image_path = source.split(":", 1)[1]
 		# проверка до ffmpeg: несуществующий файл дал бы дамп журнала
 		# вместо точной причины
 		if not Path(image_path).is_file():
 			raise ValueError(f"Картинка для заставки не найдена: {image_path}")
+		width, height = scaled_size(info.width, info.height, target_resolution)
 		extract_still(image_path, 0.0, output_path, width, height, ffmpeg_bin)
 		return
 	timestamp = resolve_timestamp(source, info)
-	extract_still(input_path, start_offset + timestamp, output_path, width, height, ffmpeg_bin)
+	still_from_video(
+		input_path, timestamp, info, output_path, target_resolution, ffmpeg_bin, start_offset
+	)
