@@ -37,7 +37,8 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `FoundVideo`, `ReadyVideo` | `video.py` | найденное при сканировании исходников; готовое к отправке (`scan_ready`/`ready_from_paths`, ADR-0015) |
 | `VideoDirs`, `IntroSourceKind` | `video.py` | действующие папки видео; вид источника кадра заставки |
 | `ProcessingRequest` | `video_queue.py` | заявка очереди обработки: файл со своими параметрами (ADR-0014) |
-| `VideoItemDto`, `VideoItemStatus` | `video_queue.py` | элемент очереди обработки и его статус |
+| `VideoItemDto` | `video_queue.py` | элемент очереди обработки (статус — общий `JobStatus`) |
+| `JobStatus` | `jobs.py` | состояние задания любой очереди движка (ADR-0025) |
 | `SchedulePlan`, `PlanKind` | `schedule_plan.py` | раскладка времени пакета отправки: стратегия и параметры (ADR-0015) |
 | `FieldDto`, `TemplateDto`, `TemplateFieldDto`, `CaptionLine` | `captions.py` | поля со словарями и шаблоны подписей |
 | `ValueDto` | `captions.py` | значение словаря поля (с привязкой к родительскому значению) |

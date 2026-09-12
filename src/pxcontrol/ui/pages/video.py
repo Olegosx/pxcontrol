@@ -37,6 +37,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.errors import user_message
+from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.settings import COMMUNITY_DEFAULT_PRESET
 from pxcontrol.engine.services.video import (
@@ -56,7 +57,6 @@ from pxcontrol.engine.services.video import (
 from pxcontrol.engine.services.video_queue import (
 	ProcessingRequest,
 	VideoItemDto,
-	VideoItemStatus,
 )
 from pxcontrol.engine.video.constants import is_upscale, scaled_size
 from pxcontrol.ui import density
@@ -844,7 +844,7 @@ class VideoPage(ScrollArea):
 		Родитель — окно: опрос живёт всегда, и завершение может прийти
 		при скрытой странице — плашка на ней погасла бы незамеченной.
 		"""
-		errors = sum(1 for item in visible if item.status is VideoItemStatus.ERROR)
+		errors = sum(1 for item in visible if item.status is JobStatus.ERROR)
 		if self._session_done:
 			text = f"Готово файлов: {self._session_done}"
 			if errors:
@@ -864,7 +864,7 @@ class VideoPage(ScrollArea):
 			self._queue_summary.hide()
 			return
 		left = sum(1 for item in items if not item.status.finished())
-		errors = sum(1 for item in items if item.status is VideoItemStatus.ERROR)
+		errors = sum(1 for item in items if item.status is JobStatus.ERROR)
 		parts = []
 		if left:
 			parts.append(f"осталось {left}")
@@ -879,11 +879,11 @@ class VideoPage(ScrollArea):
 	def _queue_subtitle(item: VideoItemDto) -> str:
 		"""Подпись карточки: пакет, статус и пометки выполнения."""
 		status_text = {
-			VideoItemStatus.PENDING: "в очереди",
-			VideoItemStatus.PROCESSING: "кодируется",
-			VideoItemStatus.DONE: "готово",
-			VideoItemStatus.ERROR: f"ошибка: {item.error}",
-			VideoItemStatus.CANCELLED: "отменено",
+			JobStatus.PENDING: "в очереди",
+			JobStatus.RUNNING: "кодируется",
+			JobStatus.DONE: "готово",
+			JobStatus.ERROR: f"ошибка: {item.error}",
+			JobStatus.CANCELLED: "отменено",
 		}[item.status]
 		parts = []
 		if item.batch:

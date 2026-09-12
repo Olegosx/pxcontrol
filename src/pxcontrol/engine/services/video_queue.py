@@ -3,19 +3,26 @@
 Единый конвейер подготовки видео (ADR-0014): и одиночная, и пакетная
 обработка ставят элементы в одну очередь — два ffmpeg не дерутся
 за процессор, а логика выполнения (авто-битрейт, отмена, повтор)
-не двоится. Очередь живёт в памяти цикла событий движка, как очередь
-отправки постов (ADR-0012): персистентности нет сознательно —
-готовые файлы уже на диске (результат пишется атомарно), остальное
-после перезапуска ставится заново.
+не двоится. Жизненный цикл элементов держит общий каркас заданий
+(:mod:`pxcontrol.engine.jobs`, ADR-0025); здесь остаётся предметное:
+проверки при постановке, авто-битрейт под лимит Telegram, копии
+выбранных кадров заставки и уборка за ними.
+
+Персистентности нет сознательно (ADR-0014): готовые файлы уже на диске
+(результат пишется атомарно), остальное после перезапуска ставится
+заново — поэтому при остановке движка ожидающие элементы честно
+помечаются отменёнными.
 
 Все методы выполняются в цикле движка (вызовы — через мост интерфейса),
 поэтому состояние не требует блокировок. Единственное исключение —
 колбэк прогресса ffmpeg: он приходит из рабочего потока, но лишь
-присваивает ``item.progress`` и читает ``cancel_requested`` — атомарные
-операции над простыми полями, безопасные под GIL без блокировок. Отмена работающей обработки —
-кооперативная: колбэк прогресса бросает :class:`ProcessingCancelled`,
+присваивает ``job.progress`` и читает ``cancel_requested`` — атомарные
+операции над простыми полями, безопасные под GIL. Отмена работающей
+обработки кооперативная: колбэк прогресса бросает :class:`JobCancelled`,
 и ``run_streaming`` убивает процесс ffmpeg (контракт закреплён тестом
-модуля видео). Фазы без прогресса (ffprobe, кадр заставки, вшивание
+модуля видео). Отмена задачи вместо этого не годится — посторонний
+процесс от неё не остановится, поэтому очередь заведена без
+``hard_cancel``. Фазы без прогресса (ffprobe, кадр заставки, вшивание
 обложки) не прерываются — отмена подхватится на первой строке прогресса.
 """
 
@@ -25,12 +32,10 @@ import asyncio
 import logging
 import shutil
 import tempfile
-from contextlib import suppress
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from pathlib import Path
 
-from pxcontrol.engine.errors import user_message
+from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
 from pxcontrol.engine.services.video import (
 	IntroSourceKind,
 	PresetFields,
@@ -44,30 +49,6 @@ logger = logging.getLogger(__name__)
 #: Сколько ждать завершения текущей обработки при остановке движка (сек):
 #: ffmpeg гаснет на первой строке прогресса, страховка — на фазы без него.
 _SHUTDOWN_TIMEOUT = 30.0
-
-
-class ProcessingCancelled(Exception):  # noqa: N818 — служебный сигнал, не ошибка
-	"""Служебный сигнал отмены обработки.
-
-	Бросается колбэком прогресса и сознательно не наследует ни
-	``EngineError`` (это не ошибка для пользователя), ни ``RuntimeError``/
-	``ValueError`` (иначе :meth:`VideoService.prepare` завернул бы его
-	в ``VideoError`` и очередь не отличила бы отмену от сбоя).
-	"""
-
-
-class VideoItemStatus(StrEnum):
-	"""Статус элемента очереди обработки."""
-
-	PENDING = "pending"  # ждёт своей очереди
-	PROCESSING = "processing"  # кодируется ffmpeg
-	DONE = "done"  # результат готов
-	ERROR = "error"  # обработка не удалась (текст — в error)
-	CANCELLED = "cancelled"  # отменён пользователем
-
-	def finished(self) -> bool:
-		"""Завершён ли элемент (в любом исходе)."""
-		return self in (self.DONE, self.ERROR, self.CANCELLED)
 
 
 @dataclass(frozen=True)
@@ -99,7 +80,7 @@ class VideoItemDto:
 		id: идентификатор элемента (для отмены, повтора и снятия с показа).
 		title: имя исходного файла.
 		batch: подпапка пакета («» — одиночная обработка).
-		status: текущий статус.
+		status: текущий статус (общий для очередей движка, ADR-0025).
 		progress: доля кодирования 0.0..1.0 (для обрабатывающегося).
 		error: текст ошибки (для статуса ERROR).
 		note: пометка выполнения (например, автоснижение битрейта).
@@ -109,28 +90,23 @@ class VideoItemDto:
 	id: int
 	title: str
 	batch: str
-	status: VideoItemStatus
+	status: JobStatus
 	progress: float
 	error: str | None
 	note: str | None
 	output_path: str | None
 
 
-class _Item:
-	"""Внутреннее состояние элемента очереди (изменяемое)."""
+class _VideoJob(Job):
+	"""Задание обработки: заявка и путь готового файла."""
 
-	def __init__(self, item_id: int, request: ProcessingRequest) -> None:
-		self.id = item_id
+	def __init__(self, job_id: int, request: ProcessingRequest) -> None:
+		super().__init__(job_id)
 		self.request = request
-		self.status = VideoItemStatus.PENDING
-		self.progress = 0.0
-		self.error: str | None = None
-		self.note: str | None = None
 		self.output_path: str | None = None
-		self.cancel_requested = False
 
 	def dto(self) -> VideoItemDto:
-		"""Снимок элемента для интерфейса."""
+		"""Снимок задания для интерфейса."""
 		return VideoItemDto(
 			id=self.id,
 			title=Path(self.request.source_path).name,
@@ -154,10 +130,17 @@ class ProcessingQueue:
 
 	def __init__(self, video: VideoService) -> None:
 		self._video = video
-		self._items: list[_Item] = []
-		self._next_id = 1
-		self._worker: asyncio.Task[None] | None = None
-		self._closing = False  # остановка движка: гасит активный ffmpeg
+		self._jobs: JobQueue[_VideoJob] = JobQueue(
+			self._process,
+			name="Обработка",
+			# ffmpeg — посторонний процесс: отмена задачи его не остановит,
+			# работает только кооперативный флаг (см. докстринг модуля)
+			hard_cancel=False,
+			# очередь не переживает перезапуск (ADR-0014) — честно сказать
+			# об этом ожидающим элементам при остановке движка
+			cancel_pending_on_shutdown=True,
+			shutdown_timeout_s=_SHUTDOWN_TIMEOUT,
+		)
 		self._frames_dir: str | None = None  # выбранные кадры заставки пакета
 		self._next_frame = 1
 
@@ -186,27 +169,26 @@ class ProcessingQueue:
 		Raises:
 			VideoError: Список пуст, файл или ffmpeg не найдены.
 		"""
-		if self._closing:
-			# постановка в окно shutdown: элемент всё равно не начался бы
-			# (см. _run), а после перезапуска очередь пуста (ADR-0014)
+		if self._jobs.stopping:
+			# постановка в окно shutdown: элемент всё равно не начался бы,
+			# а после перезапуска очередь пуста (ADR-0014)
 			raise VideoError("Движок останавливается — постановка отклонена.")
 		if not requests:
 			raise VideoError("Список файлов пуст — обрабатывать нечего.")
 		await self._video.ensure_ready([request.source_path for request in requests])
 		ids: list[int] = []
 		for request in requests:
-			item = _Item(self._next_id, request)
-			self._next_id += 1
-			self._items.append(item)
-			ids.append(item.id)
+			job = _VideoJob(self._jobs.new_id(), request)
+			self._jobs.add(job)
+			ids.append(job.id)
 			logger.info(
 				"Обработка: «%s» в очереди (id=%s, параметры «%s», пакет «%s»).",
 				Path(request.source_path).name,
-				item.id,
+				job.id,
 				request.fields.name,
 				request.batch_subdir or "—",
 			)
-		self._ensure_worker()
+		self._jobs.ensure_worker()
 		return ids
 
 	async def stash_frame(self, path: str) -> str:
@@ -239,16 +221,15 @@ class ProcessingQueue:
 		Активный ffmpeg гаснет кооперативно — на ближайшей строке
 		прогресса (см. докстринг модуля).
 		"""
-		for item in self._items:
-			if item.id != item_id:
-				continue
-			if item.status is VideoItemStatus.PENDING:
-				item.status = VideoItemStatus.CANCELLED
-				await self._drop_stashed_frame(item)
-				logger.info("Элемент обработки id=%s отменён (ждал).", item_id)
-			elif item.status is VideoItemStatus.PROCESSING:
-				item.cancel_requested = True
+		job = self._jobs.get(item_id)
+		if job is None:
 			return
+		if job.status is JobStatus.PENDING:
+			job.status = JobStatus.CANCELLED
+			await self._drop_stashed_frame(job)
+			logger.info("Элемент обработки id=%s отменён (ждал).", item_id)
+		elif job.status is JobStatus.RUNNING:
+			self._jobs.request_cancel(job)
 
 	async def retry(self, item_id: int) -> None:
 		"""Возвращает элемент с ошибкой в очередь на новую попытку.
@@ -259,35 +240,33 @@ class ProcessingQueue:
 		Raises:
 			VideoError: Файл больше не годен — элемент остаётся в ошибке.
 		"""
-		if self._closing:
-			return  # движок останавливается — повтор не начнётся (см. _run)
-		for item in self._items:
-			if item.id != item_id or item.status is not VideoItemStatus.ERROR:
-				continue
-			await self._video.ensure_ready([item.request.source_path])
-			item.status = VideoItemStatus.PENDING
-			item.progress = 0.0
-			item.error = None
-			item.note = None
-			# флаг мог взвестись, если отмена совпала с ошибкой прошлой
-			# попытки: не сбросить — новая попытка тут же отменилась бы
-			item.cancel_requested = False
-			self._ensure_worker()
-			logger.info("Элемент обработки id=%s возвращён в очередь на повтор.", item_id)
+		if self._jobs.stopping:
+			return  # движок останавливается — повтор не начнётся
+		job = self._jobs.get(item_id)
+		if job is None or job.status is not JobStatus.ERROR:
 			return
+		await self._video.ensure_ready([job.request.source_path])
+		job.status = JobStatus.PENDING
+		job.progress = 0.0
+		job.error = None
+		job.note = None
+		# флаг мог взвестись, если отмена совпала с ошибкой прошлой
+		# попытки: не сбросить — новая попытка тут же отменилась бы
+		job.cancel_requested = False
+		self._jobs.ensure_worker()
+		logger.info("Элемент обработки id=%s возвращён в очередь на повтор.", item_id)
 
 	async def dismiss(self, item_id: int) -> None:
 		"""Убирает завершённый элемент из списка (живые не трогаются)."""
-		for item in self._items:
-			if item.id == item_id and item.status.finished():
-				await self._drop_stashed_frame(item)
-		self._items = [
-			item for item in self._items if not (item.id == item_id and item.status.finished())
-		]
+		job = self._jobs.get(item_id)
+		if job is None or not job.status.finished():
+			return
+		await self._drop_stashed_frame(job)
+		self._jobs.remove(job)
 
 	async def state(self) -> list[VideoItemDto]:
 		"""Снимок очереди для интерфейса (в порядке постановки)."""
-		return [item.dto() for item in self._items]
+		return [job.dto() for job in self._jobs.all()]
 
 	async def shutdown(self) -> None:
 		"""Останавливает очередь при остановке движка.
@@ -295,83 +274,50 @@ class ProcessingQueue:
 		Ожидающие элементы помечаются отменёнными, активному ffmpeg
 		взводится флаг отмены (колбэк прогресса вызывается не реже раза
 		в секунду даже при молчании ffmpeg — см. ``run_streaming``);
-		воркер дожидается с таймаутом — страховка на шаги без колбэка.
+		каркас дожидается воркера с таймаутом — страховка на шаги
+		без колбэка. Копии выбранных кадров удаляются последними:
+		активное задание могло читать свою до последней секунды.
 		"""
-		self._closing = True
-		for item in self._items:
-			if item.status is VideoItemStatus.PENDING:
-				item.status = VideoItemStatus.CANCELLED
-		if self._worker is not None:
-			with suppress(TimeoutError, asyncio.CancelledError):
-				await asyncio.wait_for(self._worker, timeout=_SHUTDOWN_TIMEOUT)
-			self._worker = None
+		await self._jobs.shutdown()
 		if self._frames_dir is not None:
 			await asyncio.to_thread(shutil.rmtree, self._frames_dir, ignore_errors=True)
 			self._frames_dir = None
 
-	# --- внутреннее ---------------------------------------------------------
+	# --- выполнение ---------------------------------------------------------
 
-	def _ensure_worker(self) -> None:
-		"""Запускает фоновую задачу обработки, если она не крутится."""
-		if self._worker is None or self._worker.done():
-			self._worker = asyncio.create_task(self._run())
+	async def _process(self, job: _VideoJob) -> None:
+		"""Готовит один файл; исход записывает каркас заданий.
 
-	async def _run(self) -> None:
-		"""Обрабатывает элементы по одному, пока очередь не опустеет.
-
-		Остановка (``_closing``) проверяется и между элементами — как
-		у очереди отправки (ADR-0020): элемент, дождавшийся своей
-		очереди в окно shutdown, не начинает подготовку и ffmpeg.
+		Raises:
+			JobCancelled: Отмену запросил человек или остановка движка.
+			VideoError: Обработка не удалась (текст — на карточку).
 		"""
-		while not self._closing and (item := self._next_pending()) is not None:
-			await self._process(item)
-
-	def _next_pending(self) -> _Item | None:
-		"""Первый ожидающий элемент (или None — очередь пуста)."""
-		for item in self._items:
-			if item.status is VideoItemStatus.PENDING:
-				return item
-		return None
-
-	async def _process(self, item: _Item) -> None:
-		"""Обрабатывает один элемент; исход пишется в его статус."""
 
 		def _on_progress(fraction: float) -> None:
 			# вызывается из рабочего потока ffmpeg: исключение убивает
 			# процесс (контракт run_streaming) — так работает отмена
-			if item.cancel_requested or self._closing:
-				raise ProcessingCancelled
-			item.progress = fraction
+			if job.cancel_requested or self._jobs.stopping:
+				raise JobCancelled
+			job.progress = fraction
 
-		item.status = VideoItemStatus.PROCESSING
 		try:
-			fields = await self._fit_bitrate(item)
-			item.output_path = await self._video.prepare(
-				item.request.source_path,
+			fields = await self._fit_bitrate(job)
+			job.output_path = await self._video.prepare(
+				job.request.source_path,
 				fields,
-				intro_source=item.request.intro_source,
+				intro_source=job.request.intro_source,
 				on_progress=_on_progress,
-				extra_subdir=item.request.batch_subdir,
+				extra_subdir=job.request.batch_subdir,
 			)
-		except ProcessingCancelled:
-			item.status = VideoItemStatus.CANCELLED
-			await self._drop_stashed_frame(item)
-			logger.info("Обработка id=%s отменена.", item.id)
-		except asyncio.CancelledError:
-			# отменили сам воркер (остановка цикла): очередь не продолжается
+		except JobCancelled:
+			# кадр отменённого элемента больше не нужен: повтора не будет
+			await self._drop_stashed_frame(job)
 			raise
-		except Exception as exc:  # noqa: BLE001 — исход элемента, не очереди
-			item.status = VideoItemStatus.ERROR
-			# карточка очереди показывает этот текст как есть — сворачиваем
-			# недоменные исключения, как мост интерфейса (контракт errors.py)
-			item.error = user_message(exc)
-			logger.exception("Обработка id=%s не удалась.", item.id)
-		else:
-			item.status = VideoItemStatus.DONE
-			item.progress = 1.0
-			await self._drop_stashed_frame(item)
+		# успех: копия выбранного кадра сделала своё дело (у элемента
+		# с ошибкой она остаётся — её ждёт повтор)
+		await self._drop_stashed_frame(job)
 
-	async def _fit_bitrate(self, item: _Item) -> PresetFields:
+	async def _fit_bitrate(self, job: _VideoJob) -> PresetFields:
 		"""Вписывает исходник больше лимита Telegram в лимит (ADR-0014).
 
 		Пакет спросить пользователя не может, поэтому рекомендация
@@ -382,31 +328,31 @@ class ProcessingQueue:
 		Raises:
 			VideoError: Видео не влезает в лимит даже минимальным битрейтом.
 		"""
-		fields = item.request.fields
+		fields = job.request.fields
 		advice = await self._video.bitrate_advice(
-			item.request.source_path, fields.trim_start, fields.trim_end
+			job.request.source_path, fields.trim_start, fields.trim_end
 		)
 		if advice is None:
 			return fields
 		if fields.video_bitrate_kbps is not None and fields.video_bitrate_kbps <= advice.kbps:
 			return fields
-		item.note = (
+		job.note = (
 			f"битрейт снижен до {advice.mbps:g} Мбит/с — итог впишется "
 			f"в лимит Telegram {advice.limit_gb} ГБ"
 		)
-		logger.info("Обработка id=%s: %s.", item.id, item.note)
+		logger.info("Обработка id=%s: %s.", job.id, job.note)
 		return replace(fields, video_bitrate_kbps=advice.kbps)
 
-	async def _drop_stashed_frame(self, item: _Item) -> None:
+	async def _drop_stashed_frame(self, job: _VideoJob) -> None:
 		"""Удаляет копию выбранного кадра, если ею владеет очередь.
 
 		Кадры вне папки очереди (свой PNG из пресета, «image:» руками)
 		не трогаются. Элемент с ошибкой кадр сохраняет — он нужен повтору;
 		копия удаляется при снятии элемента с показа.
 		"""
-		if self._frames_dir is None or item.request.intro_source is None:
+		if self._frames_dir is None or job.request.intro_source is None:
 			return
-		kind, value = parse_intro_source(item.request.intro_source)
+		kind, value = parse_intro_source(job.request.intro_source)
 		if kind is not IntroSourceKind.IMAGE or not value:
 			return
 		path = Path(value)

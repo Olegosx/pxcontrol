@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from pxcontrol.engine.db.database import Database
+from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.video import (
 	BitrateAdvice,
 	PresetFields,
@@ -19,7 +20,6 @@ from pxcontrol.engine.services.video import (
 from pxcontrol.engine.services.video_queue import (
 	ProcessingQueue,
 	ProcessingRequest,
-	VideoItemStatus,
 )
 from pxcontrol.engine.video import ProcessingOptions
 from tests.conftest import FakeProcessor
@@ -60,7 +60,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 async def _wait_status(
-	queue: ProcessingQueue, item_id: int, *statuses: VideoItemStatus, timeout: float = 5.0
+	queue: ProcessingQueue, item_id: int, *statuses: JobStatus, timeout: float = 5.0
 ) -> None:
 	"""Ждёт, пока элемент не окажется в одном из статусов."""
 	async with asyncio.timeout(timeout):
@@ -93,7 +93,7 @@ async def test_enqueue_many_processes_in_order(db: Database, env: Path, tmp_path
 	)
 	await _wait_all_finished(queue)
 	state = await queue.state()
-	assert [item.status for item in state] == [VideoItemStatus.DONE, VideoItemStatus.DONE]
+	assert [item.status for item in state] == [JobStatus.DONE, JobStatus.DONE]
 	assert [item.id for item in state] == ids
 	# порядок обработки совпадает с порядком постановки
 	assert [Path(call.input).name for call in processor.calls] == ["исходник.mp4", "второй.mp4"]
@@ -129,7 +129,7 @@ async def test_single_enqueue_without_batch_subdir(db: Database, env: Path, tmp_
 	"""Одиночная обработка кладёт результат прямо в подпапку пресета."""
 	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=FakeProcessor()))
 	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
-	await _wait_status(queue, item_id, VideoItemStatus.DONE)
+	await _wait_status(queue, item_id, JobStatus.DONE)
 	item = (await queue.state())[0]
 	assert item.output_path is not None
 	assert Path(item.output_path).parent == tmp_path / "media" / "processed" / "паб"
@@ -169,12 +169,12 @@ async def test_error_is_isolated_and_retriable(db: Database, env: Path, tmp_path
 	)
 	await _wait_all_finished(queue)
 	state = {item.id: item for item in await queue.state()}
-	assert state[first_id].status is VideoItemStatus.ERROR
+	assert state[first_id].status is JobStatus.ERROR
 	assert state[first_id].error is not None and "Обработка не удалась" in state[first_id].error
-	assert state[second_id].status is VideoItemStatus.DONE
+	assert state[second_id].status is JobStatus.DONE
 
 	await queue.retry(first_id)
-	await _wait_status(queue, first_id, VideoItemStatus.DONE)
+	await _wait_status(queue, first_id, JobStatus.DONE)
 
 
 async def test_retry_requires_existing_file(db: Database, env: Path) -> None:
@@ -185,11 +185,11 @@ async def test_retry_requires_existing_file(db: Database, env: Path) -> None:
 
 	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=_boom))
 	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
-	await _wait_status(queue, item_id, VideoItemStatus.ERROR)
+	await _wait_status(queue, item_id, JobStatus.ERROR)
 	env.unlink()
 	with pytest.raises(VideoError, match="Файл не найден"):
 		await queue.retry(item_id)
-	assert (await queue.state())[0].status is VideoItemStatus.ERROR
+	assert (await queue.state())[0].status is JobStatus.ERROR
 
 
 async def test_cancel_pending_item(db: Database, env: Path, tmp_path: Path) -> None:
@@ -203,9 +203,9 @@ async def test_cancel_pending_item(db: Database, env: Path, tmp_path: Path) -> N
 	)
 	await asyncio.to_thread(processor.started.wait, 5.0)
 	await queue.cancel(second_id)
-	await _wait_status(queue, second_id, VideoItemStatus.CANCELLED)
+	await _wait_status(queue, second_id, JobStatus.CANCELLED)
 	processor.release.set()
-	await _wait_status(queue, first_id, VideoItemStatus.DONE)
+	await _wait_status(queue, first_id, JobStatus.DONE)
 	assert len(processor.calls) == 1  # отменённый до ffmpeg не дошёл
 
 
@@ -216,7 +216,7 @@ async def test_cancel_active_item_stops_ffmpeg(db: Database, env: Path, tmp_path
 	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
 	await asyncio.to_thread(processor.started.wait, 5.0)
 	await queue.cancel(item_id)
-	await _wait_status(queue, item_id, VideoItemStatus.CANCELLED)
+	await _wait_status(queue, item_id, JobStatus.CANCELLED)
 	# результат не создан: «кодирование» прервано до записи файла
 	processed = tmp_path / "media" / "processed" / "паб"
 	assert not processed.is_dir() or not list(processed.glob("*.mp4"))
@@ -235,7 +235,7 @@ async def test_auto_bitrate_substitution(
 	monkeypatch.setattr(service, "bitrate_advice", _advice)
 	queue = ProcessingQueue(service)
 	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
-	await _wait_status(queue, item_id, VideoItemStatus.DONE)
+	await _wait_status(queue, item_id, JobStatus.DONE)
 	assert processor.calls[0].video_bitrate_kbps == 1234
 	item = (await queue.state())[0]
 	assert item.note is not None and "битрейт снижен" in item.note
@@ -255,7 +255,7 @@ async def test_auto_bitrate_keeps_lower_manual_value(
 	queue = ProcessingQueue(service)
 	fields = PresetFields(name="Тест", subdir="паб", video_bitrate_kbps=1000)
 	item_id = await queue.enqueue(ProcessingRequest(str(env), fields))
-	await _wait_status(queue, item_id, VideoItemStatus.DONE)
+	await _wait_status(queue, item_id, JobStatus.DONE)
 	assert processor.calls[0].video_bitrate_kbps == 1000
 	assert (await queue.state())[0].note is None
 
@@ -268,7 +268,7 @@ async def test_intro_source_override_reaches_processor(db: Database, env: Path) 
 	item_id = await queue.enqueue(
 		ProcessingRequest(str(env), fields, intro_source="image:/x/кадр.png")
 	)
-	await _wait_status(queue, item_id, VideoItemStatus.DONE)
+	await _wait_status(queue, item_id, JobStatus.DONE)
 	assert processor.calls[0].intro_source == "image:/x/кадр.png"
 
 
@@ -283,7 +283,7 @@ async def test_stash_frame_lifecycle(db: Database, env: Path, tmp_path: Path) ->
 	item_id = await queue.enqueue(
 		ProcessingRequest(str(env), fields, intro_source=f"image:{stashed}")
 	)
-	await _wait_status(queue, item_id, VideoItemStatus.DONE)
+	await _wait_status(queue, item_id, JobStatus.DONE)
 	assert not Path(stashed).exists()  # копия очереди удалена после успеха
 	assert frame.exists()  # оригинал пользователя не тронут
 
@@ -291,7 +291,7 @@ async def test_stash_frame_lifecycle(db: Database, env: Path, tmp_path: Path) ->
 	item_id = await queue.enqueue(
 		ProcessingRequest(str(env), fields, intro_source=f"image:{frame}")
 	)
-	await _wait_status(queue, item_id, VideoItemStatus.DONE)
+	await _wait_status(queue, item_id, JobStatus.DONE)
 	assert frame.exists()
 
 
@@ -309,7 +309,7 @@ async def test_dismiss_removes_finished_and_frame(db: Database, env: Path, tmp_p
 	item_id = await queue.enqueue(
 		ProcessingRequest(str(env), fields, intro_source=f"image:{stashed}")
 	)
-	await _wait_status(queue, item_id, VideoItemStatus.ERROR)
+	await _wait_status(queue, item_id, JobStatus.ERROR)
 	assert Path(stashed).exists()  # у ошибки кадр остаётся — нужен повтору
 	await queue.dismiss(item_id)
 	assert await queue.state() == []
@@ -335,8 +335,8 @@ async def test_shutdown_cancels_pending_and_cleans_frames(
 	await queue.shutdown()
 	assert time.monotonic() - start < 10.0  # активный ffmpeg погашен флагом
 	state = {item.id: item for item in await queue.state()}
-	assert state[first_id].status is VideoItemStatus.CANCELLED
-	assert state[second_id].status is VideoItemStatus.CANCELLED
+	assert state[first_id].status is JobStatus.CANCELLED
+	assert state[second_id].status is JobStatus.CANCELLED
 	assert not Path(stashed).exists()
 
 
@@ -349,5 +349,5 @@ async def test_state_reflects_busyness(db: Database, env: Path) -> None:
 	assert any(not item.status.finished() for item in await queue.state())
 	await asyncio.to_thread(processor.started.wait, 5.0)
 	processor.release.set()
-	await _wait_status(queue, item_id, VideoItemStatus.DONE)
+	await _wait_status(queue, item_id, JobStatus.DONE)
 	assert all(item.status.finished() for item in await queue.state())
