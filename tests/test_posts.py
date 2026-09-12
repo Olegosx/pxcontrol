@@ -12,6 +12,7 @@ from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccoun
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
+	PostNotReadyError,
 	PostsService,
 	ScheduledList,
 	ScheduledPostDto,
@@ -413,10 +414,14 @@ async def test_publish_bot_limits(db: Database, tmp_path: Path) -> None:
 
 
 async def test_publish_without_any_way(db: Database) -> None:
-	"""Канал без способов публикации — понятная ошибка."""
+	"""Сообщество без публикатора — поправимое состояние, не дефект поста.
+
+	Класс важен: по нему очередь придерживает пост, а не хоронит
+	ошибкой (ADR-0016) — публикатор вернут, и пост уйдёт сам.
+	"""
 	service = PostsService(db, _FakeGateway())
 	community_id = await _add_community(db, with_bot=False, userbot_assigned=False)
-	with pytest.raises(PostError, match="нет способа публикации"):
+	with pytest.raises(PostNotReadyError, match="нет публикатора"):
 		await service.publish(PostDraft(community_id, text="x"))
 
 

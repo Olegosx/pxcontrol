@@ -117,6 +117,19 @@ class PostError(EngineError):
 	"""Ошибка создания/отправки поста (с понятным человеку текстом)."""
 
 
+class PostNotReadyError(PostError):
+	"""Сообщество сейчас не может принять пост, но это поправимо.
+
+	Не дефект черновика и не отказ Telegram, а состояние сообщества,
+	которое меняет сам человек: сообщество выключено переключателем
+	либо у него не осталось публикатора. Очередь отправки по этому
+	классу возвращает пост в ожидание, а не хоронит ошибкой
+	(ADR-0016): иначе одно нажатие «выключить» превращало бы всю
+	накопленную очередь канала в десятки карточек с ошибкой, которые
+	пришлось бы перебирать руками.
+	"""
+
+
 @dataclass(frozen=True)
 class TextLimits:
 	"""Пределы длины текста, действующие в конкретном сообществе.
@@ -358,6 +371,30 @@ class PostsService:
 		await self.transmit(plan, on_progress)
 		await self.settle_published(plan)
 
+	async def publish_blocker(self, community_id: int) -> str | None:
+		"""Что мешает сообществу принять пост прямо сейчас (None — ничего).
+
+		Одна точка правды на два пути: подготовку публикации (она
+		по этой причине отклоняет черновик) и дозор слотов очереди
+		(он такие сообщества пропускает, а не выпускает их ждущие
+		посты навстречу отказу).
+
+		Returns:
+			Текст причины для человека или None, если препятствий нет.
+		"""
+		community = await self._get_community(community_id)
+		if not await self._settings.get_for(COMMUNITY_ENABLED, community_id):
+			return f"Сообщество «{community.title}» выключено — пост ждёт, пока его включат."
+		caps = publish_capabilities(
+			community.bot is not None, community.default_tg_account_id is not None
+		)
+		if not caps.userbot and not caps.bot:
+			return (
+				f"У «{community.title}» нет публикатора — пост ждёт, "
+				"пока аккаунт или бот вернётся в доступы."
+			)
+		return None
+
 	async def prepare_publish(self, draft: PostDraft) -> PublishPlan:
 		"""Подготовка публикации: проверки, чтения БД, переименование.
 
@@ -373,12 +410,12 @@ class PostsService:
 		"""
 		self.validate_draft(draft)
 		community = await self._get_community(draft.community_id)
-		if not await self._settings.get_for(COMMUNITY_ENABLED, draft.community_id):
-			# правило системы, не интерфейса: любой будущий вход в публикацию
-			# (автопостинг из источников) не должен писать в выключенный канал
-			raise PostError(
-				f"Канал «{community.title}» выключен — включите его на странице «Каналы»."
-			)
+		# правило системы, не интерфейса: любой будущий вход в публикацию
+		# (автопостинг из источников) не должен писать в выключенное
+		# сообщество или в сообщество без публикатора
+		blocker = await self.publish_blocker(draft.community_id)
+		if blocker is not None:
+			raise PostNotReadyError(blocker)
 		if draft.topic_id is not None and not community.forum:
 			# тема живёт только в форуме: без проверки пост с темой улетел бы
 			# в Telegram и вернулся сырой ошибкой TOPIC_ID_INVALID
@@ -452,14 +489,15 @@ class PostsService:
 		``account_id`` — привязанный userbot-аккаунт канала (ADR-0019):
 		лимит файла зависит от Premium именно этого аккаунта.
 
+		Наличие публикатора здесь не проверяется: это свойство
+		сообщества, а не черновика, и живёт оно в одной точке —
+		:meth:`publish_blocker` (её зовёт подготовка до этих проверок).
+
 		Raises:
-			PostError: Нет способа публикации, отложенный пост через бота
-				или файл больше лимита выбранного транспорта.
+			PostNotReadyError: Отложенный пост, а userbot-публикатора нет.
+			PostError: Текст длиннее предела или файл больше лимита
+				выбранного транспорта.
 		"""
-		if not caps.userbot and not caps.bot:
-			raise PostError(
-				"У канала нет способа публикации — проверьте доступы на странице «Каналы»."
-			)
 		media_path = draft.media_path
 		with_media = media_path is not None
 		if caps.userbot:
@@ -478,8 +516,10 @@ class PostsService:
 		# бот-путь: подписки у ботов не бывает — пределы всегда базовые
 		check_text_length(draft.text, text_length_limit(False, with_media), with_media)
 		if draft.when is not None:
-			raise PostError(
-				"Отложенные посты требуют userbot-админа в канале — "
+			# поправимо человеком (вернуть userbot в доступы), поэтому
+			# очередь такой пост придержит, а не похоронит ошибкой
+			raise PostNotReadyError(
+				"Отложенные посты требуют userbot-админа в сообществе — "
 				"через бота доступно только «сейчас»."
 			)
 		if media_path is not None and self._file_size(media_path) > BOT_MAX_FILE_BYTES:

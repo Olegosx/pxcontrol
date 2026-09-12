@@ -35,6 +35,7 @@ from pxcontrol.engine.services.posts import (
 	MIN_SCHEDULE_AHEAD,
 	PostDraft,
 	PostError,
+	PostNotReadyError,
 	PostsService,
 	TextLimits,
 	check_text_length,
@@ -43,6 +44,7 @@ from pxcontrol.engine.services.posts import (
 )
 from pxcontrol.engine.services.settings import QUEUE_SLOT_POLL_MINUTES, SettingsService
 from pxcontrol.engine.telegram.mtproto import (
+	UserbotNotConnectedError,
 	UserbotScheduleFullError,
 	UserbotUnavailableError,
 )
@@ -162,6 +164,13 @@ def _expired(when: datetime | None, now: datetime) -> bool:
 	"""Желаемый момент прошёл (или ближе минимального запаса)."""
 	return when is not None and when <= now + MIN_SCHEDULE_AHEAD
 
+
+#: Сколько ждать перед новой попыткой, когда связи с Telegram нет.
+#: Обрыв связи — состояние общее для всей очереди, а не исход поста:
+#: без паузы воркер перебрал бы все готовые посты за секунды и сделал
+#: их ошибками. Минута — «сеть моргнула» проходит незаметно, а долгий
+#: обрыв стоит одной попытки в минуту.
+OFFLINE_RETRY_S = 60
 
 #: Пауза между догоняющими постами (просроченное время → «сейчас»), секунды.
 #: После простоя приложения очередь не строчит залпом: подписчики видят
@@ -692,6 +701,15 @@ class PublishQueue:
 				# дозор перепроверит слоты при восстановлении очереди
 				return
 			try:
+				blocker = await self._posts.publish_blocker(community_id)
+				if blocker is not None:
+					# сообщество выключено или осталось без публикатора:
+					# выпускать его посты незачем — они тут же вернулись бы
+					# сюда же. Без этой проверки было хуже: у сообщества
+					# без аккаунта занятых слотов «ноль», и дозор одним
+					# тиком выпускал все ждущие посты навстречу отказу
+					logger.info("Слоты сообщества id=%s не проверены: %s", community_id, blocker)
+					continue
 				taken = len(await self._posts.scheduled_times(community_id))
 			except TelegramFloodError as exc:
 				# лимит держит дорожка аккаунта (ADR-0024): остальные его
@@ -925,6 +943,30 @@ class PublishQueue:
 			if not item.cancel_requested:
 				raise
 			raise JobCancelled from None
+		except PostNotReadyError as exc:
+			# сообщество выключено или осталось без публикатора: человек
+			# поправит это сам, и хоронить пост ошибкой незачем — иначе
+			# одно нажатие «выключить» превращало бы всю накопленную
+			# очередь канала в десятки карточек, которые пришлось бы
+			# перебирать руками (ADR-0016)
+			self._ensure_watcher()  # дозор вернёт пост, когда сообщество оживёт
+			logger.info("Отправка id=%s отложена: %s", item.id, exc)
+			raise JobDeferred(JobStatus.WAITING, note=f"{exc}") from exc
+		except UserbotNotConnectedError as exc:
+			# нет связи с Telegram: временное состояние, общее для всей
+			# очереди. Без паузы воркер тут же брал бы следующий пост
+			# и короткий обрыв сети за секунды превращал бы в ошибки
+			# всё готовое к отправке
+			logger.warning(
+				"Отправка id=%s: нет связи с Telegram — очередь ждёт %d с.",
+				item.id,
+				OFFLINE_RETRY_S,
+			)
+			raise JobDeferred(
+				JobStatus.PENDING,
+				note=f"{exc} Очередь ждёт и повторит сама.",
+				delay_s=OFFLINE_RETRY_S,
+			) from exc
 		except UserbotScheduleFullError as exc:
 			# гонка: слоты заняли руками из клиента Telegram между
 			# проверкой и отправкой — не ошибка, элемент ждёт снова

@@ -23,10 +23,15 @@ from pxcontrol.engine.services.posts import (
 )
 from pxcontrol.engine.services.publish_queue import (
 	CATCHUP_INTERVAL_S,
+	OFFLINE_RETRY_S,
 	PublishQueue,
 	QueueItemDto,
 )
-from pxcontrol.engine.telegram.mtproto import UserbotScheduleFullError
+from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
+from pxcontrol.engine.telegram.mtproto import (
+	UserbotNotConnectedError,
+	UserbotScheduleFullError,
+)
 from pxcontrol.engine.telegram.types import (
 	TELEGRAM_MAX_SCHEDULED,
 	MediaKind,
@@ -99,17 +104,25 @@ async def make_queue(db: Database) -> AsyncIterator[QueueFactory]:
 
 
 async def _wait_status(
-	queue: PublishQueue, item_id: int, status: JobStatus, tries: int = 500
+	queue: PublishQueue,
+	item_id: int,
+	status: JobStatus,
+	tries: int = 500,
+	note: str | None = None,
 ) -> QueueItemDto:
 	"""Ждёт, пока элемент дойдёт до статуса (максимум ~5 секунд).
 
 	Пауза настоящая (не ``sleep(0)``): запросы к SQLite выполняет
-	поток aiosqlite, ему нужно реальное время.
+	поток aiosqlite, ему нужно реальное время. ``note`` — подстрока
+	ожидаемой пометки: статус вроде PENDING бывает и до первой попытки,
+	и после отсрочки, а различает их именно пометка.
 	"""
 	for _ in range(tries):
 		items = {item.id: item for item in await queue.state()}
-		if item_id in items and items[item_id].status is status:
-			return items[item_id]
+		item = items.get(item_id)
+		matches_note = note is None or (item is not None and note in (item.note or ""))
+		if item is not None and item.status is status and matches_note:
+			return item
 		await asyncio.sleep(0.01)
 	raise AssertionError(f"элемент {item_id} не достиг статуса {status}")
 
@@ -1316,3 +1329,88 @@ async def test_cancel_during_file_settling_keeps_the_post_published(
 	async with db.session_factory() as session:
 		rows = (await session.execute(select(PublishQueueItem))).scalars().all()
 	assert rows == []  # строка удалена — повтора после перезапуска не будет
+
+
+async def test_network_drop_makes_posts_wait_not_fail(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Обрыв связи не превращает готовую очередь в пачку ошибок.
+
+	Воркер берёт следующий пост сразу после исхода предыдущего, поэтому
+	без этого правила короткий обрыв сети за секунды делал ошибками все
+	готовые к отправке посты — а восстановление возможно только
+	поштучным «Повторить».
+	"""
+	offline = True
+
+	class _OfflineGateway(_SlowGateway):
+		async def publish(
+			self,
+			account_id: int,
+			chat_id: str,
+			post: OutgoingPost,
+			on_progress: ProgressCallback | None = None,
+		) -> None:
+			if offline:
+				raise UserbotNotConnectedError("Нет связи с Telegram.")
+			await super().publish(account_id, chat_id, post, on_progress)
+
+	gateway = _OfflineGateway()
+	gateway.release.set()
+	queue = make_queue(gateway)
+	paused: list[float] = []
+	resume = asyncio.Event()
+
+	async def _controlled(seconds: float) -> None:
+		# пауза управляется тестом: настоящие 60 секунд ждать незачем,
+		# но и мгновенная пауза не годится — повтор закрутился бы так
+		# быстро, что состояние «ждёт» нельзя было бы наблюдать
+		paused.append(seconds)
+		await resume.wait()
+
+	queue._sleep = _controlled  # noqa: SLF001 — реальная пауза растянула бы тест
+	community_id = await _add_community(db)
+	first = await queue.enqueue(PostDraft(community_id, text="первый"))
+	second = await queue.enqueue(PostDraft(community_id, text="второй"))
+
+	item = await _wait_status(queue, first, JobStatus.PENDING, note="повторит сама")
+	assert item.status is JobStatus.PENDING  # ждёт повтора, а не похоронен ошибкой
+	assert paused == [OFFLINE_RETRY_S]  # и очередь выдержала паузу
+	assert gateway.published == []  # второй пост не перемололся в ошибку следом
+
+	offline = False  # сеть вернулась — посты уходят сами, без «Повторить»
+	resume.set()
+	await _wait_status(queue, first, JobStatus.DONE)
+	await _wait_status(queue, second, JobStatus.DONE)
+	assert [post.text for post in gateway.published] == ["первый", "второй"]
+
+
+async def test_disabled_community_holds_posts_instead_of_failing(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Выключение сообщества переводит его посты в ожидание, а не в ошибку.
+
+	Одно нажатие переключателя не должно превращать накопленную очередь
+	канала в десятки карточек с ошибкой, которые придётся перебирать
+	поштучно.
+	"""
+	gateway = _SlotGateway()  # дозору слотов нужно чтение отложек
+	gateway.release.set()
+	queue = make_queue(gateway)
+	settings = SettingsService(db)
+	community_id = await _add_community(db)
+	await settings.set_for(COMMUNITY_ENABLED, community_id, False)
+	item_id = await queue.enqueue(PostDraft(community_id, text="подождёт"))
+
+	await _wait_status(queue, item_id, JobStatus.WAITING, note="выключено")
+	assert gateway.published == []
+
+	# дозор слотов такое сообщество пропускает: выпускать посты
+	# навстречу отказу незачем
+	await queue._release_slots()  # noqa: SLF001 — тик дозора без ожидания N минут
+	assert (await queue.state())[0].status is JobStatus.WAITING
+
+	await settings.set_for(COMMUNITY_ENABLED, community_id, True)
+	await queue._release_slots()  # noqa: SLF001 — следующий тик дозора
+	await _wait_status(queue, item_id, JobStatus.DONE)
+	assert [post.text for post in gateway.published] == ["подождёт"]
