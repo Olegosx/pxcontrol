@@ -25,6 +25,7 @@ from pxcontrol.engine.telegram.mtproto import UserbotFloodError, service_message
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	CommunityKind,
+	DeletedAccount,
 	ParticipantsPage,
 	ServiceMessageInfo,
 	ServiceMessageKind,
@@ -83,13 +84,15 @@ class _FakeGateway:
 		self, account_id: int, chat_id: str, offset: int, limit: int
 	) -> ParticipantsPage:
 		if not self.member_pages:
-			return ParticipantsPage(deleted_ids=[], scanned=0, next_offset=None, total=0)
+			return ParticipantsPage(deleted=[], scanned=0, next_offset=None, total=0)
 		return self.member_pages.pop(0)
 
-	async def kick_participant(self, account_id: int, chat_id: str, user_id: int) -> int | None:
-		self.kicked.append(user_id)
+	async def kick_participant(
+		self, account_id: int, chat_id: str, account: DeletedAccount
+	) -> int | None:
+		self.kicked.append(account.user_id)
 		# в супергруппе исключение порождает служебную запись
-		return 9000 + user_id
+		return 9000 + account.user_id
 
 
 def _page(
@@ -525,7 +528,11 @@ def _members(
 ) -> ParticipantsPage:
 	"""Страница участников с удалёнными учётками."""
 	return ParticipantsPage(
-		deleted_ids=deleted, scanned=scanned, next_offset=next_offset, total=total
+		# хеш доступа приходит вместе с участником и нужен для исключения
+		deleted=[DeletedAccount(user_id, access_hash=user_id * 10) for user_id in deleted],
+		scanned=scanned,
+		next_offset=next_offset,
+		total=total,
 	)
 
 

@@ -44,6 +44,7 @@ from pxcontrol.engine.telegram.mtproto import (
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	CommunityStatsInfo,
+	DeletedAccount,
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
@@ -380,7 +381,9 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.participants_page(chat_id, offset, limit)
 
-	async def kick_participant(self, account_id: int, chat_id: str, user_id: int) -> int | None:
+	async def kick_participant(
+		self, account_id: int, chat_id: str, account: DeletedAccount
+	) -> int | None:
 		"""Исключает участника; отдаёт id служебной записи об этом.
 
 		None — записи не было. В супергруппе она есть всегда, и чистка
@@ -393,7 +396,7 @@ class TelegramGateway:
 			UserbotUnavailableError: Прочие отказы Telegram.
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
-			return await transport.kick_participant(chat_id, user_id)
+			return await transport.kick_participant(chat_id, account)
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала из Telegram (его аккаунтом).

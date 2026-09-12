@@ -34,6 +34,7 @@ from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
 from pxcontrol.engine.services.communities import CommunitiesService, CommunityDto
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
+	DeletedAccount,
 	ParticipantsPage,
 	ServiceMessageKind,
 	ServiceMessagesPage,
@@ -103,7 +104,9 @@ class _MaintenancePort(Protocol):
 		self, account_id: int, chat_id: str, offset: int, limit: int
 	) -> ParticipantsPage: ...
 
-	async def kick_participant(self, account_id: int, chat_id: str, user_id: int) -> int | None: ...
+	async def kick_participant(
+		self, account_id: int, chat_id: str, account: DeletedAccount
+	) -> int | None: ...
 
 
 class MaintenanceTarget(StrEnum):
@@ -654,15 +657,15 @@ class MaintenanceService:
 				)
 				scanned += page.scanned
 				total = page.total if page.total is not None else total
-				found += len(page.deleted_ids)
+				found += len(page.deleted)
 				if job.clean:
-					for user_id in page.deleted_ids:
+					for account in page.deleted:
 						if removed >= job.limit:
 							limited = True
 							break
 						self._check_stop(job)
 						service_id = await self._gateway.kick_participant(
-							job.account_id, job.community.tg_chat_id, user_id
+							job.account_id, job.community.tg_chat_id, account
 						)
 						removed += 1
 						if service_id is not None:

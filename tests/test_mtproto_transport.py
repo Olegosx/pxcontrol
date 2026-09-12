@@ -888,15 +888,17 @@ async def test_participants_page_picks_deleted_and_steps_by_participants() -> No
 		for n in (1, 2, 3)
 	]
 	users = [
-		types.User(id=1, deleted=True, first_name=None),
-		types.User(id=2, deleted=False, first_name="Жив"),
+		types.User(id=1, deleted=True, first_name=None, access_hash=111),
+		types.User(id=2, deleted=False, first_name="Жив", access_hash=222),
 	]
 	fake.participant_pages = [(participants, users)]
 	transport = _transport(fake)
 
 	page = await transport.participants_page("-1001", offset=10, limit=200)
 
-	assert page.deleted_ids == [1]
+	assert [account.user_id for account in page.deleted] == [1]
+	# хеш доступа берётся из того же ответа: без него исключить нельзя
+	assert page.deleted[0].access_hash == 111
 	assert page.scanned == 2
 	assert page.next_offset == 13  # 10 + три участника, а не две карточки
 	assert page.total == 99
@@ -911,7 +913,7 @@ async def test_empty_participants_page_ends_the_walk() -> None:
 	page = await transport.participants_page("-1001", offset=200, limit=200)
 
 	assert page.next_offset is None
-	assert page.deleted_ids == []
+	assert page.deleted == []
 
 
 async def test_premium_upload_limit_is_a_wait_not_an_error() -> None:
@@ -934,3 +936,89 @@ async def test_premium_upload_limit_is_a_wait_not_an_error() -> None:
 			"-1001", OutgoingPost(text="видео", media_path="/tmp/x.mp4", media_kind=MediaKind.VIDEO)
 		)
 	assert flood.value.retry_after_s == 17
+
+
+async def test_kick_participant_survives_dict_response() -> None:
+	"""Ответ Telethon на исключение приходит словарём, а не сообщением.
+
+	``kick_participant`` разбирает обновления методом
+	``_get_response_message(None, …)``, а тот при пустом запросе
+	возвращает отображение «id → сообщение» (так сказано в его
+	docstring). Служебную запись он отдаёт отдельной веткой напрямую,
+	а когда записи нет вовсе — остаётся пустой словарь. Обращение
+	к нему как к сообщению роняло чистку удалённых аккаунтов
+	с «'dict' object has no attribute 'id'» (2026-09-12).
+	"""
+	from types import SimpleNamespace
+
+	from pxcontrol.engine.telegram.types import DeletedAccount
+
+	class _KickingClient(_FakeClient):
+		"""Клиент, возвращающий ответ в заданном виде."""
+
+		def __init__(self, produced: Any) -> None:
+			super().__init__()
+			self.produced = produced
+			self.kicked: list[Any] = []
+
+		async def kick_participant(self, entity: Any, user: Any) -> Any:
+			self.kicked.append(user)
+			return self.produced
+
+	account = DeletedAccount(777, access_hash=42)
+
+	# 1. словарь с записью — берём её идентификатор
+	client = _KickingClient({314: SimpleNamespace(id=314)})
+	transport = _transport(client)
+	await transport.start()
+	assert await transport.kick_participant("-1001", account) == 314
+
+	# 2. пустой словарь: записи не было — это не ошибка
+	client = _KickingClient({})
+	transport = _transport(client)
+	await transport.start()
+	assert await transport.kick_participant("-1001", account) is None
+
+	# 3. сообщение напрямую (ветка «kicking users» в Telethon)
+	client = _KickingClient(SimpleNamespace(id=515))
+	transport = _transport(client)
+	await transport.start()
+	assert await transport.kick_participant("-1001", account) == 515
+
+	# 4. None — тоже допустимый ответ
+	client = _KickingClient(None)
+	transport = _transport(client)
+	await transport.start()
+	assert await transport.kick_participant("-1001", account) is None
+
+
+async def test_kick_participant_passes_access_hash() -> None:
+	"""Ссылка на пользователя собирается из id и хеша доступа.
+
+	Без хеша Telegram пользователя не опознаёт, а кеш клиента живёт
+	в памяти сессии — надеяться на него между поиском и исключением
+	нельзя.
+	"""
+	from telethon.tl.types import InputPeerUser
+
+	from pxcontrol.engine.telegram.types import DeletedAccount
+
+	class _KickingClient(_FakeClient):
+		def __init__(self) -> None:
+			super().__init__()
+			self.kicked: list[Any] = []
+
+		async def kick_participant(self, entity: Any, user: Any) -> Any:
+			self.kicked.append(user)
+			return None
+
+	client = _KickingClient()
+	transport = _transport(client)
+	await transport.start()
+	await transport.kick_participant("-1001", DeletedAccount(777, access_hash=42))
+	peer = client.kicked[0]
+	assert isinstance(peer, InputPeerUser)
+	assert (peer.user_id, peer.access_hash) == (777, 42)
+	# хеша нет — отдаём идентификатор, ссылку соберёт сам клиент
+	await transport.kick_participant("-1001", DeletedAccount(888))
+	assert client.kicked[1] == 888

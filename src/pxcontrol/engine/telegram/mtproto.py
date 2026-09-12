@@ -23,6 +23,7 @@ from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	CommunityKind,
 	CommunityStatsInfo,
+	DeletedAccount,
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
@@ -400,6 +401,32 @@ def _can_delete_messages(perms: Any) -> bool:
 	(ADR-0026), поэтому обслуживание спрашивает именно это.
 	"""
 	return has_admin_right(perms, "delete_messages")
+
+
+def _service_message_id(produced: Any) -> int | None:
+	"""Идентификатор служебной записи из ответа Telethon на исключение.
+
+	Ответ приходит в трёх видах, и это не наша прихоть, а устройство
+	библиотеки: ``kick_participant`` разбирает обновления Telegram
+	методом ``_get_response_message(None, …)``, а тот при пустом
+	запросе возвращает **словарь** «id → сообщение» (так сказано в его
+	же docstring). Служебную запись об исключении он отдаёт напрямую
+	отдельной веткой, а когда записи нет вовсе — остаётся пустой
+	словарь. Отсюда три случая: сообщение, словарь (возможно пустой)
+	и None.
+
+	Returns:
+		Идентификатор записи или None, если Telegram её не создал.
+	"""
+	if produced is None:
+		return None
+	if isinstance(produced, dict):
+		ids = [int(key) for key in produced]
+		# несколько записей разом маловероятно, но если так — берём
+		# последнюю: именно она об этом исключении
+		return max(ids) if ids else None
+	message_id = getattr(produced, "id", None)
+	return int(message_id) if message_id is not None else None
 
 
 def _can_ban_users(perms: Any) -> bool:
@@ -870,6 +897,12 @@ class MtprotoTransport:
 		поэтому пачка, которую сервер отверг целиком, считается
 		пропущенной: 0 удалённых и след в логе (ADR-0026).
 
+		Число удалённых — это число записей, которые сервер принял
+		без отказа. Telethon отдаёт ``AffectedMessages`` со счётчиком
+		изменений состояния, но он считает события обновления, а не
+		сообщения, и подменять им ответ «принято» значило бы показывать
+		человеку величину другой природы.
+
 		Raises:
 			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
 			UserbotAccessError: Нет права удалять (подтверждённый отказ).
@@ -935,7 +968,11 @@ class MtprotoTransport:
 		# читалась бы дважды, часть не читалась бы вовсе
 		step = len(getattr(result, "participants", users))
 		return ParticipantsPage(
-			deleted_ids=[user.id for user in users if getattr(user, "deleted", False)],
+			deleted=[
+				DeletedAccount(user.id, getattr(user, "access_hash", None))
+				for user in users
+				if getattr(user, "deleted", False)
+			],
 			scanned=len(users),
 			# список кончился, когда страница пуста; короткая страница
 			# концом не считается (см. `service_messages_page`)
@@ -943,7 +980,7 @@ class MtprotoTransport:
 			total=getattr(result, "count", None),
 		)
 
-	async def kick_participant(self, chat_id: str, user_id: int) -> int | None:
+	async def kick_participant(self, chat_id: str, account: DeletedAccount) -> int | None:
 		"""Исключает участника; возвращает id порождённой служебной записи.
 
 		Исключение — это блокировка со снятием: иначе учётка осела бы
@@ -952,17 +989,29 @@ class MtprotoTransport:
 		возвращается, чтобы чистка убрала за собой (ADR-0026).
 		None — записи не было (так ведут себя каналы).
 
+		Ссылка на пользователя собирается из пары «id + хеш доступа»,
+		полученной вместе со списком участников: без хеша Telegram
+		пользователя не опознаёт, а надеяться на кеш клиента нельзя —
+		он живёт в памяти сессии, а между поиском и исключением
+		проходит время.
+
 		Raises:
 			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
 			UserbotAccessError: Нет права исключать (подтверждённый отказ).
 			UserbotFloodError: Флуд-лимит — обход прекращается.
 			UserbotUnavailableError: Прочие отказы Telegram.
 		"""
-		client = await self._connected_client()
-		peer_id = _peer_id(chat_id)
+		from telethon.tl.types import InputPeerUser
+
+		client, entity = await self._client_and_entity(chat_id)
+		peer: Any = (
+			InputPeerUser(account.user_id, account.access_hash)
+			if account.access_hash is not None
+			else account.user_id
+		)
 		async with _mtproto_errors():
-			message = await client.kick_participant(peer_id, user_id)
-		return int(message.id) if message is not None else None
+			produced = await client.kick_participant(entity, peer)
+		return _service_message_id(produced)
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи сообщества (источник истины — Telegram).
