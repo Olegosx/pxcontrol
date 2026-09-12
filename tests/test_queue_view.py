@@ -10,14 +10,20 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from pxcontrol.engine.services.publish_queue import QueueItemDto, QueueItemStatus
-from pxcontrol.ui.pages.common import card_signature, plan_cards
+from pxcontrol.ui.pages.common import SLOT_NOW, card_signature, plan_cards, slot_color, slot_label
 from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
 	QueueSort,
 	apply_view,
 	paginate,
+	queue_slots,
 	summary_text,
 )
+
+#: Точка отсчёта времён в тестах: фиксированная, а не «сейчас».
+#: Момент публикации входит в отпечаток карточки (он задаёт метку слота),
+#: и на текущем времени два одинаковых элемента различались бы микросекундами.
+_BASE = datetime(2026, 9, 12, 9, 0, tzinfo=UTC)
 
 
 def _item(
@@ -27,7 +33,7 @@ def _item(
 	when_minutes: int | None = 60,
 	status: QueueItemStatus = QueueItemStatus.WAITING,
 ) -> QueueItemDto:
-	when = None if when_minutes is None else datetime.now(UTC) + timedelta(minutes=when_minutes)
+	when = None if when_minutes is None else _BASE + timedelta(minutes=when_minutes)
 	return QueueItemDto(
 		id=item_id,
 		title=f"пост {item_id}",
@@ -233,3 +239,55 @@ def test_plan_cards_from_empty_state() -> None:
 	plan = plan_cards([_item(1), _item(2)], {})
 	assert plan.added == [1, 2]
 	assert (plan.removed, plan.changed) == ([], [])
+
+
+# --- слоты времени ---------------------------------------------------------
+
+
+def test_slot_label_is_local_time_or_now() -> None:
+	"""Слот — часы и минуты местного времени; пост без времени — «сейчас»."""
+	moment = datetime(2026, 9, 12, 15, 30, tzinfo=UTC)
+	assert slot_label(moment) == moment.astimezone().strftime("%H:%M")
+	assert slot_label(None) == SLOT_NOW
+
+
+def test_slot_color_is_stable_and_distinct() -> None:
+	"""Один слот — один цвет всегда; разные слоты различаются."""
+	assert slot_color("18:00") == slot_color("18:00")
+	assert slot_color("18:00") != slot_color("09:00")
+	# пара «светлая тема, тёмная тема»
+	assert len(slot_color("18:00")) == 2
+
+
+def test_slot_color_of_now_is_neutral() -> None:
+	"""У поста «сейчас» слота нет — метка не претендует на цвет расписания."""
+	assert slot_color(SLOT_NOW) not in {slot_color(f"{hour:02d}:00") for hour in range(24)}
+
+
+def test_queue_slots_lists_now_first_then_times() -> None:
+	"""Список слотов очереди: «сейчас» первым, времена — по возрастанию."""
+	items = [
+		_item(1, when_minutes=None, status=QueueItemStatus.PENDING),
+		_item(2, when_minutes=600),
+		_item(3, when_minutes=60),
+		_item(4, when_minutes=60),  # тот же слот, что у 3 — не дублируется
+	]
+	slots = queue_slots(items)
+	assert slots[0] == SLOT_NOW
+	assert slots[1:] == sorted(slots[1:])
+	assert len(slots) == 3
+
+
+def test_apply_view_filters_by_slot() -> None:
+	"""Фильтр слота оставляет посты только заданного времени публикации."""
+	items = [
+		_item(1, when_minutes=60),
+		_item(2, when_minutes=600),
+		_item(3, when_minutes=None, status=QueueItemStatus.PENDING),
+	]
+	slot = slot_label(items[0].when)
+	shown = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, None, slot)
+	assert [item.id for item in shown] == [1]
+	now_only = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, None, SLOT_NOW)
+	assert [item.id for item in now_only] == [3]
+	assert len(apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, None, None)) == 3

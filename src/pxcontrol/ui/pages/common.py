@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,7 +11,13 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QMouseEvent
+from PySide6.QtGui import (
+	QDesktopServices,
+	QMouseEvent,
+	QPainter,
+	QPainterPath,
+	QPixmap,
+)
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
@@ -285,6 +292,13 @@ def clear_layout(layout: QLayout) -> None:
 	Виджеты удаляются; вложенные компоновки чистятся рекурсивно;
 	распорки просто изымаются (владение переходит Python-обёртке,
 	сборщик мусора её освобождает).
+
+	Связь с родителем рвётся сразу (``setParent(None)``), а не только
+	``deleteLater``: до отложенного удаления виджет остаётся дочерним
+	и сохраняет свою геометрию, то есть продолжает рисоваться на старом
+	месте — поверх того, что встало на его место в компоновке. Ловилось
+	на метке слота в шапке карточки очереди: после правки времени поверх
+	новой метки кадром висела прежняя.
 	"""
 	while layout.count():
 		item = layout.takeAt(0)
@@ -292,6 +306,7 @@ def clear_layout(layout: QLayout) -> None:
 			break
 		widget = item.widget()
 		if widget is not None:
+			widget.setParent(None)
 			widget.deleteLater()
 			continue
 		child = item.layout()
@@ -699,6 +714,106 @@ class DtoComboBox(ComboBox, Generic[_T]):
 QUEUE_POLL_MS = 500
 
 
+#: Цвета подложки логотипа-заглушки (когда аватара нет): по кругу,
+#: чтобы соседние сообщества различались с одного взгляда.
+_LOGO_COLORS = ("#e17076", "#eda86c", "#a695e7", "#7bc862", "#6ec9cb", "#65aadd", "#ee7aae")
+
+
+def round_pixmap(path: str, size: int) -> QPixmap | None:
+	"""Круглая миниатюра из файла (None — файл не читается)."""
+	source = QPixmap(path)
+	if source.isNull():
+		return None
+	scaled = source.scaled(
+		size,
+		size,
+		Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+		Qt.TransformationMode.SmoothTransformation,
+	)
+	rounded = QPixmap(size, size)
+	rounded.fill(Qt.GlobalColor.transparent)
+	painter = QPainter(rounded)
+	painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+	clip = QPainterPath()
+	clip.addEllipse(0, 0, size, size)
+	painter.setClipPath(clip)
+	painter.drawPixmap(0, 0, scaled)
+	painter.end()
+	return rounded
+
+
+def community_logo(
+	parent: QWidget, community_id: int, title: str, avatar_path: str | None, size: int
+) -> QLabel:
+	"""Логотип сообщества: аватар из кэша, без него — буква на подложке.
+
+	Общий для плиток дашборда и карточек очереди отправки: аватар
+	лежит файлом в кэше (``community_stats``), и читают его одинаково.
+	Цвет подложки заглушки берётся по id — у одного сообщества он
+	не меняется от показа к показу.
+	"""
+	if avatar_path:
+		pixmap = round_pixmap(avatar_path, size)
+		if pixmap is not None:
+			label = QLabel(parent)
+			label.setFixedSize(size, size)
+			label.setPixmap(pixmap)
+			return label
+	label = QLabel(title[:1].upper() or "?", parent)
+	label.setFixedSize(size, size)
+	label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+	color = _LOGO_COLORS[community_id % len(_LOGO_COLORS)]
+	label.setStyleSheet(
+		f"background: {color}; color: white; border-radius: {size // 2}px;"
+		f"font-size: {max(10, size // 2)}px; font-weight: 600;"
+	)
+	return label
+
+
+#: Метка поста, у которого времени публикации нет (уйдёт сразу).
+SLOT_NOW = "сейчас"
+
+#: Палитра слотов времени: пары «светлая тема, тёмная тема». Цвет нужен,
+#: чтобы посты одного времени публикации узнавались в списке одним
+#: взглядом, поэтому тона взяты разнотонные, а не оттенки одного.
+_SLOT_COLORS = (
+	("#0f6cbd", "#62abf5"),  # синий
+	("#0f7b6c", "#5fd3bc"),  # бирюзовый
+	("#8a5a00", "#f0b429"),  # янтарный
+	("#8b2f8b", "#e08ce0"),  # пурпурный
+	("#0b6a0b", "#6ccb6c"),  # зелёный
+	("#a4262c", "#ff8a8a"),  # красный
+	("#5b5fc7", "#a6a9f5"),  # индиго
+	("#b3541e", "#ff9a62"),  # оранжевый
+)
+
+
+def slot_label(when: datetime | None) -> str:
+	"""Слот поста: «ЧЧ:ММ» местного времени публикации или «сейчас».
+
+	Момент хранится в UTC (так его отдаёт Telegram и хранит очередь),
+	а показывается в местном — как пользователь его вводил.
+	"""
+	if when is None:
+		return SLOT_NOW
+	return when.astimezone().strftime("%H:%M")
+
+
+def slot_color(label: str) -> tuple[str, str]:
+	"""Цвет метки слота: пара «светлая тема, тёмная тема».
+
+	Цвет выводится из самой метки, поэтому один и тот же слот всегда
+	выглядит одинаково — и в разных каналах, и после перезапуска.
+	Берётся контрольная сумма, а не встроенный ``hash``: тот
+	рандомизируется между запусками, и цвета прыгали бы от запуска
+	к запуску. У поста «сейчас» слота нет — он получает приглушённый
+	цвет подписи.
+	"""
+	if label == SLOT_NOW:
+		return _SUMMARY_COLORS
+	return _SLOT_COLORS[zlib.crc32(label.encode("utf-8")) % len(_SLOT_COLORS)]
+
+
 def card_signature(item: Any) -> tuple[Any, ...]:
 	"""Отпечаток одного элемента — по нему решается обновление его карточки.
 
@@ -707,7 +822,8 @@ def card_signature(item: Any) -> tuple[Any, ...]:
 	Заголовок и путь тут не для красоты: правка элемента очереди
 	(ADR-0016, п. 7) меняет их, не трогая статуса, — без них карточка
 	осталась бы со старым именем, а кнопка просмотра вела бы
-	на прежний файл. Прогресс не входит: он обновляется точечно,
+	на прежний файл. Момент публикации — по той же причине: он задаёт
+	метку слота в шапке. Прогресс не входит: он обновляется точечно,
 	без участия отпечатка.
 	"""
 	return (
@@ -716,6 +832,7 @@ def card_signature(item: Any) -> tuple[Any, ...]:
 		item.error,
 		getattr(item, "note", None),
 		getattr(item, "media_path", None),
+		getattr(item, "when", None),
 	)
 
 
@@ -787,16 +904,27 @@ class _QueueCard:
 		self._actions = QWidget(panel.page)
 		self._actions_box = QHBoxLayout(self._actions)
 		self._actions_box.setContentsMargins(0, 0, 0, 0)
+		self._leading = QWidget(panel.page)
+		self._leading_box = QHBoxLayout(self._leading)
+		self._leading_box.setContentsMargins(0, 0, 0, 0)
+		self._leading_box.setSpacing(6)
+		self._item = item
 		self._bar: ProgressBar | None = None
 		self._filled = False  # тело уже наполнено формой правки
 		self.widget = CollapsibleCard(
-			item.title, panel.page, trailing=self._actions, keep_summary=True
+			item.title,
+			panel.page,
+			trailing=self._actions,
+			leading=self._leading,
+			keep_summary=True,
 		)
 		self.widget.expanded_changed.connect(self._on_expanded)
 		self.update(item)
 
 	def update(self, item: Any) -> None:
 		"""Приводит карточку к новому снимку элемента."""
+		self._item = item
+		self.refresh_leading()
 		self.widget.set_title(item.title)
 		self.widget.set_summary(self._panel.subtitle(item))
 		editable = self._panel.can_edit(item)
@@ -805,6 +933,17 @@ class _QueueCard:
 			# пост ушёл в отправку: форма в теле уже не про него
 			self._reset_body()
 		self._fill_actions(item)
+
+	def refresh_leading(self) -> None:
+		"""Перерисовывает начало шапки (логотип канала, метка слота).
+
+		Отдельно от :meth:`update`: аватары приезжают из кэша статистики
+		позже списка, и к этому моменту снимок элемента не менялся —
+		обновлять карточку целиком было бы не с чего.
+		"""
+		clear_layout(self._leading_box)
+		for widget in self._panel.leading_widgets(self._item, self._leading):
+			self._leading_box.addWidget(widget)
 
 	def set_progress(self, fraction: float) -> None:
 		"""Двигает полосу загрузки (без пересборки карточки)."""
@@ -921,6 +1060,7 @@ class QueuePanel:
 		dismiss_finished: bool = True,
 		editable: Callable[[Any], bool] | None = None,
 		fill_body: Callable[[int, QVBoxLayout, Callable[[], None]], None] | None = None,
+		leading: Callable[[Any, QWidget], list[QWidget]] | None = None,
 	) -> None:
 		"""Args:
 		worker: мост к движку.
@@ -951,6 +1091,10 @@ class QueuePanel:
 		fill_body: наполняет тело раскрытой карточки формой правки —
 			получает id элемента, компоновку тела и «свернуть карточку».
 			Зовётся один раз, при первом раскрытии.
+		leading: виджеты в начале шапки карточки (логотип канала, метка
+			слота времени) — получает элемент и родителя. Что именно
+			показывать, решает владелец панели: очередь обработки видео
+			крючок не передаёт, и её шапки начинаются с названия.
 		"""
 		self._worker = worker
 		#: страница-владелец: родитель карточек и плашек (читают карточки).
@@ -967,6 +1111,7 @@ class QueuePanel:
 		self._dismiss_finished = dismiss_finished
 		self._editable = editable
 		self._fill_body = fill_body
+		self._leading = leading
 		self._show_error = error_reporter(page)
 		self._cards: dict[int, _QueueCard] = {}
 		self._signatures: dict[int, tuple[Any, ...]] = {}
@@ -1000,6 +1145,19 @@ class QueuePanel:
 		"""Наполняет тело раскрытой карточки (крючок владельца панели)."""
 		if self._fill_body is not None:
 			self._fill_body(item_id, body, collapse)
+
+	def leading_widgets(self, item: Any, parent: QWidget) -> list[QWidget]:
+		"""Виджеты начала шапки карточки (крючок владельца панели)."""
+		return [] if self._leading is None else self._leading(item, parent)
+
+	def refresh_leading(self) -> None:
+		"""Перерисовывает начала шапок всех карточек.
+
+		Зовётся, когда изменилось не состояние очереди, а то, из чего
+		рисуется шапка: приехали аватары сообществ из кэша статистики.
+		"""
+		for card in self._cards.values():
+			card.refresh_leading()
 
 	def poll(self) -> None:
 		"""Запрашивает состояние очереди (по таймеру и после постановки)."""

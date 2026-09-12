@@ -14,8 +14,8 @@ from collections.abc import Callable
 from functools import partial
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap, QShowEvent
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QShowEvent
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
@@ -46,6 +46,7 @@ from pxcontrol.ui.pages.common import (
 	account_caption,
 	bot_caption,
 	community_kind_caption,
+	community_logo,
 	elide_text,
 	error_reporter,
 	exec_dialog,
@@ -61,7 +62,6 @@ _KIND_FILTERS: list[tuple[str, Callable[[CommunityDto], bool]]] = [
 
 #: Палитра подложек логотипа-заглушки (в духе цветов аватаров Telegram);
 #: цвет выбирается по id сообщества — стабилен между перерисовками.
-_LOGO_COLORS = ("#e17076", "#eda86c", "#a695e7", "#7bc862", "#6ec9cb", "#65aadd", "#ee7aae")
 
 #: Размер квадрата логотипа в шапке карточки (пиксели).
 _LOGO_SIZE = 44
@@ -88,54 +88,6 @@ _METRIC_VALUE_WIDTH = 90
 #: ширины хватает самой длинной подписи («в очереди отправки»).
 _STAT_TILE_HEIGHT = 72
 _STAT_TILE_WIDTH = 160
-
-
-def _logo_placeholder(parent: QWidget, community: CommunityDto) -> QLabel:
-	"""Логотип-заглушка: первая буква названия на цветной подложке."""
-	label = QLabel(community.title[:1].upper() or "?", parent)
-	label.setFixedSize(_LOGO_SIZE, _LOGO_SIZE)
-	label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-	color = _LOGO_COLORS[community.id % len(_LOGO_COLORS)]
-	label.setStyleSheet(
-		f"background: {color}; color: white; border-radius: {_LOGO_SIZE // 2}px;"
-		"font-size: 18px; font-weight: 600;"
-	)
-	return label
-
-
-def _round_pixmap(path: str, size: int) -> QPixmap | None:
-	"""Круглая миниатюра из файла (None — файл не читается)."""
-	source = QPixmap(path)
-	if source.isNull():
-		return None
-	scaled = source.scaled(
-		size,
-		size,
-		Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-		Qt.TransformationMode.SmoothTransformation,
-	)
-	rounded = QPixmap(size, size)
-	rounded.fill(Qt.GlobalColor.transparent)
-	painter = QPainter(rounded)
-	painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-	clip = QPainterPath()
-	clip.addEllipse(0, 0, size, size)
-	painter.setClipPath(clip)
-	painter.drawPixmap(0, 0, scaled)
-	painter.end()
-	return rounded
-
-
-def _logo_widget(parent: QWidget, community: CommunityDto, avatar_path: str | None) -> QLabel:
-	"""Логотип сообщества: аватар из кэша, без него — буква-заглушка."""
-	if avatar_path:
-		pixmap = _round_pixmap(avatar_path, _LOGO_SIZE)
-		if pixmap is not None:
-			label = QLabel(parent)
-			label.setFixedSize(_LOGO_SIZE, _LOGO_SIZE)
-			label.setPixmap(pixmap)
-			return label
-	return _logo_placeholder(parent, community)
 
 
 class CommunityCard(CardWidget):
@@ -178,7 +130,7 @@ class CommunityCard(CardWidget):
 		row.setContentsMargins(0, 0, 0, 0)
 		row.setSpacing(12)
 		avatar_path = stats.avatar_path if stats is not None else None
-		row.addWidget(_logo_widget(box, community, avatar_path))
+		row.addWidget(community_logo(box, community.id, community.title, avatar_path, _LOGO_SIZE))
 		column = QVBoxLayout()
 		column.setSpacing(2)
 		title = StrongBodyLabel(box)

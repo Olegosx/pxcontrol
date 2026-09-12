@@ -17,27 +17,37 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, ComboBox, PushButton
+from qfluentwidgets import BodyLabel, CaptionLabel, ComboBox, PushButton, StrongBodyLabel
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.publish_queue import (
 	EDITABLE_STATUSES,
 	QueueItemDto,
 	QueueItemStatus,
 )
 from pxcontrol.ui import density
+from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	SLOT_NOW,
 	DtoComboBox,
 	QueuePanel,
 	WorkDialog,
 	bind,
+	community_logo,
 	format_local,
 	list_area,
+	noop,
+	slot_color,
+	slot_label,
 )
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 
 #: Служебный первый пункт фильтра по сообществу.
 _ALL_COMMUNITIES = "Все сообщества"
+
+#: Служебный первый пункт фильтра по слоту времени.
+_ALL_SLOTS = "Все слоты"
 
 #: Сколько элементов очереди показывать на одной странице. Полсотни
 #: карточек перекрывают экран с запасом и строятся мгновенно, а очередь
@@ -87,13 +97,42 @@ def queue_subtitle(item: QueueItemDto) -> str:
 	return subtitle
 
 
+#: Размер логотипа сообщества в шапке карточки очереди (пиксели).
+_LOGO_SIZE = 24
+
+
+def queue_leading(item: QueueItemDto, parent: QWidget, avatar_path: str | None) -> list[QWidget]:
+	"""Начало шапки карточки: логотип сообщества и метка слота времени.
+
+	Логотип отвечает на «в какой канал», метка — на «когда»: в очереди
+	из сотен постов это два первых вопроса. Цвет метки выводится
+	из самого времени, поэтому посты одного слота узнаются пачкой.
+	"""
+	label = slot_label(item.when)
+	chip = StrongBodyLabel(f"[{label}]", parent)
+	chip.setTextColor(*slot_color(label))
+	chip.setToolTip("Время публикации (слот)")
+	return [
+		community_logo(parent, item.community_id, item.community_title, avatar_path, _LOGO_SIZE),
+		chip,
+	]
+
+
+def queue_slots(items: list[QueueItemDto]) -> list[str]:
+	"""Слоты, встречающиеся в очереди: «сейчас» первым, дальше по времени."""
+	labels = {slot_label(item.when) for item in items}
+	timed = sorted(label for label in labels if label != SLOT_NOW)
+	return ([SLOT_NOW] if SLOT_NOW in labels else []) + timed
+
+
 def apply_view(
 	items: list[QueueItemDto],
 	sort: QueueSort,
 	status: QueueFilter,
 	community_id: int | None,
+	slot: str | None = None,
 ) -> list[QueueItemDto]:
-	"""Правило показа: фильтр по статусу и каналу, затем сортировка.
+	"""Правило показа: фильтры по статусу, каналу и слоту, затем сортировка.
 
 	Args:
 		items: видимые элементы очереди (без завершённых).
@@ -101,9 +140,13 @@ def apply_view(
 		status: фильтр по статусу.
 		community_id: id канала (None — все). Идентичность — по id:
 			названия каналов Telegram не уникальны.
+		slot: слот времени публикации, «ЧЧ:ММ» или «сейчас»
+			(None — все слоты).
 	"""
 	if community_id is not None:
 		items = [item for item in items if item.community_id == community_id]
+	if slot is not None:
+		items = [item for item in items if slot_label(item.when) == slot]
 	if status is QueueFilter.SENDABLE:
 		wanted = (QueueItemStatus.PENDING, QueueItemStatus.SENDING)
 		items = [item for item in items if item.status in wanted]
@@ -206,7 +249,12 @@ class QueueViewDialog(WorkDialog):
 		self._sort = QueueSort.NEAREST
 		self._status = QueueFilter.ALL
 		self._community: int | None = None
+		self._slot: str | None = None
 		self._known_communities: list[tuple[int, str]] = []
+		self._known_slots: list[str] = []
+		# аватары сообществ из кэша статистики: карточки рисуют их
+		# в шапке, читать их на каждый опрос незачем
+		self._avatars: dict[int, str | None] = {}
 		self._total = 0
 		self._page = 1
 		self._view = paginate([], 1)
@@ -214,7 +262,9 @@ class QueueViewDialog(WorkDialog):
 		area, box = list_area(self, spacing=density.spacing().list_spacing)
 		self.content.addWidget(area, stretch=1)
 		self._build_footer()
-		self.add_close_button()
+		# кнопки «Закрыть» нет намеренно: окно закрывается системным
+		# крестиком и Esc, а отдельная строка под неё съедала высоту
+		# списка — в окне очереди она дороже привычки
 		self._panel = QueuePanel(
 			worker,
 			self,
@@ -228,7 +278,23 @@ class QueueViewDialog(WorkDialog):
 			dismiss_finished=False,
 			editable=lambda item: item.status in EDITABLE_STATUSES,
 			fill_body=self._fill_editor,
+			leading=lambda item, parent: queue_leading(
+				item, parent, self._avatars.get(item.community_id)
+			),
 		)
+		run_in_engine(
+			worker,
+			worker.engine.community_stats.snapshot(),
+			self,
+			self._apply_avatars,
+			# аватар — украшение шапки: без него карточка рисует букву
+			noop,
+		)
+
+	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
+		"""Раскладывает аватары сообществ и перерисовывает шапки карточек."""
+		self._avatars = {item.community_id: item.avatar_path for item in stats}
+		self._panel.refresh_leading()
 
 	def _fill_editor(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
 		"""Наполняет раскрытую карточку формой правки (ADR-0016, п. 7)."""
@@ -255,6 +321,10 @@ class QueueViewDialog(WorkDialog):
 		)
 		self._community_combo.currentIndexChanged.connect(self._on_view_changed)
 		row.addWidget(self._community_combo)
+		self._slot_combo: DtoComboBox[str] = DtoComboBox(self, placeholder=_ALL_SLOTS)
+		self._slot_combo.setToolTip("Слот — время публикации поста")
+		self._slot_combo.currentIndexChanged.connect(self._on_view_changed)
+		row.addWidget(self._slot_combo)
 		row.addStretch()
 		self.content.addLayout(row)
 
@@ -290,7 +360,8 @@ class QueueViewDialog(WorkDialog):
 		"""
 		self._total = len(items)
 		self._refresh_communities(items)
-		shown = apply_view(items, self._sort, self._status, self._community)
+		self._refresh_slots(items)
+		shown = apply_view(items, self._sort, self._status, self._community, self._slot)
 		self._view = paginate(shown, self._page)
 		self._page = self._view.page
 		return self._view.items
@@ -321,12 +392,28 @@ class QueueViewDialog(WorkDialog):
 		selected = self._community_combo.selected()
 		self._community = selected[0] if selected is not None else None
 
+	def _refresh_slots(self, items: list[QueueItemDto]) -> None:
+		"""Обновляет пункты фильтра слотов по временам, живущим в очереди.
+
+		Пересборка — только при смене набора (как у фильтра сообществ):
+		выбранный слот ``DtoComboBox`` хранит по значению и сам
+		сбрасывает его на «Все слоты», когда такого времени в очереди
+		не осталось.
+		"""
+		slots = queue_slots(items)
+		if slots == self._known_slots:
+			return
+		self._known_slots = slots
+		self._slot_combo.set_items(slots, label=lambda slot: slot, key=lambda slot: slot)
+		self._slot = self._slot_combo.selected()
+
 	def _on_view_changed(self, _index: int = 0) -> None:
 		"""Читает правило показа из списков; следующий опрос его применит."""
 		self._sort = list(QueueSort)[int(self._sort_combo.currentIndex())]
 		self._status = list(QueueFilter)[int(self._status_combo.currentIndex())]
 		selected = self._community_combo.selected()
 		self._community = selected[0] if selected is not None else None
+		self._slot = self._slot_combo.selected()
 		self._page = 1  # набор изменился — листаем с начала
 		self._panel.poll()  # показ обновляется сразу, не по таймеру
 

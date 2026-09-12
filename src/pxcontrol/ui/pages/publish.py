@@ -41,6 +41,7 @@ from pxcontrol.engine.services.captions import (
 	title_from_filename,
 )
 from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PublishCapabilities,
@@ -90,7 +91,11 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
-from pxcontrol.ui.pages.publish_queue_view import QueueViewDialog, queue_subtitle
+from pxcontrol.ui.pages.publish_queue_view import (
+	QueueViewDialog,
+	queue_leading,
+	queue_subtitle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +158,8 @@ class PublishPage(ScrollArea):
 		# пределы длины текста выбранного канала (None — канал не выбран
 		# или ответ движка ещё не пришёл: счётчик покажет базовый предел)
 		self._limits: TextLimits | None = None
+		# аватары сообществ из кэша статистики — для шапок карточек очереди
+		self._avatars: dict[int, str | None] = {}
 		self._build()
 		run_in_engine(
 			worker,
@@ -303,6 +310,9 @@ class PublishPage(ScrollArea):
 			# кликом, как параметры файла на «Видео»
 			editable=lambda item: item.status in EDITABLE_STATUSES,
 			fill_body=self._fill_editor,
+			leading=lambda item, parent: queue_leading(
+				item, parent, self._avatars.get(item.community_id)
+			),
 		)
 
 	def _on_queue_view(self) -> None:
@@ -333,13 +343,27 @@ class PublishPage(ScrollArea):
 			self._restore_community_id = community_id
 			self._apply_community_restore()
 
+	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
+		"""Раскладывает аватары сообществ и перерисовывает шапки карточек."""
+		self._avatars = {item.community_id: item.avatar_path for item in stats}
+		self._queue.refresh_leading()
+
 	def _reload_communities(self) -> None:
+		"""Просит свежий список каналов и аватары для шапок очереди."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.list_communities(),
 			self,
 			self._show_communities,
 			self._show_error,
+		)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.community_stats.snapshot(),
+			self,
+			self._apply_avatars,
+			# аватар — украшение шапки: без него карточка рисует букву
+			noop,
 		)
 
 	def _show_communities(self, communities: list[CommunityDto]) -> None:
