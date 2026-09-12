@@ -16,6 +16,8 @@ from pxcontrol.engine.services.maintenance import (
 	PAGE_SIZE,
 	MaintenanceError,
 	MaintenanceService,
+	ServiceCleanReport,
+	ServiceScanReport,
 	selectable_kinds,
 )
 from pxcontrol.engine.telegram.mtproto import UserbotFloodError, service_message_kind
@@ -397,3 +399,59 @@ async def test_scan_and_clean_queue_up(db: Database) -> None:
 	assert items[first].scan is not None
 	assert items[second].clean is not None
 	assert all(item.status is JobStatus.DONE for item in items.values())
+
+
+# --- тексты интерфейса (чистые функции окна) ------------------------------------
+
+
+def test_scan_summary_tells_what_was_seen() -> None:
+	"""Итог просмотра называет число, глубину и границу по дате."""
+	from pxcontrol.ui.pages.maintenance import scan_summary
+
+	moment = datetime(2026, 3, 12, 10, 30, tzinfo=UTC)
+	report = ServiceScanReport(
+		found={ServiceMessageKind.MEMBERS: 12},
+		scanned=2000,
+		oldest_date=moment,
+		exhausted=False,
+	)
+	text = scan_summary(report)
+	assert "12" in text
+	assert "2000" in text  # видно, насколько глубоко смотрели
+	assert "2026" in text  # и до какого числа дошли
+
+
+def test_scan_summary_says_history_is_over() -> None:
+	"""Кончившаяся история — отдельная формулировка, а не «просмотрено N»."""
+	from pxcontrol.ui.pages.maintenance import scan_summary
+
+	report = ServiceScanReport(
+		found={ServiceMessageKind.PINS: 3}, scanned=42, oldest_date=None, exhausted=True
+	)
+	assert "целиком" in scan_summary(report)
+
+
+def test_scan_summary_for_empty_result() -> None:
+	"""Пустой результат не притворяется находкой."""
+	from pxcontrol.ui.pages.maintenance import scan_summary
+
+	assert "не найдено" in scan_summary(ServiceScanReport(scanned=500))
+
+
+def test_clean_summary_reports_skipped_and_limit() -> None:
+	"""Итог чистки честен про пропуски и про упёршийся потолок."""
+	from pxcontrol.ui.pages.maintenance import clean_summary
+
+	text = clean_summary(ServiceCleanReport(deleted=40, skipped=2, scanned=900, limited=True))
+	assert "40" in text
+	assert "не дал удалить: 2" in text
+	assert "повторите" in text  # человеку сказано, что осталось ещё
+
+
+def test_every_kind_has_human_title() -> None:
+	"""У каждого вида есть человеческое название — без «ServiceMessageKind.OTHER»."""
+	from pxcontrol.ui.pages.maintenance import kind_title
+
+	for kind in ServiceMessageKind:
+		title = kind_title(kind)
+		assert title and not title.startswith("ServiceMessageKind")

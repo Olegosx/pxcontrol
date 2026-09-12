@@ -57,6 +57,7 @@ from pxcontrol.ui.pages.common import (
 	role_caption,
 	show_warning,
 )
+from pxcontrol.ui.pages.maintenance import open_maintenance
 
 
 def community_route_key(community_id: int) -> str:
@@ -352,6 +353,7 @@ class CommunityPage(ScrollArea):
 		self._publish_rows.addWidget(self._prefs_row())
 		clear_layout(self._service_rows)
 		self._service_rows.addWidget(self._recheck_row())
+		self._service_rows.addWidget(self._maintenance_row())
 		self._service_rows.addWidget(self._delete_row())
 
 	def _action_row(self, text: str, actions: list[QWidget]) -> QWidget:
@@ -417,6 +419,25 @@ class CommunityPage(ScrollArea):
 			[action],
 		)
 
+	def _maintenance_row(self) -> QWidget:
+		"""Уборка в сообществе: чистка служебных записей (ADR-0026).
+
+		Без userbot-публикатора недоступна: списка участников и чужой
+		истории Bot API не отдаёт — и это сказано прямо, а не показано
+		пустым окном.
+		"""
+		action = PushButton("Служебные записи…", self)
+		action.setToolTip(
+			"«Такой-то вступил», «сообщение закреплено» — посмотреть, сколько их, и убрать"
+		)
+		if self._community.userbot_assigned:
+			action.clicked.connect(self._on_open_maintenance)
+			text = "Чистка служебных записей в ленте"
+		else:
+			action.setEnabled(False)
+			text = "Чистка служебных записей — нужен userbot-публикатор (боту история недоступна)"
+		return self._action_row(text, [action])
+
 	def _delete_row(self) -> QWidget:
 		"""Удаление сообщества из приложения (не из Telegram)."""
 		action = PushButton(FluentIcon.DELETE, "Удалить…", self)
@@ -462,6 +483,10 @@ class CommunityPage(ScrollArea):
 		"""Ошибка записи флага: показать и вернуть странице правду из БД."""
 		self._show_error(message)
 		self._refresh()
+
+	def _on_open_maintenance(self) -> None:
+		"""Открывает окно обслуживания сообщества."""
+		open_maintenance(self._worker, self._community, self)
 
 	def _recheck(self) -> None:
 		"""Перепроверяет оба способа администрирования."""
