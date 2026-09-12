@@ -45,6 +45,7 @@
 | [0023](0023-work-windows-and-question-dialogs.md) | Два вида окон: короткий вопрос и рабочее окно | accepted |
 | [0024](0024-telegram-account-lane.md) | Дорожка аккаунта Telegram: очередь, зазор, приоритет, заморозка | accepted |
 | [0025](0025-job-queue-framework.md) | Общий каркас заданий движка (жизненный цикл очередей) | accepted |
+| [0026](0026-community-maintenance.md) | Обслуживание сообществ: чистка служебных записей | accepted |
 
 ## Как добавить запись
 

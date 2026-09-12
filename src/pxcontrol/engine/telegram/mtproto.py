@@ -26,6 +26,9 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
+	ServiceMessageInfo,
+	ServiceMessageKind,
+	ServiceMessagesPage,
 	TelegramFloodError,
 	UserbotProfile,
 	UserbotRole,
@@ -282,6 +285,81 @@ def community_kind_from_entity(entity: Any) -> CommunityKind:
 			"в супергруппу (в настройках группы) и повторите."
 		)
 	raise UserbotAccessError("Это личный чат — укажите канал или группу.")
+
+
+def service_message_kind(action: Any) -> ServiceMessageKind:
+	"""Вид служебной записи по её действию (ADR-0026).
+
+	Действий в схеме Telegram больше шестидесяти, и перечислять их
+	все незачем: человеку важны группы, а не отдельные конструкторы.
+	Незнакомое действие попадает в «прочее служебное» — так новые
+	виды (Telegram добавляет их регулярно) не теряются молча
+	и не притворяются чем-то знакомым.
+
+	Особый вид — ``PROTECTED``: записи, которые удалять нельзя.
+	Главные среди них — корневые сообщения тем форума: идентификатор
+	темы и есть идентификатор такого сообщения (на него мы отвечаем
+	при публикации в тему), и удаление корня разрушило бы саму тему.
+	Сюда же создание сообщества, переезд группы в супергруппу
+	и передача владения — история, которую чистить нечего.
+	"""
+	from telethon.tl import types
+
+	if isinstance(
+		action,
+		types.MessageActionChatAddUser
+		| types.MessageActionChatDeleteUser
+		| types.MessageActionChatJoinedByLink
+		| types.MessageActionChatJoinedByRequest,
+	):
+		return ServiceMessageKind.MEMBERS
+	if isinstance(action, types.MessageActionPinMessage):
+		return ServiceMessageKind.PINS
+	if isinstance(
+		action,
+		types.MessageActionChatEditTitle
+		| types.MessageActionChatEditPhoto
+		| types.MessageActionChatDeletePhoto
+		| types.MessageActionSetChatTheme
+		| types.MessageActionSetChatWallPaper
+		| types.MessageActionSetMessagesTTL,
+	):
+		return ServiceMessageKind.APPEARANCE
+	if isinstance(
+		action,
+		types.MessageActionGroupCall
+		| types.MessageActionGroupCallScheduled
+		| types.MessageActionInviteToGroupCall
+		| types.MessageActionConferenceCall,
+	):
+		return ServiceMessageKind.CALLS
+	if isinstance(
+		action,
+		types.MessageActionTopicCreate
+		| types.MessageActionTopicEdit
+		| types.MessageActionChatCreate
+		| types.MessageActionChannelCreate
+		| types.MessageActionChatMigrateTo
+		| types.MessageActionChannelMigrateFrom
+		| types.MessageActionChangeCreator
+		| types.MessageActionNewCreatorPending,
+	):
+		return ServiceMessageKind.PROTECTED
+	return ServiceMessageKind.OTHER
+
+
+def _can_delete_messages(perms: Any) -> bool:
+	"""Может ли аккаунт удалять чужие сообщения (право админа).
+
+	Владельцу можно всё; администратору — только при праве
+	``delete_messages``. Роль сама по себе его не гарантирует
+	(ADR-0026), поэтому обслуживание спрашивает именно это.
+	"""
+	if getattr(perms, "is_creator", False):
+		return True
+	rights = getattr(perms, "participant", None)
+	admin_rights = getattr(rights, "admin_rights", None)
+	return bool(getattr(admin_rights, "delete_messages", False))
 
 
 def _peer_id(chat_id: str) -> int:
@@ -563,6 +641,8 @@ class MtprotoTransport:
 			forum=bool(getattr(entity, "forum", False)),
 			# роль — бесплатный побочный продукт зонда (ADR-0022)
 			role=UserbotRole.ADMIN if perms.is_admin else UserbotRole.MEMBER,
+			# право удалять чужие сообщения — тоже (ADR-0026)
+			can_delete=_can_delete_messages(perms),
 		)
 
 	async def get_forum_topics(self, chat_id: str) -> list[ForumTopicInfo]:
@@ -651,6 +731,92 @@ class MtprotoTransport:
 			entity = await client.get_input_entity(peer_id)
 			path = await client.download_profile_photo(entity, file=target)
 		return str(path) if path else None
+
+	async def service_messages_page(
+		self, chat_id: str, offset_id: int, limit: int
+	) -> ServiceMessagesPage:
+		"""Читает страницу истории и отбирает из неё служебные записи.
+
+		Серверного фильтра «только служебные» у Telegram нет
+		(есть фильтры по типу вложения), поэтому история читается
+		целиком и отбор идёт у нас. Одна страница — один запрос:
+		дорожка аккаунта (ADR-0024) держит темп, а между страницами
+		пропускает вперёд публикацию.
+
+		Args:
+			chat_id: сообщество.
+			offset_id: читать записи старше этого id (0 — с самых новых).
+			limit: сколько сообщений прочитать (Telegram отдаёт до 100).
+
+		Returns:
+			Страницу: служебные записи, число просмотренных сообщений
+			и id, с которого продолжать (None — история кончилась).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Флуд-лимит — обход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.types import MessageService
+
+		client = await self._connected_client()
+		peer_id = _peer_id(chat_id)
+		async with _mtproto_errors():
+			entity = await client.get_input_entity(peer_id)
+			history = await client.get_messages(entity, limit=limit, offset_id=offset_id)
+		found = [
+			ServiceMessageInfo(
+				id=message.id,
+				kind=service_message_kind(message.action),
+				date=message.date,
+			)
+			for message in history
+			if isinstance(message, MessageService)
+		]
+		oldest = history[-1] if history else None
+		return ServiceMessagesPage(
+			messages=found,
+			scanned=len(history),
+			# история кончилась, когда Telegram отдал меньше, чем просили
+			next_offset_id=oldest.id if oldest is not None and len(history) >= limit else None,
+			oldest_date=oldest.date if oldest is not None else None,
+		)
+
+	async def delete_messages(self, chat_id: str, message_ids: list[int]) -> int:
+		"""Удаляет сообщения сообщества; возвращает, сколько удалилось.
+
+		Telegram отказывает в удалении части служебных записей
+		(ошибка ``MESSAGE_DELETE_FORBIDDEN``) — например, сообщения
+		о создании сообщества. Такой отказ не должен валить весь проход,
+		поэтому пачка, которую сервер отверг целиком, считается
+		пропущенной: 0 удалённых и след в логе (ADR-0026).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Нет права удалять (подтверждённый отказ).
+			UserbotFloodError: Флуд-лимит — обход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon import errors
+
+		if not message_ids:
+			return 0
+		client = await self._connected_client()
+		peer_id = _peer_id(chat_id)
+		try:
+			async with _mtproto_errors():
+				await client.delete_messages(peer_id, message_ids)
+		except UserbotUnavailableError:
+			raise
+		except errors.MessageDeleteForbiddenError:
+			logger.info(
+				"Удаление %d служебных записей чата %s отклонено Telegram — пропускаем.",
+				len(message_ids),
+				chat_id,
+			)
+			return 0
+		return len(message_ids)
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала (источник истины — Telegram)."""

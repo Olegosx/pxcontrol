@@ -48,6 +48,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ScheduledMessage,
+	ServiceMessagesPage,
 	TelegramFloodError,
 	UserbotProfile,
 )
@@ -321,6 +322,40 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
 			return await transport.download_avatar(chat_id, target)
+
+	async def service_messages_page(
+		self, account_id: int, chat_id: str, offset_id: int, limit: int
+	) -> ServiceMessagesPage:
+		"""Читает страницу истории сообщества, отбирая служебные записи.
+
+		Одна страница — один запрос: между страницами дорожка пропускает
+		вперёд публикацию, а очередь обслуживания проверяет отмену
+		(ADR-0026).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Флуд-лимит — обход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			return await transport.service_messages_page(chat_id, offset_id, limit)
+
+	async def delete_messages(self, account_id: int, chat_id: str, message_ids: list[int]) -> int:
+		"""Удаляет сообщения сообщества; возвращает число удалённых.
+
+		Пачка, которую Telegram отказался удалять целиком (служебные
+		записи бывают защищёнными), считается пропущенной — 0 удалённых,
+		без ошибки (ADR-0026).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Нет права удалять (подтверждённый отказ).
+			UserbotFloodError: Флуд-лимит — обход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			return await transport.delete_messages(chat_id, message_ids)
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала из Telegram (его аккаунтом).

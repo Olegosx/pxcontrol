@@ -36,6 +36,7 @@
 | [scheduler.md](03-modules/scheduler.md) | Расписание: отложенные записи из Telegram | 🟢 |
 | [video-processing.md](03-modules/video-processing.md) | Подготовка видео | 🟢 |
 | [captions.md](03-modules/captions.md) | Подписи к постам (шаблоны) | 🟢 |
+| [maintenance.md](03-modules/maintenance.md) | Обслуживание сообществ: чистка служебных записей | 🟢 |
 | [content-sources.md](03-modules/content-sources.md) | Источники и парсинг | 🟡 |
 | [ai-generation.md](03-modules/ai-generation.md) | Генерация контента ИИ | 🟡 |
 | [moderation-queue.md](03-modules/moderation-queue.md) | Очередь модерации | 🟡 |

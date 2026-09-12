@@ -11,6 +11,7 @@ from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.communities import CommunitiesService
 from pxcontrol.engine.services.community_stats import CommunityStatsService
+from pxcontrol.engine.services.maintenance import MaintenanceService
 from pxcontrol.engine.services.posts import PostsService
 from pxcontrol.engine.services.publish_queue import PublishQueue
 from pxcontrol.engine.services.settings import (
@@ -47,6 +48,8 @@ class Engine:
 			self.db, self.gateway, self.settings, profile_sync=self.accounts.sync_profile
 		)
 		self.community_stats = CommunityStatsService(self.db, self.gateway, self.settings)
+		# обслуживание сообществ (ADR-0026): чистка служебных записей
+		self.maintenance = MaintenanceService(self.gateway, self.communities)
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
 		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)
@@ -141,6 +144,7 @@ class Engine:
 		logger.info("Остановка движка…")
 		first_error: BaseException | None = None
 		steps = (
+			self.maintenance.shutdown,
 			self.publish_queue.shutdown,
 			self.video_queue.shutdown,
 			self.video.shutdown,

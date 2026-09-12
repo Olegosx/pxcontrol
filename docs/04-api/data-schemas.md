@@ -40,6 +40,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `VideoItemDto` | `video_queue.py` | элемент очереди обработки (статус — общий `JobStatus`) |
 | `JobStatus` | `jobs.py` | состояние задания любой очереди движка (ADR-0025) |
 | `SchedulePlan`, `PlanKind` | `schedule_plan.py` | раскладка времени пакета отправки: стратегия и параметры (ADR-0015) |
+| `MaintenanceItemDto`, `ServiceScanReport`, `ServiceCleanReport` | `maintenance.py` | задание обслуживания и итоги просмотра/чистки (ADR-0026) |
 | `FieldDto`, `TemplateDto`, `TemplateFieldDto`, `CaptionLine` | `captions.py` | поля со словарями и шаблоны подписей |
 | `ValueDto` | `captions.py` | значение словаря поля (с привязкой к родительскому значению) |
 
@@ -51,6 +52,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `CommunityInfo` | канал, проверенный любым транспортом (бот или userbot) |
 | `OutgoingPost` | исходящий пост для транспорта |
 | `ScheduledMessage` | отложенная запись, прочитанная из Telegram |
+| `ServiceMessageKind`, `ServiceMessageInfo`, `ServiceMessagesPage` | вид служебной записи, сама запись и страница истории (ADR-0026) |
 
 ### Видео-конвейер (`engine/video/*`) — чистый модуль без Telegram
 
