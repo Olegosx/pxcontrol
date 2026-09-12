@@ -33,6 +33,7 @@ from qfluentwidgets import (
 	CalendarPicker,
 	CaptionLabel,
 	CardWidget,
+	CheckBox,
 	ComboBox,
 	EditableComboBox,
 	FluentIcon,
@@ -45,6 +46,7 @@ from qfluentwidgets import (
 	ProgressBar,
 	PushButton,
 	ScrollArea,
+	SegmentedWidget,
 	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
@@ -162,6 +164,93 @@ def visible_topics(
 def topic_label(topic: ForumTopicInfo) -> str:
 	"""Подпись темы в списке: закрытая помечается (её видит только админ)."""
 	return f"{topic.title} (закрыта)" if topic.closed else topic.title
+
+
+def closed_topics_hint(closed: int) -> str:
+	"""Подпись «сколько закрытых тем скрыто» (одна на обе формы поста)."""
+	return f"Закрытых тем скрыто: {closed} — в них пишет только админ."
+
+
+def caption_placeholder(is_text: bool) -> str:
+	"""Подсказка в поле текста: у поста с вложением это подпись к файлу."""
+	return "Текст поста…" if is_text else "Подпись к файлу (необязательно)…"
+
+
+@dataclass
+class TopicRow:
+	"""Ряд выбора темы форума: коробка ряда, список тем и подпись."""
+
+	box: QWidget
+	combo: DtoComboBox[ForumTopicInfo]
+	hint: CaptionLabel
+
+
+def topic_row(parent: QWidget, layout: QVBoxLayout, *, tooltip: str = "") -> TopicRow:
+	"""Собирает ряд выбора темы форума (ADR-0021).
+
+	Общий для обеих форм поста — создания на «Публикации» и правки
+	в карточке очереди: расходиться их рядам незачем, а тексты
+	у них уже начинали расходиться. Наполнение списка и правила
+	видимости — забота вызывающего: на странице темы читаются
+	из Telegram асинхронно, в карточке приходят уже готовыми.
+	"""
+	box = QWidget(parent)
+	row = QHBoxLayout(box)
+	row.setContentsMargins(0, 0, 0, 0)
+	row.addWidget(BodyLabel("Тема форума:", box))
+	combo: DtoComboBox[ForumTopicInfo] = DtoComboBox(box, placeholder="Общая лента")
+	if tooltip:
+		combo.setToolTip(tooltip)
+	row.addWidget(combo, stretch=1)
+	hint = CaptionLabel("", box)
+	row.addWidget(hint)
+	layout.addWidget(box)
+	return TopicRow(box, combo, hint)
+
+
+@dataclass
+class RenameRow:
+	"""Ряд «переименовать при отправке»: галочка и поле имени."""
+
+	box: QWidget
+	check: CheckBox
+	edit: LineEdit
+
+
+def rename_row(
+	parent: QWidget, layout: QVBoxLayout, *, checked: bool = True, name: str = ""
+) -> RenameRow:
+	"""Собирает ряд переименования файла при отправке."""
+	box = QWidget(parent)
+	row = QHBoxLayout(box)
+	row.setContentsMargins(0, 0, 0, 0)
+	check = CheckBox("Переименовать при отправке:", box)
+	check.setChecked(checked)
+	row.addWidget(check)
+	edit = LineEdit(box)
+	edit.setText(name)
+	edit.setPlaceholderText("Новое имя файла с расширением…")
+	row.addWidget(edit, stretch=1)
+	layout.addWidget(box)
+	return RenameRow(box, check, edit)
+
+
+def kind_segments(
+	parent: QWidget,
+	layout: QVBoxLayout,
+	on_changed: Callable[[str], None],
+	*,
+	current: str | None = None,
+) -> SegmentedWidget:
+	"""Собирает переключатель типа контента (текст, фото, видео, …)."""
+	segments = SegmentedWidget(parent)
+	for label, kind, _file_filter in CONTENT_KINDS:
+		segments.addItem(routeKey=kind.value, text=label)
+	if current is not None:
+		segments.setCurrentItem(current)
+	segments.currentItemChanged.connect(on_changed)
+	layout.addWidget(segments)
+	return segments
 
 
 def bot_caption(label: str, username: str | None) -> str:

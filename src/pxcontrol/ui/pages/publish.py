@@ -19,16 +19,13 @@ from pathlib import Path
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-	BodyLabel,
 	CaptionLabel,
-	CheckBox,
 	FluentIcon,
 	InfoBar,
 	LineEdit,
 	PrimaryPushButton,
 	PushButton,
 	ScrollArea,
-	SegmentedWidget,
 	SubtitleLabel,
 	TextEdit,
 )
@@ -47,7 +44,6 @@ from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PublishCapabilities,
 	TextLimits,
-	publish_capabilities,
 )
 from pxcontrol.engine.services.publish_queue import (
 	EDITABLE_STATUSES,
@@ -72,22 +68,26 @@ from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
-	CONTENT_KINDS,
 	CharCounter,
 	DtoComboBox,
 	QueuePanel,
 	WhenRow,
+	caption_placeholder,
+	closed_topics_hint,
 	community_combo_label,
 	error_reporter,
 	exec_dialog,
 	kind_file_filter,
 	kind_label,
+	kind_segments,
 	noop,
 	page_layout,
 	pick_dir,
 	pick_file,
+	rename_row,
 	show_warning,
 	topic_label,
+	topic_row,
 	visible_topics,
 )
 from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
@@ -136,15 +136,6 @@ def _actor_note(community: CommunityDto) -> str:
 	return f" Пост уйдёт от имени {actor} (админ)."
 
 
-def _community_caps(community: CommunityDto) -> PublishCapabilities:
-	"""Возможности публикации канала из DTO — одна точка перевода.
-
-	Правило «бот назначен» = ``bot_id is not None`` живёт здесь,
-	а не в трёх местах страницы.
-	"""
-	return publish_capabilities(community.bot_id is not None, community.userbot_assigned)
-
-
 class PublishPage(ScrollArea):
 	"""Создание публикации: тип контента, канал, текст, время, отправка."""
 
@@ -183,7 +174,7 @@ class PublishPage(ScrollArea):
 		layout.addWidget(self._caps_hint)
 		self._build_topic_row(layout)
 		self._text = TextEdit(self)
-		self._text.setPlaceholderText("Текст поста…")
+		self._text.setPlaceholderText(caption_placeholder(True))
 		self._text.setMinimumHeight(120)
 		layout.addWidget(self._text)
 		self._counter = CharCounter(self, layout, self._text)
@@ -197,30 +188,20 @@ class PublishPage(ScrollArea):
 
 	def _build_topic_row(self, layout: QVBoxLayout) -> None:
 		"""Ряд выбора темы форума (виден только форумам с userbot)."""
-		self._topic_box = QWidget(self)
-		row = QHBoxLayout(self._topic_box)
-		row.setContentsMargins(0, 0, 0, 0)
-		row.addWidget(BodyLabel("Тема форума:", self._topic_box))
-		self._topic_combo: DtoComboBox[ForumTopicInfo] = DtoComboBox(
-			self._topic_box, placeholder="Общая лента"
+		row = topic_row(
+			self,
+			layout,
+			tooltip=(
+				"Тема, в которую уйдёт пост; «Общая лента» — General. "
+				"Список читается из Telegram при выборе сообщества."
+			),
 		)
-		self._topic_combo.setToolTip(
-			"Тема, в которую уйдёт пост; «Общая лента» — General. "
-			"Список читается из Telegram при выборе сообщества."
-		)
-		row.addWidget(self._topic_combo, stretch=1)
-		layout.addWidget(self._topic_box)
-		self._topic_hint = CaptionLabel("", self._topic_box)
-		row.addWidget(self._topic_hint)
+		self._topic_box, self._topic_combo, self._topic_hint = row.box, row.combo, row.hint
 		self._topic_box.setVisible(False)
 
 	def _build_kind_segments(self, layout: QVBoxLayout) -> None:
 		"""Сегментный переключатель типа контента."""
-		self._segments = SegmentedWidget(self)
-		for label, kind, _file_filter in CONTENT_KINDS:
-			self._segments.addItem(routeKey=kind.value, text=label)
-		self._segments.currentItemChanged.connect(self._on_kind_changed)
-		layout.addWidget(self._segments)
+		self._segments = kind_segments(self, layout, self._on_kind_changed)
 
 	def _build_caption_tools(self, layout: QVBoxLayout) -> None:
 		"""Кнопки шаблонизатора подписи."""
@@ -252,16 +233,9 @@ class PublishPage(ScrollArea):
 
 	def _build_rename_row(self, layout: QVBoxLayout) -> None:
 		"""Строка переименования файла при отправке (появляется из подписи)."""
-		self._rename_box = QWidget(self)
-		row = QHBoxLayout(self._rename_box)
-		row.setContentsMargins(0, 0, 0, 0)
-		self._rename_check = CheckBox("Переименовать при отправке:", self._rename_box)
-		self._rename_check.setChecked(True)
-		row.addWidget(self._rename_check)
-		self._rename_edit = LineEdit(self._rename_box)
-		row.addWidget(self._rename_edit, stretch=1)
+		row = rename_row(self, layout)
+		self._rename_box, self._rename_check, self._rename_edit = row.box, row.check, row.edit
 		self._rename_box.hide()
-		layout.addWidget(self._rename_box)
 
 	def _clear_rename(self, _text: str = "") -> None:
 		"""Сбрасывает переименование (файл сменился — имя устарело)."""
@@ -436,7 +410,7 @@ class PublishPage(ScrollArea):
 			partial(self._apply_times, community.id),
 			noop,
 		)
-		caps = _community_caps(community)
+		caps = community.capabilities
 		self._update_topic_row(community, caps)
 		if caps.userbot:
 			# лимит зависит от Premium userbot — узнаём у движка
@@ -516,7 +490,7 @@ class PublishPage(ScrollArea):
 			return
 		shown, closed = visible_topics(topics, community.default_role)
 		if closed:
-			self._topic_hint.setText(f"Закрытых тем скрыто: {closed} — в них пишет только админ.")
+			self._topic_hint.setText(closed_topics_hint(closed))
 		self._topic_combo.set_items(shown, label=topic_label, key=lambda topic: topic.id)
 
 	def _on_topics_failed(self, community_id: int, message: str) -> None:
@@ -567,9 +541,7 @@ class PublishPage(ScrollArea):
 		self._kind = MediaKind(kind_key)
 		is_text = self._kind is MediaKind.NONE
 		self._file_box.setVisible(not is_text)
-		self._text.setPlaceholderText(
-			"Текст поста…" if is_text else "Подпись к файлу (необязательно)…"
-		)
+		self._text.setPlaceholderText(caption_placeholder(is_text))
 		# подпись к файлу вчетверо короче поста без вложения
 		self._apply_text_limit()
 
@@ -702,7 +674,7 @@ class PublishPage(ScrollArea):
 		community = self._current_community()
 		if community is None:
 			return
-		caps = _community_caps(community)
+		caps = community.capabilities
 		if not (caps.userbot or caps.bot):
 			self._show_error("Нет способа публикации — проверьте доступы на странице «Каналы».")
 			return
@@ -877,7 +849,7 @@ class PublishPage(ScrollArea):
 	def _batch_rules_loaded(self, setup: _BatchSetup, tokens: list[str]) -> None:
 		"""Правила разбора получены — осталась граница размера файла."""
 		setup.title_rules = TitleParseRules.from_tokens(tokens)
-		caps = _community_caps(setup.community)
+		caps = setup.community.capabilities
 		if caps.userbot:
 			run_in_engine(
 				self._worker,

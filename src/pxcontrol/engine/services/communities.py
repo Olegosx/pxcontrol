@@ -22,6 +22,7 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.accounts import account_display
+from pxcontrol.engine.services.posts import PublishCapabilities, publish_capabilities
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
 from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind, UserbotRole
@@ -98,6 +99,17 @@ class CommunityDto:
 	def userbot_assigned(self) -> bool:
 		"""Назначен ли публикатор по умолчанию (ADR-0022)."""
 		return self.default_account_id is not None
+
+	@property
+	def capabilities(self) -> PublishCapabilities:
+		"""Чем это сообщество может публиковать (ADR-0011).
+
+		Перевод «сообщество → способы публикации» живёт здесь, рядом
+		с самими признаками: прежде интерфейс собирал его руками
+		в трёх местах, и правило «бот назначен» пришлось бы менять
+		в каждом.
+		"""
+		return publish_capabilities(self.bot_id is not None, self.userbot_assigned)
 
 
 @dataclass(frozen=True)

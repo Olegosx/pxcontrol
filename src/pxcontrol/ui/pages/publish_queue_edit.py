@@ -20,33 +20,33 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-	BodyLabel,
 	CaptionLabel,
-	CheckBox,
 	LineEdit,
 	PrimaryPushButton,
 	PushButton,
-	SegmentedWidget,
 	TextEdit,
 )
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import PostDraft, TextLimits, publish_capabilities
+from pxcontrol.engine.services.posts import PostDraft, TextLimits
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.types import ForumTopicInfo, MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	CONTENT_KINDS,
 	CharCounter,
-	DtoComboBox,
 	ErrorLabel,
 	WhenRow,
+	caption_placeholder,
 	clear_layout,
+	closed_topics_hint,
 	kind_file_filter,
 	kind_label,
+	kind_segments,
 	pick_file,
+	rename_row,
 	topic_label,
+	topic_row,
 	visible_topics,
 )
 
@@ -98,7 +98,7 @@ class QueueItemEditor(QWidget):
 		self._draft = draft
 		self._community = community
 		self._limits = limits
-		self._caps = publish_capabilities(community.bot_id is not None, community.userbot_assigned)
+		self._caps = community.capabilities
 		self._kind = draft.media_kind
 		self._on_saved = on_saved
 		self._on_close = on_close
@@ -133,17 +133,8 @@ class QueueItemEditor(QWidget):
 		self, layout: QVBoxLayout, topics: list[ForumTopicInfo], topics_error: str
 	) -> None:
 		"""Ряд выбора темы форума с предвыбором текущей (ADR-0021/0022)."""
-		self._topic_box = QWidget(self)
-		row = QHBoxLayout(self._topic_box)
-		row.setContentsMargins(0, 0, 0, 0)
-		row.addWidget(BodyLabel("Тема форума:", self._topic_box))
-		self._topic_combo: DtoComboBox[ForumTopicInfo] = DtoComboBox(
-			self._topic_box, placeholder="Общая лента"
-		)
-		row.addWidget(self._topic_combo, stretch=1)
-		self._topic_hint = CaptionLabel("", self._topic_box)
-		row.addWidget(self._topic_hint)
-		layout.addWidget(self._topic_box)
+		row = topic_row(self, layout)
+		self._topic_box, self._topic_combo, self._topic_hint = row.box, row.combo, row.hint
 		if not self._community.forum or not self._caps.userbot:
 			self._topic_box.setVisible(False)
 			return
@@ -155,7 +146,7 @@ class QueueItemEditor(QWidget):
 		shown, closed = visible_topics(topics, self._community.default_role)
 		self._topic_combo.set_items(shown, label=topic_label, key=lambda topic: topic.id)
 		if closed:
-			self._topic_hint.setText(f"Закрытых тем скрыто: {closed} — в них пишет только админ.")
+			self._topic_hint.setText(closed_topics_hint(closed))
 		if self._draft.topic_id is not None and not self._topic_combo.select(
 			lambda topic: topic.id == self._draft.topic_id
 		):
@@ -165,12 +156,9 @@ class QueueItemEditor(QWidget):
 
 	def _build_kind_segments(self, layout: QVBoxLayout) -> None:
 		"""Сегментный переключатель типа контента (как на «Публикации»)."""
-		self._segments = SegmentedWidget(self)
-		for label, kind, _file_filter in CONTENT_KINDS:
-			self._segments.addItem(routeKey=kind.value, text=label)
-		self._segments.setCurrentItem(self._kind.value)
-		self._segments.currentItemChanged.connect(self._on_kind_changed)
-		layout.addWidget(self._segments)
+		self._segments = kind_segments(
+			self, layout, self._on_kind_changed, current=self._kind.value
+		)
 
 	def _build_file_row(self, layout: QVBoxLayout) -> None:
 		"""Строка вложения: путь, «Обзор…», «Убрать» и переименование."""
@@ -193,17 +181,13 @@ class QueueItemEditor(QWidget):
 
 	def _build_rename_row(self, layout: QVBoxLayout) -> None:
 		"""Строка переименования файла при отправке."""
-		self._rename_box = QWidget(self)
-		row = QHBoxLayout(self._rename_box)
-		row.setContentsMargins(0, 0, 0, 0)
-		self._rename_check = CheckBox("Переименовать при отправке:", self._rename_box)
-		self._rename_check.setChecked(bool(self._draft.rename_to))
-		row.addWidget(self._rename_check)
-		self._rename_edit = LineEdit(self._rename_box)
-		self._rename_edit.setText(self._draft.rename_to or "")
-		self._rename_edit.setPlaceholderText("Новое имя файла с расширением…")
-		row.addWidget(self._rename_edit, stretch=1)
-		layout.addWidget(self._rename_box)
+		row = rename_row(
+			self,
+			layout,
+			checked=bool(self._draft.rename_to),
+			name=self._draft.rename_to or "",
+		)
+		self._rename_box, self._rename_check, self._rename_edit = row.box, row.check, row.edit
 
 	def _build_buttons(self, layout: QVBoxLayout) -> None:
 		"""Кнопки формы: сохранение возвращает пост в работу."""
@@ -233,9 +217,7 @@ class QueueItemEditor(QWidget):
 		is_text = self._kind is MediaKind.NONE
 		self._file_box.setVisible(not is_text)
 		self._rename_box.setVisible(not is_text)
-		self._text.setPlaceholderText(
-			"Текст поста…" if is_text else "Подпись к файлу (необязательно)…"
-		)
+		self._text.setPlaceholderText(caption_placeholder(is_text))
 		# подпись к файлу вчетверо короче поста без вложения
 		self._counter.set_limit(self._limits.text if is_text else self._limits.caption)
 
@@ -396,7 +378,7 @@ def mount_queue_item_editor(
 		)
 
 	def with_limits(draft: PostDraft, community: CommunityDto, limits: TextLimits) -> None:
-		caps = publish_capabilities(community.bot_id is not None, community.userbot_assigned)
+		caps = community.capabilities
 		if not community.forum or not caps.userbot:
 			show(draft, community, limits, [])
 			return
