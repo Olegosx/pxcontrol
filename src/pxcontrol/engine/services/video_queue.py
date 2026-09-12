@@ -243,14 +243,7 @@ class ProcessingQueue:
 		if job is None or job.status is not JobStatus.ERROR:
 			return
 		await self._video.ensure_ready([job.request.source_path])
-		job.status = JobStatus.PENDING
-		job.progress = 0.0
-		job.error = None
-		job.note = None
-		# флаг мог взвестись, если отмена совпала с ошибкой прошлой
-		# попытки: не сбросить — новая попытка тут же отменилась бы
-		job.cancel_requested = False
-		self._jobs.ensure_worker()
+		self._jobs.reset_for_retry(job)
 		logger.info("Элемент обработки id=%s возвращён в очередь на повтор.", item_id)
 
 	async def dismiss(self, item_id: int) -> None:

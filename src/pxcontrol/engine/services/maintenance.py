@@ -482,12 +482,7 @@ class MaintenanceService:
 		job = self._jobs.get(item_id)
 		if job is None or job.status is not JobStatus.ERROR:
 			return
-		job.status = JobStatus.PENDING
-		job.progress = 0.0
-		job.error = None
-		job.note = None
-		job.cancel_requested = False
-		self._jobs.ensure_worker()
+		self._jobs.reset_for_retry(job)
 		logger.info("Обслуживание id=%s возвращено в очередь на повтор.", item_id)
 
 	async def dismiss(self, item_id: int) -> None:

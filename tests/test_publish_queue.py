@@ -795,6 +795,45 @@ async def test_catchup_paces_expired_posts(db: Database, make_queue: QueueFactor
 	assert sleeps == [CATCHUP_INTERVAL_S]  # пауза между постами; после хвоста — нет
 
 
+async def test_catchup_mark_is_recomputed_not_accumulated(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Пост, поправленный на будущее, догоном больше не считается.
+
+	Признак живёт на самом задании и пересчитывается каждой попыткой.
+	Раньше он копился во множестве номеров, которое не чистилось
+	никогда: пост, однажды ушедший догоном, требовал щадящей паузы
+	и после правки на будущее время.
+	"""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.fail_texts = {"сорвётся"}
+	queue = make_queue(gateway)
+	sleeps: list[float] = []
+
+	async def _instant(seconds: float) -> None:
+		sleeps.append(seconds)
+
+	queue._sleep = _instant  # noqa: SLF001 — реальная пауза растянула бы тест
+	community_id = await _add_community(db)
+	# просроченный пост уходит догоном и срывается ошибкой
+	item_id = await queue.enqueue(PostDraft(community_id, text="сорвётся"))
+	job = next(entry for entry in queue._jobs.all() if entry.id == item_id)  # noqa: SLF001
+	job.draft = replace(job.draft, when=datetime.now(UTC) - timedelta(hours=2))
+	await queue._release_slots()  # noqa: SLF001 — тик дозора после простоя
+	await _wait_status(queue, item_id, JobStatus.ERROR)
+	assert job.catchup is True  # это был догон
+
+	# человек переносит пост на будущее и повторяет
+	gateway.fail_texts.clear()
+	await queue.edit(item_id, replace(job.draft, text="уйдёт", when=_future(600)))
+	await queue._release_slots()  # noqa: SLF001 — слот свободен, пост выпускается
+	await _wait_status(queue, item_id, JobStatus.DONE)
+
+	assert job.catchup is False  # догоном он больше не считается
+	assert sleeps == []  # и щадящей паузы после себя не требует
+
+
 class _FloodOnReadGateway(_SlotGateway):
 	"""Чтение отложек упирается во флуд-лимит у выбранных аккаунтов.
 

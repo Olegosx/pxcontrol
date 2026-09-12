@@ -129,6 +129,10 @@ class _PublishJob(Job):
 		self.editing = False
 		# канал удаляется: по исходу элемент снимается и с показа
 		self.drop_on_finish = False
+		# пост ушёл догоном (его время прошло, публикуем «сейчас»):
+		# после такого выдерживается щадящая пауза, иначе очередь,
+		# накопившаяся за простой приложения, ушла бы залпом
+		self.catchup = False
 
 	def dto(self) -> QueueItemDto:
 		"""Снимок элемента для интерфейса."""
@@ -163,6 +167,18 @@ def _as_utc(moment: datetime | None) -> datetime | None:
 def _expired(when: datetime | None, now: datetime) -> bool:
 	"""Желаемый момент прошёл (или ближе минимального запаса)."""
 	return when is not None and when <= now + MIN_SCHEDULE_AHEAD
+
+
+def _release_order(item: _PublishJob) -> datetime:
+	"""Ключ порядка выпуска ждущих: ближайшая дата — первой (ADR-0016).
+
+	Одна точка на два места: дозор слотов выпускает элементы в этом
+	порядке, а снимок для интерфейса в нём же их показывает — иначе
+	обещание «очередь видна в том порядке, в каком она уйдёт» стало бы
+	ложью незаметно. Пост без даты («сейчас») слота не ждёт и в этой
+	сортировке не участвует; на всякий случай он уходит в конец.
+	"""
+	return item.draft.when or datetime.max.replace(tzinfo=UTC)
 
 
 #: Сколько ждать перед новой попыткой, когда связи с Telegram нет.
@@ -223,7 +239,6 @@ class PublishQueue:
 		)
 		self._sleep: Callable[[float], Coroutine[Any, Any, None]] = self._wait_stop
 		# элементы, ушедшие догоном: им положена пауза перед следующим
-		self._catchup: set[int] = set()
 		# задача передачи активного элемента — единственное, что можно
 		# рвать отменой: подготовка ходит в БД и обрываться не должна
 		self._transmit: asyncio.Task[None] | None = None
@@ -363,18 +378,20 @@ class PublishQueue:
 
 	async def cancel(self, item_id: int) -> None:
 		"""Отменяет элемент: ожидающий убирается, отправляющийся обрывается."""
-		cancellable = (JobStatus.PENDING, JobStatus.WAITING)
-		for item in self._jobs.all():
-			if item.id != item_id:
-				continue
-			if item.status is JobStatus.RUNNING:
-				self._request_cancel(item)
-				return
-			if item.status in cancellable:
-				item.status = JobStatus.CANCELLED
-				await self._leave_queue(item)
-				logger.info("Элемент очереди id=%s отменён (ждал).", item_id)
-				return
+		item = self._jobs.get(item_id)
+		if item is None:
+			return
+		if item.status is JobStatus.RUNNING:
+			self._request_cancel(item)
+			return
+		if item.status in (JobStatus.PENDING, JobStatus.WAITING):
+			# порядок «хранилище → память» — инвариант очереди (ADR-0016):
+			# исход, видный на экране, уже сохранён. Обратный порядок
+			# оставлял окно, в котором отменённый на экране пост уходил
+			# после перезапуска: в БД он всё ещё ждал отправки
+			await self._leave_queue(item)
+			item.status = JobStatus.CANCELLED
+			logger.info("Элемент очереди id=%s отменён (ждал).", item_id)
 
 	async def retry(self, item_id: int) -> None:
 		"""Возвращает элемент с ошибкой в очередь на новую попытку.
@@ -391,27 +408,19 @@ class PublishQueue:
 			PostError: Черновик больше не годен к отправке — элемент
 				остаётся в ошибке с прежним текстом.
 		"""
-		for item in self._jobs.all():
-			if item.id != item_id or item.status is not JobStatus.ERROR:
-				continue
-			item.draft = refresh_draft_media(item.draft)
-			if _expired(item.draft.when, datetime.now(UTC)):
-				# просрочка → «сейчас»: иначе validate_draft отверг бы
-				# прошедшее время и повтор был бы невозможен
-				item.draft = replace(item.draft, when=None)
-			self._posts.validate_draft(item.draft)
-			item.status = self._initial_status(item.draft)
-			item.progress = 0.0
-			item.error = None
-			# флаг мог взвестись, если отмена совпала с ошибкой прошлой
-			# попытки: не сбросить — остановка движка при следующей отправке
-			# была бы принята за отмену пользователем (см. _send)
-			item.cancel_requested = False
-			await self._persist(item)
-			self._jobs.ensure_worker()
-			self._request_slot_check()
-			logger.info("Элемент id=%s возвращён в очередь на повтор.", item_id)
+		item = self._jobs.get(item_id)
+		if item is None or item.status is not JobStatus.ERROR:
 			return
+		item.draft = refresh_draft_media(item.draft)
+		if _expired(item.draft.when, datetime.now(UTC)):
+			# просрочка → «сейчас»: иначе validate_draft отверг бы
+			# прошедшее время и повтор был бы невозможен
+			item.draft = replace(item.draft, when=None)
+		self._posts.validate_draft(item.draft)
+		self._jobs.reset_for_retry(item, self._initial_status(item.draft))
+		await self._persist(item)
+		self._request_slot_check()
+		logger.info("Элемент id=%s возвращён в очередь на повтор.", item_id)
 
 	async def get_draft(self, item_id: int) -> PostDraft:
 		"""Черновик элемента для окна правки.
@@ -505,17 +514,16 @@ class PublishQueue:
 			PostError: Элемент не найден, отправляется, уже завершён
 				или прямо сейчас правится другим окном.
 		"""
-		for item in self._jobs.all():
-			if item.id != item_id:
-				continue
-			if item.status is JobStatus.RUNNING:
-				raise PostError("Пост уже отправляется — сначала отмените отправку, потом правьте.")
-			if item.status not in EDITABLE_STATUSES:
-				raise PostError("Пост уже покинул очередь — править нечего.")
-			if item.editing:
-				raise PostError("Пост правится в другом окне — дождитесь сохранения.")
-			return item
-		raise PostError("Элемент очереди не найден — обновите список.")
+		item = self._jobs.get(item_id)
+		if item is None:
+			raise PostError("Элемент очереди не найден — обновите список.")
+		if item.status is JobStatus.RUNNING:
+			raise PostError("Пост уже отправляется — сначала отмените отправку, потом правьте.")
+		if item.status not in EDITABLE_STATUSES:
+			raise PostError("Пост уже покинул очередь — править нечего.")
+		if item.editing:
+			raise PostError("Пост правится в другом окне — дождитесь сохранения.")
+		return item
 
 	def _check_pipeline_kind(self, draft: PostDraft) -> None:
 		"""Отклоняет смену типа у файла конвейера обработки (ADR-0016).
@@ -571,13 +579,12 @@ class PublishQueue:
 		Снятая с показа ошибка покидает очередь навсегда: строка удаляется,
 		файл возвращается из папки очереди в результаты.
 		"""
-		for item in self._jobs.all():
-			if item.id == item_id and item.status is JobStatus.ERROR:
-				await self._leave_queue(item)
-				break
-		for item in self._jobs.all():
-			if item.id == item_id and item.status.finished():
-				self._jobs.remove(item)
+		item = self._jobs.get(item_id)
+		if item is None or not item.status.finished():
+			return
+		if item.status is JobStatus.ERROR:
+			await self._leave_queue(item)
+		self._jobs.remove(item)
 
 	async def state(self) -> list[QueueItemDto]:
 		"""Снимок очереди для интерфейса.
@@ -586,10 +593,9 @@ class PublishQueue:
 		после них, по возрастанию даты публикации (в этом порядке они
 		и уйдут — интерфейс показывает ближайшие).
 		"""
-		fallback = datetime.max.replace(tzinfo=UTC)
 		waiting = [item for item in self._jobs.all() if item.status is JobStatus.WAITING]
 		others = [item for item in self._jobs.all() if item.status is not JobStatus.WAITING]
-		waiting.sort(key=lambda item: item.draft.when or fallback)
+		waiting.sort(key=_release_order)
 		return [item.dto() for item in [*others, *waiting]]
 
 	async def settle(self) -> None:
@@ -691,7 +697,6 @@ class PublishQueue:
 		следующего тика.
 		"""
 		now = datetime.now(UTC)
-		fallback = datetime.max.replace(tzinfo=UTC)
 		communities = {
 			item.draft.community_id for item in self._jobs.all() if item.status is JobStatus.WAITING
 		}
@@ -745,7 +750,7 @@ class PublishQueue:
 					# правка сама поставит элементу статус по новому времени
 					and not item.editing
 				),
-				key=lambda item: item.draft.when or fallback,
+				key=_release_order,
 			)
 			released = 0
 			for item in waiting:
@@ -856,7 +861,7 @@ class PublishQueue:
 		видят «канал ожил», а не пулемётную ленту. Обычный пост паузы
 		не требует.
 		"""
-		return CATCHUP_INTERVAL_S if item.id in self._catchup else 0.0
+		return CATCHUP_INTERVAL_S if item.catchup else 0.0
 
 	async def _record_outcome(
 		self, item: _PublishJob, status: JobStatus, error: str | None
@@ -904,14 +909,17 @@ class PublishQueue:
 			item.progress = fraction
 
 		draft = item.draft
-		if _expired(draft.when, datetime.now(UTC)):
+		# признак пересчитывается каждой попыткой, а не копится: пост,
+		# поправленный на будущее время, догоном уже не считается
+		# и щадящую паузу после себя не требует
+		item.catchup = _expired(draft.when, datetime.now(UTC))
+		if item.catchup:
 			# желаемый момент прошёл — это уже не отложка: публикуем
 			# обычным сообщением, слота не занимая (ADR-0016)
 			draft = replace(draft, when=None)
 			# снимок для интерфейса честен: карточка и итоговая плашка
 			# показывают «сейчас», а не несуществующую отложку
 			item.draft = draft
-			self._catchup.add(item.id)
 		try:
 			plan = await self._posts.prepare_publish(draft)
 			if item.cancel_requested:
