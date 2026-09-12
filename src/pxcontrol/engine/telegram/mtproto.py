@@ -233,6 +233,14 @@ def has_admin_right(perms: Any, right: str) -> bool:
 	сообщений, ни исключения участников (ADR-0026), поэтому каждое
 	право спрашивается отдельно — но одним способом.
 
+	У самой библиотеки есть одноимённые свойства (``delete_messages``
+	и прочие), но они читают присланный набор флагов как есть — и для
+	**владельца** отвечают ровно то, что прислал сервер. Проверено
+	2026-09-13: владелец с неполным набором флагов получает от них
+	«нельзя», хотя в Telegram владельцу нельзя урезать права в принципе.
+	Поэтому владелец здесь — отдельная ветка, а не частный случай
+	общего чтения флагов.
+
 	Args:
 		perms: ответ Telegram о правах аккаунта в сообществе.
 		right: имя права в наборе ``admin_rights`` (``post_messages``,
@@ -702,6 +710,11 @@ class MtprotoTransport:
 		client = await self._connected_client()
 		async with _mtproto_errors():
 			me = await client.get_me()
+		if me is None:
+			# библиотека отвечает пустотой, когда сессия не авторизована;
+			# без этой проверки профиль аккаунта затёрся бы пустыми
+			# полями, хотя ответа от Telegram не было вовсе
+			raise UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
 		return UserbotProfile(
 			username=getattr(me, "username", None) or None,
 			first_name=getattr(me, "first_name", None) or None,
@@ -874,7 +887,12 @@ class MtprotoTransport:
 			for message in history
 			if isinstance(message, MessageService)
 		]
-		oldest = history[-1] if history else None
+		# пустышки (удалённые сообщения) приходят без даты — для отчёта
+		# «просмотрено до такого-то числа» годится последняя настоящая
+		oldest = next(
+			(item for item in reversed(history) if getattr(item, "date", None) is not None),
+			None,
+		)
 		return ServiceMessagesPage(
 			messages=found,
 			scanned=len(history),
@@ -1032,12 +1050,16 @@ class MtprotoTransport:
 		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
 			result = await client(GetScheduledHistoryRequest(peer=entity, hash=0))
+		# у ответа «ничего не изменилось» поля со списком нет вовсе,
+		# а среди записей попадаются пустышки (удалённая отложка) —
+		# у них нет даты, и дальше по коду она обещана как дата
 		return [
 			ScheduledMessage(
 				text=getattr(message, "message", "") or "",
 				scheduled_at=message.date,
 			)
-			for message in result.messages
+			for message in getattr(result, "messages", [])
+			if getattr(message, "date", None) is not None
 		]
 
 

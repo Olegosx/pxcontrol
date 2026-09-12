@@ -1022,3 +1022,117 @@ async def test_kick_participant_passes_access_hash() -> None:
 	# хеша нет — отдаём идентификатор, ссылку соберёт сам клиент
 	await transport.kick_participant("-1001", DeletedAccount(888))
 	assert client.kicked[1] == 888
+
+
+def _service_like(*, id: int, text: str, date: datetime) -> Any:
+	"""Запись отложки: минимум полей, которые читает транспорт."""
+	return SimpleNamespace(id=id, message=text, date=date)
+
+
+async def test_scheduled_skips_empty_records() -> None:
+	"""Пустые записи в отложках не превращаются в посты без даты.
+
+	Telegram отдаёт `messageEmpty` вместо удалённой отложки; у такой
+	записи нет даты, а тип границы обещает дату. Раньше None доезжал
+	до «Расписания» и ронял сортировку списка (2026-09-12).
+	"""
+	from telethon.tl import types
+
+	class _ScheduledClient(_FakeClient):
+		async def __call__(self, request: Any) -> Any:
+			if type(request).__name__ == "GetScheduledHistoryRequest":
+				return SimpleNamespace(
+					messages=[
+						types.MessageEmpty(id=1, peer_id=types.PeerChannel(1)),
+						_service_like(id=2, text="пост", date=datetime(2026, 9, 1, tzinfo=UTC)),
+					]
+				)
+			return await super().__call__(request)
+
+	transport = _transport(_ScheduledClient())
+	await transport.start()
+	scheduled = await transport.get_scheduled("-1001")
+	assert [item.text for item in scheduled] == ["пост"]
+
+
+async def test_scheduled_survives_not_modified_answer() -> None:
+	"""Ответ «ничего не изменилось» приходит без списка — это не сбой."""
+
+	class _NotModifiedClient(_FakeClient):
+		async def __call__(self, request: Any) -> Any:
+			if type(request).__name__ == "GetScheduledHistoryRequest":
+				return SimpleNamespace(count=0)  # messages.messagesNotModified
+			return await super().__call__(request)
+
+	transport = _transport(_NotModifiedClient())
+	await transport.start()
+	assert await transport.get_scheduled("-1001") == []
+
+
+async def test_me_treats_empty_answer_as_expired_session() -> None:
+	"""Пустой ответ на «кто я» — это неавторизованная сессия, а не профиль.
+
+	Иначе профиль аккаунта затёрся бы пустыми полями, хотя ответа
+	от Telegram не было вовсе.
+	"""
+
+	class _AnonymousClient(_FakeClient):
+		async def get_me(self) -> Any:
+			return None
+
+	transport = _transport(_AnonymousClient())
+	await transport.start()
+	with pytest.raises(UserbotSessionExpiredError):
+		await transport.me()
+
+
+def test_admin_rights_are_read_from_real_permissions() -> None:
+	"""Права читаются верно на настоящем объекте прав Telethon.
+
+	Тест намеренно строит не подставную заглушку, а тот самый объект,
+	который приходит от библиотеки: подмена легко расходится с правдой,
+	а права — основание для необратимых действий.
+	"""
+	from telethon.tl import types
+	from telethon.tl.custom.participantpermissions import ParticipantPermissions
+
+	from pxcontrol.engine.telegram.mtproto import has_admin_right
+
+	def _rights(**flags: bool) -> Any:
+		fields = {
+			"change_info": False,
+			"post_messages": False,
+			"edit_messages": False,
+			"delete_messages": False,
+			"ban_users": False,
+			"invite_users": False,
+			"pin_messages": False,
+			"add_admins": False,
+			"anonymous": False,
+			"manage_call": False,
+			"other": False,
+		}
+		fields.update(flags)
+		return types.ChatAdminRights(**fields)
+
+	admin = ParticipantPermissions(
+		types.ChannelParticipantAdmin(
+			user_id=1, admin_rights=_rights(delete_messages=True), promoted_by=2, date=None
+		),
+		chat=False,
+	)
+	assert has_admin_right(admin, "delete_messages") is True
+	assert has_admin_right(admin, "ban_users") is False  # выдали не всё
+
+	# владельцу можно всё, даже если присланный набор флагов неполон:
+	# в Telegram права владельца урезать нельзя, а библиотечные свойства
+	# читают набор как есть и ответили бы «нельзя»
+	creator = ParticipantPermissions(
+		types.ChannelParticipantCreator(user_id=1, admin_rights=_rights()), chat=False
+	)
+	assert creator.ban_users is False  # так отвечает библиотека
+	assert has_admin_right(creator, "ban_users") is True  # так отвечаем мы
+
+	# обычный участник не может ничего
+	member = ParticipantPermissions(types.ChannelParticipant(user_id=1, date=None), chat=False)
+	assert has_admin_right(member, "delete_messages") is False
