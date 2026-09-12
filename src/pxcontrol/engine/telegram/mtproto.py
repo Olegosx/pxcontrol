@@ -618,6 +618,15 @@ class MtprotoTransport:
 		долю загрузки файла 0.0..1.0 (большие файлы — это минуты).
 		Миниатюру Telegram принимает, только когда известны размеры
 		видео — их извлекает hachoir.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotSessionExpiredError: Сессия отозвана — нужен новый вход.
+			UserbotAccessError: Аккаунт не видит сообщество или не может
+				в нём публиковать.
+			UserbotScheduleFullError: Слоты отложенных заняты (ADR-0016).
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
 		"""
 		client = await self._connected_client()
 		peer = _peer_id(chat_id)
@@ -956,7 +965,19 @@ class MtprotoTransport:
 		return int(message.id) if message is not None else None
 
 	async def get_scheduled(self, chat_id: str) -> list[ScheduledMessage]:
-		"""Читает отложенные записи канала (источник истины — Telegram)."""
+		"""Читает отложенные записи сообщества (источник истины — Telegram).
+
+		Returns:
+			Записи в порядке, в котором их отдал сервер; пустой список —
+			отложенных нет (это знание, а не «не удалось прочитать»:
+			неудача приходит исключением).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
 		from telethon.tl.functions.messages import GetScheduledHistoryRequest
 
 		client, entity = await self._client_and_entity(chat_id)

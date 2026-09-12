@@ -86,7 +86,7 @@ def _prep(label_in: str, fps: str, label_out: str) -> str:
 def _main_chain(fps: str, width: int, height: int) -> str:
 	"""Цепочка приведения основного видео к целевому размеру и формату.
 
-	Размер задаётся явными числами (см. fitted_size): кадр заставки
+	Размер задаётся явными числами (см. :func:`constants.scaled_size`): кадр заставки
 	готовится под тот же размер, а xfade требует точного совпадения.
 	"""
 	return f"[0:v]scale={width}:{height}," + _prep("", fps, "[main]")
@@ -259,8 +259,8 @@ def build_filter_complex(
 
 	Args:
 		fps: кадровая частота строкой (например '29.97003').
-		width: ширина итогового кадра (fitted_size).
-		height: высота итогового кадра (fitted_size).
+		width: ширина итогового кадра (:func:`constants.scaled_size`).
+		height: высота итогового кадра (:func:`constants.scaled_size`).
 		duration: длительность итогового видео (сек) — ограничивает
 			зацикленный поток вотермарка при плавности и задаёт конец
 			затухания.

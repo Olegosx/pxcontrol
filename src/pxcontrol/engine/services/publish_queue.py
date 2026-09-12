@@ -472,9 +472,10 @@ class PublishQueue:
 		await self._posts.check_draft_limits(draft)
 		self._check_pipeline_kind(draft)
 		status = self._initial_status(draft)
-		# флаг взводится до первого ожидания: воркер выбирает элемент
-		# и помечает его SENDING без единой точки приостановки, поэтому
-		# элемент, помеченный здесь, он уже не подхватит
+		# флаг взводится до первого ожидания: каркас выбирает задание
+		# и переводит его в RUNNING без единой точки приостановки
+		# (см. `JobQueue._next_pending`), поэтому элемент, помеченный
+		# здесь, воркер уже не подхватит
 		item.editing = True
 		try:
 			stashed_drafts, moved = await self._stash_all([draft])
