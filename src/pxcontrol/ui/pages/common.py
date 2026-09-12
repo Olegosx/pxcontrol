@@ -664,6 +664,23 @@ def show_warning(parent: QWidget, title: str, message: str) -> None:
 	InfoBar.warning(title, message, parent=parent, duration=TOAST_DURATION_MS)
 
 
+def show_success(parent: QWidget, title: str, message: str = "") -> None:
+	"""Показывает успешный исход всплывающей плашкой.
+
+	Та же единая точка, что у ошибок и предупреждений: длительность
+	задаётся здесь, а не умолчанием библиотеки (одна секунда, за которую
+	плашку не успевают прочитать). Прежде успех и справка звались
+	напрямую классом библиотеки — половина плашек приложения жила
+	с чужим умолчанием.
+	"""
+	InfoBar.success(title, message, parent=parent, duration=TOAST_DURATION_MS)
+
+
+def show_info(parent: QWidget, title: str, message: str = "") -> None:
+	"""Показывает справочное сообщение всплывающей плашкой."""
+	InfoBar.info(title, message, parent=parent, duration=TOAST_DURATION_MS)
+
+
 def error_reporter(parent: QWidget) -> Callable[[str], None]:
 	"""Колбэк показа ошибок, привязанный к странице/диалогу.
 
@@ -1261,14 +1278,21 @@ class QueuePanel:
 		# а раз в полсекунды спамить пользователя нечем и незачем
 		run_in_engine(self._worker, self._service().state(), self.page, self._show, noop)
 
-	def dismiss(self, item_id: int) -> None:
-		"""Убирает завершённый элемент из состояния очереди."""
+	def dismiss(self, item_id: int, *, silent: bool = False) -> None:
+		"""Убирает завершённый элемент из состояния очереди.
+
+		``silent`` — снятие автоматическое (панель убирает завершённые
+		сама): о таком человеку говорить нечего, след останется в логе.
+		Нажатие «Убрать» — не автоматика: движок при нём двигает файл
+		из папки очереди обратно в результаты и может отказать, и тогда
+		молчание оставило бы человека в уверенности, что всё убрано.
+		"""
 		run_in_engine(
 			self._worker,
 			self._service().dismiss(item_id),
 			self.page,
 			lambda *_a: self.poll(),
-			noop,
+			noop if silent else self._show_error,
 		)
 
 	def retry(self, item_id: int) -> None:
@@ -1338,7 +1362,7 @@ class QueuePanel:
 		if self._on_finished is not None:
 			self._on_finished(item, done)
 		if self._dismiss_finished:
-			self.dismiss(item.id)
+			self.dismiss(item.id, silent=True)
 
 	def _sync_cards(self, shown: list[Any]) -> None:
 		"""Приводит список карточек к снимку, трогая только изменившееся."""

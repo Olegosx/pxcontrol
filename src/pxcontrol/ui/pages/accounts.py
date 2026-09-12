@@ -10,7 +10,6 @@ from qfluentwidgets import (
 	CaptionLabel,
 	CardWidget,
 	FluentIcon,
-	InfoBar,
 	MessageBox,
 	PushButton,
 	ScrollArea,
@@ -34,6 +33,8 @@ from pxcontrol.ui.pages.common import (
 	page_layout,
 	require_filled,
 	row_card,
+	show_info,
+	show_success,
 )
 
 
@@ -132,7 +133,7 @@ class AccountsPage(ScrollArea):
 
 	def _diagnose_bot(self, bot: BotDto) -> None:
 		"""Запрашивает события бота и показывает результат."""
-		InfoBar.info("Диагностика", "Читаю события бота…", parent=self)
+		show_info(self, "Диагностика", "Читаю события бота…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.accounts.bot_whereabouts(bot.id),
@@ -161,7 +162,7 @@ class AccountsPage(ScrollArea):
 		)
 		if not exec_dialog(dialog):
 			return
-		InfoBar.info("Проверка", "Проверяю токен через Telegram…", parent=self)
+		show_info(self, "Проверка", "Проверяю токен через Telegram…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.accounts.add_bot(dialog.value("label"), dialog.value("token")),
@@ -171,7 +172,7 @@ class AccountsPage(ScrollArea):
 		)
 
 	def _on_bot_added(self, bot: BotDto) -> None:
-		InfoBar.success("Бот добавлен", f"@{bot.username}", parent=self)
+		show_success(self, "Бот добавлен", f"@{bot.username}")
 		self._reload_bots()
 
 	def _delete_bot(self, bot: BotDto) -> None:
@@ -263,11 +264,7 @@ class AccountsPage(ScrollArea):
 
 	def _start_login(self, account: TgAccountDto) -> None:
 		"""Шаг 1: просим Telegram отправить код на телефон аккаунта."""
-		InfoBar.info(
-			"Вход",
-			f"Отправляю код на {account.phone or 'номер аккаунта'}…",
-			parent=self,
-		)
+		show_info(self, "Вход", f"Отправляю код на {account.phone or 'номер аккаунта'}…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.accounts.start_login(account.id),
@@ -298,7 +295,7 @@ class AccountsPage(ScrollArea):
 	def _after_code(self, account: TgAccountDto, done: bool) -> None:
 		"""После кода: вход завершён (``done``) или нужен пароль 2FA."""
 		if done:
-			InfoBar.success("Вход выполнен", account.display, parent=self)
+			show_success(self, "Вход выполнен", account.display)
 			self._reload_accounts()
 			return
 		self._ask_password(account)
@@ -327,7 +324,7 @@ class AccountsPage(ScrollArea):
 
 	def _after_password(self, account: TgAccountDto) -> None:
 		"""Пароль принят — вход завершён."""
-		InfoBar.success("Вход выполнен", account.display, parent=self)
+		show_success(self, "Вход выполнен", account.display)
 		self._reload_accounts()
 
 	def _cancel_login(self, account: TgAccountDto) -> None:
@@ -366,7 +363,7 @@ class AccountsPage(ScrollArea):
 		run_in_engine(self._worker, coro, self, self._on_account_added, self._show_error)
 
 	def _on_account_added(self, account: TgAccountDto) -> None:
-		InfoBar.success("Аккаунт сохранён", account.display, parent=self)
+		show_success(self, "Аккаунт сохранён", account.display)
 		self._reload_accounts()
 
 	def _delete_account(self, account: TgAccountDto) -> None:
@@ -443,7 +440,7 @@ class AccountsPage(ScrollArea):
 		)
 
 	def _on_key_added(self, key: AiKeyDto) -> None:
-		InfoBar.success("Ключ сохранён", key.label, parent=self)
+		show_success(self, "Ключ сохранён", key.label)
 		self._reload_keys()
 
 	def _delete_key(self, key: AiKeyDto) -> None:

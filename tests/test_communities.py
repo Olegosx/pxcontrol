@@ -579,3 +579,31 @@ async def test_recheck_updates_roles_and_drops_refused(db: Database) -> None:
 	assert access.userbot_ok is False
 	assert [m.label for m in await service.list_members(community_id)] == ["@second"]
 	assert access.community.default_account_id is None
+
+
+async def test_bot_probe_separates_refusal_from_no_connection(db: Database) -> None:
+	"""Обрыв связи не выдаётся за «бот потерял права».
+
+	Подтверждённый отказ Telegram — знание о правах; отсутствие связи —
+	отсутствие знания. Прежде обе причины давали одинаковый приговор,
+	и человек видел «права потеряны» из-за пропавшей сети.
+	"""
+	from pxcontrol.engine.telegram.bot_api import CommunityCheckError
+
+	class _BrokenBotGateway(_FakeGateway):
+		"""Бот-проверка падает заданной ошибкой; userbot отвечает как обычно."""
+
+		def __init__(self, failure: Exception) -> None:
+			super().__init__()
+			self.failure = failure
+
+		async def check_community(self, token: str, chat_ref: str) -> CommunityInfo:
+			raise self.failure
+
+	bot_id = await _make_bot(db)
+	refusal = CommunitiesService(db, _BrokenBotGateway(CommunityCheckError("Бот не админ.")))
+	dto = await CommunitiesService(db, _FakeGateway()).add_community(bot_id, "@testchan")
+	assert (await refusal.recheck_community(dto.id)).bot_ok is False
+
+	offline = CommunitiesService(db, _BrokenBotGateway(ConnectionError("нет сети")))
+	assert (await offline.recheck_community(dto.id)).bot_ok is None

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from functools import partial
 
@@ -23,7 +24,6 @@ from qfluentwidgets import (
 	ComboBox,
 	FlowLayout,
 	FluentIcon,
-	InfoBar,
 	LineEdit,
 	MessageBoxBase,
 	PrimaryPushButton,
@@ -52,7 +52,11 @@ from pxcontrol.ui.pages.common import (
 	error_reporter,
 	exec_dialog,
 	page_layout,
+	show_info,
+	show_success,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Фильтр списка по виду: подпись пункта → правило показа.
 _KIND_FILTERS: list[tuple[str, Callable[[CommunityDto], bool]]] = [
@@ -453,8 +457,18 @@ class CommunitiesPage(ScrollArea):
 			self._worker.engine.community_stats.refresh_stale(),
 			self,
 			self._on_stats_refreshed,
-			lambda _message: setattr(self, "_stats_refreshing", False),
+			self._on_stats_failed,
 		)
+
+	def _on_stats_failed(self, message: str) -> None:
+		"""Фоновое обновление сводки не удалось — снимаем флаг «идёт».
+
+		Плашкой не тревожим: сводка фоновая, кэш при сбое не затирается,
+		и подробности уже записал мост движка. Но флаг снять обязаны,
+		иначе следующее обновление не начнётся до перезапуска.
+		"""
+		logger.debug("Фоновое обновление статистики не удалось: %s", message)
+		self._stats_refreshing = False
 
 	def _on_stats_refreshed(self, changed: bool) -> None:
 		"""Кэш обновился — перечитываем снимок (без нового обновления)."""
@@ -595,9 +609,9 @@ class CommunitiesPage(ScrollArea):
 			coro = self._worker.engine.communities.add_community_via_userbot(
 				account_id, dialog.chat_ref()
 			)
-		InfoBar.info("Проверка", "Проверяю сообщество и права…", parent=self)
+		show_info(self, "Проверка", "Проверяю сообщество и права…")
 		run_in_engine(self._worker, coro, self, self._on_connected, self._show_error)
 
 	def _on_connected(self, community: CommunityDto) -> None:
-		InfoBar.success("Подключено", community.title, parent=self)
+		show_success(self, "Подключено", community.title)
 		self.reload()

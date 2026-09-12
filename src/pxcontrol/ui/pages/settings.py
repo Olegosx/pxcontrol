@@ -19,7 +19,6 @@ from PySide6.QtWidgets import QHBoxLayout, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
-	InfoBar,
 	LineEdit,
 	ListWidget,
 	PushButton,
@@ -55,11 +54,17 @@ from pxcontrol.ui.pages.common import (
 	error_reporter,
 	noop,
 	pick_dir,
+	show_success,
 )
 from pxcontrol.ui.theme import apply_theme
 
 #: Ширина списка категорий слева.
 _CATEGORIES_WIDTH = 200
+
+
+#: Отказ чтения настройки: форма осталась с умолчаниями, и молчать
+#: об этом нельзя — первая же правка записала бы выбранное вслепую.
+_READ_FAILED = "Настройки прочитаны не полностью: {message}"
 
 
 class SettingsPage(QWidget):
@@ -222,56 +227,31 @@ class _GeneralSettings(QWidget):
 		self._api_status.setWordWrap(True)
 		layout.addWidget(self._api_status)
 
+	def _read_setting(self, coro: object, show: object) -> None:
+		"""Читает одну настройку в форму, не молча при сбое.
+
+		Сбой чтения оставлял форму с умолчаниями и ничего не говорил:
+		переключатель темы показывал «тёмная» независимо от правды,
+		а первая же правка записала бы в БД значение, выбранное
+		из неверного состояния. Битое значение — не этот случай:
+		его реестр ключей откатывает к умолчанию сам (ADR-0013).
+		"""
+		run_in_engine(self._worker, coro, self, show, self._on_read_failed)  # type: ignore[arg-type]
+
+	def _on_read_failed(self, message: str) -> None:
+		"""Настройка не прочиталась — говорим и не притворяемся."""
+		self._show_error(_READ_FAILED.format(message=message))
+
 	def _load(self) -> None:
 		"""Подтягивает сохранённые значения из движка."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.get_tg_api(),
-			self,
-			self._show_tg_api,
-			noop,
-		)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get(THEME_DARK),
-			self,
-			self._show_theme,
-			noop,
-		)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get(FFMPEG_PATH),
-			self,
-			self._ffmpeg_edit.setText,
-			noop,
-		)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get(UI_COMPACT_SPACING),
-			self,
-			self._show_compact,
-			noop,
-		)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get(UI_CONTROL_HEIGHT),
-			self,
-			self._show_height,
-			noop,
-		)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get(UI_FONT_SIZE),
-			self,
-			self._show_font,
-			noop,
-		)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get(QUEUE_SLOT_POLL_MINUTES),
-			self,
-			self._show_poll,
-			noop,
+		self._read_setting(self._worker.engine.accounts.get_tg_api(), self._show_tg_api)
+		self._read_setting(self._worker.engine.settings.get(THEME_DARK), self._show_theme)
+		self._read_setting(self._worker.engine.settings.get(FFMPEG_PATH), self._ffmpeg_edit.setText)
+		self._read_setting(self._worker.engine.settings.get(UI_COMPACT_SPACING), self._show_compact)
+		self._read_setting(self._worker.engine.settings.get(UI_CONTROL_HEIGHT), self._show_height)
+		self._read_setting(self._worker.engine.settings.get(UI_FONT_SIZE), self._show_font)
+		self._read_setting(
+			self._worker.engine.settings.get(QUEUE_SLOT_POLL_MINUTES), self._show_poll
 		)
 
 	def _show_tg_api(self, credential: TgApiDto | None) -> None:
@@ -310,7 +290,7 @@ class _GeneralSettings(QWidget):
 	def _on_tg_api_saved(self, credential: TgApiDto) -> None:
 		"""Подтверждает сохранение и обновляет маску."""
 		self._show_tg_api(credential)
-		InfoBar.success("Сохранено", "Ключ API Telegram применён.", parent=self)
+		show_success(self, "Сохранено", "Ключ API Telegram применён.")
 
 	def _show_theme(self, dark: bool) -> None:
 		"""Ставит переключатель без срабатывания сохранения."""
@@ -407,11 +387,7 @@ class _GeneralSettings(QWidget):
 
 	def _on_ffmpeg_saved(self, _result: object = None) -> None:
 		"""Подтверждает сохранение пути."""
-		InfoBar.success(
-			"Сохранено",
-			"Путь к ffmpeg применён (пусто — из .env или PATH).",
-			parent=self,
-		)
+		show_success(self, "Сохранено", "Путь к ffmpeg применён (пусто — из .env или PATH).")
 
 
 #: Папки видео: подпись и ключ настройки; стандартное имя подсказки
@@ -485,8 +461,12 @@ class _FoldersSettings(QWidget):
 				self._worker.engine.settings.get(key),
 				self,
 				self._edits[key.name].setText,
-				noop,
+				self._on_read_failed,
 			)
+
+	def _on_read_failed(self, message: str) -> None:
+		"""Путь не прочитался — поле осталось пустым, и об этом надо сказать."""
+		self._show_error(_READ_FAILED.format(message=message))
 
 	def _pick_folder(self, key_name: str) -> None:
 		"""Диалог выбора папки для строки настройки."""
@@ -514,8 +494,4 @@ class _FoldersSettings(QWidget):
 
 	def _on_saved(self, _result: object = None) -> None:
 		"""Подтверждает сохранение папок (вызывается по факту записи)."""
-		InfoBar.success(
-			"Сохранено",
-			"Папки видео применены.",
-			parent=self,
-		)
+		show_success(self, "Сохранено", "Папки видео применены.")

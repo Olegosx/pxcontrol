@@ -286,6 +286,9 @@ def parse_intro_source(source: str) -> tuple[IntroSourceKind, str]:
 	try:
 		return IntroSourceKind(kind), value
 	except ValueError:
+		# молча подменять режим нельзя: человек с сохранённой картинкой
+		# получил бы чужой случайный кадр и ни следа о причине
+		logger.warning("Пресет: неизвестный источник заставки %r — берём случайный кадр.", source)
 		return IntroSourceKind.RANDOM_MIDDLE, ""
 
 
@@ -1013,16 +1016,22 @@ class VideoService:
 		await asyncio.to_thread(_check_all)
 
 	def _require_ffmpeg(self) -> None:
-		"""Проверяет доступность ffmpeg (ffprobe лежит рядом с ним).
+		"""Проверяет, что на месте оба инструмента: ffmpeg и ffprobe.
+
+		Путь к ffprobe производный — «сосед ffmpeg». Раньше проверялся
+		только ffmpeg, и отсутствие ffprobe выглядело как «в папке
+		полно битых файлов»: проба падала на каждом файле по отдельности,
+		а настоящая причина была видна только в журнале.
 
 		Raises:
-			VideoError: ffmpeg не найден.
+			VideoError: Инструмент не найден.
 		"""
-		if shutil.which(self._ffmpeg()) is None:
-			raise VideoError(
-				f"Не найден ffmpeg («{self._ffmpeg()}») — установите его "
-				"или укажите путь в «Настройки → Общие»."
-			)
+		for tool in (self._ffmpeg(), ffprobe_bin_for(self._ffmpeg())):
+			if shutil.which(tool) is None:
+				raise VideoError(
+					f"Не найден {Path(tool).name} («{tool}») — установите его "
+					"или укажите путь к ffmpeg в «Настройки → Общие»."
+				)
 
 	def _build_options(
 		self,

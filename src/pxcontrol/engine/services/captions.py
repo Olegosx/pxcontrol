@@ -744,8 +744,16 @@ class CaptionsService:
 				.where(CaptionValue.parent_value_id.in_(doomed_values))
 				.values(parent_value_id=None)
 			)
-			await session.execute(delete(CaptionField).where(CaptionField.id == field_id))
+			field = await session.get(CaptionField, field_id)
+			if field is None:
+				# идемпотентность сознательная (повторный клик), но след
+				# нужен: удаление словаря необратимо (как в delete_community)
+				logger.info("Поле подписи id=%s уже отсутствует — удалять нечего.", field_id)
+				return
+			name = field.name
+			await session.delete(field)
 			await session.commit()
+		logger.info("Поле подписи «%s» (id=%s) удалено вместе со словарём.", name, field_id)
 
 	async def add_values(
 		self, field_id: int, values: list[str], parent_value_id: int | None = None
@@ -837,8 +845,10 @@ class CaptionsService:
 			if row is None:
 				raise CaptionsError("Значение не найдено — обновите список.")
 			field_id = row.field_id
+			value = row.value
 			await session.delete(row)
 			await session.commit()
+		logger.info("Значение «%s» удалено из словаря поля id=%s.", value, field_id)
 		return await self._get_field(field_id)
 
 	# --- шаблоны -----------------------------------------------------------
@@ -926,8 +936,14 @@ class CaptionsService:
 		"""Удаляет шаблон; строки состава убирают каскады схемы
 		(внешние ключи включены) — как при удалении поля."""
 		async with self._db.session_factory() as session:
-			await session.execute(delete(CaptionTemplate).where(CaptionTemplate.id == template_id))
+			template = await session.get(CaptionTemplate, template_id)
+			if template is None:
+				logger.info("Шаблон подписи id=%s уже отсутствует — удалять нечего.", template_id)
+				return
+			name = template.name
+			await session.delete(template)
 			await session.commit()
+		logger.info("Шаблон подписи «%s» (id=%s) удалён.", name, template_id)
 
 	async def render_filename(
 		self,

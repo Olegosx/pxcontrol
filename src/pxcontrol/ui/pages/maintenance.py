@@ -47,6 +47,7 @@ from pxcontrol.engine.telegram.types import ServiceMessageKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	ErrorLabel,
 	QueuePanel,
 	WorkDialog,
 	clear_layout,
@@ -217,6 +218,11 @@ class MaintenanceDialog(WorkDialog):
 		box.addWidget(self._service_label)
 		area, self._kinds_box = list_area(page, density.spacing().list_spacing)
 		box.addWidget(area, stretch=1)
+		# проверка заполнения — красной подписью рядом с формой, а не
+		# всплывающей плашкой: плашка уезжает и не привязана к месту,
+		# где человеку нужно что-то поправить (единый приём проекта)
+		self._service_error = ErrorLabel(page)
+		box.addWidget(self._service_error)
 		box.addLayout(self._clean_row(page))
 		return page
 
@@ -257,8 +263,9 @@ class MaintenanceDialog(WorkDialog):
 		"""Спрашивает подтверждение и ставит задание чистки записей."""
 		chosen = [kind for kind, box in self._boxes.items() if box.isChecked()]
 		if not chosen:
-			self._show_error("Отметьте хотя бы один вид записей.")
+			self._service_error.fail("Отметьте хотя бы один вид записей.")
 			return
+		self._service_error.succeed()
 		names = "\n".join(f"— {kind_title(kind)};" for kind in chosen)
 		if not confirm_delete(
 			self,

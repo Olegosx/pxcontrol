@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AiCredential, Bot, TgAccount, TgApiCredential
@@ -194,9 +194,16 @@ class AccountsService:
 		канал не «прилипнет» к чужому боту, если SQLite переиспользует id.
 		"""
 		async with self._db.session_factory() as session:
-			await session.execute(delete(Bot).where(Bot.id == bot_id))
+			bot = await session.get(Bot, bot_id)
+			if bot is None:
+				# идемпотентность сознательная (повторный клик), но след
+				# нужен: иначе журнал уверяет в удалении, которого не было
+				logger.info("Бот id=%s уже отсутствует — удалять нечего.", bot_id)
+				return
+			label = bot.label
+			await session.delete(bot)
 			await session.commit()
-		logger.info("Удалён бот id=%s.", bot_id)
+		logger.info("Удалён бот «%s» (id=%s).", label, bot_id)
 
 	async def bot_whereabouts(self, bot_id: int) -> list[str]:
 		"""Диагностика «где состоит бот»: события Telegram за 24 часа.
@@ -355,8 +362,13 @@ class AccountsService:
 		"""
 		try:
 			profile = await self._gateway.userbot_me(account_id)
-		except Exception:  # noqa: BLE001 — актуализация вспомогательная
-			logger.info("Профиль аккаунта id=%s не обновлён (нет связи или сессии).", account_id)
+		except Exception as exc:  # noqa: BLE001 — актуализация вспомогательная
+			logger.warning(
+				"Профиль аккаунта id=%s не обновлён (%s: %s).",
+				account_id,
+				type(exc).__name__,
+				exc,
+			)
 			return
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
@@ -387,6 +399,9 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
 			if account is None:
+				# идемпотентность сознательная (повторный клик), но след
+				# нужен: иначе непонятно, почему аккаунт «удалён» дважды
+				logger.info("Аккаунт id=%s уже отсутствует — удалять нечего.", account_id)
 				return
 			display = account_display(
 				account.label,
@@ -584,7 +599,11 @@ class AccountsService:
 	async def delete_ai_key(self, key_id: int) -> None:
 		"""Удаляет ключ ИИ по идентификатору."""
 		async with self._db.session_factory() as session:
-			await session.execute(delete(AiCredential).where(AiCredential.id == key_id))
+			credential = await session.get(AiCredential, key_id)
+			if credential is None:
+				logger.info("Ключ ИИ id=%s уже отсутствует — удалять нечего.", key_id)
+				return
+			await session.delete(credential)
 			await session.commit()
 		logger.info("Удалён ключ ИИ id=%s.", key_id)
 

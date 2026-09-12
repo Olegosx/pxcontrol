@@ -21,7 +21,6 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	CaptionLabel,
 	FluentIcon,
-	InfoBar,
 	LineEdit,
 	PrimaryPushButton,
 	PushButton,
@@ -85,6 +84,8 @@ from pxcontrol.ui.pages.common import (
 	pick_dir,
 	pick_file,
 	rename_row,
+	show_info,
+	show_success,
 	show_warning,
 	topic_label,
 	topic_row,
@@ -767,10 +768,10 @@ class PublishPage(ScrollArea):
 	def _on_batch_scanned(self, setup: _BatchSetup, files: list[VideoFile]) -> None:
 		"""Файлы найдены — общий шаблон подписи (если шаблоны настроены)."""
 		if not files:
-			InfoBar.info(
+			show_info(
+				self,
 				"Видео не найдено",
 				f"В папке нет видеофайлов (включая вложенные): {setup.root}",
-				parent=self,
 			)
 			return
 		setup.files = files
@@ -908,7 +909,7 @@ class PublishPage(ScrollArea):
 
 	def _on_batch_enqueued(self, count: int, _ids: list[int]) -> None:
 		"""Пакет принят в очередь — карточки видны сразу, не по таймеру."""
-		InfoBar.success("Пакет в очереди", f"Постов: {count}", parent=self)
+		show_success(self, "Пакет в очереди", f"Постов: {count}")
 		self._queue.poll()
 
 	# --- отправка через очередь ---------------------------------------------------
@@ -992,13 +993,13 @@ class PublishPage(ScrollArea):
 		при скрытой странице — плашка на ней погасла бы незамеченной.
 		"""
 		if done:
-			InfoBar.success(
+			show_success(
+				self.window(),
 				"Отложенная запись создана" if item.scheduled else "Опубликовано",
 				item.title,
-				parent=self.window(),
 			)
 		else:
-			InfoBar.info("Отправка отменена", item.title, parent=self.window())
+			show_info(self.window(), "Отправка отменена", item.title)
 
 	def _update_queue_summary(self, items: list[QueueItemDto]) -> None:
 		"""Сводка над карточками: отправка, очередь, ждущие слота, ошибки."""

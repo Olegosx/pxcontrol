@@ -17,7 +17,6 @@ from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
 	FluentIcon,
-	InfoBar,
 	LineEdit,
 	MessageBoxBase,
 	PushButton,
@@ -55,6 +54,8 @@ from pxcontrol.ui.pages.common import (
 	list_area,
 	page_layout,
 	role_caption,
+	show_info,
+	show_success,
 	show_warning,
 )
 from pxcontrol.ui.pages.maintenance import open_maintenance
@@ -181,7 +182,7 @@ class _MembersDialog(WorkDialog):
 			self._error.fail("Нет свободных вошедших аккаунтов — войдите: Настройки → Аккаунты.")
 			return
 		self._error.succeed()
-		InfoBar.info("Проверка", "Проверяю права аккаунта…", parent=self)
+		show_info(self, "Проверка", "Проверяю права аккаунта…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.add_member(self._community.id, account.id),
@@ -490,7 +491,7 @@ class CommunityPage(ScrollArea):
 
 	def _recheck(self) -> None:
 		"""Перепроверяет оба способа администрирования."""
-		InfoBar.info("Проверка", f"Проверяю доступы «{self._community.title}»…", parent=self)
+		show_info(self, "Проверка", f"Проверяю доступы «{self._community.title}»…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.recheck_community(self._community.id),
@@ -508,11 +509,17 @@ class CommunityPage(ScrollArea):
 		else:
 			userbot_text = "не админ — привязка снята"
 		parts = [f"userbot: {userbot_text}"]
-		if access.bot_ok is not None:
-			parts.append(f"бот: {'права на месте' if access.bot_ok else 'права потеряны'}")
+		if access.community.bot_id is not None:
+			# None у назначенного бота — «не проверили», а не «потерял
+			# права»: приговор правам из-за пропавшей сети — неправда
+			if access.bot_ok is None:
+				bot_text = "проверить не удалось (нет связи или Telegram не ответил)"
+			else:
+				bot_text = "права на месте" if access.bot_ok else "права потеряны"
+			parts.append(f"бот: {bot_text}")
 		summary = " · ".join(parts)
 		if access.userbot_ok and access.bot_ok is not False:
-			InfoBar.success(access.community.title, summary, parent=self)
+			show_success(self, access.community.title, summary)
 		else:
 			show_warning(self, access.community.title, summary)
 		self._refresh()
@@ -573,7 +580,7 @@ class CommunityPage(ScrollArea):
 		)
 
 	def _on_prefs_saved(self, _result: object = None) -> None:
-		InfoBar.success("Готово", f"Настройки «{self._community.title}» сохранены.", parent=self)
+		show_success(self, "Готово", f"Настройки «{self._community.title}» сохранены.")
 
 	# --- бот ---------------------------------------------------------------------
 
@@ -598,7 +605,7 @@ class CommunityPage(ScrollArea):
 		bot_id = dialog.bot_id()
 		if bot_id is None:
 			return
-		InfoBar.info("Проверка", "Проверяю права бота…", parent=self)
+		show_info(self, "Проверка", "Проверяю права бота…")
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.assign_bot(self._community.id, bot_id),
@@ -623,7 +630,7 @@ class CommunityPage(ScrollArea):
 		)
 
 	def _on_publisher_changed(self, community: CommunityDto) -> None:
-		InfoBar.success("Готово", community.title, parent=self)
+		show_success(self, "Готово", community.title)
 		self._refresh()
 
 	# --- участники (ADR-0022) ----------------------------------------------------

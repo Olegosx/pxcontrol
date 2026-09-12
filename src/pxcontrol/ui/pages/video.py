@@ -28,7 +28,6 @@ from qfluentwidgets import (
 	CaptionLabel,
 	CheckBox,
 	FluentIcon,
-	InfoBar,
 	PrimaryPushButton,
 	PushButton,
 	ScrollArea,
@@ -82,6 +81,8 @@ from pxcontrol.ui.pages.common import (
 	pick_dir,
 	pick_file,
 	row_card,
+	show_info,
+	show_success,
 	show_warning,
 )
 from pxcontrol.ui.pages.frame_picker import FramePickerDialog
@@ -425,11 +426,11 @@ class VideoPage(ScrollArea):
 		if preset_id is None or not self._preset_combo.select(
 			lambda preset: preset.id == preset_id
 		):
-			InfoBar.info(
+			show_info(
+				self,
 				"Пресет не задан",
 				f"У канала «{community.title}» нет пресета по умолчанию — "
 				"задайте его на странице «Каналы» → «Пресет…».",
-				parent=self,
 			)
 
 	def _update_preset_buttons(self) -> None:
@@ -493,7 +494,7 @@ class VideoPage(ScrollArea):
 		)
 
 	def _on_preset_saved(self, preset: PresetDto) -> None:
-		InfoBar.success("Пресет сохранён", preset.name, parent=self)
+		show_success(self, "Пресет сохранён", preset.name)
 		self._reload_presets(select_name=preset.name)
 
 	def _on_delete_preset(self) -> None:
@@ -570,7 +571,7 @@ class VideoPage(ScrollArea):
 			):
 				added += 1
 		if added:
-			InfoBar.success("Файлы добавлены", f"В списке новых: {added}", parent=self)
+			show_success(self, "Файлы добавлены", f"В списке новых: {added}")
 
 	def _add_entry(
 		self,
@@ -594,7 +595,7 @@ class VideoPage(ScrollArea):
 			или не читается.
 		"""
 		if any(entry.path == path for entry in self._entries):
-			InfoBar.info("Уже в списке", Path(path).name, parent=self)
+			show_info(self, "Уже в списке", Path(path).name)
 			return False
 		if size_bytes is None:
 			try:
@@ -819,7 +820,7 @@ class VideoPage(ScrollArea):
 		"""
 		self._remove_entries(submitted)
 		if len(submitted) > 1:
-			InfoBar.success("Пакет в очереди", f"Файлов: {len(submitted)}", parent=self)
+			show_success(self, "Пакет в очереди", f"Файлов: {len(submitted)}")
 		self._queue.poll()  # карточки видны сразу, не по таймеру
 
 	# --- панель очереди обработки -------------------------------------------------
@@ -848,7 +849,7 @@ class VideoPage(ScrollArea):
 			text = f"Готово файлов: {self._session_done}"
 			if errors:
 				text += f" · ошибок: {errors} (см. карточки)"
-			InfoBar.success("Обработка завершена", text, parent=self.window())
+			show_success(self.window(), "Обработка завершена", text)
 		elif errors:
 			show_warning(
 				self.window(),

@@ -13,7 +13,6 @@ import asyncio
 import logging
 import shutil
 import tempfile
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -865,8 +864,22 @@ class PostsService:
 			# пара «файл + превью» переименовывается атомарно: без отката
 			# превью осталось бы под старым стемом и потерялось бы при
 			# переносе в «опубликованные» (поиск соседа идёт по новому)
-			with suppress(OSError):
+			try:
 				target.rename(source)
+			except OSError:
+				# откат не удался — говорить «переименование отменено»
+				# было бы неправдой: файл остался под новым именем
+				logger.warning(
+					"Откат переименования %s → %s не удался.",
+					target.name,
+					source.name,
+					exc_info=True,
+				)
+				raise PostError(
+					f"Не удалось переименовать превью файла «{rename_to}», "
+					f"а вернуть прежнее имя не вышло — файл называется "
+					f"«{target.name}»: {exc.strerror or exc}"
+				) from exc
 			raise PostError(
 				f"Не удалось переименовать превью файла «{rename_to}» — "
 				f"переименование отменено: {exc.strerror or exc}"

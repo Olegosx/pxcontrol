@@ -24,6 +24,7 @@ from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.accounts import account_display
 from pxcontrol.engine.services.posts import PublishCapabilities, publish_capabilities
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
+from pxcontrol.engine.telegram.bot_api import CommunityCheckError
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
 from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind, UserbotRole
 
@@ -122,7 +123,10 @@ class CommunityAccess:
 			(None — проверить не удалось: нет связи или аккаунт отключён;
 			для канала без привязки None означает «админ не нашёлся
 			и среди вошедших аккаунтов»).
-		bot_ok: права бота на месте (None — бот не назначен).
+		bot_ok: права бота на месте; None — либо бот не назначен, либо
+			проверить не удалось (нет связи, Telegram не ответил).
+			Различить помогает ``community.bot_id``: назначен, но
+			``bot_ok`` None — значит не проверили, а не «потерял права».
 	"""
 
 	community: CommunityDto
@@ -239,11 +243,15 @@ class CommunitiesService:
 		except UserbotAccessError:
 			logger.info("Аккаунт id=%s не может публиковать в сообществе %s.", account_id, chat_id)
 			return _ProbeResult(ok=False)
-		except Exception:  # noqa: BLE001 — вспомогательная проверка
-			logger.info(
-				"Проверка аккаунта id=%s в сообществе %s не удалась (сеть или подключение).",
+		except Exception as exc:  # noqa: BLE001 — вспомогательная проверка
+			# тип и текст обязательны: без них обрыв сети и ошибка в коде
+			# выглядят в журнале одинаково (единый приём движка)
+			logger.warning(
+				"Проверка аккаунта id=%s в сообществе %s не удалась (%s: %s).",
 				account_id,
 				chat_id,
+				type(exc).__name__,
+				exc,
 			)
 			return _ProbeResult(ok=None)
 		await self._sync_profile(account_id)
@@ -605,11 +613,27 @@ class CommunitiesService:
 		return dto
 
 	async def _probe_bot(self, token: str, chat_id: str) -> _ProbeResult:
-		"""Проверяет права бота, не роняя перепроверку."""
+		"""Проверяет права бота, не роняя перепроверку.
+
+		Различает то же, что и зонд userbot: подтверждённый отказ
+		Telegram — это знание о правах (``ok=False``), а обрыв связи
+		или неверный токен — отсутствие знания (``ok=None``). Раньше
+		обе причины давали «права потеряны», и человек видел приговор
+		правам из-за пропавшей сети.
+		"""
 		try:
 			info = await self._gateway.check_community(token, chat_id)
-		except Exception:  # noqa: BLE001 — итог отражается в ответе
+		except CommunityCheckError as exc:
+			logger.info("Бот не может публиковать в сообществе %s: %s", chat_id, exc)
 			return _ProbeResult(ok=False)
+		except Exception as exc:  # noqa: BLE001 — вспомогательная проверка
+			logger.warning(
+				"Проверка бота в сообществе %s не удалась (%s: %s).",
+				chat_id,
+				type(exc).__name__,
+				exc,
+			)
+			return _ProbeResult(ok=None)
 		return _ProbeResult(ok=True, info=info)
 
 	async def _refresh_mutable(self, community_id: int, info: CommunityInfo) -> None:
