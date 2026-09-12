@@ -57,6 +57,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.schedule_plan import parse_hhmm
 from pxcontrol.engine.services.video import video_dialog_filter
 from pxcontrol.engine.telegram.types import (
 	GENERAL_TOPIC_ID,
@@ -164,6 +165,22 @@ def visible_topics(
 def topic_label(topic: ForumTopicInfo) -> str:
 	"""Подпись темы в списке: закрытая помечается (её видит только админ)."""
 	return f"{topic.title} (закрыта)" if topic.closed else topic.title
+
+
+def checked_or_single(items: list[_T], checked: list[_T]) -> list[_T] | None:
+	"""Отмеченные элементы, а если не отмечено ничего — единственный.
+
+	Правило списков с галочками на странице «Видео»: когда элемент
+	один, галочка избыточна — человек и так указал, о чём речь.
+	Ничего не отмечено при нескольких элементах — выбор не сделан.
+
+	Returns:
+		Список для работы или None, если выбор не сделан (вызывающий
+		скажет об этом своими словами — списки разные).
+	"""
+	if checked:
+		return checked
+	return list(items) if len(items) == 1 else None
 
 
 def closed_topics_hint(closed: int) -> str:
@@ -1517,25 +1534,6 @@ def list_area(parent: QWidget, spacing: int) -> tuple[ScrollArea, QVBoxLayout]:
 	area.setWidgetResizable(True)
 	area.enableTransparentBackground()
 	return area, box
-
-
-def parse_hhmm(text: str) -> tuple[int, int]:
-	"""Разбирает время «ЧЧ:ММ» (часы 0–23, минуты 0–59).
-
-	Returns:
-		Пара (часы, минуты).
-
-	Raises:
-		ValueError: Формат не «ЧЧ:ММ» или значения вне диапазона.
-	"""
-	error = ValueError("Время — в формате ЧЧ:ММ, например 18:30.")
-	parts = text.strip().split(":")
-	if len(parts) != 2 or not all(part.isdigit() for part in parts):
-		raise error
-	hours, minutes = int(parts[0]), int(parts[1])
-	if hours > 23 or minutes > 59:
-		raise error
-	return hours, minutes
 
 
 class WhenRow:

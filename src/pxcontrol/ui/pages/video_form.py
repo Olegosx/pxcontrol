@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from pxcontrol.engine.services.video import (
 	parse_intro_source,
 )
 from pxcontrol.engine.video.constants import RESOLUTION_STEPS
+from pxcontrol.engine.video.filtergraph import CORNER_POSITIONS
 from pxcontrol.ui import density
 from pxcontrol.ui.pages.common import (
 	INPUT_DEBOUNCE_MS,
@@ -48,16 +50,30 @@ from pxcontrol.ui.pages.common import (
 #: смена дефолта в движке подхватывается формой сама.
 _DEFAULTS = PresetFields(name="")
 
-#: Углы вотермарка: подпись → код (коды понимает движок, filtergraph).
-_CORNERS = [
-	("Правый верхний", "tr"),
-	("Левый верхний", "tl"),
-	("Сверху по центру", "tc"),
-	("Правый нижний", "br"),
-	("Левый нижний", "bl"),
-	("Снизу по центру", "bc"),
-	("Вдоль левого края", "lc"),
-	("Вдоль правого края", "rc"),
+logger = logging.getLogger(__name__)
+
+#: Имена углов вотермарка. Сам перечень кодов — за движком
+#: (``CORNER_POSITIONS``): куда можно ставить вотермарк, решает граф
+#: фильтров, здесь только слова для человека. Тот же приём, что
+#: у ступеней разрешения ниже: угол без имени покажется кодом,
+#: а не пропадёт из списка.
+_CORNER_NAMES = {
+	"tr": "Правый верхний",
+	"tl": "Левый верхний",
+	"tc": "Сверху по центру",
+	"br": "Правый нижний",
+	"bl": "Левый нижний",
+	"bc": "Снизу по центру",
+	"lc": "Вдоль левого края",
+	"rc": "Вдоль правого края",
+}
+
+#: Пункты списка «Угол»: подпись → код. Порядок — как у имён выше,
+#: незнакомые движку коды сюда не попадают, а незнакомые нам —
+#: показываются кодом в конце списка.
+_CORNERS: list[tuple[str, str]] = [
+	*((name, code) for code, name in _CORNER_NAMES.items() if code in CORNER_POSITIONS),
+	*((code, code) for code in CORNER_POSITIONS if code not in _CORNER_NAMES),
 ]
 #: Имена ступеней разрешения. Сам перечень ступеней — за движком
 #: (``RESOLUTION_STEPS``): числа это логика обработки, слова — показ.
@@ -458,7 +474,14 @@ class PresetForm(QWidget):
 			self._fade_out.setValue(fields.fade_out)
 		self._wm_path.setText(fields.watermark_path or "")
 		codes = [code for _label, code in _CORNERS]
-		self._corner.setCurrentIndex(codes.index(fields.wm_corner))
+		# незнакомый код из пресета (запись будущей версии) не должен
+		# ронять форму: показываем первый угол, как и у ступени
+		# разрешения делает _RESOLUTION_FALLBACK
+		if fields.wm_corner in codes:
+			self._corner.setCurrentIndex(codes.index(fields.wm_corner))
+		else:
+			logger.warning("Пресет: неизвестный угол вотермарка %r.", fields.wm_corner)
+			self._corner.setCurrentIndex(0)
 		self._margin.setValue(fields.wm_margin)
 		self._opacity.setValue(fields.wm_opacity)
 		self._scale.setValue(fields.wm_scale)

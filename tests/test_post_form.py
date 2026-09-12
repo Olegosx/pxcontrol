@@ -93,3 +93,18 @@ def test_counter_text_within_limit() -> None:
 def test_counter_text_names_the_overflow() -> None:
 	"""Превышение названо числом: «сократите» без цифры заставляет считать самому."""
 	assert counter_text(1100, 1024) == "1100 / 1024 — на 76 больше предела Telegram"
+
+
+def test_checked_or_single_treats_lonely_item_as_chosen() -> None:
+	"""Один элемент в списке — галочка избыточна, он и есть выбор.
+
+	Правило списков с галочками на странице «Видео»: раньше оно было
+	написано дважды (файлы к обработке и готовые видео к публикации),
+	вместе с одинаковым комментарием.
+	"""
+	from pxcontrol.ui.pages.common import checked_or_single
+
+	assert checked_or_single(["один"], []) == ["один"]  # выбирать не из чего
+	assert checked_or_single(["a", "b"], []) is None  # выбор не сделан
+	assert checked_or_single(["a", "b"], ["b"]) == ["b"]
+	assert checked_or_single([], []) is None  # пустой список — выбора нет

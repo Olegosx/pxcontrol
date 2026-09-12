@@ -32,7 +32,6 @@ from qfluentwidgets import (
 	PillPushButton,
 	PushButton,
 	RoundMenu,
-	ScrollArea,
 	SwitchButton,
 	TransparentToolButton,
 )
@@ -447,19 +446,15 @@ class DictionaryDialog(WorkDialog):
 	# --- сборка окна ----------------------------------------------------------
 
 	def _build_values_area(self) -> None:
-		"""Прокручиваемая область значений (растёт на всю высоту окна)."""
-		self._area = ScrollArea(self)
-		container = QWidget(self._area)
-		self._values_box = QVBoxLayout(container)
-		self._values_box.setContentsMargins(0, 0, 0, 0)
-		self._values_box.setSpacing(density.spacing().row_spacing)
-		self._area.setWidget(container)
-		# содержимое тянется по ширине области, а его высоту считает
-		# поточная раскладка (heightForWidth) — отсюда и берётся полоса
-		# прокрутки, когда пилюли не помещаются
-		self._area.setWidgetResizable(True)
-		self._area.enableTransparentBackground()
-		self.content.addWidget(self._area, stretch=1)
+		"""Прокручиваемая область значений (растёт на всю высоту окна).
+
+		Полоса прокрутки появляется сама, когда пилюли не помещаются:
+		высоту содержимого считает поточная раскладка
+		(``heightForWidth``), а область — общая для рабочих окон
+		(ADR-0023), собранная руками она повторяла бы её построчно.
+		"""
+		area, self._values_box = list_area(self, density.spacing().row_spacing)
+		self.content.addWidget(area, stretch=1)
 
 	def _build_add_row(self) -> None:
 		"""Строка добавления: значения через запятую и (для зависимого) родитель."""

@@ -49,6 +49,7 @@ from pxcontrol.engine.services.schedule_plan import (
 	PlanError,
 	PlanKind,
 	SchedulePlan,
+	parse_hhmm,
 	plan_times,
 )
 from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
@@ -70,7 +71,6 @@ from pxcontrol.ui.pages.common import (
 	human_size,
 	list_area,
 	noop,
-	parse_hhmm,
 	show_error,
 )
 

@@ -30,6 +30,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto, MemberDto
+from pxcontrol.engine.services.schedule_plan import parse_hhmm
 from pxcontrol.engine.services.settings import (
 	COMMUNITY_DEFAULT_PRESET,
 	COMMUNITY_ENABLED,
@@ -53,7 +54,6 @@ from pxcontrol.ui.pages.common import (
 	exec_dialog,
 	list_area,
 	page_layout,
-	parse_hhmm,
 	role_caption,
 	show_warning,
 )

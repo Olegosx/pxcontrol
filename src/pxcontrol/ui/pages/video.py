@@ -67,6 +67,7 @@ from pxcontrol.ui.pages.common import (
 	FormDialog,
 	QueuePanel,
 	bind,
+	checked_or_single,
 	clear_layout,
 	community_combo_label,
 	confirm_delete,
@@ -699,13 +700,11 @@ class VideoPage(ScrollArea):
 		if not self._entries:
 			self._show_error("Добавьте файл или папку — список пуст.")
 			return
-		selected = [entry for entry in self._entries if entry.check.isChecked()]
-		if not selected:
-			if len(self._entries) != 1:
-				self._show_error("Отметьте чекбоксами файлы, которые обрабатывать.")
-				return
-			# файл один — выбирать не из чего, галочка избыточна
-			selected = list(self._entries)
+		checked = [entry for entry in self._entries if entry.check.isChecked()]
+		selected = checked_or_single(self._entries, checked)
+		if selected is None:
+			self._show_error("Отметьте чекбоксами файлы, которые обрабатывать.")
+			return
 		self._process_entries(selected)
 
 	def _process_entries(self, entries: list[_FileEntry]) -> None:
@@ -968,13 +967,12 @@ class VideoPage(ScrollArea):
 
 	def _publish_checked_processed(self) -> None:
 		"""Отмеченные чекбоксами видео — пакетом на «Публикацию»."""
-		picked = [item for check, item in self._processed_checks if check.isChecked()]
-		if not picked:
-			if len(self._processed_checks) != 1:
-				self._show_error("Отметьте чекбоксами готовые видео для публикации.")
-				return
-			# файл один — выбирать не из чего, галочка избыточна
-			picked = [item for _check, item in self._processed_checks]
+		items = [item for _check, item in self._processed_checks]
+		checked = [item for check, item in self._processed_checks if check.isChecked()]
+		picked = checked_or_single(items, checked)
+		if picked is None:
+			self._show_error("Отметьте чекбоксами готовые видео для публикации.")
+			return
 		self._emit_publish_files(picked)
 
 	def _emit_publish_files(self, items: list[VideoFile]) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pxcontrol.ui.pages.common import parse_hhmm
+from pxcontrol.engine.services.schedule_plan import parse_hhmm
 
 
 def test_parse_hhmm_valid() -> None:

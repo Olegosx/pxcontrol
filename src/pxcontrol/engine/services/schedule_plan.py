@@ -73,13 +73,13 @@ class SchedulePlan:
 	community_times: tuple[str, ...] = ()
 
 
-def _try_hhmm(text: str) -> tuple[int, int] | None:
+def try_hhmm(text: str) -> tuple[int, int] | None:
 	"""Щадящий разбор «ЧЧ:ММ»: None вместо ошибки (битый элемент — мимо).
 
-	Строгий разбор пользовательского ввода — забота интерфейса
-	(``parse_hhmm`` в общих помощниках страниц); здесь разбираются
-	значения настройки канала, где битый элемент просто пропускается —
-	как в форме одиночной публикации.
+	Формат времени публикации принадлежит движку, а не экрану: одни
+	и те же строки он читает из настроек сообщества и принимает
+	от человека. Здесь — щадящая форма (битое значение настройки просто
+	пропускается), строгая — :func:`parse_hhmm` поверх неё.
 	"""
 	parts = text.strip().split(":")
 	if len(parts) != 2 or not all(part.isdigit() for part in parts):
@@ -88,6 +88,21 @@ def _try_hhmm(text: str) -> tuple[int, int] | None:
 	if hours > 23 or minutes > 59:
 		return None
 	return hours, minutes
+
+
+def parse_hhmm(text: str) -> tuple[int, int]:
+	"""Строгий разбор «ЧЧ:ММ» для ввода человека (часы 0–23, минуты 0–59).
+
+	Returns:
+		Пара (часы, минуты).
+
+	Raises:
+		ValueError: Формат не «ЧЧ:ММ» или значения вне диапазона.
+	"""
+	parsed = try_hhmm(text)
+	if parsed is None:
+		raise ValueError("Время — в формате ЧЧ:ММ, например 18:30.")
+	return parsed
 
 
 def _busy_keys(busy: Collection[datetime]) -> set[datetime]:
@@ -199,9 +214,7 @@ def _community_times(plan: SchedulePlan, now: datetime) -> Iterator[datetime]:
 	публикации); слоты идут по дням начиная с даты начала (не раньше
 	сегодняшней), прошедшие отбрасываются.
 	"""
-	slots = [
-		parsed for item in plan.community_times if (parsed := _try_hhmm(str(item))) is not None
-	]
+	slots = [parsed for item in plan.community_times if (parsed := try_hhmm(str(item))) is not None]
 	if not slots:
 		raise PlanError(
 			"У канала нет стандартных времён публикации — задайте их "
