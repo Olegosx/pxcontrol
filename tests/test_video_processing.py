@@ -26,13 +26,13 @@ INFO = VideoInfo(width=1920, height=1080, duration=100.0, fps=25.0, has_audio=Tr
 def _options(**overrides: object) -> ProcessingOptions:
 	"""Хелпер: ProcessingOptions из умолчаний пресета.
 
-	Единственный источник умолчаний — ``PresetFields``; фабрика повторяет
-	отображение полей из ``VideoService._build_options``.
+	Единственный источник умолчаний — ``PresetFields``; имена полей
+	у пресета и у параметров обработки совпадают, поэтому отображение
+	не переписывается — ни здесь, ни в сервисе.
 	"""
 	fields = asdict(PresetFields(name="тест"))
 	fields.pop("name")
 	fields.pop("subdir")  # уровень сервиса: конвейер получает готовый путь вывода
-	fields["watermark"] = fields.pop("watermark_path")
 	merged: dict[str, object] = {"input": "a", "output": "b", **fields, **overrides}
 	return ProcessingOptions(**merged)  # type: ignore[arg-type]
 
@@ -233,10 +233,10 @@ def test_watermark_window_offsets_to_absolute() -> None:
 	"""Отступы от краёв превращаются в абсолютное окно показа."""
 	from pxcontrol.engine.video.pipeline import _watermark_options
 
-	opts = _options(watermark="/x/wm.png", wm_start_offset=3.0, wm_end_offset=10.0)
+	opts = _options(watermark_path="/x/wm.png", wm_start_offset=3.0, wm_end_offset=10.0)
 	wm = _watermark_options(opts, INFO)  # длительность 100 с
 	assert wm.start == 3.0 and wm.end == 90.0
-	plain = _watermark_options(_options(watermark="/x/wm.png"), INFO)
+	plain = _watermark_options(_options(watermark_path="/x/wm.png"), INFO)
 	assert plain.start is None and plain.end is None
 
 
@@ -245,7 +245,7 @@ def test_watermark_zero_offsets_mean_no_limit() -> None:
 	from pxcontrol.engine.video.pipeline import _watermark_options
 
 	wm = _watermark_options(
-		_options(watermark="/x/wm.png", wm_start_offset=0.0, wm_end_offset=0.0),
+		_options(watermark_path="/x/wm.png", wm_start_offset=0.0, wm_end_offset=0.0),
 		INFO,
 	)
 	assert wm.start is None and wm.end is None
@@ -286,7 +286,7 @@ def test_watermark_fade_must_fit_window() -> None:
 	from pxcontrol.engine.video.pipeline import _watermark_options
 
 	opts = _options(
-		watermark="/x/wm.png",
+		watermark_path="/x/wm.png",
 		wm_start_offset=45.0,
 		wm_end_offset=45.0,
 		wm_fade=6.0,  # окно 10 с < 12 с
@@ -295,7 +295,7 @@ def test_watermark_fade_must_fit_window() -> None:
 		_watermark_options(opts, INFO)
 	ok = _watermark_options(
 		_options(
-			watermark="/x/wm.png",
+			watermark_path="/x/wm.png",
 			wm_start_offset=45.0,
 			wm_end_offset=45.0,
 			wm_fade=5.0,
@@ -310,7 +310,7 @@ def test_watermark_window_degenerate_raises() -> None:
 	from pxcontrol.engine.video.pipeline import _watermark_options
 
 	opts = _options(
-		watermark="/x/wm.png",
+		watermark_path="/x/wm.png",
 		wm_start_offset=60.0,
 		wm_end_offset=50.0,  # 60 ≥ 100−50
 	)
@@ -406,7 +406,7 @@ def test_watermark_window_counts_from_trimmed() -> None:
 	work = trimmed_info(INFO, 10.0, 10.0)  # рабочая версия — 80 с
 	wm = _watermark_options(
 		_options(
-			watermark="/x/wm.png",
+			watermark_path="/x/wm.png",
 			trim_start=10.0,
 			trim_end=10.0,
 			wm_start_offset=5.0,
@@ -561,7 +561,7 @@ def test_missing_watermark_fails_before_ffmpeg(tmp_path: Path) -> None:
 	"""Несуществующий вотермарк — точная ошибка до запуска ffmpeg."""
 	from pxcontrol.engine.video import pipeline
 
-	opts = _options(watermark=str(tmp_path / "нет-такого.png"))
+	opts = _options(watermark_path=str(tmp_path / "нет-такого.png"))
 	with pytest.raises(ValueError, match="вотермарка не найден"):
 		pipeline.process(opts)
 

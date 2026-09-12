@@ -23,6 +23,18 @@ from pxcontrol.engine.telegram.types import UserbotProfile
 logger = logging.getLogger(__name__)
 
 
+def _account_not_found() -> AccountsError:
+	"""Единый отказ «userbot-аккаунта нет».
+
+	Один текст и один класс на все пути: проверка написана в трёх
+	местах (чтение, смена пометки, сохранение сессии), и прежде общий
+	помощник бросал ошибку входа — хотя «аккаунта нет» ко входу
+	отношения не имеет, и человек получал разный текст в зависимости
+	от того, каким путём попал в отказ.
+	"""
+	return AccountsError("Аккаунт не найден — обновите список.")
+
+
 class AccountsError(EngineError):
 	"""Ошибка операций с аккаунтами (с понятным человеку текстом)."""
 
@@ -324,7 +336,7 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
 			if account is None:
-				raise AccountsError("Аккаунт не найден — обновите список.")
+				raise _account_not_found()
 			account.label = label.strip() or None
 			await session.commit()
 			await session.refresh(account)
@@ -468,7 +480,7 @@ class AccountsService:
 			AccountsError: Ключ API приложения ещё не задан.
 			LoginError: Нет телефона у аккаунта или Telegram отклонил запрос.
 		"""
-		account = await self._get_account(account_id)
+		account = await self._require_account(account_id)
 		if not account.phone:
 			raise LoginError("У аккаунта не указан номер телефона.")
 		credential = await self._require_tg_api()
@@ -501,12 +513,22 @@ class AccountsService:
 		"""Прерывает незавершённый вход (пользователь закрыл диалог)."""
 		await self._gateway.login.cancel(account_id)
 
-	async def _get_account(self, account_id: int) -> TgAccount:
-		"""Возвращает аккаунт или объясняет, что он не найден."""
+	async def _require_account(self, account_id: int) -> TgAccount:
+		"""Возвращает userbot-аккаунт или объясняет, что он не найден.
+
+		Парная форма :meth:`_require_bot`: один текст и один класс
+		ошибки на все пути. Прежде проверка была написана трижды,
+		причём общий помощник бросал ошибку входа — хотя «аккаунта
+		нет» ко входу отношения не имеет, и человек получал разный
+		текст в зависимости от того, каким путём попал в отказ.
+
+		Raises:
+			AccountsError: Аккаунт не найден.
+		"""
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
 		if account is None:
-			raise LoginError("Аккаунт не найден.")
+			raise _account_not_found()
 		return account
 
 	async def _save_session(self, account_id: int, session_string: str) -> None:
@@ -515,7 +537,7 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
 			if account is None:
-				raise LoginError("Аккаунт не найден.")
+				raise _account_not_found()
 			account.session = session_string
 			await session.commit()
 		logger.info("Userbot id=%s: сессия сохранена.", account_id)

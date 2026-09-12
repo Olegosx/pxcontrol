@@ -65,7 +65,7 @@ class ProcessingOptions:
 	# (у альбома это высота, у книги — ширина); None — «как в оригинале»
 	target_resolution: int | None
 	video_bitrate_kbps: int | None
-	watermark: str | None
+	watermark_path: str | None
 	wm_corner: str
 	wm_margin: int
 	wm_opacity: float
@@ -123,7 +123,7 @@ def _watermark_options(opts: ProcessingOptions, info: VideoInfo) -> WatermarkOpt
 	end = info.duration - opts.wm_end_offset if opts.wm_end_offset else None
 	# без вотермарка отступы безвредны — валидировать нечего (контракт
 	# закреплён тестом test_watermark_window_degenerate_raises)
-	if opts.watermark and (start is not None or end is not None):
+	if opts.watermark_path and (start is not None or end is not None):
 		window = (end if end is not None else info.duration) - (start or 0.0)
 		if window <= 0:
 			raise ValueError(
@@ -166,8 +166,8 @@ def _build_inputs(
 	index = 1
 	wm_index: int | None = None
 	still_index: int | None = None
-	if opts.watermark:
-		inputs += ["-i", opts.watermark]
+	if opts.watermark_path:
+		inputs += ["-i", opts.watermark_path]
 		wm_index, index = index, index + 1
 	if opts.intro:
 		duration = opts.intro_hold + opts.xfade + _STILL_INPUT_MARGIN
@@ -246,7 +246,7 @@ def _run_main(
 		hold=opts.intro_hold,
 		xfade=opts.xfade,
 		still_index=still_index,
-		wm=_watermark_options(opts, info) if opts.watermark else None,
+		wm=_watermark_options(opts, info) if opts.watermark_path else None,
 		wm_index=wm_index,
 		has_audio=has_audio,
 		fade_in=opts.fade_in,
@@ -338,9 +338,10 @@ def process(opts: ProcessingOptions, on_progress: ProgressCallback | None = None
 	"""
 	# пути из параметров проверяются до запуска ffmpeg: несуществующий
 	# файл дал бы вместо точной причины многострочный журнал ffmpeg
-	if opts.watermark and not Path(opts.watermark).is_file():
+	if opts.watermark_path and not Path(opts.watermark_path).is_file():
 		raise ValueError(
-			f"Файл вотермарка не найден: {opts.watermark} — проверьте путь в разделе «Вотермарк»."
+			f"Файл вотермарка не найден: {opts.watermark_path} — "
+			"проверьте путь в разделе «Вотермарк»."
 		)
 	info = probe_video(opts.input, opts.ffprobe_bin)
 	# все дальнейшие расчёты — от рабочей (обрезанной) версии

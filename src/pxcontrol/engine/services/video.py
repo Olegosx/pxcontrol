@@ -214,6 +214,10 @@ class FoundVideo:
 	frame: tuple[int, int] | None
 
 
+#: Поля пресета, которых у конвейера нет: имя набора и подпапка
+#: результатов — это устройство хранения, а не параметры обработки.
+_PRESET_ONLY_FIELDS = frozenset({"name", "subdir"})
+
 #: Колбэк хода сканирования папки: (прочитано файлов, всего файлов).
 #: Вызывается из рабочего потока — интерфейс доставляет через сигнал Qt.
 ScanProgress = Callable[[int, int], None]
@@ -1041,31 +1045,21 @@ class VideoService:
 		# разборчивым для title_from_filename (captions)
 		preset_part = sanitize_subdir(fields.name).replace("_", "-").strip(" .") or "preset"
 		output = out_dir / f"{source.stem}_{preset_part}_{stamp}.mp4"
-		ffprobe = ffprobe_bin_for(self._ffmpeg())
+		# имена полей пресета и параметров обработки совпадают, поэтому
+		# перечислять два десятка присваиваний не нужно: новое поле
+		# пресета доходит до конвейера само. В сторону БД то же самое
+		# уже сделано интроспекцией (см. _preset_field_names)
+		pipeline_fields = {
+			field.name: getattr(fields, field.name)
+			for field in dataclass_fields(fields)
+			if field.name not in _PRESET_ONLY_FIELDS
+		}
+		# заставку вызывающий может задать поверх пресета (выбранный кадр)
+		pipeline_fields["intro_source"] = intro_source or fields.intro_source
 		return ProcessingOptions(
 			input=str(source),
 			output=str(output),
-			trim_start=fields.trim_start,
-			trim_end=fields.trim_end,
-			fade_in=fields.fade_in,
-			fade_out=fields.fade_out,
-			watermark=fields.watermark_path,
-			wm_corner=fields.wm_corner,
-			wm_margin=fields.wm_margin,
-			wm_opacity=fields.wm_opacity,
-			wm_scale=fields.wm_scale,
-			wm_start_offset=fields.wm_start_offset,
-			wm_end_offset=fields.wm_end_offset,
-			wm_fade=fields.wm_fade,
-			intro=fields.intro,
-			intro_source=intro_source or fields.intro_source,
-			intro_hold=fields.intro_hold,
-			xfade=fields.xfade,
-			cover=fields.cover,
-			no_audio=fields.no_audio,
-			video_bitrate_kbps=fields.video_bitrate_kbps,
-			target_resolution=fields.target_resolution,
-			meta_comment=fields.meta_comment,
 			ffmpeg_bin=self._ffmpeg(),
-			ffprobe_bin=ffprobe,
+			ffprobe_bin=ffprobe_bin_for(self._ffmpeg()),
+			**pipeline_fields,
 		)

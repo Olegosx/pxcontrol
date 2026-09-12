@@ -307,7 +307,7 @@ async def test_prepare_maps_fields_to_options(
 	assert options.input == str(source)
 	assert options.trim_start == 3.5 and options.trim_end == 1.5
 	assert options.fade_in == 0.5 and options.fade_out == 1.0
-	assert options.watermark == "/tmp/logo.png"
+	assert options.watermark_path == "/tmp/logo.png"
 	assert options.wm_corner == "br" and options.wm_opacity == 0.8
 	assert options.wm_start_offset == 2.0 and options.wm_end_offset == 15.0
 	assert options.wm_fade == 1.5
@@ -807,3 +807,24 @@ async def test_prepare_passes_resolution_to_pipeline(
 	await service.prepare(str(source), PresetFields(name="Т", target_resolution=2160))
 	await service.prepare(str(source), PresetFields(name="Т", target_resolution=None))
 	assert [options.target_resolution for options in processor.calls] == [2160, None]
+
+
+def test_preset_fields_reach_the_pipeline_by_name() -> None:
+	"""Поля пресета и параметры обработки названы одинаково.
+
+	Замок автоматического отображения: сборка параметров не перечисляет
+	два десятка присваиваний, а берёт поля по именам — значит новое поле
+	пресета доходит до конвейера само. Разойдись имена (как было
+	у ``watermark``/``watermark_path``), сборка упала бы в бою; здесь
+	расхождение видно сразу.
+	"""
+	from dataclasses import fields
+
+	from pxcontrol.engine.services.video import _PRESET_ONLY_FIELDS, PresetFields
+	from pxcontrol.engine.video.pipeline import ProcessingOptions
+
+	preset = {field.name for field in fields(PresetFields)} - _PRESET_ONLY_FIELDS
+	pipeline = {field.name for field in fields(ProcessingOptions)}
+	assert preset <= pipeline, f"поля пресета без места в конвейере: {preset - pipeline}"
+	# у конвейера сверх пресета — только то, что добавляет сервис
+	assert pipeline - preset == {"input", "output", "ffmpeg_bin", "ffprobe_bin"}
