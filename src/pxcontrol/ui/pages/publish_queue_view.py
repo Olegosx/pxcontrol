@@ -86,9 +86,11 @@ def queue_subtitle(item: QueueItemDto) -> str:
 	elif item.status is QueueItemStatus.ERROR:
 		status = f"ошибка: {item.error}"
 	elif item.status is QueueItemStatus.WAITING:
-		# лимит Telegram — 100 отложек на канал (ADR-0016); хвост
-		# публикует само приложение, поэтому оно должно быть запущено
-		status = "ждёт слота отложек · уйдёт при запущенном приложении"
+		# лимит Telegram — 100 отложек на канал (ADR-0016). Приписки
+		# «уйдёт при запущенном приложении» здесь нет намеренно: она
+		# повторялась в каждой строке списка, ничего не добавляя
+		# к следующей; само ограничение — в ADR-0016, п. 8
+		status = "ждёт слота отложек"
 	else:
 		status = "в очереди"
 	subtitle = f"{item.community_title} · публикация: {when_text} · {status}"
