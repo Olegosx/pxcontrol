@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	CaptionLabel,
 	LineEdit,
@@ -33,6 +33,7 @@ from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.types import ForumTopicInfo, MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	DIM_TEXT,
 	CharCounter,
 	ErrorLabel,
 	WhenRow,
@@ -44,6 +45,7 @@ from pxcontrol.ui.pages.common import (
 	kind_segments,
 	pick_file,
 	rename_row,
+	tinted,
 	topic_label,
 	topic_row,
 	visible_topics,
@@ -55,6 +57,15 @@ _BOT_ONLY_HINT = "Отложенная публикация требует userb
 
 #: Высота поля текста в карточке: форма не должна занимать весь список.
 _TEXT_HEIGHT = 120
+
+#: Интервал между рядами формы (макет карточки очереди).
+_FORM_SPACING = 10
+
+#: Сноска под формой: канал-получатель в правке не меняется.
+_RECIPIENT_NOTE = (
+	"Канал получателя не меняется — у другого свои темы, лимит файла "
+	"и право на отложенную публикацию."
+)
 
 
 class QueueItemEditor(QWidget):
@@ -110,6 +121,7 @@ class QueueItemEditor(QWidget):
 		"""Собирает форму и заполняет её текущим черновиком."""
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(_FORM_SPACING)
 		self._build_topic_row(layout, topics, topics_error)
 		self._build_kind_segments(layout)
 		self._build_file_row(layout)
@@ -118,13 +130,14 @@ class QueueItemEditor(QWidget):
 		self._text.setFixedHeight(_TEXT_HEIGHT)
 		layout.addWidget(self._text)
 		self._counter = CharCounter(self, layout, self._text)
-		self._when_row = WhenRow(self, layout)
+		# по макету кнопки формы стоят в ряду времени, справа
+		self._when_row = WhenRow(self, layout, compact=True, trailing=self._build_buttons())
 		self._when_row.set_schedule_allowed(self._caps.userbot, _BOT_ONLY_HINT)
 		self._when_row.set_when(self._draft.when)
 		self._error = ErrorLabel(self)
 		layout.addWidget(self._error)
+		layout.addWidget(tinted(CaptionLabel(_RECIPIENT_NOTE, self), DIM_TEXT))
 		self._apply_kind()
-		self._build_buttons(layout)
 
 	def _build_topic_row(
 		self, layout: QVBoxLayout, topics: list[ForumTopicInfo], topics_error: str
@@ -152,10 +165,15 @@ class QueueItemEditor(QWidget):
 			self._topic_hint.setText("Прежняя тема недоступна — пост уйдёт в общую ленту.")
 
 	def _build_kind_segments(self, layout: QVBoxLayout) -> None:
-		"""Сегментный переключатель типа контента (как на «Публикации»)."""
+		"""Сегментный переключатель типа контента (как на «Публикации»).
+
+		В карточке он своей ширины и прижат влево (макет), а не на всю
+		строку, как на странице.
+		"""
 		self._segments = kind_segments(
 			self, layout, self._on_kind_changed, current=self._kind.value
 		)
+		self._segments.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
 	def _build_file_row(self, layout: QVBoxLayout) -> None:
 		"""Строка вложения: путь, «Обзор…», «Убрать» и переименование."""
@@ -186,14 +204,11 @@ class QueueItemEditor(QWidget):
 		)
 		self._rename_box, self._rename_check, self._rename_edit = row.box, row.check, row.edit
 
-	def _build_buttons(self, layout: QVBoxLayout) -> None:
-		"""Кнопки формы: сохранение возвращает пост в работу."""
-		row = QHBoxLayout()
-		row.addStretch()
+	def _build_buttons(self) -> list[QWidget]:
+		"""Кнопки формы (встают в ряд времени): сохранение возвращает пост в работу."""
 		cancel = PushButton("Отмена", self)
 		cancel.setToolTip("Закрыть форму, ничего не меняя")
 		cancel.clicked.connect(self._on_close)
-		row.addWidget(cancel)
 		# коротко: полная формулировка «Сохранить и отправить» не влезает
 		# в ряд при ширине окна 1160, а подсказка договаривает остальное
 		self._save_button = PrimaryPushButton("Сохранить", self)
@@ -201,8 +216,7 @@ class QueueItemEditor(QWidget):
 			"Пост вернётся в очередь: «сейчас» — в отправку, отложенный — ждать слота."
 		)
 		self._save_button.clicked.connect(self._on_save)
-		row.addWidget(self._save_button)
-		layout.addLayout(row)
+		return [cancel, self._save_button]
 
 	# --- поведение формы -------------------------------------------------------
 

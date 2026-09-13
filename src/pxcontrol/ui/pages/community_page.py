@@ -29,7 +29,7 @@ from functools import partial
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QFont, QHideEvent, QResizeEvent, QShowEvent
+from PySide6.QtGui import QFont, QHideEvent, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
@@ -72,6 +72,7 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	DIM_TEXT,
 	DtoComboBox,
 	ErrorLabel,
 	QueueCounts,
@@ -90,6 +91,7 @@ from pxcontrol.ui.pages.common import (
 	font_px,
 	format_local,
 	list_area,
+	list_button,
 	page_layout,
 	role_caption,
 	section_header,
@@ -98,6 +100,7 @@ from pxcontrol.ui.pages.common import (
 	show_warning,
 	slot_color,
 	slot_label,
+	tinted,
 )
 from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
@@ -486,60 +489,71 @@ class _CommunityPrefsDialog(MessageBoxBase):
 #: Полоса под активной вкладкой и кегль подписи — по макету.
 _TAB_INDICATOR_LENGTH = 26
 _TAB_FONT_PX = 14
+_TAB_COUNT_PX = 12
+_TAB_COUNT_GAP = 7
+_TAB_BADGE_HEIGHT = 18
+#: Поля пункта вкладок (лево, верх, право, низ): по макету 14 по бокам.
+_TAB_ITEM_MARGINS = (14, 0, 14, 0)
 
 
 class _TabItem(PivotItem):
-	"""Пункт вкладок со счётчиком-пилюлей справа от подписи.
+	"""Пункт вкладок: подпись и число рядом (макет, раздел 2).
 
-	Пилюля — библиотечный ``InfoBadge`` (официальный элемент для
-	счётчиков), живёт внутри кнопки пункта: под неё отводится правое
-	поле, чтобы подпись не наезжала. Цвета — пресеты уровней библиотеки:
-	у активной вкладки ``ATTENTION`` (фон — акцент темы, текст — по теме:
-	чёрный в тёмной, белый в светлой), у остальных — приглушённый
-	``INFOAMTION``. Своих цветов здесь нет.
+	Штатный ``PivotItem`` — кнопка; подпись и счётчик лежат в её
+	компоновке, поэтому число стоит вплотную к подписи (зазор 7)
+	при любой ширине пункта. У активной вкладки подпись полужирная,
+	счётчик — пилюля ``InfoBadge`` (акцент темы); у остальных число —
+	приглушённая ``CaptionLabel`` без подложки. Свой текст у кнопки
+	пустой: его рисовала бы кнопка, а не компоновка.
 	"""
 
 	def __init__(self, text: str, parent: QWidget) -> None:
 		super().__init__(parent)
-		self.setText(text)
-		self._badge: InfoBadge | None = None
+		self._text = text
+		self._count: QWidget | None = None
+		self._active = False
+		self._box = QHBoxLayout(self)
+		self._box.setContentsMargins(*_TAB_ITEM_MARGINS)
+		self._box.setSpacing(_TAB_COUNT_GAP)
+		self.setMinimumWidth(0)  # ширина — по подписи, а не по умолчанию кнопки
+		self._label = BodyLabel(text, self)
+		self._label.setFont(font_px(_TAB_FONT_PX))
+		self._box.addWidget(self._label)
+
+	def setSelected(self, isSelected: bool) -> None:  # noqa: N802, N803 — API библиотеки
+		super().setSelected(isSelected)
+		weight = QFont.Weight.DemiBold if isSelected else QFont.Weight.Normal
+		self._label.setFont(font_px(_TAB_FONT_PX, weight))
+		self.updateGeometry()
 
 	def set_count(self, count: int | None, active: bool) -> None:
-		"""Показывает число (None или 0 — без пилюли) и красит его по активности."""
-		if not count:
-			if self._badge is not None:
-				self._badge.hide()
-			self.setContentsMargins(0, 0, 0, 0)
-			self.updateGeometry()
-			return
-		level = InfoLevel.ATTENTION if active else InfoLevel.INFOAMTION
-		if self._badge is None:
-			self._badge = InfoBadge(str(count), self, level)
-		else:
-			self._badge.setText(str(count))
-			self._badge.setLevel(level)
-		self._badge.adjustSize()
-		self._badge.show()
-		self.setContentsMargins(0, 0, self._badge.width() + 6, 0)
+		"""Показывает число (None или 0 — без него); активной — пилюлей."""
+		if self._count is not None:
+			self._box.removeWidget(self._count)
+			self._count.hide()  # deleteLater сработает позже, а след виден сразу
+			self._count.deleteLater()
+			self._count = None
+		if count:
+			if active:
+				badge = InfoBadge(str(count), self, InfoLevel.ATTENTION)
+				badge.setFont(font_px(_TAB_COUNT_PX))
+				badge.setContentsMargins(4, 0, 4, 0)
+				badge.setFixedHeight(_TAB_BADGE_HEIGHT)
+				self._count = badge
+			else:
+				self._count = tinted(CaptionLabel(str(count), self), DIM_TEXT)
+				self._count.setFont(font_px(_TAB_COUNT_PX))
+			self._count.adjustSize()
+			self._box.addWidget(self._count)
+			self._count.show()
 		self.updateGeometry()
-		self._place_badge()
 
 	def sizeHint(self) -> QSize:  # noqa: N802 — API Qt
 		hint: QSize = super().sizeHint()
-		if self._badge is not None and self._badge.isVisible():
-			hint.setWidth(hint.width() + self._badge.width() + 6)
-		return hint
+		return QSize(self._box.sizeHint().width(), hint.height())
 
-	def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 — API Qt
-		super().resizeEvent(event)
-		self._place_badge()
-
-	def _place_badge(self) -> None:
-		if self._badge is None or not self._badge.isVisible():
-			return
-		self._badge.move(
-			self.width() - self._badge.width() - 8, (self.height() - self._badge.height()) // 2
-		)
+	def minimumSizeHint(self) -> QSize:  # noqa: N802 — API Qt
+		return self.sizeHint()
 
 
 class _QueueTab(QWidget):
@@ -565,11 +579,11 @@ class _QueueTab(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(spacing.row_spacing)
-		self._retry_button = PushButton("Повторить ошибки", self)
+		self._retry_button = list_button("Повторить ошибки", self)
 		self._retry_button.setToolTip("Вернуть в очередь все элементы с ошибкой разом")
 		self._retry_button.clicked.connect(self._on_retry_errors)
 		self._retry_button.hide()
-		view_button = PushButton("Вся очередь…", self)
+		view_button = list_button("Вся очередь…", self)
 		view_button.setToolTip("Окно очереди отправки с фильтром по этому сообществу")
 		view_button.clicked.connect(self._on_view_all)
 		self._header_box = QVBoxLayout()
@@ -592,10 +606,10 @@ class _QueueTab(QWidget):
 		footer.addWidget(self._footer, stretch=1)
 		# перелистывание — как в окне «Вся очередь…»: видно только при
 		# нескольких страницах, кнопки, которые никуда не ведут, — шум
-		self._prev_button = PushButton("Назад", self)
+		self._prev_button = list_button("Назад", self)
 		self._prev_button.clicked.connect(bind(self._step, -1))
 		self._page_label = CaptionLabel("", self)
-		self._next_button = PushButton("Вперёд", self)
+		self._next_button = list_button("Вперёд", self)
 		self._next_button.clicked.connect(bind(self._step, 1))
 		for widget in (self._prev_button, self._page_label, self._next_button):
 			footer.addWidget(widget, alignment=Qt.AlignmentFlag.AlignTop)
@@ -836,7 +850,18 @@ class CommunityPage(ScrollArea):
 		# под активной, без рамки-подложки (SegmentedWidget рисует её)
 		self._segments = Pivot(self)
 		self._segments.setIndicatorLength(_TAB_INDICATOR_LENGTH)
-		layout.addWidget(self._segments)
+		# вкладки прижаты влево (сами пункты — своей ширины), под всей
+		# полосой вкладок — разделитель, как в макете
+		tabs_row = QHBoxLayout()
+		tabs_row.setContentsMargins(0, 0, 0, 0)
+		tabs_row.addWidget(self._segments)
+		tabs_row.addStretch()
+		tabs_box = QVBoxLayout()
+		tabs_box.setContentsMargins(0, 0, 0, 0)
+		tabs_box.setSpacing(0)
+		tabs_box.addLayout(tabs_row)
+		tabs_box.addWidget(HorizontalSeparator(self))
+		layout.addLayout(tabs_box)
 		# тело вкладки — единственный виджет в этой компоновке: скрытые
 		# вкладки в ней не живут, и высота страницы считается по видимой.
 		# Штатный QStackedWidget мерит все страницы разом — длинная
@@ -851,7 +876,6 @@ class CommunityPage(ScrollArea):
 			# без обработчика клика: библиотека зовёт его с флагом, которого
 			# обработчик не ждёт, а переключение и так идёт по currentItemChanged
 			self._segments.addWidget(key, item)
-		self._segments.setItemFontSize(_TAB_FONT_PX)
 		self._segments.currentItemChanged.connect(self._show_tab)
 		self._mount_tab(TAB_SETTINGS)
 		self._segments.setCurrentItem(TAB_OVERVIEW)

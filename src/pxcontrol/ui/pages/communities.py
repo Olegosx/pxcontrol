@@ -18,14 +18,16 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
 
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QIcon, QResizeEvent, QShowEvent
+from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
 	QAbstractItemView,
 	QGridLayout,
@@ -78,15 +80,17 @@ from pxcontrol.ui.pages.common import (
 	bot_caption,
 	clear_layout,
 	community_logo,
+	dim_widget,
 	elide_text,
 	error_reporter,
 	exec_dialog,
+	font_px,
 	format_count,
+	list_button,
 	noop,
 	page_layout,
 	plural,
 	queue_counts,
-	round_pixmap,
 	section_header,
 	show_info,
 	show_success,
@@ -127,12 +131,20 @@ _CARD_LOGO_SIZE = 40
 _ROW_LOGO_SIZE = 28
 
 #: Высоты элементов по макету (пиксели).
-_SUMMARY_HEIGHT = 38
 _SUMMARY_BADGE_HEIGHT = 26
-_BADGE_HEIGHT = 22
 _ACTION_HEIGHT = 26
 _TABLE_HEADER_HEIGHT = 34
 _TABLE_ROW_HEIGHT = 50
+
+#: Кегли по макету: кнопки карточки 12.5 → 13, числа таблицы 13.5 → 13,
+#: заголовок таблицы и подстрочник строки — 12.
+_ACTION_FONT_PX = 13
+_TABLE_FONT_PX = 13
+_TABLE_HEADER_FONT_PX = 12
+
+#: Непрозрачность выключенного сообщества по макету: карточка и строка.
+_DISABLED_CARD_OPACITY = 0.62
+_DISABLED_ROW_OPACITY = 0.6
 
 #: Ширины числовых колонок таблицы (пиксели); колонка названия тянется.
 _COLUMN_WIDTHS = {"participants": 96, "queue": 104, "scheduled": 92, "state": 132}
@@ -179,6 +191,18 @@ def metrics_text(
 	scheduled_count = stats.scheduled_count if stats is not None else None
 	scheduled = "нет данных" if scheduled_count is None else f"{scheduled_count} отложено"
 	return MetricsText(queue, scheduled)
+
+
+_NUMBER_RE = re.compile(r"\d[\d\u202f]*")
+
+
+def bold_numbers(text: str) -> str:
+	"""Размечает числа в тексте полужирным (rich text для ``BodyLabel``).
+
+	Макет карточки: «**5** к отправке · **2** ждут». Числа с узким
+	неразрывным пробелом (``format_count``) считаются одним числом.
+	"""
+	return _NUMBER_RE.sub(lambda m: f"<b>{m.group(0)}</b>", html.escape(text))
 
 
 def grid_columns(width: int, card_min: int = CARD_MIN_WIDTH, spacing: int = GRID_SPACING) -> int:
@@ -317,6 +341,8 @@ class CommunityCard(CardWidget):
 		self._state = card_state(community, counts)
 		self.setMinimumHeight(_CARD_MIN_HEIGHT)
 		self.setCursor(Qt.CursorShape.PointingHandCursor)
+		if not community.enabled:
+			dim_widget(self, _DISABLED_CARD_OPACITY)  # макет: карточка 0.62
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(16, 12, 16, 10)
 		layout.setSpacing(9)
@@ -368,7 +394,10 @@ class CommunityCard(CardWidget):
 		texts = metrics_text(row.community, row.counts, row.stats)
 		for text in (texts.queue, texts.scheduled):
 			if text is not None:
-				group_layout.addWidget(BodyLabel(text, group))
+				label = BodyLabel(group)
+				label.setTextFormat(Qt.TextFormat.RichText)
+				label.setText(bold_numbers(text))  # макет: числа полужирным
+				group_layout.addWidget(label)
 		group_layout.addStretch()
 		layout.addWidget(group, stretch=1)
 		text = state_badge_text(self._state, row.counts)
@@ -401,6 +430,8 @@ class CommunityCard(CardWidget):
 				button = PrimaryPushButton(ACTION_LABELS[action], box)
 			else:
 				button = PushButton(ACTION_LABELS[action], box)
+			button.setFixedHeight(_ACTION_HEIGHT)  # макет: 26 / 12.5 px
+			button.setFont(font_px(_ACTION_FONT_PX))
 			if not action_available(action, community):
 				button.setEnabled(False)
 				button.setToolTip(MAINTENANCE_UNAVAILABLE)
@@ -454,19 +485,63 @@ class _TileGrid(QWidget):
 #: Колонки таблицы по порядку: заголовок (пустой — по виду раздела) и сортировка.
 _TABLE_COLUMNS: tuple[tuple[str, TableColumn], ...] = (
 	("Название", TableColumn.TITLE),
-	("@имя", TableColumn.TITLE),
 	("", TableColumn.PARTICIPANTS),
 	("К отправке", TableColumn.QUEUE),
 	("Отложено", TableColumn.SCHEDULED),
 	("Состояние", TableColumn.STATE),
 )
 
+#: Ширины колонок по порядку (None — колонка названия тянется).
+_TABLE_WIDTHS: tuple[int | None, ...] = (
+	None,
+	_COLUMN_WIDTHS["participants"],
+	_COLUMN_WIDTHS["queue"],
+	_COLUMN_WIDTHS["scheduled"],
+	_COLUMN_WIDTHS["state"],
+)
+
 
 def _number_item(value: int | None) -> QTableWidgetItem:
-	"""Числовая ячейка: вправо; нет данных — «—»."""
+	"""Числовая ячейка: вправо, кегль макета; нет данных — «—»."""
 	item = QTableWidgetItem("—" if value is None else format_count(value))
 	item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+	item.setFont(font_px(_TABLE_FONT_PX))
 	return item
+
+
+def _name_cell(row: Row, parent: QWidget) -> QWidget:
+	"""Ячейка названия по макету: аватар 28, название, под ним @имя."""
+	community, stats = row.community, row.stats
+	box = QWidget(parent)
+	layout = QHBoxLayout(box)
+	layout.setContentsMargins(16, 0, 8, 0)
+	layout.setSpacing(11)
+	avatar = stats.avatar_path if stats is not None else None
+	layout.addWidget(community_logo(box, community.id, community.title, avatar, _ROW_LOGO_SIZE))
+	column = QVBoxLayout()
+	column.setSpacing(0)
+	title = BodyLabel(box)
+	title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+	elide_text(title, community.title)
+	column.addWidget(title)
+	name = CaptionLabel(f"@{community.username}" if community.username else "имя не задано", box)
+	column.addWidget(name)
+	layout.addLayout(column, stretch=1)
+	return box
+
+
+def _state_cell(row: Row, parent: QWidget) -> QWidget | None:
+	"""Ячейка состояния: та же плашка, что на карточке; штатное — «—» текстом."""
+	state = card_state(row.community, row.counts)
+	text = state_badge_text(state, row.counts)
+	if text is None:
+		return None
+	box = QWidget(parent)
+	layout = QHBoxLayout(box)
+	layout.setContentsMargins(8, 0, 8, 0)
+	layout.addWidget(state_badge(box, state, text))
+	layout.addStretch()
+	return box
 
 
 class _Table(TableWidget):
@@ -503,6 +578,8 @@ class _Table(TableWidget):
 		self.setRowCount(len(self._rows))
 		self.setBorderVisible(True)
 		self.setBorderRadius(6)
+		self.setShowGrid(False)  # макет: только горизонтальные линии строк
+		self.setAlternatingRowColors(False)
 		self.setWordWrap(False)
 		self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 		self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -513,10 +590,13 @@ class _Table(TableWidget):
 		vertical = self.verticalHeader()
 		if vertical is not None:
 			vertical.hide()
+			vertical.setDefaultSectionSize(_TABLE_ROW_HEIGHT)
 		for index, row in enumerate(self._rows):
 			self._fill_row(index, row)
 		header = self.horizontalHeader()
 		if header is not None:
+			header.setFixedHeight(_TABLE_HEADER_HEIGHT)
+			header.setFont(font_px(_TABLE_HEADER_FONT_PX))
 			header.setSortIndicatorShown(True)
 			header.setSortIndicator(
 				self._column_index(column),
@@ -524,9 +604,22 @@ class _Table(TableWidget):
 			)
 			header.sectionClicked.connect(self._on_header)
 			header.setStretchLastSection(False)
-		self.resizeColumnsToContents()
-		if header is not None:
-			header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+			# заголовок названия — влево (как ячейка), числовые — вправо
+			first = self.horizontalHeaderItem(0)
+			if first is not None:
+				first.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+			for index in (1, 2, 3):
+				item = self.horizontalHeaderItem(index)
+				if item is not None:
+					item.setTextAlignment(
+						Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+					)
+			for index, width in enumerate(_TABLE_WIDTHS):
+				if width is None:
+					header.setSectionResizeMode(index, QHeaderView.ResizeMode.Stretch)
+				else:
+					header.setSectionResizeMode(index, QHeaderView.ResizeMode.Fixed)
+					self.setColumnWidth(index, width)
 		self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 		self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 		self._fit_height()
@@ -540,24 +633,30 @@ class _Table(TableWidget):
 		return 0
 
 	def _fill_row(self, index: int, row: Row) -> None:
+		"""Строка по макету: название с аватаром и @именем, числа, плашка."""
 		community, counts, stats = row.community, row.counts, row.stats
-		name = QTableWidgetItem(community.title)
-		avatar = stats.avatar_path if stats is not None else None
-		pixmap = round_pixmap(avatar, _ROW_LOGO_SIZE) if avatar else None
-		if pixmap is not None:
-			name.setIcon(QIcon(pixmap))
-		self.setItem(index, 0, name)
-		self.setItem(
-			index, 1, QTableWidgetItem(f"@{community.username}" if community.username else "—")
-		)
-		self.setItem(index, 2, _number_item(stats.participants if stats is not None else None))
+		self.setItem(index, 0, QTableWidgetItem(""))  # текст рисует виджет ячейки
+		name = _name_cell(row, self)
+		self.setCellWidget(index, 0, name)
+		self.setItem(index, 1, _number_item(stats.participants if stats is not None else None))
 		queue = _number_item(counts.planned)
 		if counts.waiting:
 			queue.setText(f"{counts.planned} +{counts.waiting}")
-		self.setItem(index, 3, queue)
-		self.setItem(index, 4, _number_item(stats.scheduled_count if stats is not None else None))
-		state = card_state(community, counts)
-		self.setItem(index, 5, QTableWidgetItem(state_badge_text(state, counts) or "—"))
+		self.setItem(index, 2, queue)
+		self.setItem(index, 3, _number_item(stats.scheduled_count if stats is not None else None))
+		state = _state_cell(row, self)
+		if state is None:
+			dash = QTableWidgetItem("—")
+			dash.setFont(font_px(_TABLE_FONT_PX))
+			self.setItem(index, 4, dash)
+		else:
+			self.setItem(index, 4, QTableWidgetItem(""))
+			self.setCellWidget(index, 4, state)
+		if not community.enabled:
+			# выключенное сообщество приглушено (макет: строка 0.6)
+			for widget in (name, state):
+				if widget is not None:
+					dim_widget(widget, _DISABLED_ROW_OPACITY)
 
 	def _fit_height(self) -> None:
 		"""Высота по строкам: таблица внутри прокручиваемой страницы."""
@@ -878,13 +977,16 @@ class CommunitiesPage(ScrollArea):
 		if totals.errors:
 			layout.addWidget(VerticalSeparator(bar))
 			text = f"{totals.errors} {plural(totals.errors, 'ошибка', 'ошибки', 'ошибок')}"
-			errors = PushButton(text, bar)
+			errors = list_button(text, bar, height=_SUMMARY_BADGE_HEIGHT)
 			errors.setToolTip("Элементы очереди отправки с ошибкой — открыть очередь")
 			errors.clicked.connect(self._open_errors)
 			layout.addWidget(errors)
 		if totals.without_publisher:
 			layout.addWidget(VerticalSeparator(bar))
 			badge = InfoBadge.attension(f"{totals.without_publisher} без публикатора", parent=bar)
+			badge.setFont(font_px(_ACTION_FONT_PX))
+			badge.setFixedHeight(_SUMMARY_BADGE_HEIGHT)
+			badge.setContentsMargins(8, 0, 8, 0)
 			layout.addWidget(badge)
 		layout.addStretch()
 		self._summary_box.addWidget(bar)

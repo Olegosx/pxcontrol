@@ -23,6 +23,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
+	QGraphicsOpacityEffect,
 	QHBoxLayout,
 	QLabel,
 	QLayout,
@@ -521,6 +522,26 @@ def tinted(label: Any, pair: tuple[str, str]) -> Any:
 	return label
 
 
+#: Кнопка в строке списка по макету: ниже штатной (28 вместо 33), кегль 13.
+LIST_BUTTON_HEIGHT = 28
+LIST_BUTTON_FONT_PX = 13
+
+
+def list_button(text: str, parent: QWidget, *, height: int = LIST_BUTTON_HEIGHT) -> PushButton:
+	"""Штатная ``PushButton`` размером строки списка (макет: 28 / 13 px)."""
+	button = PushButton(text, parent)
+	button.setFixedHeight(height)
+	button.setFont(font_px(LIST_BUTTON_FONT_PX))
+	return button
+
+
+def dim_widget(widget: QWidget, opacity: float) -> None:
+	"""Приглушает виджет штатным эффектом Qt (выключенное сообщество в макете)."""
+	effect = QGraphicsOpacityEffect(widget)
+	effect.setOpacity(opacity)
+	widget.setGraphicsEffect(effect)
+
+
 def section_header(
 	parent: QWidget,
 	title: str,
@@ -684,6 +705,8 @@ class CollapsibleCard(CardWidget):
 		head_row = QHBoxLayout(header)
 		head_row.setContentsMargins(*((14, 10, 14, 10) if stacked else (12, 8, 16, 8)))
 		head_row.setSpacing(12 if stacked else 8)
+		if stacked:
+			self._chevron.setIconSize(QSize(13, 13))
 		head_row.addWidget(self._chevron)
 		if leading is not None:
 			leading.setParent(header)
@@ -700,7 +723,9 @@ class CollapsibleCard(CardWidget):
 		self._bar: ProgressBar | None = None
 		self._progress_text: CaptionLabel | None = None
 		if stacked:
-			# колонка: название сверху, сводка (или полоса прогресса) под ним
+			# колонка: название сверху, сводка (или полоса прогресса) под ним;
+			# название — обычным начертанием (макет: 14 px, без жирного)
+			self._title.setFont(font_px(14))
 			self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 			column = QVBoxLayout()
 			column.setSpacing(2)
@@ -728,11 +753,22 @@ class CollapsibleCard(CardWidget):
 			trailing.setParent(header)
 			head_row.addWidget(trailing)
 		outer.addWidget(header)
+		# разделитель между шапкой и телом (макет); виден вместе с телом
+		self._divider: HorizontalSeparator | None = None
+		if stacked:
+			self._divider = HorizontalSeparator(self)
+			self._divider.setContentsMargins(14, 0, 14, 0)
+			outer.addWidget(self._divider)
+			self._divider.hide()
 		self._body = QWidget(self)
 		#: Компоновка тела — раздел добавляет сюда своё содержимое.
 		self.body = QVBoxLayout(self._body)
-		self.body.setContentsMargins(*density.spacing().card_body_margins)
-		self.body.setSpacing(density.spacing().card_body_spacing)
+		if stacked:
+			self.body.setContentsMargins(14, 0, 14, 14)
+			self.body.setSpacing(10)
+		else:
+			self.body.setContentsMargins(*density.spacing().card_body_margins)
+			self.body.setSpacing(density.spacing().card_body_spacing)
 		outer.addWidget(self._body)
 		self._body.hide()
 
@@ -767,6 +803,8 @@ class CollapsibleCard(CardWidget):
 		"""Показывает или прячет тело; стрелка отражает состояние."""
 		changed = self._body.isVisible() != expanded
 		self._body.setVisible(expanded)
+		if self._divider is not None:
+			self._divider.setVisible(expanded)
 		icon = FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED
 		self._chevron.setIcon(icon)
 		self._refresh_summary()
@@ -1327,8 +1365,12 @@ class _QueueCard:
 		self._actions_box.addWidget(action)
 
 	def _button(self, text: str) -> QPushButton:
-		"""Кнопка шапки — библиотечная ``PushButton`` (обоих режимов)."""
-		button: QPushButton = PushButton(text, self._actions)
+		"""Кнопка шапки: штатная; в компактном режиме — размером строки (28 / 13)."""
+		button: QPushButton
+		if self._compact:
+			button = list_button(text, self._actions)
+		else:
+			button = PushButton(text, self._actions)
 		return button
 
 
@@ -1791,22 +1833,45 @@ class WhenRow:
 	времена канала (:func:`set_times`), текст правится вручную («ЧЧ:ММ»).
 	"""
 
-	def __init__(self, dialog: QWidget, layout: QVBoxLayout) -> None:
+	def __init__(
+		self,
+		dialog: QWidget,
+		layout: QVBoxLayout,
+		*,
+		compact: bool = False,
+		trailing: Sequence[QWidget] = (),
+	) -> None:
+		"""``compact`` — ряд по макету карточки очереди: переключатель без
+		подписей On/Off, дата «дд.мм.гггг» шириной 126, время 92, дата
+		и время сразу за переключателем; ``trailing`` — виджеты в правом
+		краю ряда (кнопки формы)."""
 		row = QHBoxLayout()
+		row.setSpacing(10 if compact else row.spacing())
 		row.addWidget(BodyLabel("Опубликовать сейчас", dialog))
 		self._now_switch = SwitchButton(dialog)
 		self._now_switch.setChecked(False)
 		self._now_switch.checkedChanged.connect(self._on_now_toggled)
 		row.addWidget(self._now_switch)
-		row.addStretch()
+		if not compact:
+			row.addStretch()
 		self._date = CalendarPicker(dialog)
 		self._date.setDate(QDate.currentDate())
 		self._time = EditableComboBox(dialog)
 		self._time.setPlaceholderText("ЧЧ:ММ")
 		self._time.setText(QTime.currentTime().addSecs(DEFAULT_SCHEDULE_OFFSET_S).toString("HH:mm"))
 		self._time.setMaximumWidth(120)
+		if compact:
+			self._now_switch.setOnText("")
+			self._now_switch.setOffText("")
+			self._date.setDateFormat("dd.MM.yyyy")
+			self._date.setFixedWidth(126)
+			self._time.setFixedWidth(92)
 		row.addWidget(self._date)
 		row.addWidget(self._time)
+		if trailing:
+			row.addStretch()
+			for widget in trailing:
+				row.addWidget(widget)
 		layout.addLayout(row)
 
 	def _on_now_toggled(self, now: bool) -> None:
