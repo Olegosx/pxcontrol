@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 
 from pxcontrol.engine.errors import EngineError
@@ -300,18 +300,87 @@ class CommunityInfo:
 
 @dataclass(frozen=True)
 class CommunityStatsInfo:
-	"""Живая статистика сообщества из полной информации о канале.
+	"""Живая статистика сообщества из полной информации о нём.
 
-	Оба поля — из одного ответа Telegram (``GetFullChannelRequest``):
-	отдельных запросов на онлайн нет. None — Telegram поле не отдал.
+	Userbot берёт всё из одного ответа (``GetFullChannelRequest``), бот —
+	из пары запросов Bot API (``getChat`` + ``getChatMemberCount``);
+	отдельных запросов на онлайн нет. None — источник поле не отдал.
 
 	Attributes:
 		participants: подписчики канала или участники группы.
-		online: сколько участников сейчас онлайн (только у групп).
+		online: сколько участников сейчас онлайн (только у групп,
+			только через userbot).
+		can_view_stats: доступна ли аккаунту встроенная статистика
+			Telegram (признак сервера; бот-путь её не видит — False).
+		linked_chat_id: связанное сообщество в формате Bot API (-100…):
+			у канала — чат обсуждений, у группы — канал; None — нет.
 	"""
 
 	participants: int | None
 	online: int | None
+	can_view_stats: bool = False
+	linked_chat_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DayPoint:
+	"""Точка ряда по дням: дата и целое значение."""
+
+	day: date
+	value: int
+
+
+@dataclass(frozen=True)
+class CommunityAnalytics:
+	"""Встроенная статистика Telegram, разобранная транспортом.
+
+	Доступна администратору сообщества достаточного размера (признак
+	``can_view_stats`` в :class:`CommunityStatsInfo`); историю считает
+	и хранит сам Telegram — приложение получает готовые ряды. Чего
+	в ответе не оказалось (график не построен, ряд не опознан) —
+	пустой ряд или None: вкладка покажет «нет данных», а не сломается.
+
+	Attributes:
+		period_from: начало периода абсолютных чисел (обычно неделя).
+		period_to: конец периода.
+		members: участники сейчас и в прошлый период (current, previous);
+			None — Telegram не отдал.
+		growth: участники по дням (абсолютные значения).
+		joined: пришедшие по дням.
+		left: ушедшие по дням.
+		hours: активность по часам суток (24 значения; у канала —
+			просмотры, у группы — сообщения); None — графика нет.
+		views_per_post: просмотров на пост сейчас и раньше (только
+			каналы); None — нет.
+		recent_post_views: просмотры последних постов (только каналы),
+			от новых к старым.
+	"""
+
+	period_from: date
+	period_to: date
+	members: tuple[int, int] | None = None
+	growth: tuple[DayPoint, ...] = ()
+	joined: tuple[DayPoint, ...] = ()
+	left: tuple[DayPoint, ...] = ()
+	hours: tuple[int, ...] | None = None
+	views_per_post: tuple[int, int] | None = None
+	recent_post_views: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class HistoryMarks:
+	"""Крайние точки истории сообщества, прочитанные транспортом.
+
+	Attributes:
+		last_post_at: момент последнего сообщения в ленте; None — лента
+			пуста или недоступна.
+		created_at: момент первого сообщения — служебной записи
+			о создании; None — не запрашивали или история скрыта
+			(у супергруппы после переезда первых записей может не быть).
+	"""
+
+	last_post_at: datetime | None
+	created_at: datetime | None
 
 
 @dataclass(frozen=True)

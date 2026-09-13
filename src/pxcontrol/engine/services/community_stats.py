@@ -1,33 +1,65 @@
-"""Кэш статистики сообществ: подписчики, онлайн, отложенные, аватар.
+"""Кэш статистики сообществ и периодический опрос (ADR-0027).
 
-Дашборд рисует карточки мгновенно из этого кэша; обновление идёт фоном
-с TTL. Флуд-лимит действует на аккаунт целиком, и помнит об этом дорожка
-аккаунта (ADR-0024): остальные его сообщества получат мгновенный отказ,
-не тревожа Telegram, — своего списка «провинившихся» проходу вести
-не нужно. Сбои сети кэш не затирают — остаются прежние значения.
+Интерфейс читает только кэш: дашборд — снимок для карточек, страница
+сообщества — сводку «Обзора». Наполняет кэш **периодическая задача
+движка**, а не показ страницы, — иначе числа обновлялись бы только
+пока человек смотрит на дашборд.
 
-Аватары хранятся файлами в каталоге кэша (в БД — только путь); файл
-перекачивается, когда его нет или он старше суток (аватары меняются
-редко, гонять скачивание каждый проход незачем).
+Два темпа опроса, по источникам:
+
+- **бот, раз в 15 минут** — участники и связанное сообщество через
+  Bot API. Бот-путь не проходит через дорожку аккаунта (лимиты Bot API —
+  на бота), поэтому загрузки userbot ему не мешают: это дешёвый частый
+  источник для локальной истории;
+- **userbot, раз в 6 часов** — всё, что умеет только он: онлайн,
+  отложенные, аватар, признак доступности встроенной статистики,
+  связанное сообщество, последний пост, дата создания (однократно)
+  и — где доступна — встроенная статистика Telegram. Фоновый приоритет
+  дорожки (ADR-0024): публикация идёт вперёд, долгая загрузка
+  задерживает опрос, а не наоборот.
+
+Флуд-лимит действует на аккаунт целиком, и помнит об этом дорожка:
+остальные его сообщества получат мгновенный отказ, не тревожа Telegram.
+Сбои сети кэш не затирают — остаются прежние значения.
+
+Каждый успешный проход оставляет снимок в истории (участники, онлайн);
+история старше срока хранения убирается тем же проходом. Аватары
+хранятся файлами в каталоге кэша (в БД — только путь); файл
+перекачивается, когда его нет или он старше суток.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Community, CommunityStats
+from pxcontrol.engine.db.models import (
+	Community,
+	CommunityAnalyticsRow,
+	CommunityStats,
+	CommunityStatsHistory,
+)
+from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.services.community_overview import (
+	CommunityOverviewDto,
+	HistorySample,
+	build_overview,
+)
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.types import (
+	CommunityAnalytics,
 	CommunityStatsInfo,
+	DayPoint,
+	HistoryMarks,
 	ScheduledMessage,
 	TelegramFloodError,
 )
@@ -35,11 +67,31 @@ from pxcontrol.paths import cache_dir
 
 logger = logging.getLogger(__name__)
 
-#: Свежесть кэша статистики: моложе — сообщество в проходе пропускается.
-STATS_TTL_S = 15 * 60
+#: Темп опроса ботом (участники, связанный чат), секунды.
+BOT_POLL_S = 15 * 60
+
+#: Темп полного опроса userbot-ом (онлайн, отложенные, статистика), секунды.
+FULL_POLL_S = 6 * 60 * 60
+
+#: Шаг периодической задачи: как часто проверять, кому пора. Минута —
+#: с запасом мельче любого темпа; сама проверка без сети дешёвая.
+POLL_TICK_S = 60
+
+#: Срок хранения локальной истории снимков, дни. Графикам нужны 30,
+#: запас втрое; при опросе раз в 15 минут — до ~9 тысяч строк на сообщество.
+HISTORY_KEEP_DAYS = 90
 
 #: Свежесть файла аватара: старше — перекачивается (по mtime файла).
 AVATAR_TTL_S = 24 * 60 * 60
+
+#: Сколько ждать периодическую задачу при остановке движка (ADR-0020):
+#: между обращениями к Telegram она выходит сразу, внутри обращения —
+#: дожидается его конца.
+_SHUTDOWN_TIMEOUT_S = 30.0
+
+
+class CommunityStatsError(EngineError):
+	"""Ошибка чтения статистики (с понятным человеку текстом)."""
 
 
 class _StatsGateway(Protocol):
@@ -53,14 +105,22 @@ class _StatsGateway(Protocol):
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
 
-	async def bot_member_count(self, token: str, chat_id: str) -> int: ...
+	async def userbot_history_marks(
+		self, account_id: int, chat_id: str, *, with_created: bool
+	) -> HistoryMarks: ...
+
+	async def userbot_community_analytics(
+		self, account_id: int, chat_id: str
+	) -> CommunityAnalytics: ...
+
+	async def bot_community_stats(self, token: str, chat_id: str) -> CommunityStatsInfo: ...
 
 
 @dataclass(frozen=True)
 class CommunityStatsDto:
-	"""Снимок статистики сообщества для интерфейса (из кэша).
+	"""Снимок статистики сообщества для карточек дашборда (из кэша).
 
-	None в поле — данные ещё не получены или Telegram их не отдаёт
+	None в поле — данные ещё не получены или источник их не отдаёт
 	(онлайн есть только у групп; у бот-сообществ нет аватара и отложек).
 	"""
 
@@ -79,8 +139,69 @@ def _aware(moment: datetime | None) -> datetime | None:
 	return moment.replace(tzinfo=UTC)
 
 
+def _as_int(value: object) -> int | None:
+	"""Целое из собранного значения (None — не число)."""
+	return value if isinstance(value, int) else None
+
+
+def due(last: datetime | None, every_s: int, now: datetime) -> bool:
+	"""Пора ли опрашивать: прошлого прохода не было или он старше срока."""
+	last = _aware(last)
+	return last is None or (now - last).total_seconds() >= every_s
+
+
+# --- сериализация встроенной статистики -------------------------------------------
+
+
+def analytics_to_payload(analytics: CommunityAnalytics) -> dict[str, Any]:
+	"""Разобранные ряды → JSON-совместимый словарь (даты — ISO)."""
+
+	def points(series: tuple[DayPoint, ...]) -> list[list[Any]]:
+		return [[point.day.isoformat(), point.value] for point in series]
+
+	return {
+		"period_from": analytics.period_from.isoformat(),
+		"period_to": analytics.period_to.isoformat(),
+		"members": list(analytics.members) if analytics.members is not None else None,
+		"growth": points(analytics.growth),
+		"joined": points(analytics.joined),
+		"left": points(analytics.left),
+		"hours": list(analytics.hours) if analytics.hours is not None else None,
+		"views_per_post": (
+			list(analytics.views_per_post) if analytics.views_per_post is not None else None
+		),
+		"recent_post_views": list(analytics.recent_post_views),
+	}
+
+
+def analytics_from_payload(payload: Any) -> CommunityAnalytics | None:
+	"""Словарь из БД → ряды; None — запись битая (в журнал, не наружу)."""
+
+	def points(raw: Any) -> tuple[DayPoint, ...]:
+		return tuple(DayPoint(date.fromisoformat(day), int(value)) for day, value in raw)
+
+	def pair(raw: Any) -> tuple[int, int] | None:
+		return (int(raw[0]), int(raw[1])) if raw else None
+
+	try:
+		return CommunityAnalytics(
+			period_from=date.fromisoformat(payload["period_from"]),
+			period_to=date.fromisoformat(payload["period_to"]),
+			members=pair(payload.get("members")),
+			growth=points(payload.get("growth", [])),
+			joined=points(payload.get("joined", [])),
+			left=points(payload.get("left", [])),
+			hours=tuple(int(v) for v in payload["hours"]) if payload.get("hours") else None,
+			views_per_post=pair(payload.get("views_per_post")),
+			recent_post_views=tuple(int(v) for v in payload.get("recent_post_views", [])),
+		)
+	except (KeyError, TypeError, ValueError, AttributeError):
+		logger.warning("Запись статистики Telegram не разобрана — считаю, что её нет.")
+		return None
+
+
 class CommunityStatsService:
-	"""Читает кэш статистики и обновляет его из Telegram по TTL."""
+	"""Кэш статистики, периодический опрос и сводка «Обзора»."""
 
 	def __init__(
 		self,
@@ -96,6 +217,10 @@ class CommunityStatsService:
 		self._gateway = gateway
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._avatars_dir = avatars_dir if avatars_dir is not None else cache_dir() / "avatars"
+		self._stop = asyncio.Event()
+		self._poller: asyncio.Task[None] | None = None
+
+	# --- чтение кэша -------------------------------------------------------------
 
 	async def snapshot(self) -> list[CommunityStatsDto]:
 		"""Текущий кэш статистики всех сообществ (без похода в сеть)."""
@@ -113,22 +238,124 @@ class CommunityStatsService:
 				for row in rows
 			]
 
-	async def refresh_stale(self, ttl_s: int = STATS_TTL_S) -> bool:
-		"""Обновляет кэш сообществ со снимком старше ``ttl_s`` секунд.
+	async def overview(
+		self, community_id: int, now: datetime | None = None
+	) -> CommunityOverviewDto:
+		"""Сводка «Обзора» сообщества из кэша, истории и статистики Telegram.
 
-		Опрашиваются только активные сообщества; сообщество с userbot —
-		его аккаунтом-умолчанием (подписчики + онлайн одним запросом,
-		отложенные, аватар), сообщество только с ботом — числом
-		участников через бота. Отложки группы считаются по умолчанию
-		сообщества: чужие (созданные другими участниками) в счёт
-		не попадают — карточке важен порядок величины, точный список
-		остаётся за «Расписанием».
+		Без похода в сеть. Ряды — из статистики Telegram, если она
+		есть, иначе из локальных снимков (оценка); связанное сообщество
+		называется по имени, если оно подключено в приложении. ``now`` —
+		точка отсчёта окон «за N дней» (по умолчанию текущий момент;
+		тесты передают свою).
+
+		Raises:
+			CommunityStatsError: Сообщество не найдено.
+		"""
+		async with self._db.session_factory() as session:
+			if await session.get(Community, community_id) is None:
+				raise CommunityStatsError("Сообщество не найдено — обновите список.")
+			row = await session.get(CommunityStats, community_id)
+			analytics_row = await session.get(CommunityAnalyticsRow, community_id)
+			history = (
+				(
+					await session.execute(
+						select(CommunityStatsHistory)
+						.where(CommunityStatsHistory.community_id == community_id)
+						.order_by(CommunityStatsHistory.at)
+					)
+				)
+				.scalars()
+				.all()
+			)
+			linked_title: str | None = None
+			if row is not None and row.linked_chat_id:
+				linked = (
+					await session.execute(
+						select(Community.title).where(Community.tg_chat_id == row.linked_chat_id)
+					)
+				).scalar_one_or_none()
+				linked_title = linked
+		samples = [
+			HistorySample(_aware(item.at) or datetime.now(UTC), item.participants, item.online)
+			for item in history
+		]
+		analytics = (
+			analytics_from_payload(analytics_row.payload) if analytics_row is not None else None
+		)
+		now = (now if now is not None else datetime.now(UTC)).astimezone()
+		return build_overview(
+			community_id,
+			participants=row.participants if row is not None else None,
+			online=row.online if row is not None else None,
+			samples=samples,
+			analytics=analytics,
+			today=now.date(),
+			tz=now.tzinfo or UTC,
+			can_view_stats=bool(row.can_view_stats) if row is not None else False,
+			linked_chat_id=row.linked_chat_id if row is not None else None,
+			linked_title=linked_title,
+			tg_created_at=_aware(row.tg_created_at) if row is not None else None,
+			last_post_at=_aware(row.last_post_at) if row is not None else None,
+			fetched_at=_aware(row.fetched_at) if row is not None else None,
+			deleted=(
+				(row.deleted_found, row.deleted_removed, _aware(row.deleted_checked_at))
+				if row is not None
+				else (None, None, None)
+			),
+		)
+
+	# --- периодический опрос (ADR-0027) ------------------------------------------
+
+	def start_polling(self) -> None:
+		"""Запускает периодическую задачу опроса (при старте движка)."""
+		if self._poller is None or self._poller.done():
+			self._poller = asyncio.create_task(self._poll_forever())
+
+	async def shutdown(self) -> None:
+		"""Гасит периодическую задачу кооперативно (ADR-0020).
+
+		Взводится событие остановки: между обращениями задача выходит
+		сразу, начатое обращение к Telegram дожидается конца; не успевшая
+		за страховочный срок — отменяется как последнее средство.
+		"""
+		self._stop.set()
+		if self._poller is not None:
+			with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+				await asyncio.wait_for(self._poller, timeout=_SHUTDOWN_TIMEOUT_S)
+			self._poller = None
+
+	async def _poll_forever(self) -> None:
+		"""Цикл опроса: проход по «должникам», пауза, снова — до остановки."""
+		while not self._stop.is_set():
+			try:
+				await self.refresh_due()
+			except Exception:  # noqa: BLE001 — опрос не должен умирать
+				logger.exception("Проход опроса статистики не удался.")
+			with contextlib.suppress(TimeoutError):
+				await asyncio.wait_for(self._stop.wait(), timeout=POLL_TICK_S)
+
+	async def refresh_due(
+		self,
+		now: datetime | None = None,
+		*,
+		bot_every_s: int = BOT_POLL_S,
+		full_every_s: int = FULL_POLL_S,
+	) -> bool:
+		"""Опрашивает сообщества, чей срок по источнику вышел.
+
+		Только активные сообщества. Бот — где назначен и прошёл его темп;
+		userbot — где есть публикатор и прошёл его темп (у сообщества
+		без бота только он и обновляет участников — раз в 6 часов,
+		и это осознанно: частая беготня userbot-ом задевает публикацию).
+		Каждый успешный проход оставляет снимок в истории; в конце
+		убирается история старше срока хранения.
 
 		Returns:
-			True — хоть одно сообщество обновилось (дашборду пора
-			перечитать снимок), False — всё свежо или недоступно.
+			True — хоть одно сообщество обновилось (интерфейсу пора
+			перечитать кэш), False — никому не пора или всё недоступно.
 		"""
-		now = datetime.now(UTC)
+		now = now if now is not None else datetime.now(UTC)
 		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
 		async with self._db.session_factory() as session:
 			communities = (
@@ -142,33 +369,53 @@ class CommunityStatsService:
 				.scalars()
 				.all()
 			)
-			fresh_ids = {
-				row.community_id
+			rows = {
+				row.community_id: row
 				for row in (await session.execute(select(CommunityStats))).scalars()
-				if row.fetched_at is not None
-				and (now - (_aware(row.fetched_at) or now)).total_seconds() < ttl_s
 			}
-			bot_tokens = {
-				community.id: community.bot.token
-				for community in communities
-				if community.bot is not None
-			}
+			bot_tokens = {c.id: c.bot.token for c in communities if c.bot is not None}
 		changed = False
 		for community in communities:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
-			if community.id in fresh_ids:
-				continue
+			row = rows.get(community.id)
+			if self._stop.is_set():
+				break
+			token = bot_tokens.get(community.id)
+			if token is not None and due(row.bot_fetched_at if row else None, bot_every_s, now):
+				update = await self._bot_pass(community, token)
+				if update is not None:
+					await self._store(community.id, update, now, stamp="bot_fetched_at")
+					changed = True
 			account_id = community.default_tg_account_id
-			update = await self._collect(community, account_id, bot_tokens.get(community.id))
-			if update is None:
-				continue
-			await self._store(community.id, update, now)
-			changed = True
+			if account_id is not None and due(
+				row.full_fetched_at if row else None, full_every_s, now
+			):
+				update = await self._full_pass(community, account_id, row, now)
+				if update is not None:
+					await self._store(community.id, update, now, stamp="full_fetched_at")
+					changed = True
+		await self._prune_history(now)
 		return changed
 
+	async def record_members_report(
+		self, community_id: int, found: int, removed: int, at: datetime | None = None
+	) -> None:
+		"""Запоминает итог прохода обслуживания по удалённым аккаунтам.
+
+		Крючок из очереди обслуживания (ADR-0026): «Обзор» показывает
+		число мёртвых душ и дату прохода, сам проход остаётся во вкладке
+		«Обслуживание».
+		"""
+		await self._store(
+			community_id,
+			{"deleted_found": found, "deleted_removed": removed, "deleted_checked_at": at},
+			at or datetime.now(UTC),
+			stamp=None,
+		)
+
 	async def drop(self, community_id: int) -> None:
-		"""Убирает файл аватара удаляемого сообщества (строку — каскад БД)."""
+		"""Убирает файл аватара удаляемого сообщества (строки — каскад БД)."""
 		target = self._avatar_target(community_id)
 		removed = await asyncio.to_thread(self._remove_file, target)
 		if removed:
@@ -176,58 +423,74 @@ class CommunityStatsService:
 
 	# --- сбор данных -------------------------------------------------------------
 
-	async def _collect(
+	async def _bot_pass(self, community: Community, token: str) -> dict[str, object] | None:
+		"""Частый дешёвый проход ботом: участники и связанный чат."""
+		try:
+			info = await self._gateway.bot_community_stats(token, community.tg_chat_id)
+		except Exception as exc:  # noqa: BLE001 — фоновая сводка, кэш не затираем
+			logger.info(
+				"Участники «%s» через бота не обновлены (%s: %s).",
+				community.title,
+				type(exc).__name__,
+				exc,
+			)
+			return None
+		update: dict[str, object] = {"participants": info.participants}
+		if info.linked_chat_id is not None:
+			update["linked_chat_id"] = info.linked_chat_id
+		return update
+
+	async def _full_pass(
 		self,
 		community: Community,
-		account_id: int | None,
-		bot_token: str | None,
+		account_id: int,
+		row: CommunityStats | None,
+		now: datetime,
 	) -> dict[str, object] | None:
-		"""Собирает свежие значения; None — не удалось ничего.
+		"""Редкий полный проход userbot-ом; None — не удалось ничего.
 
 		Каждый источник независим: сбой одного не отменяет остальные —
-		уже собранное сообществу засчитывается.
+		уже собранное сообществу засчитывается. Флуд-лимит прекращает
+		проход по сообществу: дорожка аккаунта уже заморожена (ADR-0024),
+		остальные его сообщества получат отказ, не дойдя до сети.
 		"""
 		update: dict[str, object] = {}
-		if account_id is not None:
-			try:
-				stats = await self._gateway.userbot_community_stats(
-					account_id, community.tg_chat_id
-				)
-				update["participants"] = stats.participants
-				update["online"] = stats.online
-				scheduled = await self._gateway.get_scheduled(account_id, community.tg_chat_id)
-				update["scheduled_count"] = len(scheduled)
-				avatar_changed, avatar_path = await self._refresh_avatar(account_id, community)
-				if avatar_changed:
-					update["avatar_path"] = avatar_path
-			except TelegramFloodError as exc:
-				# дорожка аккаунта уже заморожена этим лимитом (ADR-0024):
-				# остальные его сообщества получат отказ, не дойдя до сети
-				logger.info(
-					"Статистика «%s» пропущена: аккаунт id=%s под флуд-лимитом (%s).",
-					community.title,
-					account_id,
-					exc,
-				)
-			except Exception as exc:  # noqa: BLE001 — фоновая сводка, кэш не затираем
-				logger.info(
-					"Статистика «%s» не обновлена (%s: %s).",
-					community.title,
-					type(exc).__name__,
-					exc,
-				)
-		elif bot_token is not None:
-			try:
-				update["participants"] = await self._gateway.bot_member_count(
-					bot_token, community.tg_chat_id
-				)
-			except Exception as exc:  # noqa: BLE001 — фоновая сводка, кэш не затираем
-				logger.info(
-					"Участники «%s» через бота не обновлены (%s: %s).",
-					community.title,
-					type(exc).__name__,
-					exc,
-				)
+		chat_id = community.tg_chat_id
+		try:
+			stats = await self._gateway.userbot_community_stats(account_id, chat_id)
+			update["participants"] = stats.participants
+			update["online"] = stats.online
+			update["can_view_stats"] = stats.can_view_stats
+			if stats.linked_chat_id is not None:
+				update["linked_chat_id"] = stats.linked_chat_id
+			scheduled = await self._gateway.get_scheduled(account_id, chat_id)
+			update["scheduled_count"] = len(scheduled)
+			avatar_changed, avatar_path = await self._refresh_avatar(account_id, community)
+			if avatar_changed:
+				update["avatar_path"] = avatar_path
+			marks = await self._gateway.userbot_history_marks(
+				account_id, chat_id, with_created=row is None or row.tg_created_at is None
+			)
+			update["last_post_at"] = marks.last_post_at
+			if marks.created_at is not None:
+				update["tg_created_at"] = marks.created_at
+			if stats.can_view_stats:
+				analytics = await self._gateway.userbot_community_analytics(account_id, chat_id)
+				await self._store_analytics(community.id, analytics, now)
+		except TelegramFloodError as exc:
+			logger.info(
+				"Статистика «%s» пропущена: аккаунт id=%s под флуд-лимитом (%s).",
+				community.title,
+				account_id,
+				exc,
+			)
+		except Exception as exc:  # noqa: BLE001 — фоновая сводка, кэш не затираем
+			logger.info(
+				"Статистика «%s» не обновлена (%s: %s).",
+				community.title,
+				type(exc).__name__,
+				exc,
+			)
 		return update or None
 
 	async def _refresh_avatar(
@@ -276,8 +539,22 @@ class CommunityStatsService:
 			logger.warning("Не удалось удалить файл кэша %s.", target, exc_info=True)
 			return False
 
-	async def _store(self, community_id: int, update: dict[str, object], now: datetime) -> None:
-		"""Пишет собранные значения в кэш (создаёт строку при первом заходе)."""
+	# --- хранение --------------------------------------------------------------------
+
+	async def _store(
+		self,
+		community_id: int,
+		update: dict[str, object],
+		now: datetime,
+		*,
+		stamp: str | None,
+	) -> None:
+		"""Пишет собранные значения в кэш и снимок в историю.
+
+		``stamp`` — какой момент прохода отметить (``bot_fetched_at`` /
+		``full_fetched_at``; None — не проход, а запись отчёта). Снимок
+		истории оставляется, когда в обновлении есть число участников.
+		"""
 		async with self._db.session_factory() as session:
 			row = await session.get(CommunityStats, community_id)
 			if row is None:
@@ -285,5 +562,44 @@ class CommunityStatsService:
 				session.add(row)
 			for field, value in update.items():
 				setattr(row, field, value)
-			row.fetched_at = now
+			if stamp is not None:
+				setattr(row, stamp, now)
+				row.fetched_at = now
+				if "participants" in update:
+					session.add(
+						CommunityStatsHistory(
+							community_id=community_id,
+							at=now,
+							participants=row.participants,
+							online=_as_int(update.get("online")),
+						)
+					)
 			await session.commit()
+
+	async def _store_analytics(
+		self, community_id: int, analytics: CommunityAnalytics, now: datetime
+	) -> None:
+		"""Перезаписывает последний ответ статистики Telegram."""
+		async with self._db.session_factory() as session:
+			row = await session.get(CommunityAnalyticsRow, community_id)
+			if row is None:
+				row = CommunityAnalyticsRow(community_id=community_id, fetched_at=now, payload={})
+				session.add(row)
+			row.fetched_at = now
+			row.payload = analytics_to_payload(analytics)
+			await session.commit()
+
+	async def _prune_history(self, now: datetime, keep_days: int = HISTORY_KEEP_DAYS) -> None:
+		"""Убирает историю старше срока хранения (одним запросом)."""
+		threshold = now - timedelta(days=keep_days)
+		async with self._db.session_factory() as session:
+			result = await session.execute(
+				delete(CommunityStatsHistory).where(CommunityStatsHistory.at < threshold)
+			)
+			await session.commit()
+		# у результата DELETE число строк есть, но общий тип Result его не обещает
+		removed = int(getattr(result, "rowcount", 0) or 0)
+		if removed:
+			logger.info(
+				"История статистики: удалено снимков старше %d дней — %d.", keep_days, removed
+			)

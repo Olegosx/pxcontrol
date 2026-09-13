@@ -13,18 +13,29 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
+from pxcontrol.engine.telegram.stats_graph import (
+	GraphSeries,
+	daily,
+	hourly,
+	parse_graph,
+	pick_series,
+)
 from pxcontrol.engine.telegram.types import (
 	FORUM_TOPICS_PAGE,
 	TELEGRAM_MAX_SCHEDULED,
+	CommunityAnalytics,
 	CommunityInfo,
 	CommunityKind,
 	CommunityStatsInfo,
+	DayPoint,
 	DeletedAccount,
 	ForumTopicInfo,
+	HistoryMarks,
 	MediaKind,
 	OutgoingPost,
 	ParticipantsPage,
@@ -825,10 +836,91 @@ class MtprotoTransport:
 		async with _mtproto_errors():
 			result = await client(GetFullChannelRequest(channel=entity))
 		full = result.full_chat
+		linked = getattr(full, "linked_chat_id", None)
 		return CommunityStatsInfo(
 			participants=getattr(full, "participants_count", None),
 			online=getattr(full, "online_count", None) or None,
+			can_view_stats=bool(getattr(full, "can_view_stats", False)),
+			# Telethon отдаёт голый id канала; в приложении сообщества
+			# ходят в формате Bot API (-100…) — так связь найдётся по БД
+			linked_chat_id=f"-100{linked}" if linked else None,
 		)
+
+	async def community_analytics(self, chat_id: str) -> CommunityAnalytics:
+		"""Встроенная статистика Telegram: рост, приходы/уходы, часы, просмотры.
+
+		``client.get_stats`` сам выбирает метод по виду сообщества
+		(канал / супергруппа) и переотправляет запрос в дата-центр
+		статистики (ошибка миграции ``STATS_MIGRATE``). Графики, отданные
+		«по токену» (``StatsGraphAsync``), догружаются вторым запросом —
+		тоже в тот дата-центр. Сырые объекты дальше транспорта не уходят:
+		JSON графиков разбирает :mod:`stats_graph`.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Статистика недоступна (не админ, мало
+				участников — Telegram отвечает «нужен админ»).
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			stats = await client.get_stats(entity)
+			growth = await self._graph(client, getattr(stats, "growth_graph", None))
+			# у канала ряд подписок/отписок — followers_graph, у группы — members_graph
+			flow = await self._graph(
+				client,
+				getattr(stats, "followers_graph", None) or getattr(stats, "members_graph", None),
+			)
+			hours = await self._graph(client, getattr(stats, "top_hours_graph", None))
+		return _analytics_from(stats, growth, flow, hours)
+
+	async def _graph(self, client: Any, graph: Any) -> list[GraphSeries]:
+		"""Ряды графика: готовый JSON или догрузка по токену.
+
+		График с ошибкой построения (``StatsGraphError``) и отсутствующий
+		график — пустой список: вкладка покажет «нет данных».
+		"""
+		from telethon.errors import StatsMigrateError
+		from telethon.tl.functions.stats import LoadAsyncGraphRequest
+		from telethon.tl.types import StatsGraph, StatsGraphAsync
+
+		if isinstance(graph, StatsGraphAsync):
+			request = LoadAsyncGraphRequest(token=graph.token)
+			try:
+				graph = await client(request)
+			except StatsMigrateError as exc:
+				# тот же дата-центр статистики, что и у основного запроса:
+				# Telethon переотправляет сам только get_stats, а догрузку
+				# по токену приходится проводить через одолженный канал
+				sender = await client._borrow_exported_sender(exc.dc)  # noqa: SLF001 — приём самого Telethon
+				try:
+					graph = await sender.send(request)
+				finally:
+					await client._return_exported_sender(sender)  # noqa: SLF001
+		if not isinstance(graph, StatsGraph):
+			return []
+		payload = getattr(getattr(graph, "json", None), "data", None)
+		return parse_graph(payload) if isinstance(payload, str) else []
+
+	async def history_marks(self, chat_id: str, *, with_created: bool) -> HistoryMarks:
+		"""Момент последнего сообщения и — по запросу — создания сообщества.
+
+		Последнее сообщение — одно чтение истории; создание — первое
+		сообщение сообщества (служебная запись «создано», id 1); у группы
+		после переезда в супергруппу её может не быть — тогда None.
+
+		Raises: как у :meth:`community_stats`.
+		"""
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			latest = await client.get_messages(entity, limit=1)
+			last_post_at = latest[0].date if latest else None
+			created_at = None
+			if with_created:
+				first = await client.get_messages(entity, ids=1)
+				created_at = getattr(first, "date", None)
+		return HistoryMarks(last_post_at=last_post_at, created_at=created_at)
 
 	async def download_avatar(self, chat_id: str, target: str) -> str | None:
 		"""Скачивает аватар сообщества в файл ``target``.
@@ -1061,6 +1153,55 @@ class MtprotoTransport:
 			for message in getattr(result, "messages", [])
 			if getattr(message, "date", None) is not None
 		]
+
+
+def _analytics_from(
+	stats: Any,
+	growth: list[GraphSeries],
+	flow: list[GraphSeries],
+	hours: list[GraphSeries],
+) -> CommunityAnalytics:
+	"""Собирает границу из ответа статистики и разобранных графиков.
+
+	Ряды приходов и уходов опознаются по именам («Joined» / «Left»
+	в клиентах Telegram), при промахе — по позиции: первый ряд —
+	пришли, второй — ушли. Числа за период: у канала ``followers``,
+	у группы ``members``; просмотры на пост есть только у канала.
+	"""
+	period = getattr(stats, "period", None)
+	period_from = getattr(period, "min_date", None)
+	period_to = getattr(period, "max_date", None)
+	members_value = getattr(stats, "followers", None) or getattr(stats, "members", None)
+	views = getattr(stats, "views_per_post", None)
+	recent = [
+		int(getattr(item, "views", 0))
+		for item in getattr(stats, "recent_posts_interactions", None) or []
+		if getattr(item, "views", None) is not None
+	]
+	return CommunityAnalytics(
+		period_from=period_from.date() if period_from else datetime.now(UTC).date(),
+		period_to=period_to.date() if period_to else datetime.now(UTC).date(),
+		members=_abs_pair(members_value),
+		growth=tuple(DayPoint(*point) for point in daily(pick_series(growth, position=0))),
+		joined=tuple(DayPoint(*point) for point in daily(pick_series(flow, "join", position=0))),
+		left=tuple(
+			DayPoint(*point) for point in daily(pick_series(flow, "left", "leav", position=1))
+		),
+		hours=(lambda profile: tuple(profile) if profile is not None else None)(
+			hourly(pick_series(hours, position=0))
+		),
+		views_per_post=_abs_pair(views),
+		recent_post_views=tuple(recent),
+	)
+
+
+def _abs_pair(value: Any) -> tuple[int, int] | None:
+	"""«Сейчас и раньше» из ``StatsAbsValueAndPrev``; None — поля нет."""
+	current = getattr(value, "current", None)
+	previous = getattr(value, "previous", None)
+	if current is None:
+		return None
+	return int(round(current)), int(round(previous or 0))
 
 
 class MtprotoLoginManager:

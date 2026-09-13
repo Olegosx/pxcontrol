@@ -48,8 +48,14 @@ class Engine:
 			self.db, self.gateway, self.settings, profile_sync=self.accounts.sync_profile
 		)
 		self.community_stats = CommunityStatsService(self.db, self.gateway, self.settings)
-		# обслуживание сообществ (ADR-0026): чистка служебных записей
-		self.maintenance = MaintenanceService(self.gateway, self.communities)
+		# обслуживание сообществ (ADR-0026): чистка служебных записей;
+		# итог прохода по удалённым аккаунтам уходит в кэш статистики
+		# крючком — очередь обслуживания о кэше не знает (ADR-0027)
+		self.maintenance = MaintenanceService(
+			self.gateway,
+			self.communities,
+			on_members_report=self.community_stats.record_members_report,
+		)
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
 		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)
@@ -135,6 +141,9 @@ class Engine:
 		# после загрузки очереди: файлы живых элементов уже на местах,
 		# пустые папки её дерева — остатки отработанных пакетов
 		await self.posts.sweep_queue_dirs()
+		# периодический опрос статистики (ADR-0027) — последним: его
+		# первый проход пойдёт по дорожкам, где уже стоит очередь отправки
+		self.community_stats.start_polling()
 		logger.info("Движок запущен.")
 
 	async def stop(self) -> None:
@@ -148,6 +157,7 @@ class Engine:
 		logger.info("Остановка движка…")
 		first_error: BaseException | None = None
 		steps = (
+			self.community_stats.shutdown,
 			self.maintenance.shutdown,
 			self.publish_queue.shutdown,
 			self.video_queue.shutdown,

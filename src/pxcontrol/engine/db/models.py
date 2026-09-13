@@ -2,7 +2,7 @@
 
 Таблицы добавляются миграциями по мере появления функций (YAGNI).
 Сейчас отложены источники контента и задания генерации ИИ; очередь
-отправки, кэш статистики и членства уже здесь. Отправленных постов
+отправки, кэш статистики с историей снимков и членства уже здесь. Отправленных постов
 таблицы нет и не будет: истина по вышедшему — сам канал (ADR-0010),
 хранится только неотправленное (ADR-0016).
 
@@ -20,6 +20,7 @@ from sqlalchemy import (
 	DateTime,
 	Float,
 	ForeignKey,
+	Index,
 	Integer,
 	String,
 	Text,
@@ -261,13 +262,14 @@ class CommunityMember(TimestampMixin, Base):
 
 
 class CommunityStats(Base):
-	"""Кэш статистики сообщества для карточек дашборда.
+	"""Кэш статистики сообщества: дашборд и вкладка «Обзор» (ADR-0027).
 
-	Данные приезжают из Telegram фоновым обновлением (TTL); дашборд
-	читает только кэш. NULL в поле — данные ещё не получены (или
-	Telegram их не отдаёт: онлайн есть только у групп). ``avatar_path``
-	указывает на файл в кэше на диске; сам файл при удалении сообщества
-	убирает движок (строку — каскад БД).
+	Данные приезжают из Telegram периодическим опросом движка (бот —
+	часто, userbot — редко); интерфейс читает только кэш. NULL в поле —
+	данные ещё не получены (или источник их не отдаёт: онлайн есть
+	только у групп и только через userbot). ``avatar_path`` указывает
+	на файл в кэше на диске; сам файл при удалении сообщества убирает
+	движок (строку — каскад БД).
 	"""
 
 	__tablename__ = "community_stats"
@@ -279,7 +281,62 @@ class CommunityStats(Base):
 	online: Mapped[int | None] = mapped_column(Integer, default=None)
 	scheduled_count: Mapped[int | None] = mapped_column(Integer, default=None)
 	avatar_path: Mapped[str | None] = mapped_column(String(1024), default=None)
+	# момент последнего успешного обновления любым источником («Обновлено»)
 	fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	# моменты проходов по источникам: по ним считается, кто «должен»
+	# (бот — раз в 15 минут, userbot — раз в 6 часов)
+	bot_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	full_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	# справка «Обзора» (ADR-0027): встроенная статистика доступна,
+	# связанное сообщество (формат Bot API), создано, последний пост
+	can_view_stats: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
+	linked_chat_id: Mapped[str | None] = mapped_column(String(64), default=None)
+	tg_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	last_post_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	# итог последнего прохода обслуживания по удалённым аккаунтам
+	# (ADR-0026): найдено, исключено, когда
+	deleted_found: Mapped[int | None] = mapped_column(Integer, default=None)
+	deleted_removed: Mapped[int | None] = mapped_column(Integer, default=None)
+	deleted_checked_at: Mapped[datetime | None] = mapped_column(
+		DateTime(timezone=True), default=None
+	)
+
+
+class CommunityStatsHistory(Base):
+	"""Снимок статистики сообщества в момент опроса (ADR-0027).
+
+	Локальная история для сообществ без встроенной статистики Telegram:
+	участники по дням, оценка приходов и уходов, онлайн по часам. Пишется
+	каждым успешным проходом опроса; строки старше срока хранения
+	убирает сам опрос. Удаление сообщества уносит историю каскадом.
+	"""
+
+	__tablename__ = "community_stats_history"
+	__table_args__ = (Index("ix_community_stats_history_community_at", "community_id", "at"),)
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
+	at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+	participants: Mapped[int | None] = mapped_column(Integer, default=None)
+	online: Mapped[int | None] = mapped_column(Integer, default=None)
+
+
+class CommunityAnalyticsRow(Base):
+	"""Встроенная статистика Telegram сообщества — последний ответ (ADR-0027).
+
+	Историю считает и хранит сам Telegram, поэтому копить ответы незачем:
+	одна строка на сообщество, перезаписывается редким опросом userbot.
+	``payload`` — разобранные ряды в JSON (сериализация ``CommunityAnalytics``
+	живёт в сервисе статистики).
+	"""
+
+	__tablename__ = "community_analytics"
+
+	community_id: Mapped[int] = mapped_column(
+		ForeignKey("communities.id", ondelete="CASCADE"), primary_key=True
+	)
+	fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+	payload: Mapped[Any] = mapped_column(JSON)
 
 
 class PublishQueueItem(TimestampMixin, Base):

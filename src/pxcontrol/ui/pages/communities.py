@@ -1101,7 +1101,6 @@ class CommunitiesPage(ScrollArea):
 		self._communities: list[CommunityDto] = []
 		self._queue_counts: dict[int, QueueCounts] = {}
 		self._stats_cache: dict[int, CommunityStatsDto] = {}
-		self._stats_refreshing = False
 		self._view = VIEW_TILES
 		self._query = ""
 		self._sort: tuple[TableColumn, bool] = (TableColumn.TITLE, False)
@@ -1192,57 +1191,14 @@ class CommunitiesPage(ScrollArea):
 		)
 
 	def _on_stats_loaded(self, stats: list[CommunityStatsDto]) -> None:
-		"""Кэш статистики получен — рисуем и запускаем фоновое обновление."""
+		"""Кэш статистики получен — рисуем и сообщаем главному окну.
+
+		Сам кэш наполняет периодический опрос движка (ADR-0027) —
+		страница его не запускает, только читает при каждом показе.
+		"""
 		self._stats_cache = {item.community_id: item for item in stats}
 		self._render()
 		self.communities_changed.emit(list(self._communities))
-		self._refresh_stats_in_background()
-
-	def _refresh_stats_in_background(self) -> None:
-		"""Фоновое обновление кэша статистики (не чаще одного за раз).
-
-		Ошибки не показываются: обновление вспомогательное, каждый сбой
-		уже залогирован движком — всплывашка при каждом открытии
-		страницы без сети только раздражала бы.
-		"""
-		if self._stats_refreshing:
-			return
-		self._stats_refreshing = True
-		run_in_engine(
-			self._worker,
-			self._worker.engine.community_stats.refresh_stale(),
-			self,
-			self._on_stats_refreshed,
-			self._on_stats_failed,
-		)
-
-	def _on_stats_failed(self, message: str) -> None:
-		"""Фоновое обновление сводки не удалось — снимаем флаг «идёт».
-
-		Плашкой не тревожим: сводка фоновая, кэш при сбое не затирается,
-		и подробности уже записал мост движка. Но флаг снять обязаны,
-		иначе следующее обновление не начнётся до перезапуска.
-		"""
-		logger.debug("Фоновое обновление статистики не удалось: %s", message)
-		self._stats_refreshing = False
-
-	def _on_stats_refreshed(self, changed: bool) -> None:
-		"""Кэш обновился — перечитываем снимок (без нового обновления)."""
-		self._stats_refreshing = False
-		if not changed:
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.community_stats.snapshot(),
-			self,
-			self._on_fresh_stats,
-			self._show_error,
-		)
-
-	def _on_fresh_stats(self, stats: list[CommunityStatsDto]) -> None:
-		"""Свежий снимок после фонового обновления — только перерисовка."""
-		self._stats_cache = {item.community_id: item for item in stats}
-		self._render()
 
 	# --- вид и поиск -----------------------------------------------------------
 

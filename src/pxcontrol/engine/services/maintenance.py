@@ -23,9 +23,9 @@ ADR-0025), темп обращений к Telegram — дорожка аккау
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 
@@ -285,9 +285,15 @@ class MaintenanceService:
 		self,
 		gateway: _MaintenancePort,
 		communities: CommunitiesService,
+		on_members_report: Callable[[int, int, int, datetime], Awaitable[None]] | None = None,
 	) -> None:
+		"""``on_members_report`` — крючок «запомни итог прохода по удалённым
+		аккаунтам» (сообщество, найдено, исключено, когда): движок передаёт
+		запись в кэш статистики, чтобы «Обзор» показывал число мёртвых душ
+		и дату прохода (ADR-0027). Сбой крючка задание не роняет."""
 		self._gateway = gateway
 		self._communities = communities
+		self._on_members_report = on_members_report
 		self._jobs: JobQueue[_MaintenanceJob] = JobQueue(
 			self._run_job,
 			name="Обслуживание",
@@ -572,6 +578,25 @@ class MaintenanceService:
 			await self._run_service_messages(job)
 			return
 		await self._run_deleted_accounts(job)
+		await self._report_members(job)
+
+	async def _report_members(self, job: _MaintenanceJob) -> None:
+		"""Отдаёт итог прохода по участникам крючку (если он есть).
+
+		Сбой записи — в журнал: проход состоялся, его отчёт на экране
+		не зависит от того, запомнил ли его кэш статистики.
+		"""
+		report = job.members_report
+		if self._on_members_report is None or report is None:
+			return
+		try:
+			await self._on_members_report(
+				job.community.id, report.found, report.removed, datetime.now(UTC)
+			)
+		except Exception:  # noqa: BLE001 — итог обслуживания важнее его записи
+			logger.exception(
+				"Обслуживание id=%s: итог по удалённым аккаунтам не записан в кэш.", job.id
+			)
 
 	async def _run_service_messages(self, job: _MaintenanceJob) -> None:
 		"""Проход по истории: считает служебные записи, при чистке удаляет."""

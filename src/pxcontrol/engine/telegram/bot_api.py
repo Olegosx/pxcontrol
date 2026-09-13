@@ -23,6 +23,7 @@ from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityInfo,
 	CommunityKind,
+	CommunityStatsInfo,
 	MediaKind,
 	TelegramFloodError,
 	limit_mb,
@@ -408,11 +409,13 @@ async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 		await bot.session.close()
 
 
-async def get_member_count(token: str, chat_id: str) -> int:
-	"""Число участников сообщества через бота (getChatMemberCount).
+async def get_community_stats(token: str, chat_id: str) -> CommunityStatsInfo:
+	"""Статистика сообщества через бота: число участников и связанный чат.
 
-	Запасной путь для сообществ без userbot: только число, без аватара
-	и отложек (их Bot API не отдаёт).
+	Два запроса Bot API — ``getChat`` (связанное сообщество) и
+	``getChatMemberCount``. Больше Bot API о сообществе не расскажет:
+	ни онлайна, ни отложенных, ни встроенной статистики у него нет —
+	это путь дешёвого частого опроса, полная картина — за userbot.
 
 	Raises:
 		InvalidBotTokenError: Токен отклонён Telegram.
@@ -424,9 +427,17 @@ async def get_member_count(token: str, chat_id: str) -> int:
 	try:
 		async with _bot_errors(
 			"Бот не видит сообщество — его могли исключить.",
-			"Telegram отклонил запрос числа участников.",
+			"Telegram отклонил запрос сведений о сообществе.",
 		):
-			return await bot.get_chat_member_count(_chat_id(chat_id))
+			numeric = _chat_id(chat_id)
+			chat = await bot.get_chat(numeric)
+			count = await bot.get_chat_member_count(numeric)
+			linked = getattr(chat, "linked_chat_id", None)
+			return CommunityStatsInfo(
+				participants=count,
+				online=None,
+				linked_chat_id=str(linked) if linked is not None else None,
+			)
 	finally:
 		await bot.session.close()
 

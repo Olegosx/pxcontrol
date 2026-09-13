@@ -30,7 +30,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	check_community,
 	check_token,
 	get_bot_events,
-	get_member_count,
+	get_community_stats,
 	send_media,
 	send_text,
 )
@@ -42,10 +42,12 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 )
 from pxcontrol.engine.telegram.types import (
+	CommunityAnalytics,
 	CommunityInfo,
 	CommunityStatsInfo,
 	DeletedAccount,
 	ForumTopicInfo,
+	HistoryMarks,
 	MediaKind,
 	OutgoingPost,
 	ParticipantsPage,
@@ -244,12 +246,16 @@ class TelegramGateway:
 		"""
 		return await send_media(token, chat_id, kind, path, caption, topic_id)
 
-	async def bot_member_count(self, token: str, chat_id: str) -> int:
-		"""Число участников сообщества через бота (запасной путь).
+	async def bot_community_stats(self, token: str, chat_id: str) -> CommunityStatsInfo:
+		"""Участники и связанный чат через бота — дешёвый частый опрос.
 
-		Raises: см. :func:`bot_api.get_member_count`.
+		Бот-путь дорожкой не регулируется (лимиты Bot API — на бота),
+		поэтому загрузки userbot на него не влияют: этим и ценен.
+
+		Raises: см. :func:`bot_api.get_community_stats`.
 		"""
-		return await get_member_count(token, chat_id)
+		info: CommunityStatsInfo = await get_community_stats(token, chat_id)
+		return info
 
 	# --- MTProto (userbot) -------------------------------------------------------
 
@@ -324,6 +330,33 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
 			return await transport.community_stats(chat_id)
+
+	async def userbot_community_analytics(
+		self, account_id: int, chat_id: str
+	) -> CommunityAnalytics:
+		"""Встроенная статистика Telegram аккаунтом (редкий фоновый опрос).
+
+		Несколько запросов подряд (сами данные и графики, отданные
+		по токену) — все на одной занятой дорожке с фоновым приоритетом.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Статистика недоступна (не админ, мало участников).
+			UserbotFloodError: Флуд-лимит — вызывающий пропускает аккаунт.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
+			return await transport.community_analytics(chat_id)
+
+	async def userbot_history_marks(
+		self, account_id: int, chat_id: str, *, with_created: bool
+	) -> HistoryMarks:
+		"""Момент последнего сообщения и (по запросу) создания сообщества.
+
+		Raises: как у :meth:`userbot_community_stats`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
+			return await transport.history_marks(chat_id, with_created=with_created)
 
 	async def userbot_avatar(self, account_id: int, chat_id: str, target: str) -> str | None:
 		"""Скачивает аватар сообщества аккаунтом (None — аватара нет).

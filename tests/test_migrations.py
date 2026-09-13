@@ -23,6 +23,8 @@ EXPECTED_TABLES = {
 	"caption_values",
 	"caption_templates",
 	"caption_template_fields",
+	"community_stats_history",
+	"community_analytics",
 }
 
 
