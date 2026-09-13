@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -11,7 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
-from PySide6.QtCore import QDate, QEvent, QObject, QRectF, QSize, Qt, QTime, QTimer, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import (
 	QColor,
 	QDesktopServices,
@@ -19,15 +18,11 @@ from PySide6.QtGui import (
 	QMouseEvent,
 	QPainter,
 	QPainterPath,
-	QPaintEvent,
-	QPen,
 	QPixmap,
 )
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
-	QFrame,
-	QGraphicsOpacityEffect,
 	QHBoxLayout,
 	QLabel,
 	QLayout,
@@ -37,6 +32,7 @@ from PySide6.QtWidgets import (
 	QWidget,
 )
 from qfluentwidgets import (
+	AvatarWidget,
 	BodyLabel,
 	CalendarPicker,
 	CaptionLabel,
@@ -46,6 +42,8 @@ from qfluentwidgets import (
 	EditableComboBox,
 	FluentIcon,
 	FluentStyleSheet,
+	HorizontalSeparator,
+	IconWidget,
 	InfoBar,
 	LineEdit,
 	MessageBox,
@@ -61,7 +59,6 @@ from qfluentwidgets import (
 	TextEdit,
 	TransparentToolButton,
 	getFont,
-	isDarkTheme,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -80,6 +77,7 @@ from pxcontrol.engine.telegram.types import (
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
+from pxcontrol.ui.theme import ACCENT_COLOR
 
 _T = TypeVar("_T")
 
@@ -498,47 +496,17 @@ def format_count(value: int) -> str:
 	return f"{value:,}".replace(",", "\u202f")
 
 
-# --- оформление: палитра и помощники на чистых виджетах Qt -----------------------
+# --- оформление: только штатные элементы библиотеки ------------------------------
 #
-# Цвета парами «светлая тема, тёмная тема». Тёмные — из макетов, светлые —
-# те же роли на светлом фоне (белая полупрозрачность становится чёрной,
-# цвет ошибки — как у ErrorLabel). Библиотечные виджеты этими стилями
-# не красятся (ADR-0023, п. 5): плашки, разделители и кнопки-обводки
-# собраны на чистых виджетах Qt, у которых своего листа стилей нет.
+# Правило проекта (ADR-0023, п. 5): интерфейс собирается из штатных
+# элементов QFluentWidgets, без собственных стилей и рисования. Цвет
+# текста надписей задаётся их же API ``setTextColor`` — пары ниже
+# для него (светлая тема, тёмная), это не листы стилей.
 
-TITLE_COLOR = ("#1b1b1b", "#ffffff")
-TEXT_COLOR = ("#3a3a3a", "#dfdfdf")
-MUTED_COLOR = ("#6f6f6f", "#9d9d9d")
-DIM_COLOR = ("#8a8a8a", "#8a8a8a")
-COUNT_COLOR = ("#8a8a8a", "#6f6f6f")
-FOOTNOTE_COLOR = ("#8a8a8a", "#7a7a7a")
-HAIRLINE = ("rgba(0,0,0,.08)", "rgba(255,255,255,.08)")
-CARD_HAIRLINE = ("rgba(0,0,0,.07)", "rgba(255,255,255,.07)")
-ROW_HAIRLINE = ("rgba(0,0,0,.055)", "rgba(255,255,255,.055)")
-SUMMARY_BG = ("rgba(0,0,0,.03)", "rgba(255,255,255,.03)")
-SUMMARY_BORDER = ("rgba(0,0,0,.075)", "rgba(255,255,255,.075)")
-DIVIDER = ("rgba(0,0,0,.09)", "rgba(255,255,255,.09)")
+#: Цвета текста для ``setTextColor``: акцент, ошибка, приглушённый.
+ACCENT_TEXT = (ACCENT_COLOR, ACCENT_COLOR)
 ERROR_TEXT = ("#c42b1c", "#ff99a4")
-ERROR_BORDER = ("rgba(196,43,28,.5)", "rgba(255,153,164,.5)")
-ERROR_HOVER = ("rgba(196,43,28,.08)", "rgba(255,153,164,.08)")
-ACCENT_TEXT = ("#14b8a6", "#14b8a6")
-ACCENT_BORDER = ("rgba(20,184,166,.5)", "rgba(20,184,166,.5)")
-ACCENT_BUTTON_BORDER = ("rgba(20,184,166,.55)", "rgba(20,184,166,.55)")
-ACCENT_HOVER = ("rgba(20,184,166,.10)", "rgba(20,184,166,.10)")
-NEUTRAL_BORDER = ("rgba(0,0,0,.22)", "rgba(255,255,255,.22)")
-BUTTON_BORDER = ("rgba(0,0,0,.16)", "rgba(255,255,255,.16)")
-BUTTON_HOVER = ("rgba(0,0,0,.05)", "rgba(255,255,255,.06)")
-TABLE_BORDER = ("rgba(0,0,0,.075)", "rgba(255,255,255,.075)")
-TABLE_HEADER_BG = ("rgba(0,0,0,.035)", "rgba(255,255,255,.035)")
-ROW_BORDER = ("rgba(0,0,0,.06)", "rgba(255,255,255,.06)")
-
-#: Числа в тексте — их разметка выделяет жирным.
-_DIGITS = re.compile(r"\d+")
-
-
-def theme_pick(pair: tuple[str, str]) -> str:
-	"""Значение пары «светлая, тёмная» по текущей теме."""
-	return pair[1] if isDarkTheme() else pair[0]
+DIM_TEXT = ("#8a8a8a", "#8a8a8a")
 
 
 def font_px(size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
@@ -547,84 +515,10 @@ def font_px(size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
 	return font
 
 
-def hairline(parent: QWidget, colors: tuple[str, str] = HAIRLINE) -> QFrame:
-	"""Горизонтальная линия в 1 пиксель."""
-	line = QFrame(parent)
-	line.setFixedHeight(1)
-	line.setStyleSheet(f"background: {theme_pick(colors)};")
-	line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-	return line
-
-
-def outline_badge(
-	parent: QWidget,
-	text: str,
-	border: tuple[str, str],
-	color: tuple[str, str],
-	*,
-	height: int = 22,
-	padding: int = 8,
-) -> QLabel:
-	"""Плашка-обводка: состояние карточки, строка таблицы, сводка, шапка."""
-	label = QLabel(text, parent)
-	label.setFixedHeight(height)
-	label.setFont(font_px(12))
-	label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-	label.setStyleSheet(
-		f"QLabel {{ border: 1px solid {theme_pick(border)}; border-radius: 4px; "
-		f"color: {theme_pick(color)}; padding: 0 {padding}px; background: transparent; }}"
-	)
+def tinted(label: Any, pair: tuple[str, str]) -> Any:
+	"""Красит библиотечную надпись её же API ``setTextColor`` (обе темы)."""
+	label.setTextColor(QColor(pair[0]), QColor(pair[1]))
 	return label
-
-
-def colored(label: QLabel, color: tuple[str, str]) -> QLabel:
-	"""Красит текст надписи по паре цветов (без фона и рамки)."""
-	label.setStyleSheet(f"color: {theme_pick(color)}; background: transparent;")
-	return label
-
-
-def rich_numbers(text: str, number_color: tuple[str, str], tail_color: tuple[str, str]) -> str:
-	"""Разметка «числа жирным цветом заголовка, слова приглушённо»."""
-	bold = f'<span style="color:{theme_pick(number_color)}; font-weight:600">'
-	marked = _DIGITS.sub(lambda match: f"{bold}{match.group(0)}</span>", text)
-	return f'<span style="color:{theme_pick(tail_color)}">{marked}</span>'
-
-
-class OutlineButton(QPushButton):
-	"""Кнопка-обводка (26 пикселей, радиус 4) — карточки и списки.
-
-	Чистый ``QPushButton``, а не библиотечный ``PushButton``: у того
-	свой лист стилей и высота 33 — переопределять его нельзя (ADR-0023,
-	п. 5), а низкую обводку макетов иначе не собрать. ``tone`` —
-	«neutral», «accent» (действие-совет) или «error» (необратимое).
-	"""
-
-	def __init__(
-		self, text: str, parent: QWidget, *, tone: str = "neutral", height: int = 26
-	) -> None:
-		super().__init__(text, parent)
-		self.setFixedHeight(height)
-		self.setFont(font_px(12))
-		self.setCursor(Qt.CursorShape.PointingHandCursor)
-		self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-		border, color, hover = {
-			"accent": (ACCENT_BUTTON_BORDER, ACCENT_TEXT, ACCENT_HOVER),
-			"error": (ERROR_BORDER, ERROR_TEXT, ERROR_HOVER),
-		}.get(tone, (BUTTON_BORDER, TEXT_COLOR, BUTTON_HOVER))
-		self.setStyleSheet(
-			f"QPushButton {{ border: 1px solid {theme_pick(border)}; border-radius: 4px; "
-			f"color: {theme_pick(color)}; padding: 0 11px; background: transparent; }}"
-			f"QPushButton:hover {{ background: {theme_pick(hover)}; }}"
-			f"QPushButton:disabled {{ color: {theme_pick(DIM_COLOR)}; "
-			f"border-color: {theme_pick(ROW_BORDER)}; }}"
-		)
-
-
-def dim_widget(widget: QWidget, opacity: float) -> None:
-	"""Приглушает виджет целиком (выключенное сообщество)."""
-	effect = QGraphicsOpacityEffect(widget)
-	effect.setOpacity(opacity)
-	widget.setGraphicsEffect(effect)
 
 
 def section_header(
@@ -635,29 +529,25 @@ def section_header(
 	icon: FluentIcon | None = None,
 	trailing: Sequence[QWidget] | None = None,
 ) -> QWidget:
-	"""Заголовок-хайрлайн раздела: значок, подпись капителью, число, линия.
+	"""Заголовок раздела: значок, подпись капителью, число, разделитель.
 
-	``trailing`` — виджеты справа от линии (кнопки заголовка списка).
+	Штатные элементы: ``IconWidget``, ``CaptionLabel``,
+	``HorizontalSeparator``; ``trailing`` — виджеты справа (кнопки
+	заголовка списка).
 	"""
 	box = QWidget(parent)
 	layout = QHBoxLayout(box)
 	layout.setContentsMargins(0, 0, 0, 0)
 	layout.setSpacing(12)
 	if icon is not None:
-		icon_label = QLabel(box)
-		icon_label.setFixedSize(14, 14)
-		icon_label.setPixmap(icon.icon(color=QColor(theme_pick(MUTED_COLOR))).pixmap(14, 14))
-		layout.addWidget(icon_label)
-	caption = QLabel(title.upper(), box)
-	font = font_px(13)
-	font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 106)
-	caption.setFont(font)
-	layout.addWidget(colored(caption, MUTED_COLOR))
+		icon_widget = IconWidget(box)
+		icon_widget.setIcon(icon)
+		icon_widget.setFixedSize(14, 14)
+		layout.addWidget(icon_widget)
+	layout.addWidget(CaptionLabel(title.upper(), box))
 	if count is not None:
-		counter = QLabel(str(count), box)
-		counter.setFont(font_px(13))
-		layout.addWidget(colored(counter, COUNT_COLOR))
-	layout.addWidget(hairline(box), stretch=1)
+		layout.addWidget(tinted(CaptionLabel(str(count), box), DIM_TEXT))
+	layout.addWidget(HorizontalSeparator(box), stretch=1)
 	for widget in trailing or []:
 		layout.addWidget(widget)
 	return box
@@ -725,9 +615,8 @@ def file_action_buttons(
 #: в ``common``) тут не подходит.
 _SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
 
-#: Цвет подписи об ошибке и рамки карточки с ошибкой (светлая, тёмная).
+#: Цвет подписи об ошибке (светлая, тёмная) — для ``setTextColor``.
 _ERROR_COLORS = (QColor("#c42b1c"), QColor("#ff99a4"))
-_ERROR_BORDER_COLOR = (QColor(196, 43, 28, 102), QColor(255, 153, 164, 102))
 
 #: Цвета «это ошибка» для светлой и тёмной темы: подпись валидации
 #: (``ErrorLabel``) и счётчик символов при превышении предела.
@@ -779,10 +668,9 @@ class CollapsibleCard(CardWidget):
 		элемента очереди она говорит состояние («ждёт слота», «ошибка:…»),
 		и оно нужно как раз тогда, когда карточку раскрыли для правки.
 		``stacked`` — сводка под названием, а не в строку с ним (макет
-		страницы сообщества); в этом режиме доступны :meth:`set_alert`
-		(рамка цветом ошибки) и :meth:`set_progress` (полоса под названием)."""
+		страницы сообщества); в этом режиме доступен :meth:`set_progress`
+		(полоса под названием)."""
 		super().__init__(parent)
-		self._alert = False
 		outer = QVBoxLayout(self)
 		outer.setContentsMargins(0, 0, 0, 0)
 		outer.setSpacing(0)
@@ -900,12 +788,6 @@ class CollapsibleCard(CardWidget):
 			self._summary.setTextColor(*_SUMMARY_COLORS)
 		self._refresh_summary()
 
-	def set_alert(self, alert: bool) -> None:
-		"""Рамка цветом ошибки поверх штатной (рисуется пером, не стилем)."""
-		if alert != self._alert:
-			self._alert = alert
-			self.update()
-
 	def set_progress(self, fraction: float | None, text: str = "") -> None:
 		"""Полоса под названием (только ``stacked``): доля 0..1 и подпись.
 
@@ -921,19 +803,6 @@ class CollapsibleCard(CardWidget):
 		self._progress_text.setText(text)
 		self._progress_row.show()
 		self._summary.hide()
-
-	def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 — API Qt
-		super().paintEvent(event)
-		if not self._alert:
-			return
-		painter = QPainter(self)
-		painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-		painter.setPen(
-			QPen(_ERROR_BORDER_COLOR[1] if isDarkTheme() else _ERROR_BORDER_COLOR[0], 1.0)
-		)
-		painter.setBrush(Qt.BrushStyle.NoBrush)
-		radius = float(self.borderRadius)
-		painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
 
 	def _refresh_summary(self) -> None:
 		self._summary.setText(self._summary_text)
@@ -1189,30 +1058,25 @@ def round_pixmap(path: str, size: int) -> QPixmap | None:
 
 def community_logo(
 	parent: QWidget, community_id: int, title: str, avatar_path: str | None, size: int
-) -> QLabel:
+) -> AvatarWidget:
 	"""Логотип сообщества: аватар из кэша, без него — буква на подложке.
 
 	Общий для плиток дашборда и карточек очереди отправки: аватар
 	лежит файлом в кэше (``community_stats``), и читают его одинаково.
-	Цвет подложки заглушки берётся по id — у одного сообщества он
-	не меняется от показа к показу.
+	Штатный ``AvatarWidget`` библиотеки: картинку кадрирует по кругу
+	сам, без неё рисует первую букву текста на подложке. Цвет подложки
+	берётся по id — у одного сообщества он не меняется от показа
+	к показу.
 	"""
+	logo = AvatarWidget(parent)
+	logo.setRadius(size // 2)
+	logo.setText(title[:1].upper() or "?")
+	color = QColor(_LOGO_COLORS[community_id % len(_LOGO_COLORS)])
+	logo.setBackgroundColor(color, color)
 	if avatar_path:
-		pixmap = round_pixmap(avatar_path, size)
-		if pixmap is not None:
-			label = QLabel(parent)
-			label.setFixedSize(size, size)
-			label.setPixmap(pixmap)
-			return label
-	label = QLabel(title[:1].upper() or "?", parent)
-	label.setFixedSize(size, size)
-	label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-	color = _LOGO_COLORS[community_id % len(_LOGO_COLORS)]
-	label.setStyleSheet(
-		f"background: {color}; color: white; border-radius: {size // 2}px;"
-		f"font-size: {max(10, size // 2)}px; font-weight: 600;"
-	)
-	return label
+		logo.setImage(avatar_path)
+		logo.setRadius(size // 2)
+	return logo
 
 
 #: Метка поста, у которого времени публикации нет (уйдёт сразу).
@@ -1364,7 +1228,6 @@ class _QueueCard:
 		self.widget.set_title(item.title)
 		is_error = item.status is JobStatus.ERROR
 		self.widget.set_summary(self._panel.subtitle(item), alert=self._compact and is_error)
-		self.widget.set_alert(self._compact and is_error)
 		if self._compact:
 			# полоса под названием вместо сводки, пока идёт отправка
 			self.widget.set_progress(
@@ -1464,9 +1327,7 @@ class _QueueCard:
 		self._actions_box.addWidget(action)
 
 	def _button(self, text: str) -> QPushButton:
-		"""Кнопка шапки: библиотечная (33) или обводка 28 в компактном режиме."""
-		if self._compact:
-			return OutlineButton(text, self._actions, height=28)
+		"""Кнопка шапки — библиотечная ``PushButton`` (обоих режимов)."""
 		button: QPushButton = PushButton(text, self._actions)
 		return button
 

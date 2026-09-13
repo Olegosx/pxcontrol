@@ -5,6 +5,45 @@
 
 ## [Unreleased]
 
+### Изменено 2026-09-14 — «Каналы и группы» и страница сообщества: только штатные элементы
+
+Макеты собраны стандартными элементами, а экраны обросли собственным
+оформлением: 14 `setStyleSheet`, четыре своих `paintEvent`, кнопки
+и плашки на чистых `QPushButton`/`QLabel`/`QFrame`, приглушение
+через `QGraphicsOpacityEffect`. Всё это снято, правило ADR-0023, п. 5
+дописано: интерфейс — из виджетов QFluentWidgets как есть, без своих
+стилей и рисования; единственное исключение — графики «Обзора»
+(элемента графика в библиотеке нет, макет требует их явно).
+
+- **`pages/common.py`**: удалены `theme_pick`, `hairline`,
+  `outline_badge`, `colored`, `rich_numbers`, `OutlineButton`,
+  `dim_widget` и палитра рамок. Остались `font_px` (`getFont`),
+  `tinted` (`setTextColor` библиотечных надписей — пары
+  `ACCENT_TEXT`/`ERROR_TEXT`/`DIM_TEXT`; акцент — из `theme.ACCENT_COLOR`,
+  а не второй копией) и `section_header` на `IconWidget`/`CaptionLabel`/
+  `HorizontalSeparator`. `CollapsibleCard` не рисует рамку пером
+  (`set_alert` убран; ошибка — цвет подписи), её кнопка — `PushButton`.
+  Логотип сообщества (`community_logo`) — штатный `AvatarWidget`:
+  картинку кадрирует по кругу сам, без неё рисует букву на подложке
+  (цвет подложки по id, как прежде).
+- **Дашборд**: карточка — `CardWidget` + `HorizontalSeparator` +
+  `BodyLabel` + `InfoBadge` + `PushButton`/`PrimaryPushButton`;
+  плашка состояния — `InfoBadge` пресетом уровня (`ERROR` — ошибки,
+  `INFOAMTION` — выключено, `ATTENTION` — остальное), приглушения
+  выключенного сообщества нет — о нём говорит плашка. Список —
+  `TableWidget` (сортировка перестройкой строк, меню по правому клику),
+  состояние в нём словами; сводка — `SimpleCardWidget` с
+  `VerticalSeparator`, ошибки — `PushButton`, «без публикатора» —
+  `InfoBadge.attension`.
+- **Страница сообщества**: кнопки-обводки → `PushButton`, хайрлайны →
+  `HorizontalSeparator`, удаление — `PushButton` со значком корзины.
+- **«Обзор»**: надписи — `CaptionLabel`/`BodyLabel`/`StrongBodyLabel`
+  с `setTextColor`, цветные точки легенды — `DotInfoBadge`, разделители
+  справки — `HorizontalSeparator`; графики (`_BarsChart`, `_FlowChart`)
+  остались на `QPainter` — исключение правила.
+- Тестов 597, без изменений по числу; проверка «на глаз» — снимки
+  трёх экранов в обеих темах.
+
 ### Исправлено 2026-09-14 — страница сообщества: вкладки, карточки очереди, справка
 
 - **Вкладки** — по официальному набору QFluentWidgets: `Pivot`

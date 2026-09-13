@@ -36,6 +36,7 @@ from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
 	FluentIcon,
+	HorizontalSeparator,
 	InfoBadge,
 	InfoLevel,
 	LineEdit,
@@ -71,10 +72,8 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	FOOTNOTE_COLOR,
 	DtoComboBox,
 	ErrorLabel,
-	OutlineButton,
 	QueueCounts,
 	QueuePanel,
 	WorkDialog,
@@ -82,7 +81,6 @@ from pxcontrol.ui.pages.common import (
 	bind,
 	bot_caption,
 	clear_layout,
-	colored,
 	community_kind_caption,
 	community_logo,
 	confirm_delete,
@@ -91,7 +89,6 @@ from pxcontrol.ui.pages.common import (
 	exec_dialog,
 	font_px,
 	format_local,
-	hairline,
 	list_area,
 	page_layout,
 	role_caption,
@@ -568,11 +565,11 @@ class _QueueTab(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(spacing.row_spacing)
-		self._retry_button = OutlineButton("Повторить ошибки", self, height=28)
+		self._retry_button = PushButton("Повторить ошибки", self)
 		self._retry_button.setToolTip("Вернуть в очередь все элементы с ошибкой разом")
 		self._retry_button.clicked.connect(self._on_retry_errors)
 		self._retry_button.hide()
-		view_button = OutlineButton("Вся очередь…", self, height=28)
+		view_button = PushButton("Вся очередь…", self)
 		view_button.setToolTip("Окно очереди отправки с фильтром по этому сообществу")
 		view_button.clicked.connect(self._on_view_all)
 		self._header_box = QVBoxLayout()
@@ -592,13 +589,13 @@ class _QueueTab(QWidget):
 		footer = QHBoxLayout()
 		self._footer = CaptionLabel("", self)
 		self._footer.setWordWrap(True)
-		footer.addWidget(colored(self._footer, FOOTNOTE_COLOR), stretch=1)
+		footer.addWidget(self._footer, stretch=1)
 		# перелистывание — как в окне «Вся очередь…»: видно только при
 		# нескольких страницах, кнопки, которые никуда не ведут, — шум
-		self._prev_button = OutlineButton("Назад", self, height=28)
+		self._prev_button = PushButton("Назад", self)
 		self._prev_button.clicked.connect(bind(self._step, -1))
 		self._page_label = CaptionLabel("", self)
-		self._next_button = OutlineButton("Вперёд", self, height=28)
+		self._next_button = PushButton("Вперёд", self)
 		self._next_button.clicked.connect(bind(self._step, 1))
 		for widget in (self._prev_button, self._page_label, self._next_button):
 			footer.addWidget(widget, alignment=Qt.AlignmentFlag.AlignTop)
@@ -719,7 +716,7 @@ class _ScheduledTab(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(spacing.row_spacing)
-		refresh = OutlineButton("Обновить", self, height=28)
+		refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
 		refresh.clicked.connect(self.reload)
 		self._header_box = QVBoxLayout()
 		layout.addLayout(self._header_box)
@@ -889,7 +886,7 @@ class CommunityPage(ScrollArea):
 		# получает ноль — всё свободное место уходит растяжке в конце
 		title_row.addWidget(title, stretch=1)
 		state, text = header_state_text(community, self._counts)
-		title_row.addWidget(state_badge(box, state, text, height=21))
+		title_row.addWidget(state_badge(box, state, text))
 		title_row.addStretch()
 		column.addLayout(title_row)
 		participants = self._stats.participants if self._stats is not None else None
@@ -1035,7 +1032,7 @@ class CommunityPage(ScrollArea):
 		)
 		hint.setWordWrap(True)
 		layout.addWidget(hint)
-		go = OutlineButton("Участники — назначить публикатора", box, tone="accent", height=28)
+		go = PushButton("Участники — назначить публикатора", box)
 		go.clicked.connect(partial(self._segments.setCurrentItem, TAB_MEMBERS))
 		layout.addWidget(go, alignment=Qt.AlignmentFlag.AlignLeft)
 		layout.addStretch()
@@ -1104,7 +1101,7 @@ class CommunityPage(ScrollArea):
 		rows.addWidget(self._prefs_row())
 		rows.addWidget(self._recheck_row())
 		rows.addSpacing(density.spacing().row_spacing)
-		rows.addWidget(hairline(self))
+		rows.addWidget(HorizontalSeparator(self))
 		rows.addSpacing(density.spacing().row_spacing)
 		rows.addWidget(self._delete_row())
 		rows.addStretch()
@@ -1189,7 +1186,7 @@ class CommunityPage(ScrollArea):
 
 	def _delete_row(self) -> QWidget:
 		"""Удаление сообщества из приложения — единственная красная обводка."""
-		action = OutlineButton("Удалить из приложения…", self, tone="error", height=28)
+		action = PushButton(FluentIcon.DELETE, "Удалить из приложения…", self)
 		action.clicked.connect(self._on_delete)
 		return self._action_row(
 			"Удаление убирает сообщество только из приложения",

@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_overview import CommunityOverviewDto, SeriesSource
 from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, UserbotRole
-from pxcontrol.ui.pages.common import ACCENT_TEXT, DIM_COLOR, ERROR_TEXT
+from pxcontrol.ui.pages.common import ACCENT_TEXT, DIM_TEXT, ERROR_TEXT
 from pxcontrol.ui.pages.community_overview import (
 	axis_dates,
 	deleted_caption,
@@ -48,8 +48,8 @@ def _community(**overrides: object) -> CommunityDto:
 def test_delta_caption_sign_and_color() -> None:
 	assert delta_caption(38) == ("+38 за 7 дней", ACCENT_TEXT)
 	assert delta_caption(-5) == ("−5 за 7 дней", ERROR_TEXT)
-	assert delta_caption(0) == ("0 за 7 дней", DIM_COLOR)
-	assert delta_caption(None) == ("нет данных за период", DIM_COLOR)
+	assert delta_caption(0) == ("0 за 7 дней", DIM_TEXT)
+	assert delta_caption(None) == ("нет данных за период", DIM_TEXT)
 	assert delta_caption(1200, days=1)[0] == "+1 200 за 1 день"
 
 

@@ -21,9 +21,17 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import CaptionLabel, CardWidget
+from qfluentwidgets import (
+	BodyLabel,
+	CaptionLabel,
+	CardWidget,
+	DotInfoBadge,
+	HorizontalSeparator,
+	StrongBodyLabel,
+	isDarkTheme,
+)
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
@@ -40,24 +48,17 @@ from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	ACCENT_TEXT,
-	DIM_COLOR,
+	DIM_TEXT,
 	ERROR_TEXT,
-	FOOTNOTE_COLOR,
-	MUTED_COLOR,
-	ROW_HAIRLINE,
-	TEXT_COLOR,
-	TITLE_COLOR,
 	clear_layout,
-	colored,
 	elide_text,
 	error_reporter,
 	font_px,
 	format_count,
 	format_local,
-	hairline,
 	plural,
 	role_caption,
-	theme_pick,
+	tinted,
 )
 
 #: Полотна графиков (пиксели): участники и приходы/уходы, часы суток.
@@ -73,12 +74,14 @@ _BAR_DIM = ("rgba(20,184,166,.45)", "rgba(20,184,166,.4)")
 _BAR_LEFT = ("#c42b1c", "#ff99a4")
 _ZERO_LINE = ("rgba(0,0,0,.18)", "rgba(255,255,255,.14)")
 _AXIS_TEXT = ("#8a8a8a", "#7a7a7a")
-_LEGEND_ACCENT = ("#14b8a6", "#14b8a6")
 
 
 def _qcolor(pair: tuple[str, str]) -> QColor:
-	"""QColor из пары «светлая, тёмная» — включая записи ``rgba(r,g,b,a)``."""
-	value = theme_pick(pair)
+	"""QColor из пары «светлая, тёмная» — включая записи ``rgba(r,g,b,a)``.
+
+	Цвета для пера графиков (рисование заказано макетом), не стили.
+	"""
+	value = pair[1] if isDarkTheme() else pair[0]
 	if value.startswith("rgba("):
 		parts = [part.strip() for part in value[5:-1].split(",")]
 		return QColor(int(parts[0]), int(parts[1]), int(parts[2]), round(float(parts[3]) * 255))
@@ -91,9 +94,9 @@ def _qcolor(pair: tuple[str, str]) -> QColor:
 def delta_caption(delta: int | None, days: int = PERIOD_DAYS) -> tuple[str, tuple[str, str]]:
 	"""Подпись изменения «+38 за 7 дней» и её цвет (рост — акцент, убыль — ошибка)."""
 	if delta is None:
-		return "нет данных за период", DIM_COLOR
+		return "нет данных за период", DIM_TEXT
 	sign = "+" if delta > 0 else ("−" if delta < 0 else "")
-	color = ACCENT_TEXT if delta > 0 else (ERROR_TEXT if delta < 0 else DIM_COLOR)
+	color = ACCENT_TEXT if delta > 0 else (ERROR_TEXT if delta < 0 else DIM_TEXT)
 	return (
 		f"{sign}{format_count(abs(delta))} за {days} {plural(days, 'день', 'дня', 'дней')}",
 		color,
@@ -405,14 +408,28 @@ def _card(parent: QWidget, margins: tuple[int, int, int, int]) -> tuple[CardWidg
 
 
 def _label(
-	parent: QWidget, text: str, size: int, color: tuple[str, str], *, bold: bool = False
+	parent: QWidget,
+	text: str,
+	size: int,
+	color: tuple[str, str] | None = None,
+	*,
+	bold: bool = False,
 ) -> QLabel:
-	label = QLabel(text, parent)
-	font = font_px(size)
-	if bold:
-		font.setWeight(font.Weight.DemiBold)
-	label.setFont(font)
-	return colored(label, color)
+	"""Библиотечная надпись нужного кегля: 12 — ``CaptionLabel``, 13–14 —
+	``BodyLabel``, крупнее — ``StrongBodyLabel`` с этим кеглем; цвет —
+	только её же ``setTextColor`` (акцент, ошибка, приглушённый)."""
+	label: QLabel
+	if size <= 12:
+		label = CaptionLabel(text, parent)
+	elif size <= 14:
+		label = BodyLabel(text, parent)
+	else:
+		label = StrongBodyLabel(text, parent)
+	if size not in (12, 14) or bold:
+		label.setFont(font_px(size, QFont.Weight.DemiBold if bold else QFont.Weight.Normal))
+	if color is not None:
+		tinted(label, color)
+	return label
 
 
 class OverviewTab(QWidget):
@@ -482,10 +499,9 @@ class OverviewTab(QWidget):
 				"Данных пока нет: статистика накопится за неделю наблюдений.", self
 			)
 			self._layout.addWidget(empty)
-		note = QLabel(source_note(overview, self._community), self)
+		note = CaptionLabel(source_note(overview, self._community), self)
 		note.setWordWrap(True)
-		note.setFont(font_px(11))
-		self._layout.addWidget(colored(note, FOOTNOTE_COLOR))
+		self._layout.addWidget(tinted(note, DIM_TEXT))
 		self._layout.addStretch()
 
 	def _tiles(self, overview: CommunityOverviewDto) -> QWidget:
@@ -498,10 +514,12 @@ class OverviewTab(QWidget):
 		is_group = community.kind is CommunityKind.GROUP
 		audience = "Участников" if is_group else "Подписчиков"
 		delta_text, delta_color = delta_caption(overview.participants_delta)
-		tiles: list[tuple[str, list[tuple[str, int, tuple[str, str]]], str, tuple[str, str]]] = [
+		tiles: list[
+			tuple[str, list[tuple[str, int, tuple[str, str] | None]], str, tuple[str, str]]
+		] = [
 			(
 				audience,
-				[(_count(overview.participants), 24, TITLE_COLOR)],
+				[(_count(overview.participants), 24, None)],
 				delta_text,
 				delta_color,
 			),
@@ -510,51 +528,51 @@ class OverviewTab(QWidget):
 			tiles.append(
 				(
 					"Онлайн сейчас",
-					[(_count(overview.online), 24, TITLE_COLOR)],
+					[(_count(overview.online), 24, None)],
 					share_caption(overview.online, overview.participants, "участников"),
-					DIM_COLOR,
+					DIM_TEXT,
 				)
 			)
 		else:
 			tiles.append(
 				(
 					"Просмотров на пост",
-					[(_count(overview.views_per_post), 24, TITLE_COLOR)],
+					[(_count(overview.views_per_post), 24, None)],
 					"медиана последних постов"
 					if overview.views_per_post is not None
 					else "нет данных",
-					DIM_COLOR,
+					DIM_TEXT,
 				)
 			)
 		tiles.append(
 			(
 				f"Пришли · ушли, {PERIOD_DAYS} дней",
 				[
-					(signed(overview.joined), 24, ACCENT_TEXT if overview.joined else DIM_COLOR),
+					(signed(overview.joined), 24, ACCENT_TEXT if overview.joined else DIM_TEXT),
 					(
 						signed(-overview.left) if overview.left is not None else "—",
 						19,
-						ERROR_TEXT if overview.left else DIM_COLOR,
+						ERROR_TEXT if overview.left else DIM_TEXT,
 					),
 				],
 				flow_caption(overview.joined, overview.left),
-				DIM_COLOR,
+				DIM_TEXT,
 			)
 		)
 		tiles.append(
 			(
 				"Удалённых аккаунтов",
-				[(_count(overview.deleted_found), 24, TITLE_COLOR)],
+				[(_count(overview.deleted_found), 24, None)],
 				deleted_caption(
 					overview.deleted_found, overview.participants, overview.deleted_checked_at
 				),
-				DIM_COLOR,
+				DIM_TEXT,
 			)
 		)
 		for title, values, caption, caption_color in tiles:
 			card, layout = _card(box, (14, 11, 14, 11))
 			layout.setSpacing(2)
-			layout.addWidget(_label(card, title, 12, MUTED_COLOR))
+			layout.addWidget(_label(card, title, 12))
 			values_row = QHBoxLayout()
 			values_row.setSpacing(8)
 			for text, size, color in values:
@@ -584,9 +602,9 @@ class OverviewTab(QWidget):
 			card, layout = _card(box, (14, 12, 14, 10))
 			head = QHBoxLayout()
 			who = "Участники" if self._community.kind is CommunityKind.GROUP else "Подписчики"
-			head.addWidget(_label(card, f"{who}, {GROWTH_DAYS} дней", 13, TEXT_COLOR))
+			head.addWidget(_label(card, f"{who}, {GROWTH_DAYS} дней", 13))
 			head.addStretch()
-			head.addWidget(_label(card, growth_subtitle(growth), 12, DIM_COLOR))
+			head.addWidget(_label(card, growth_subtitle(growth), 12, DIM_TEXT))
 			layout.addLayout(head)
 			layout.addWidget(_BarsChart([p.value for p in growth], axis_dates(growth), card))
 			row.addWidget(card, stretch=145)
@@ -594,7 +612,7 @@ class OverviewTab(QWidget):
 			joined = {p.day: p.value for p in overview.flow_joined}
 			left = {p.day: p.value for p in overview.flow_left}
 			card, layout = _card(box, (14, 12, 14, 10))
-			layout.addWidget(_label(card, f"Пришли и ушли, {FLOW_DAYS} дней", 13, TEXT_COLOR))
+			layout.addWidget(_label(card, f"Пришли и ушли, {FLOW_DAYS} дней", 13))
 			layout.addWidget(
 				_FlowChart(
 					[joined.get(d, 0) for d in flow_days], [left.get(d, 0) for d in flow_days], card
@@ -602,14 +620,14 @@ class OverviewTab(QWidget):
 			)
 			legend = QHBoxLayout()
 			legend.setSpacing(6)
-			legend.addWidget(_swatch(card, _LEGEND_ACCENT))
-			legend.addWidget(_label(card, "пришли", 11, MUTED_COLOR))
+			legend.addWidget(_swatch(card))
+			legend.addWidget(_label(card, "пришли", 11))
 			legend.addSpacing(8)
-			legend.addWidget(_swatch(card, _BAR_LEFT))
-			legend.addWidget(_label(card, "ушли", 11, MUTED_COLOR))
+			legend.addWidget(_swatch(card, error=True))
+			legend.addWidget(_label(card, "ушли", 11))
 			legend.addStretch()
 			period = tuple(DayPoint(d, 0) for d in flow_days)
-			legend.addWidget(_label(card, period_caption(period), 11, DIM_COLOR))
+			legend.addWidget(_label(card, period_caption(period), 11, DIM_TEXT))
 			layout.addLayout(legend)
 			row.addWidget(card, stretch=100)
 		return box
@@ -623,9 +641,9 @@ class OverviewTab(QWidget):
 		card, layout = _card(self, (14, 12, 14, 10))
 		head = QHBoxLayout()
 		title = "Онлайн по часам суток" if overview.hours_online else "Активность по часам суток"
-		head.addWidget(_label(card, title, 13, TEXT_COLOR))
+		head.addWidget(_label(card, title, 13))
 		head.addStretch()
-		head.addWidget(_label(card, hours_subtitle(hours, overview.hours_online), 12, DIM_COLOR))
+		head.addWidget(_label(card, hours_subtitle(hours, overview.hours_online), 12, DIM_TEXT))
 		layout.addLayout(head)
 		labels = [(0, "00"), (6, "06"), (12, "12"), (18, "18"), (23, "23")]
 		layout.addWidget(
@@ -663,10 +681,10 @@ class OverviewTab(QWidget):
 				# оставалось 8, и хвосты букв резались
 				line.setContentsMargins(0, 0, 0, 0)
 				line.setSpacing(8)
-				label = _label(cell, label_text, 12, MUTED_COLOR)
+				label = _label(cell, label_text, 12)
 				label.setFixedWidth(104)
 				line.addWidget(label)
-				value = _label(cell, "", 13, TEXT_COLOR)
+				value = _label(cell, "", 13)
 				value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 				elide_text(value, value_text)
 				line.addWidget(value, stretch=1)
@@ -675,18 +693,16 @@ class OverviewTab(QWidget):
 				line_box.setFixedHeight(30)
 				cell_layout.addWidget(line_box)
 				if position < len(items) - 1:
-					cell_layout.addWidget(hairline(cell, ROW_HAIRLINE))
+					cell_layout.addWidget(HorizontalSeparator(cell))
 				grid.addWidget(cell, position, column)
 			grid.setColumnStretch(column, 1)
 		return box
 
 
-def _swatch(parent: QWidget, color: tuple[str, str]) -> QLabel:
-	"""Квадрат легенды 8 × 8 с радиусом 2."""
-	label = QLabel(parent)
-	label.setFixedSize(8, 8)
-	label.setStyleSheet(f"background: {theme_pick(color)}; border-radius: 2px;")
-	return label
+def _swatch(parent: QWidget, *, error: bool = False) -> QWidget:
+	"""Точка легенды — штатный ``DotInfoBadge``: акцент или цвет ошибки."""
+	badge: QWidget = DotInfoBadge.error(parent) if error else DotInfoBadge.attension(parent)
+	return badge
 
 
 def _count(value: int | None) -> str:

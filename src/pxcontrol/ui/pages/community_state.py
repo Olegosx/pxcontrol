@@ -4,31 +4,20 @@
 и страницы сообщества (шапка): одно состояние на сообщество по приоритету
 «выключено → ошибки → нет публикатора», один набор быстрых действий.
 Чистые функции без Qt — тестируются как обычный код; единственный
-виджет здесь — плашка, собранная на чистом ``QLabel``.
+виджет здесь — плашка, штатный ``InfoBadge`` пресетом уровня.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
 
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtWidgets import QWidget
+from qfluentwidgets import InfoBadge, InfoLevel
 
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.telegram.types import CommunityKind
-from pxcontrol.ui.pages.common import (
-	ACCENT_BORDER,
-	ACCENT_TEXT,
-	ERROR_BORDER,
-	ERROR_TEXT,
-	NEUTRAL_BORDER,
-	TEXT_COLOR,
-	QueueCounts,
-	format_count,
-	outline_badge,
-	plural,
-	queue_counts,
-)
+from pxcontrol.ui.pages.common import QueueCounts, format_count, plural, queue_counts
 
 #: Подсказка неактивного «Обслуживания» — одна на дашборд и страницу.
 MAINTENANCE_UNAVAILABLE = "Нужен userbot-публикатор: боту история и участники недоступны"
@@ -88,13 +77,19 @@ def header_state_text(community: CommunityDto, counts: QueueCounts) -> tuple[Car
 	return state, text
 
 
-def state_badge(parent: QWidget, state: CardState, text: str, *, height: int = 22) -> QLabel:
-	"""Плашка состояния: цвет по виду состояния (штатное — акцентом)."""
-	if state is CardState.ERRORS:
-		return outline_badge(parent, text, ERROR_BORDER, ERROR_TEXT, height=height)
-	if state is CardState.DISABLED:
-		return outline_badge(parent, text, NEUTRAL_BORDER, TEXT_COLOR, height=height)
-	return outline_badge(parent, text, ACCENT_BORDER, ACCENT_TEXT, height=height)
+def state_badge(parent: QWidget, state: CardState, text: str) -> InfoBadge:
+	"""Плашка состояния — штатный ``InfoBadge`` пресетом уровня.
+
+	Ошибки — ``ERROR`` (красная), выключено — ``INFOAMTION`` (серая),
+	нет публикатора и штатное «активен» — ``ATTENTION`` (акцент темы).
+	"""
+	levels = {
+		CardState.ERRORS: InfoLevel.ERROR,
+		CardState.DISABLED: InfoLevel.INFOAMTION,
+	}
+	badge = InfoBadge(text, parent, levels.get(state, InfoLevel.ATTENTION))
+	badge.adjustSize()
+	return badge
 
 
 class CardAction(StrEnum):

@@ -24,24 +24,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
 
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import (
-	QColor,
-	QContextMenuEvent,
-	QMouseEvent,
-	QPainter,
-	QPaintEvent,
-	QPen,
-	QResizeEvent,
-	QShowEvent,
-)
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QIcon, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
-	QFrame,
+	QAbstractItemView,
 	QGridLayout,
 	QHBoxLayout,
-	QLabel,
+	QHeaderView,
 	QPushButton,
 	QSizePolicy,
+	QTableWidgetItem,
 	QVBoxLayout,
 	QWidget,
 )
@@ -52,16 +44,21 @@ from qfluentwidgets import (
 	CardWidget,
 	ComboBox,
 	FluentIcon,
+	HorizontalSeparator,
+	InfoBadge,
 	LineEdit,
 	MessageBoxBase,
 	PrimaryPushButton,
+	PushButton,
 	RoundMenu,
 	ScrollArea,
 	SearchLineEdit,
 	SegmentedToolWidget,
+	SimpleCardWidget,
 	StrongBodyLabel,
 	SubtitleLabel,
-	isDarkTheme,
+	TableWidget,
+	VerticalSeparator,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -74,48 +71,25 @@ from pxcontrol.engine.telegram.types import CommunityKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	ACCENT_BORDER,
-	ACCENT_TEXT,
-	CARD_HAIRLINE,
-	DIM_COLOR,
-	DIVIDER,
-	ERROR_BORDER,
-	ERROR_HOVER,
-	ERROR_TEXT,
-	MUTED_COLOR,
-	ROW_BORDER,
-	SUMMARY_BG,
-	SUMMARY_BORDER,
-	TABLE_BORDER,
-	TABLE_HEADER_BG,
-	TEXT_COLOR,
-	TITLE_COLOR,
 	DtoComboBox,
 	ErrorLabel,
-	OutlineButton,
 	QueueCounts,
 	account_caption,
 	bot_caption,
 	clear_layout,
-	colored,
 	community_logo,
-	dim_widget,
 	elide_text,
 	error_reporter,
 	exec_dialog,
-	font_px,
 	format_count,
-	hairline,
 	noop,
-	outline_badge,
 	page_layout,
 	plural,
 	queue_counts,
-	rich_numbers,
+	round_pixmap,
 	section_header,
 	show_info,
 	show_success,
-	theme_pick,
 )
 from pxcontrol.ui.pages.community_page import open_members
 from pxcontrol.ui.pages.community_state import (
@@ -162,13 +136,6 @@ _TABLE_ROW_HEIGHT = 50
 
 #: Ширины числовых колонок таблицы (пиксели); колонка названия тянется.
 _COLUMN_WIDTHS = {"participants": 96, "queue": 104, "scheduled": 92, "state": 132}
-
-#: Непрозрачность выключенного сообщества: карточка и строка таблицы.
-_DISABLED_CARD_OPACITY = 0.62
-_DISABLED_ROW_OPACITY = 0.6
-
-#: Рамка карточки с ошибками (пером поверх штатной): пары QColor по темам.
-_ERROR_CARD_BORDER = (QColor(196, 43, 28, 102), QColor(255, 153, 164, 102))
 
 #: Ширина поля поиска в шапке (пиксели).
 _SEARCH_WIDTH = 200
@@ -332,10 +299,11 @@ def sort_rows(rows: list[Row], column: TableColumn, descending: bool) -> list[Ro
 
 
 class CommunityCard(CardWidget):
-	"""Карточка сообщества: шапка, хайрлайн, метрики и состояние, действия.
+	"""Карточка сообщества: шапка, разделитель, метрики и состояние, действия.
 
-	Ширины у карточки нет — её даёт колонка сетки (:class:`_TileGrid`);
-	высота — не меньше минимальной, растёт по содержимому.
+	Только штатные элементы библиотеки: надписи, ``HorizontalSeparator``,
+	``InfoBadge`` состояния, кнопки. Ширины у карточки нет — её даёт
+	колонка сетки (:class:`_TileGrid`); высота — не меньше минимальной.
 	"""
 
 	def __init__(
@@ -347,35 +315,16 @@ class CommunityCard(CardWidget):
 		super().__init__(parent)
 		community, counts = row.community, row.counts
 		self._state = card_state(community, counts)
-		self._border = _pick_color(_ERROR_CARD_BORDER) if self._state is CardState.ERRORS else None
 		self.setMinimumHeight(_CARD_MIN_HEIGHT)
 		self.setCursor(Qt.CursorShape.PointingHandCursor)
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(16, 12, 16, 10)
 		layout.setSpacing(9)
 		layout.addWidget(self._header(row))
-		layout.addWidget(hairline(self, CARD_HAIRLINE))
+		layout.addWidget(HorizontalSeparator(self))
 		layout.addWidget(self._metrics(row))
 		layout.addStretch()
 		layout.addWidget(self._actions(community, counts, on_action))
-		if self._state is CardState.DISABLED:
-			dim_widget(self, _DISABLED_CARD_OPACITY)
-
-	def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 — API Qt
-		"""Рамка карточки с ошибками — цветом ошибки поверх штатной.
-
-		Рисуется своим пером, а не стилем: лист стилей карточки
-		принадлежит библиотеке (ADR-0023, п. 5).
-		"""
-		super().paintEvent(event)
-		if self._border is None:
-			return
-		painter = QPainter(self)
-		painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-		painter.setPen(QPen(self._border, 1.0))
-		painter.setBrush(Qt.BrushStyle.NoBrush)
-		radius = float(self.borderRadius)
-		painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
 
 	def _header(self, row: Row) -> QWidget:
 		"""Шапка: логотип, название и подстрочник (@имя · подписчики)."""
@@ -418,25 +367,16 @@ class CommunityCard(CardWidget):
 		group_layout.setSpacing(16)
 		texts = metrics_text(row.community, row.counts, row.stats)
 		for text in (texts.queue, texts.scheduled):
-			if text is None:
-				continue
-			label = QLabel(rich_numbers(text, TITLE_COLOR, MUTED_COLOR), group)
-			label.setFont(font_px(13))
-			label.setStyleSheet("background: transparent;")
-			group_layout.addWidget(label)
+			if text is not None:
+				group_layout.addWidget(BodyLabel(text, group))
 		group_layout.addStretch()
 		layout.addWidget(group, stretch=1)
-		badge = self.state_badge(box, row.counts)
-		if badge is not None:
-			layout.addWidget(badge, alignment=Qt.AlignmentFlag.AlignRight)
+		text = state_badge_text(self._state, row.counts)
+		if text is not None:
+			layout.addWidget(
+				state_badge(box, self._state, text), alignment=Qt.AlignmentFlag.AlignRight
+			)
 		return box
-
-	def state_badge(self, parent: QWidget, counts: QueueCounts) -> QLabel | None:
-		"""Плашка состояния (одна из трёх) или ничего в штатном случае."""
-		text = state_badge_text(self._state, counts)
-		if text is None:
-			return None
-		return state_badge(parent, self._state, text)
 
 	def _actions(
 		self,
@@ -444,21 +384,23 @@ class CommunityCard(CardWidget):
 		counts: QueueCounts,
 		on_action: Callable[[CardAction, CommunityDto], None],
 	) -> QWidget:
-		"""Строка кнопок-обводок; набор — по состоянию карточки.
+		"""Строка кнопок; набор — по состоянию карточки.
 
 		Кнопки перехватывают свои нажатия сами: клик по кнопке
 		не открывает страницу сообщества, клик мимо неё — открывает.
+		«Назначить публикатора» — главное действие карточки без
+		публикатора, поэтому ``PrimaryPushButton``.
 		"""
 		box = QWidget(self)
 		layout = QHBoxLayout(box)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(8)
 		for action in card_actions(community, counts):
-			button = OutlineButton(
-				ACTION_LABELS[action],
-				box,
-				tone="accent" if action is CardAction.ASSIGN_PUBLISHER else "neutral",
-			)
+			button: QPushButton
+			if action is CardAction.ASSIGN_PUBLISHER:
+				button = PrimaryPushButton(ACTION_LABELS[action], box)
+			else:
+				button = PushButton(ACTION_LABELS[action], box)
 			if not action_available(action, community):
 				button.setEnabled(False)
 				button.setToolTip(MAINTENANCE_UNAVAILABLE)
@@ -466,11 +408,6 @@ class CommunityCard(CardWidget):
 			layout.addWidget(button)
 		layout.addStretch()
 		return box
-
-
-def _pick_color(pair: tuple[QColor, QColor]) -> QColor:
-	"""Цвет пары «светлая, тёмная» по текущей теме (для рисования пером)."""
-	return pair[1] if isDarkTheme() else pair[0]
 
 
 class _TileGrid(QWidget):
@@ -514,154 +451,34 @@ class _TileGrid(QWidget):
 
 # --- таблица (вид «список») -------------------------------------------------------
 
-
-class _HeaderCell(QLabel):
-	"""Заголовок колонки: клик сортирует."""
-
-	def __init__(self, text: str, on_click: Callable[[], None], parent: QWidget) -> None:
-		super().__init__(text, parent)
-		self._on_click = on_click
-		self.setFont(font_px(12))
-		self.setCursor(Qt.CursorShape.PointingHandCursor)
-		colored(self, MUTED_COLOR)
-
-	def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
-		inside = self.rect().contains(event.position().toPoint())
-		if event.button() is Qt.MouseButton.LeftButton and inside:
-			self._on_click()
-		super().mouseReleaseEvent(event)
+#: Колонки таблицы по порядку: заголовок (пустой — по виду раздела) и сортировка.
+_TABLE_COLUMNS: tuple[tuple[str, TableColumn], ...] = (
+	("Название", TableColumn.TITLE),
+	("@имя", TableColumn.TITLE),
+	("", TableColumn.PARTICIPANTS),
+	("К отправке", TableColumn.QUEUE),
+	("Отложено", TableColumn.SCHEDULED),
+	("Состояние", TableColumn.STATE),
+)
 
 
-class _TableRow(QFrame):
-	"""Строка таблицы: клик открывает страницу, правый клик — меню действий."""
-
-	def __init__(
-		self,
-		row: Row,
-		on_open: Callable[[int], None],
-		on_action: Callable[[CardAction, CommunityDto], None],
-		parent: QWidget,
-	) -> None:
-		super().__init__(parent)
-		self._row = row
-		self._on_open = on_open
-		self._on_action = on_action
-		self.setFixedHeight(_TABLE_ROW_HEIGHT)
-		self.setCursor(Qt.CursorShape.PointingHandCursor)
-		self.setObjectName("communityRow")
-		self.setStyleSheet(
-			f"#communityRow {{ border-top: 1px solid {theme_pick(ROW_BORDER)}; "
-			"background: transparent; }"
-		)
-		layout = QHBoxLayout(self)
-		layout.setContentsMargins(16, 0, 16, 0)
-		layout.setSpacing(12)
-		layout.addWidget(self._name_cell(), stretch=1)
-		community, counts, stats = row.community, row.counts, row.stats
-		participants = stats.participants if stats is not None else None
-		layout.addWidget(self._number(participants, _COLUMN_WIDTHS["participants"]))
-		layout.addWidget(self._queue_cell(counts))
-		scheduled = stats.scheduled_count if stats is not None else None
-		layout.addWidget(self._number(scheduled, _COLUMN_WIDTHS["scheduled"]))
-		layout.addWidget(self._state_cell(community, counts))
-		if not community.enabled:
-			dim_widget(self, _DISABLED_ROW_OPACITY)
-
-	def _name_cell(self) -> QWidget:
-		"""Логотип, название и @имя."""
-		community, stats = self._row.community, self._row.stats
-		box = QWidget(self)
-		layout = QHBoxLayout(box)
-		layout.setContentsMargins(0, 0, 0, 0)
-		layout.setSpacing(10)
-		avatar_path = stats.avatar_path if stats is not None else None
-		layout.addWidget(
-			community_logo(box, community.id, community.title, avatar_path, _ROW_LOGO_SIZE)
-		)
-		column = QVBoxLayout()
-		column.setSpacing(1)
-		title = QLabel(box)
-		title.setFont(font_px(14))
-		title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		colored(title, TITLE_COLOR)
-		elide_text(title, community.title)
-		column.addWidget(title)
-		name = QLabel(box)
-		name.setFont(font_px(12))
-		name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		colored(name, DIM_COLOR)
-		elide_text(name, f"@{community.username}" if community.username else "имя не задано")
-		column.addWidget(name)
-		layout.addLayout(column, stretch=1)
-		return box
-
-	def _number(self, value: int | None, width: int) -> QLabel:
-		"""Числовая ячейка, выровненная вправо; ноль и «—» приглушены."""
-		label = QLabel("—" if value is None else format_count(value), self)
-		label.setFixedWidth(width)
-		label.setFont(font_px(13))
-		label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-		colored(label, DIM_COLOR if not value else TEXT_COLOR)
-		return label
-
-	def _queue_cell(self, counts: QueueCounts) -> QLabel:
-		"""«К отправке»: число и «+N» ждущих слота приглушённым."""
-		label = self._number(counts.planned, _COLUMN_WIDTHS["queue"])
-		if counts.waiting:
-			label.setText(
-				f'<span style="color:{theme_pick(TEXT_COLOR)}">{counts.planned}</span> '
-				f'<span style="color:{theme_pick(DIM_COLOR)}">+{counts.waiting}</span>'
-			)
-		return label
-
-	def _state_cell(self, community: CommunityDto, counts: QueueCounts) -> QWidget:
-		"""Состояние: плашка или прочерк."""
-		box = QWidget(self)
-		box.setFixedWidth(_COLUMN_WIDTHS["state"])
-		layout = QHBoxLayout(box)
-		layout.setContentsMargins(0, 0, 0, 0)
-		state = card_state(community, counts)
-		text = state_badge_text(state, counts)
-		if text is None:
-			dash = QLabel("—", box)
-			dash.setFont(font_px(13))
-			layout.addWidget(colored(dash, DIM_COLOR))
-		else:
-			layout.addWidget(state_badge(box, state, text))
-		layout.addStretch()
-		return box
-
-	def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
-		inside = self.rect().contains(event.position().toPoint())
-		if event.button() is Qt.MouseButton.LeftButton and inside:
-			self._on_open(self._row.community.id)
-		super().mouseReleaseEvent(event)
-
-	def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802 — API Qt
-		"""Меню действий — тот же набор, что кнопками на карточке."""
-		community, counts = self._row.community, self._row.counts
-		menu = RoundMenu(parent=self)
-		for action in card_actions(community, counts):
-			item = Action(ACTION_LABELS[action], menu)
-			if not action_available(action, community):
-				item.setEnabled(False)
-				item.setToolTip(MAINTENANCE_UNAVAILABLE)
-			item.triggered.connect(partial(self._on_action, action, community))
-			menu.addAction(item)
-		menu.exec(event.globalPos())
+def _number_item(value: int | None) -> QTableWidgetItem:
+	"""Числовая ячейка: вправо; нет данных — «—»."""
+	item = QTableWidgetItem("—" if value is None else format_count(value))
+	item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+	return item
 
 
-#: Заголовки колонок таблицы; «аудитория» зависит от вида раздела.
-_COLUMN_TITLES: dict[TableColumn, str] = {
-	TableColumn.TITLE: "Название",
-	TableColumn.QUEUE: "К отправке",
-	TableColumn.SCHEDULED: "Отложено",
-	TableColumn.STATE: "Состояние",
-}
+class _Table(TableWidget):
+	"""Таблица раздела: штатный ``TableWidget``, строка — сообщество.
 
-
-class _Table(QFrame):
-	"""Таблица раздела: шапка с сортировкой и строки сообществ."""
+	Сортировка — наша чистая функция :func:`sort_rows` с перестройкой
+	(правило одно с карточками и закрыто тестами), клик по заголовку
+	меняет колонку и направление. Клик по строке открывает страницу
+	сообщества, правый клик — меню действий (тот же набор, что кнопки
+	карточки). Таблица живёт внутри прокручиваемой страницы, поэтому
+	высота — по числу строк, свои полосы прокрутки выключены.
+	"""
 
 	def __init__(
 		self,
@@ -674,62 +491,106 @@ class _Table(QFrame):
 		parent: QWidget,
 	) -> None:
 		super().__init__(parent)
-		self.setObjectName("communityTable")
-		# как у сетки карточек: высота по содержимому, не по странице
-		self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-		self.setStyleSheet(
-			f"#communityTable {{ border: 1px solid {theme_pick(TABLE_BORDER)}; "
-			"border-radius: 6px; background: transparent; }"
-		)
-		layout = QVBoxLayout(self)
-		layout.setContentsMargins(0, 0, 0, 0)
-		layout.setSpacing(0)
-		layout.addWidget(self._header(kind, sort, on_sort))
+		self._on_sort = on_sort
+		self._on_open = on_open
+		self._on_action = on_action
 		column, descending = sort
-		for row in sort_rows(rows, column, descending):
-			layout.addWidget(_TableRow(row, on_open, on_action, self))
-
-	def _header(
-		self,
-		kind: CommunityKind,
-		sort: tuple[TableColumn, bool],
-		on_sort: Callable[[TableColumn], None],
-	) -> QWidget:
-		"""Шапка таблицы: подписи колонок с признаком сортировки."""
-		box = QFrame(self)
-		box.setObjectName("communityTableHeader")
-		box.setFixedHeight(_TABLE_HEADER_HEIGHT)
-		box.setStyleSheet(
-			f"#communityTableHeader {{ background: {theme_pick(TABLE_HEADER_BG)}; "
-			"border-top-left-radius: 6px; border-top-right-radius: 6px; }"
-		)
-		layout = QHBoxLayout(box)
-		layout.setContentsMargins(16, 0, 16, 0)
-		layout.setSpacing(12)
-		sorted_column, descending = sort
+		self._rows = sort_rows(rows, column, descending)
 		audience = "Участники" if kind is CommunityKind.GROUP else "Подписчики"
-		widths = {
-			TableColumn.PARTICIPANTS: _COLUMN_WIDTHS["participants"],
-			TableColumn.QUEUE: _COLUMN_WIDTHS["queue"],
-			TableColumn.SCHEDULED: _COLUMN_WIDTHS["scheduled"],
-			TableColumn.STATE: _COLUMN_WIDTHS["state"],
-		}
-		for column in TableColumn:
-			title = _COLUMN_TITLES.get(column, audience)
-			if column is sorted_column:
-				title += " ▼" if descending else " ▲"
-			cell = _HeaderCell(title, partial(on_sort, column), box)
-			if column is TableColumn.TITLE:
-				layout.addWidget(cell, stretch=1)
-				continue
-			cell.setFixedWidth(widths[column])
-			right = column in (TableColumn.PARTICIPANTS, TableColumn.QUEUE, TableColumn.SCHEDULED)
-			cell.setAlignment(
-				(Qt.AlignmentFlag.AlignRight if right else Qt.AlignmentFlag.AlignLeft)
-				| Qt.AlignmentFlag.AlignVCenter
+		titles = [title or audience for title, _column in _TABLE_COLUMNS]
+		self.setColumnCount(len(titles))
+		self.setHorizontalHeaderLabels(titles)
+		self.setRowCount(len(self._rows))
+		self.setBorderVisible(True)
+		self.setBorderRadius(6)
+		self.setWordWrap(False)
+		self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+		self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+		self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+		self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+		self.customContextMenuRequested.connect(self._on_menu)
+		self.cellClicked.connect(self._on_cell)
+		vertical = self.verticalHeader()
+		if vertical is not None:
+			vertical.hide()
+		for index, row in enumerate(self._rows):
+			self._fill_row(index, row)
+		header = self.horizontalHeader()
+		if header is not None:
+			header.setSortIndicatorShown(True)
+			header.setSortIndicator(
+				self._column_index(column),
+				Qt.SortOrder.DescendingOrder if descending else Qt.SortOrder.AscendingOrder,
 			)
-			layout.addWidget(cell)
-		return box
+			header.sectionClicked.connect(self._on_header)
+			header.setStretchLastSection(False)
+		self.resizeColumnsToContents()
+		if header is not None:
+			header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+		self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+		self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+		self._fit_height()
+
+	@staticmethod
+	def _column_index(column: TableColumn) -> int:
+		"""Номер колонки для индикатора сортировки (у названия — первая)."""
+		for index, (_title, candidate) in enumerate(_TABLE_COLUMNS):
+			if candidate is column:
+				return index
+		return 0
+
+	def _fill_row(self, index: int, row: Row) -> None:
+		community, counts, stats = row.community, row.counts, row.stats
+		name = QTableWidgetItem(community.title)
+		avatar = stats.avatar_path if stats is not None else None
+		pixmap = round_pixmap(avatar, _ROW_LOGO_SIZE) if avatar else None
+		if pixmap is not None:
+			name.setIcon(QIcon(pixmap))
+		self.setItem(index, 0, name)
+		self.setItem(
+			index, 1, QTableWidgetItem(f"@{community.username}" if community.username else "—")
+		)
+		self.setItem(index, 2, _number_item(stats.participants if stats is not None else None))
+		queue = _number_item(counts.planned)
+		if counts.waiting:
+			queue.setText(f"{counts.planned} +{counts.waiting}")
+		self.setItem(index, 3, queue)
+		self.setItem(index, 4, _number_item(stats.scheduled_count if stats is not None else None))
+		state = card_state(community, counts)
+		self.setItem(index, 5, QTableWidgetItem(state_badge_text(state, counts) or "—"))
+
+	def _fit_height(self) -> None:
+		"""Высота по строкам: таблица внутри прокручиваемой страницы."""
+		header = self.horizontalHeader()
+		height = header.sizeHint().height() if header is not None else 0
+		for index in range(self.rowCount()):
+			height += self.rowHeight(index)
+		self.setFixedHeight(height + 2 * self.frameWidth())
+
+	def _on_header(self, index: int) -> None:
+		self._on_sort(_TABLE_COLUMNS[index][1])
+
+	def _on_cell(self, row: int, _column: int) -> None:
+		self._on_open(self._rows[row].community.id)
+
+	def _on_menu(self, pos: QPoint) -> None:
+		"""Меню действий — тот же набор, что кнопками на карточке."""
+		index = self.indexAt(pos)
+		if not index.isValid():
+			return
+		row = self._rows[index.row()]
+		community, counts = row.community, row.counts
+		menu = RoundMenu(parent=self)
+		for action in card_actions(community, counts):
+			item = Action(ACTION_LABELS[action], menu)
+			if not action_available(action, community):
+				item.setEnabled(False)
+				item.setToolTip(MAINTENANCE_UNAVAILABLE)
+			item.triggered.connect(partial(self._on_action, action, community))
+			menu.addAction(item)
+		viewport = self.viewport()
+		anchor = viewport.mapToGlobal(pos) if viewport is not None else self.mapToGlobal(pos)
+		menu.exec(anchor)
 
 
 # --- диалог подключения --------------------------------------------------------------
@@ -996,78 +857,43 @@ class CommunitiesPage(ScrollArea):
 		self._render_sections()
 
 	def _render_summary(self) -> None:
-		"""Строка сводки: очередь, активные, плашки ошибок и без публикатора."""
+		"""Строка сводки: очередь, активные, ошибки, без публикатора.
+
+		``SimpleCardWidget`` (без реакции на наведение), числа —
+		``StrongBodyLabel``, подписи — ``BodyLabel``, между ними
+		``VerticalSeparator``; ошибки — кнопка (ведёт в очередь),
+		«без публикатора» — ``InfoBadge`` акцентом.
+		"""
 		clear_layout(self._summary_box)
 		if not self._communities:
 			return
 		totals = summary_counts(self._communities, self._queue_counts)
-		bar = QFrame(self)
-		bar.setObjectName("communitySummary")
-		bar.setFixedHeight(_SUMMARY_HEIGHT)
-		bar.setStyleSheet(
-			f"#communitySummary {{ background: {theme_pick(SUMMARY_BG)}; border-radius: 6px; "
-			f"border: 1px solid {theme_pick(SUMMARY_BORDER)}; }}"
-		)
+		bar: QWidget = SimpleCardWidget(self)
 		layout = QHBoxLayout(bar)
-		layout.setContentsMargins(4, 0, 4, 0)
-		layout.setSpacing(0)
-		layout.addWidget(self._summary_segment(bar, totals.queued, "в очереди отправки"))
-		layout.addWidget(self._divider(bar))
-		layout.addWidget(self._summary_segment(bar, totals.enabled, f"активных из {totals.total}"))
+		layout.setContentsMargins(16, 6, 16, 6)
+		layout.setSpacing(12)
+		self._summary_segment(bar, layout, totals.queued, "в очереди отправки")
+		layout.addWidget(VerticalSeparator(bar))
+		self._summary_segment(bar, layout, totals.enabled, f"активных из {totals.total}")
 		if totals.errors:
-			layout.addWidget(self._divider(bar))
-			layout.addWidget(self._errorsoutline_badge(bar, totals.errors))
+			layout.addWidget(VerticalSeparator(bar))
+			text = f"{totals.errors} {plural(totals.errors, 'ошибка', 'ошибки', 'ошибок')}"
+			errors = PushButton(text, bar)
+			errors.setToolTip("Элементы очереди отправки с ошибкой — открыть очередь")
+			errors.clicked.connect(self._open_errors)
+			layout.addWidget(errors)
 		if totals.without_publisher:
-			layout.addWidget(self._divider(bar))
-			layout.addWidget(
-				outline_badge(
-					bar,
-					f"{totals.without_publisher} без публикатора",
-					ACCENT_BORDER,
-					ACCENT_TEXT,
-					height=_SUMMARY_BADGE_HEIGHT,
-					padding=14,
-				)
-			)
+			layout.addWidget(VerticalSeparator(bar))
+			badge = InfoBadge.attension(f"{totals.without_publisher} без публикатора", parent=bar)
+			layout.addWidget(badge)
 		layout.addStretch()
 		self._summary_box.addWidget(bar)
 
 	@staticmethod
-	def _summary_segment(parent: QWidget, number: int, tail: str) -> QLabel:
+	def _summary_segment(parent: QWidget, layout: QHBoxLayout, number: int, tail: str) -> None:
 		"""Сегмент сводки: число жирным и подпись прозой."""
-		label = QLabel(
-			f'<span style="color:{theme_pick(TITLE_COLOR)}; font-weight:600">{number}</span> '
-			f'<span style="color:{theme_pick(TEXT_COLOR)}">{tail}</span>',
-			parent,
-		)
-		label.setFont(font_px(13))
-		label.setContentsMargins(14, 0, 14, 0)
-		label.setStyleSheet("background: transparent;")
-		return label
-
-	@staticmethod
-	def _divider(parent: QWidget) -> QFrame:
-		"""Вертикальный разделитель сегментов сводки."""
-		line = QFrame(parent)
-		line.setFixedSize(1, 18)
-		line.setStyleSheet(f"background: {theme_pick(DIVIDER)};")
-		return line
-
-	def _errorsoutline_badge(self, parent: QWidget, errors: int) -> QPushButton:
-		"""Плашка ошибок — кнопка: открывает очередь с фильтром «ошибки»."""
-		button = QPushButton(f"{errors} {plural(errors, 'ошибка', 'ошибки', 'ошибок')}", parent)
-		button.setFixedHeight(_SUMMARY_BADGE_HEIGHT)
-		button.setFont(font_px(12))
-		button.setCursor(Qt.CursorShape.PointingHandCursor)
-		button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-		button.setToolTip("Элементы очереди отправки с ошибкой — открыть очередь")
-		button.setStyleSheet(
-			f"QPushButton {{ border: 1px solid {theme_pick(ERROR_BORDER)}; border-radius: 4px; "
-			f"color: {theme_pick(ERROR_TEXT)}; padding: 0 14px; background: transparent; }}"
-			f"QPushButton:hover {{ background: {theme_pick(ERROR_HOVER)}; }}"
-		)
-		button.clicked.connect(self._open_errors)
-		return button
+		layout.addWidget(StrongBodyLabel(str(number), parent))
+		layout.addWidget(BodyLabel(tail, parent))
 
 	def _render_sections(self) -> None:
 		"""Разделы «Каналы» и «Группы» по текущему поиску и виду."""
