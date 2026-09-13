@@ -360,10 +360,20 @@ class PublishPage(ScrollArea):
 			self._restore_community_id = None
 			self._on_community_changed()
 
-	def _on_last_community_loaded(self, community_id: int | None) -> None:
-		"""Пришёл канал прошлой публикации — применяем, если список готов."""
+	def select_community(self, community_id: int | None) -> None:
+		"""Предвыбирает сообщество (переход с дашборда, канал прошлой публикации).
+
+		Применяется сразу, если список каналов уже загружен, иначе —
+		при его загрузке (тот же механизм, что у канала прошлой
+		публикации). Выключенного или удалённого сообщества в списке нет —
+		предвыбор тогда молча снимается.
+		"""
 		self._restore_community_id = community_id
 		self._apply_community_restore()
+
+	def _on_last_community_loaded(self, community_id: int | None) -> None:
+		"""Пришёл канал прошлой публикации — применяем, если список готов."""
+		self.select_community(community_id)
 
 	def _apply_community_restore(self) -> bool:
 		"""Предвыбирает канал прошлой публикации (один раз).

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -219,6 +220,34 @@ class _MembersDialog(WorkDialog):
 			self._show_members,
 			self._show_error,
 		)
+
+
+def open_members(
+	worker: EngineWorker,
+	community: CommunityDto,
+	parent: QWidget,
+	on_closed: Callable[[], None],
+) -> None:
+	"""Открывает диалог участников сообщества (ADR-0022).
+
+	Общая точка входа для страницы сообщества и кнопки «Назначить
+	публикатора» на дашборде. Кандидаты — вошедшие userbot-аккаунты,
+	их список читается из движка перед показом; ``on_closed`` зовётся
+	после закрытия — вызывающий перечитывает своё состояние.
+	"""
+
+	def _open(accounts: list[TgAccountDto]) -> None:
+		logged_in = [account for account in accounts if account.logged_in]
+		exec_dialog(_MembersDialog(worker, community, logged_in, parent.window()))
+		on_closed()
+
+	run_in_engine(
+		worker,
+		worker.engine.accounts.list_tg_accounts(),
+		parent,
+		_open,
+		error_reporter(parent),
+	)
 
 
 class _CommunityPrefsDialog(MessageBoxBase):
@@ -641,21 +670,8 @@ class CommunityPage(ScrollArea):
 	# --- участники (ADR-0022) ----------------------------------------------------
 
 	def _on_open_members(self) -> None:
-		"""Открывает диалог участников (нужны вошедшие аккаунты-кандидаты)."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.list_tg_accounts(),
-			self,
-			self._open_members_dialog,
-			self._show_error,
-		)
-
-	def _open_members_dialog(self, accounts: list[TgAccountDto]) -> None:
 		"""Живой диалог участников; по закрытии — обновление страницы."""
-		logged_in = [account for account in accounts if account.logged_in]
-		dialog = _MembersDialog(self._worker, self._community, logged_in, self.window())
-		exec_dialog(dialog)
-		self._refresh()
+		open_members(self._worker, self._community, self, self._refresh)
 
 	# --- удаление ----------------------------------------------------------------
 

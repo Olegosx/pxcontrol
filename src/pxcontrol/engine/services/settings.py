@@ -138,6 +138,13 @@ UI_CONTROL_HEIGHT: SettingKey[int] = SettingKey("ui_control_height", SettingScop
 #: Применяется при запуске.
 UI_FONT_SIZE: SettingKey[int] = SettingKey("ui_font_size", SettingScope.APP, 14, int)
 
+#: Вид дашборда «Каналы и группы»: ``"tiles"`` — сетка карточек,
+#: ``"list"`` — таблица. Положение переключателя в шапке страницы;
+#: незнакомое значение страница читает как плитку.
+UI_COMMUNITIES_VIEW: SettingKey[str] = SettingKey(
+	"ui_communities_view", SettingScope.APP, "tiles", str
+)
+
 
 class SettingsService:
 	"""Чтение и запись настроек приложения и каналов.

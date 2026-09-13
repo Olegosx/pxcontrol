@@ -60,6 +60,10 @@ class SchedulePage(ScrollArea):
 		# показ вкладки не должен запускать второй обход поверх первого
 		self._loading = False
 		self._loaded_at: float | None = None
+		# сообщество, которое просили показать одно (кнопка «Расписание»
+		# на дашборде): применяется к текущему списку или к следующему,
+		# если обход как раз идёт
+		self._only: int | None = None
 		self._build()
 		# первичной загрузки здесь нет: её делает showEvent при первом
 		# показе — Telegram не опрашивается, пока страницу не открыли
@@ -86,6 +90,28 @@ class SchedulePage(ScrollArea):
 		fresh = self._loaded_at is not None and monotonic() - self._loaded_at < _FRESH_FOR_S
 		if not fresh:
 			self._reload()
+
+	def show_only(self, community_id: int) -> None:
+		"""Оставляет в фильтре только одно сообщество (переход с дашборда).
+
+		Список сам не перечитывается: если он свежий, фильтр применяется
+		сразу; если обход идёт, — к его результату. Галки остальных
+		сообществ снимаются — человек вернёт их сам.
+		"""
+		self._only = community_id
+		if not self._loading:
+			self._apply_only()
+
+	def _apply_only(self) -> None:
+		"""Снимает галки всех сообществ, кроме запрошенного (если оно есть)."""
+		if self._only is None:
+			return
+		known = {item.community_id for item in self._items}
+		if self._only in known:
+			self._unchecked = known - {self._only}
+			self._rebuild_filter()
+			self._render()
+		self._only = None
 
 	def _build(self) -> None:
 		"""Шапка с кнопками, фильтр по каналам и область списка."""
@@ -138,6 +164,7 @@ class SchedulePage(ScrollArea):
 		self._unread = scheduled.unread
 		self._rebuild_filter()
 		self._render()
+		self._apply_only()
 
 	# --- фильтр по каналам -------------------------------------------------------
 

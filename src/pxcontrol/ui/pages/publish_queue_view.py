@@ -245,12 +245,27 @@ def summary_text(view: QueuePage, total: int) -> str:
 class QueueViewDialog(WorkDialog):
 	"""Вся очередь отправки: живой список с сортировкой и фильтрами."""
 
-	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
+	def __init__(
+		self,
+		worker: EngineWorker,
+		parent: QWidget,
+		*,
+		status: QueueFilter = QueueFilter.ALL,
+		community_id: int | None = None,
+	) -> None:
+		"""``status`` и ``community_id`` — начальное правило показа: окно
+		открывают не только с «Публикации», но и с дашборда сообществ —
+		плашкой ошибок (фильтр «ошибки») и кнопкой «Очередь» карточки
+		(фильтр по сообществу). Сообщество, которого в очереди нет,
+		фильтром не становится — показывается вся очередь."""
 		super().__init__("Очередь отправки", parent, size=(880, 620))
 		self._worker = worker
 		self._sort = QueueSort.NEAREST
-		self._status = QueueFilter.ALL
+		self._status = status
 		self._community: int | None = None
+		# сообщество применяется при первом наполнении фильтра: пункты
+		# списка строятся по элементам очереди, которых до опроса ещё нет
+		self._wanted_community = community_id
 		self._slot: str | None = None
 		self._known_communities: list[tuple[int, str]] = []
 		self._known_slots: list[str] = []
@@ -316,6 +331,9 @@ class QueueViewDialog(WorkDialog):
 		self._status_combo = ComboBox(self)
 		for status_option in QueueFilter:
 			self._status_combo.addItem(status_option.value)
+		# начальный фильтр — до подключения сигнала: обработчик опрашивает
+		# панель, а её ещё нет
+		self._status_combo.setCurrentIndex(list(QueueFilter).index(self._status))
 		self._status_combo.currentIndexChanged.connect(self._on_view_changed)
 		row.addWidget(self._status_combo)
 		self._community_combo: DtoComboBox[tuple[int, str]] = DtoComboBox(
@@ -391,6 +409,16 @@ class QueueViewDialog(WorkDialog):
 		self._community_combo.set_items(
 			communities, label=lambda entry: entry[1], key=lambda entry: entry[0]
 		)
+		if self._wanted_community is not None:
+			# без сигнала: выбор делается внутри опроса панели, и его
+			# обработчик запустил бы второй опрос поверх первого
+			wanted = self._wanted_community
+			self._wanted_community = None
+			self._community_combo.blockSignals(True)
+			try:
+				self._community_combo.select(lambda entry: entry[0] == wanted)
+			finally:
+				self._community_combo.blockSignals(False)
 		selected = self._community_combo.selected()
 		self._community = selected[0] if selected is not None else None
 

@@ -421,6 +421,33 @@ def clear_layout(layout: QLayout) -> None:
 			clear_layout(child)
 
 
+def plural(count: int, one: str, few: str, many: str) -> str:
+	"""Форма слова по числу (правила русского языка).
+
+	«1 подписчик», «2 подписчика», «5 подписчиков», «11 подписчиков»,
+	«21 подписчик». Формы передаются явно — склонять слово автоматически
+	приложение не берётся.
+	"""
+	tail = abs(count) % 100
+	if 11 <= tail <= 19:
+		return many
+	tail %= 10
+	if tail == 1:
+		return one
+	if 2 <= tail <= 4:
+		return few
+	return many
+
+
+def format_count(value: int) -> str:
+	"""Число с разделителем тысяч: «18 420».
+
+	Разделитель — узкий неразрывный пробел: число не рвётся на перенос
+	и не расходится, как с обычным пробелом.
+	"""
+	return f"{value:,}".replace(",", "\u202f")
+
+
 def human_size(size_bytes: int) -> str:
 	"""Размер файла для человека: «412 МБ», «1,8 ГБ», «6,4 КБ».
 

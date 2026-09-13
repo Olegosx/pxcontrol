@@ -67,6 +67,8 @@ class MainWindow(FluentWindow):
 		self._community_pages: dict[int, CommunityPage] = {}
 		self._communities_page.communities_changed.connect(self._sync_community_nav)
 		self._communities_page.open_community.connect(self._open_community)
+		self._communities_page.publish_requested.connect(self._open_publish_for)
+		self._communities_page.schedule_requested.connect(self._open_schedule_for)
 		self._video_page = VideoPage(self._worker, self)
 		self.addSubInterface(self._video_page, FluentIcon.VIDEO, "Видео")
 		self._publish_page = PublishPage(self._worker, self)
@@ -74,7 +76,8 @@ class MainWindow(FluentWindow):
 		self._video_page.publish_requested.connect(self._open_publish_with_video)
 		self._video_page.publish_files_requested.connect(self._open_publish_batch_files)
 		self._video_page.publish_folder_requested.connect(self._open_publish_batch_folder)
-		self.addSubInterface(SchedulePage(self._worker, self), FluentIcon.CALENDAR, "Расписание")
+		self._schedule_page = SchedulePage(self._worker, self)
+		self.addSubInterface(self._schedule_page, FluentIcon.CALENDAR, "Расписание")
 		# категории настроек (Общие, Аккаунты) — внутри самой страницы
 		self.addSubInterface(
 			SettingsPage(self._worker, self),
@@ -124,6 +127,16 @@ class MainWindow(FluentWindow):
 		page = self._community_pages.get(community_id)
 		if page is not None:
 			self.switchTo(page)
+
+	def _open_publish_for(self, community_id: int) -> None:
+		"""«Опубликовать» на карточке дашборда — «Публикация» с этим сообществом."""
+		self.switchTo(self._publish_page)
+		self._publish_page.select_community(community_id)
+
+	def _open_schedule_for(self, community_id: int) -> None:
+		"""«Расписание» на карточке дашборда — страница с фильтром по сообществу."""
+		self.switchTo(self._schedule_page)
+		self._schedule_page.show_only(community_id)
 
 	def _open_publish_with_video(self, path: str, community_id: int) -> None:
 		"""Переходит на «Публикацию» с видеофайлом и каналом со страницы «Видео»."""
