@@ -30,7 +30,7 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QHideEvent, QShowEvent
-from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
 	BodyLabel,
@@ -110,15 +110,22 @@ from pxcontrol.ui.pages.maintenance import MaintenancePanel, open_maintenance
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
+	QueuePage,
 	QueueSort,
 	QueueViewDialog,
 	apply_view,
+	paginate,
 	queue_subtitle,
 )
 from pxcontrol.ui.pages.schedule import scheduled_card
 
 #: Размер логотипа в шапке страницы (пиксели).
 _HEADER_LOGO_SIZE = 48
+
+#: Сколько карточек очереди на одной странице вкладки. Меньше, чем в окне
+#: «Вся очередь…» (50): над списком здесь шапка и вкладки, а карточки
+#: раскрываются формой правки — длинная страница тяжела и глазу, и Qt.
+QUEUE_TAB_PAGE_SIZE = 20
 
 #: Ключи вкладок (маршруты сегментов) в порядке показа.
 TAB_OVERVIEW = "overview"
@@ -149,13 +156,18 @@ def tab_title(key: str, count: int | None = None) -> str:
 	return f"{title} {count}" if count else title
 
 
-def queue_footer_text(shown: int) -> str:
-	"""Итоговая строка под очередью сообщества."""
-	if shown == 0:
+def queue_footer_text(view: QueuePage) -> str:
+	"""Итоговая строка под очередью сообщества: сколько показано и из скольких."""
+	if view.total == 0:
 		return ""
+	shown = (
+		f"В очереди {view.total}"
+		if view.pages == 1
+		else f"Показаны {view.first}–{view.last} из {view.total}"
+	)
 	return (
-		f"В очереди {shown} — ближайшие сначала. Клик по карточке раскрывает "
-		"правку; после сохранения пост возвращается в очередь."
+		f"{shown} — ближайшие сначала. Клик по карточке раскрывает правку; "
+		"после сохранения пост возвращается в очередь."
 	)
 
 
@@ -486,7 +498,9 @@ class _QueueTab(QWidget):
 		super().__init__(parent)
 		self._worker = worker
 		self._community = community
-		self._shown: list[QueueItemDto] = []
+		self._all: list[QueueItemDto] = []  # вся очередь сообщества (до нарезки)
+		self._page = 1
+		self._view = paginate([], 1, QUEUE_TAB_PAGE_SIZE)
 		self._last_count = -1  # число в заголовке перестраивается только при смене
 		spacing = density.spacing()
 		layout = QVBoxLayout(self)
@@ -513,9 +527,21 @@ class _QueueTab(QWidget):
 		queue_box = QVBoxLayout()
 		queue_box.setSpacing(spacing.list_spacing)
 		layout.addLayout(queue_box)
+		footer = QHBoxLayout()
 		self._footer = CaptionLabel("", self)
 		self._footer.setWordWrap(True)
-		layout.addWidget(colored(self._footer, FOOTNOTE_COLOR))
+		footer.addWidget(colored(self._footer, FOOTNOTE_COLOR), stretch=1)
+		# перелистывание — как в окне «Вся очередь…»: видно только при
+		# нескольких страницах, кнопки, которые никуда не ведут, — шум
+		self._prev_button = OutlineButton("Назад", self, height=28)
+		self._prev_button.clicked.connect(bind(self._step, -1))
+		self._page_label = CaptionLabel("", self)
+		self._next_button = OutlineButton("Вперёд", self, height=28)
+		self._next_button.clicked.connect(bind(self._step, 1))
+		for widget in (self._prev_button, self._page_label, self._next_button):
+			footer.addWidget(widget, alignment=Qt.AlignmentFlag.AlignTop)
+			widget.hide()
+		layout.addLayout(footer)
 		layout.addStretch()
 		self._panel = QueuePanel(
 			worker,
@@ -546,24 +572,49 @@ class _QueueTab(QWidget):
 		)
 
 	def _only_this_community(self, items: list[QueueItemDto]) -> list[QueueItemDto]:
-		"""Правило показа: только это сообщество, ближайшие сначала."""
-		return apply_view(items, QueueSort.NEAREST, QueueFilter.ALL, self._community.id)
+		"""Правило показа: только это сообщество, ближайшие сначала, страницами.
 
-	def _on_refreshed(self, shown: list[QueueItemDto]) -> None:
-		"""После опроса: число в заголовке, кнопка повтора, пустое состояние, итог."""
-		self._shown = shown
-		if len(shown) != self._last_count:
-			self._render_header(len(shown))
-			self._last_count = len(shown)
-		errors = sum(1 for item in shown if item.status is JobStatus.ERROR)
+		Крючок панели: нарезка на страницы — та же, что в окне «Вся
+		очередь…» (зажатый номер возвращается: очередь живая, и страница
+		под человеком может исчезнуть). Полный список сообщества
+		запоминается для чисел шапки и «Повторить ошибки».
+		"""
+		self._all = apply_view(items, QueueSort.NEAREST, QueueFilter.ALL, self._community.id)
+		self._view = paginate(self._all, self._page, QUEUE_TAB_PAGE_SIZE)
+		self._page = self._view.page
+		return self._view.items
+
+	def _step(self, delta: int) -> None:
+		"""Листает страницу; показ обновляется сразу, не по таймеру."""
+		self._page = min(max(1, self._page + delta), self._view.pages)
+		self._panel.poll()
+
+	def _on_refreshed(self, _shown: list[QueueItemDto]) -> None:
+		"""После опроса: число в заголовке, кнопка повтора, пустое состояние, итог.
+
+		Числа — по всей очереди сообщества, а не по странице: ошибка
+		на третьей странице всё равно ошибка.
+		"""
+		total = len(self._all)
+		if total != self._last_count:
+			self._render_header(total)
+			self._last_count = total
+		errors = sum(1 for item in self._all if item.status is JobStatus.ERROR)
 		self._retry_button.setVisible(errors > 0)
-		self._empty.setVisible(not shown)
-		self._footer.setText(queue_footer_text(len(shown)))
-		self.counts_changed.emit(community_queue_counts(shown, self._community.id))
+		self._empty.setVisible(not self._all)
+		self._footer.setText(queue_footer_text(self._view))
+		multipage = self._view.pages > 1
+		for widget in (self._prev_button, self._page_label, self._next_button):
+			widget.setVisible(multipage)
+		if multipage:
+			self._page_label.setText(f"Страница {self._view.page} из {self._view.pages}")
+			self._prev_button.setEnabled(self._view.page > 1)
+			self._next_button.setEnabled(self._view.page < self._view.pages)
+		self.counts_changed.emit(community_queue_counts(self._all, self._community.id))
 
 	def _on_retry_errors(self) -> None:
 		"""«Повторить ошибки»: то же, что кнопка на каждой карточке, для всех."""
-		for item in self._shown:
+		for item in self._all:
 			if item.status is JobStatus.ERROR:
 				self._panel.retry(item.id)
 
@@ -722,19 +773,21 @@ class CommunityPage(ScrollArea):
 		layout.addLayout(self._header_box)
 		self._segments = SegmentedWidget(self)
 		layout.addWidget(self._segments)
-		self._stack = QStackedWidget(self)
-		self._stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-		layout.addWidget(self._stack, stretch=1)
+		# тело вкладки — единственный виджет в этой компоновке: скрытые
+		# вкладки в ней не живут, и высота страницы считается по видимой.
+		# Штатный QStackedWidget мерит все страницы разом — длинная
+		# очередь растягивала бы и «Обзор», и «Настройки»
+		self._body = QVBoxLayout()
+		self._body.setContentsMargins(0, 0, 0, 0)
+		layout.addLayout(self._body, stretch=1)
 		for key in _TABS:
-			placeholder = QWidget(self)
-			self._stack.addWidget(placeholder)
 			self._segments.addItem(
 				routeKey=key, text=tab_title(key), onClick=partial(self._show_tab, key)
 			)
 		self._segments.currentItemChanged.connect(self._show_tab)
-		self._segments.setCurrentItem(TAB_OVERVIEW)
-		self._mount_tab(TAB_OVERVIEW)
 		self._mount_tab(TAB_SETTINGS)
+		self._segments.setCurrentItem(TAB_OVERVIEW)
+		self._show_tab(TAB_OVERVIEW)
 
 	def _render_header(self) -> None:
 		"""Шапка: логотип, название с плашкой, подстрочник, «Опубликовать», «…»."""
@@ -817,25 +870,32 @@ class CommunityPage(ScrollArea):
 		if key not in _TABS:
 			return
 		previous = self._tabs.get(self._current_tab)
-		if previous is not None and previous is not self._tabs.get(key):
-			_set_polling(previous, False)
 		self._current_tab = key
-		self._mount_tab(key)
-		self._stack.setCurrentIndex(_TABS.index(key))
-		_set_polling(self._tabs[key], True)
-
-	def _mount_tab(self, key: str) -> None:
-		"""Строит тело вкладки, если ещё не строили, и ставит в стопку."""
-		if key in self._tabs:
+		body = self._mount_tab(key)
+		if previous is body:
+			_set_polling(body, True)
 			return
-		body = self._build_tab(key)
-		self._tabs[key] = body
-		index = _TABS.index(key)
-		old = self._stack.widget(index)
-		if old is not None:
-			self._stack.removeWidget(old)
-			old.deleteLater()
-		self._stack.insertWidget(index, body)
+		if previous is not None:
+			_set_polling(previous, False)
+			self._body.removeWidget(previous)
+			previous.hide()
+		self._body.addWidget(body)
+		body.show()
+		_set_polling(body, True)
+
+	def _mount_tab(self, key: str) -> QWidget:
+		"""Тело вкладки: строится при первом обращении, дальше — из памяти.
+
+		Вне показа тело скрыто и в компоновке не участвует (ни в высоте,
+		ни в опросе движка); его состояние — набранный текст, страница
+		очереди — переживает переключения.
+		"""
+		body = self._tabs.get(key)
+		if body is None:
+			body = self._build_tab(key)
+			body.hide()
+			self._tabs[key] = body
+		return body
 
 	def _build_tab(self, key: str) -> QWidget:
 		"""Фабрика тел вкладок."""

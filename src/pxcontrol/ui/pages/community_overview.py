@@ -467,6 +467,9 @@ class OverviewTab(QWidget):
 
 	def _render(self, overview: CommunityOverviewDto) -> None:
 		clear_layout(self._layout)
+		# справка — первой: «что за сообщество» читают раньше, чем «что
+		# с ним происходит»; числа и графики — следом
+		self._layout.addWidget(self._reference(overview))
 		self._layout.addWidget(self._tiles(overview))
 		charts = self._charts(overview)
 		if charts is not None:
@@ -479,7 +482,6 @@ class OverviewTab(QWidget):
 				"Данных пока нет: статистика накопится за неделю наблюдений.", self
 			)
 			self._layout.addWidget(empty)
-		self._layout.addWidget(self._reference(overview))
 		note = QLabel(source_note(overview, self._community), self)
 		note.setWordWrap(True)
 		note.setFont(font_px(11))

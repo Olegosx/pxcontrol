@@ -47,7 +47,7 @@ from pxcontrol.ui.pages.community_state import (
 	state_badge_text,
 	subtitle_text,
 )
-from pxcontrol.ui.pages.publish_queue_view import queue_subtitle
+from pxcontrol.ui.pages.publish_queue_view import paginate, queue_subtitle
 
 
 def _community(
@@ -314,9 +314,25 @@ def test_tab_title_with_and_without_count() -> None:
 	assert tab_title(TAB_MEMBERS, None) == "Участники"
 
 
-def test_queue_footer_text() -> None:
-	assert queue_footer_text(0) == ""
-	assert queue_footer_text(5).startswith("В очереди 5 — ближайшие сначала.")
+def test_queue_footer_text_single_and_multi_page() -> None:
+	assert queue_footer_text(paginate([], 1, 20)) == ""
+	items = [_queue_item(i) for i in range(1, 6)]
+	assert queue_footer_text(paginate(items, 1, 20)).startswith("В очереди 5 — ближайшие сначала.")
+	many = [_queue_item(i) for i in range(1, 46)]
+	assert queue_footer_text(paginate(many, 2, 20)).startswith("Показаны 21–40 из 45 — ближайшие")
+
+
+def _queue_item(item_id: int) -> QueueItemDto:
+	return QueueItemDto(
+		id=item_id,
+		title=f"пост {item_id}",
+		community_id=1,
+		community_title="Кино",
+		when=None,
+		status=JobStatus.PENDING,
+		progress=0.0,
+		error=None,
+	)
 
 
 def test_recheck_summary_distinguishes_unknown_from_lost() -> None:
