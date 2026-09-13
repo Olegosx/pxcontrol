@@ -1,9 +1,9 @@
-"""Рабочее окно обслуживания сообщества: уборка в ленте и в участниках.
+"""Обслуживание сообщества: уборка в ленте и в участниках (ADR-0026).
 
-Два раздела-сегмента (ADR-0026): **служебные записи** («такой-то
-вступил», «сообщение закреплено») и **удалённые аккаунты** — мёртвые
-души в списке участников. У каждого свой набор параметров и свой отчёт,
-поэтому они разведены, а не свалены на один экран.
+Два раздела-сегмента: **служебные записи** («такой-то вступил»,
+«сообщение закреплено») и **удалённые аккаунты** — мёртвые души в списке
+участников. У каждого свой набор параметров и свой отчёт, поэтому они
+разведены, а не свалены на один экран.
 
 Оба устроены одинаково и по одному правилу: сначала «Просмотреть» —
 он ничего не меняет и отвечает числами, — и только потом удаление
@@ -11,6 +11,10 @@
 
 Ход работы виден панелью очереди (той же, что на «Публикации»
 и «Видео»): прогресс, отмена, повтор после ошибки.
+
+Тело собрано виджетом :class:`MaintenancePanel`: он же — вкладка
+«Обслуживание» на странице сообщества и содержимое рабочего окна
+:class:`MaintenanceDialog` (окно открывает дашборд).
 """
 
 from __future__ import annotations
@@ -125,11 +129,17 @@ def members_summary(report: MembersReport) -> str:
 	return f"Найдено удалённых аккаунтов: {report.found} ({seen})."
 
 
-class MaintenanceDialog(WorkDialog):
-	"""Окно обслуживания: служебные записи и удалённые аккаунты."""
+class MaintenancePanel(QWidget):
+	"""Тело обслуживания: сегменты разделов, их страницы и панель хода.
+
+	Один и тот же виджет живёт во вкладке страницы сообщества
+	и в рабочем окне с дашборда. Опрос панели хода работы владелец
+	включает и выключает через :meth:`set_polling` (невидимая вкладка
+	опрашивать движок не должна).
+	"""
 
 	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
-		super().__init__(f"Обслуживание · {community.title}", parent)
+		super().__init__(parent)
 		self._worker = worker
 		self._community = community
 		self._show_error = error_reporter(self)
@@ -140,23 +150,30 @@ class MaintenanceDialog(WorkDialog):
 		self._jobs: dict[int, BodyLabel] = {}
 		self._build()
 
+	def set_polling(self, active: bool) -> None:
+		"""Включает или приостанавливает опрос панели хода работы."""
+		self._panel.set_polling(active)
+
 	# --- каркас -------------------------------------------------------------------
 
 	def _build(self) -> None:
-		"""Каркас окна: сегменты разделов, их страницы и панель хода."""
+		"""Каркас: сегменты разделов, их страницы и панель хода."""
 		spacing = density.spacing()
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(spacing.row_spacing)
 		self._segments = SegmentedWidget(self)
 		self._pages = QStackedWidget(self)
-		self.content.addWidget(self._segments)
-		self.content.addWidget(self._pages, stretch=1)
+		layout.addWidget(self._segments)
+		layout.addWidget(self._pages, stretch=1)
 		self._add_page("service", "Служебные записи", self._service_page())
 		self._add_page("members", "Удалённые аккаунты", self._members_page())
 		self._segments.currentItemChanged.connect(self._on_segment)
 		self._segments.setCurrentItem("service")
-		self.content.addWidget(CaptionLabel("Ход работы", self))
+		layout.addWidget(CaptionLabel("Ход работы", self))
 		queue_box = QVBoxLayout()
 		queue_box.setSpacing(spacing.list_spacing)
-		self.content.addLayout(queue_box)
+		layout.addLayout(queue_box)
 		self._panel = QueuePanel(
 			self._worker,
 			self,
@@ -257,7 +274,7 @@ class MaintenanceDialog(WorkDialog):
 				self._community.id, depth=self._depth.value()
 			),
 			self,
-			lambda job_id: self._track(job_id, "service", self._service_label, "Просмотр идёт…"),
+			lambda job_id: self._track(job_id, self._service_label, "Просмотр идёт…"),
 			self._show_error,
 		)
 
@@ -286,7 +303,7 @@ class MaintenanceDialog(WorkDialog):
 				delete_limit=self._delete_limit.value(),
 			),
 			self,
-			lambda job_id: self._track(job_id, "service", self._service_label, "Чистка идёт…"),
+			lambda job_id: self._track(job_id, self._service_label, "Чистка идёт…"),
 			self._show_error,
 		)
 
@@ -373,7 +390,7 @@ class MaintenanceDialog(WorkDialog):
 			self._worker,
 			self._worker.engine.maintenance.scan_deleted_accounts(self._community.id),
 			self,
-			lambda job_id: self._track(job_id, "members", self._members_label, "Поиск идёт…"),
+			lambda job_id: self._track(job_id, self._members_label, "Поиск идёт…"),
 			self._show_error,
 		)
 
@@ -393,7 +410,7 @@ class MaintenanceDialog(WorkDialog):
 			self._worker,
 			self._worker.engine.maintenance.clean_deleted_accounts(self._community.id, limit=limit),
 			self,
-			lambda job_id: self._track(job_id, "members", self._members_label, "Чистка идёт…"),
+			lambda job_id: self._track(job_id, self._members_label, "Чистка идёт…"),
 			self._show_error,
 		)
 
@@ -405,7 +422,7 @@ class MaintenanceDialog(WorkDialog):
 
 	# --- общее --------------------------------------------------------------------
 
-	def _track(self, job_id: int, section: str, label: BodyLabel, text: str) -> None:
+	def _track(self, job_id: int, label: BodyLabel, text: str) -> None:
 		"""Запоминает, какой раздел ждёт исхода этого задания."""
 		self._jobs[job_id] = label
 		label.setText(text)
@@ -460,6 +477,14 @@ class MaintenanceDialog(WorkDialog):
 		if item.note:
 			return str(item.note)
 		return "идёт обращение к Telegram"
+
+
+class MaintenanceDialog(WorkDialog):
+	"""Рабочее окно обслуживания (с дашборда): та же панель, что во вкладке."""
+
+	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
+		super().__init__(f"Обслуживание · {community.title}", parent)
+		self.content.addWidget(MaintenancePanel(worker, community, self), stretch=1)
 
 
 def open_maintenance(worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:

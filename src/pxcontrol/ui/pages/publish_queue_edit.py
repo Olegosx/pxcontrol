@@ -194,7 +194,9 @@ class QueueItemEditor(QWidget):
 		cancel.setToolTip("Закрыть форму, ничего не меняя")
 		cancel.clicked.connect(self._on_close)
 		row.addWidget(cancel)
-		self._save_button = PrimaryPushButton("Сохранить и отправить", self)
+		# коротко: полная формулировка «Сохранить и отправить» не влезает
+		# в ряд при ширине окна 1160, а подсказка договаривает остальное
+		self._save_button = PrimaryPushButton("Сохранить", self)
 		self._save_button.setToolTip(
 			"Пост вернётся в очередь: «сейчас» — в отправку, отложенный — ждать слота."
 		)

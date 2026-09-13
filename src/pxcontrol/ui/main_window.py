@@ -109,6 +109,7 @@ class MainWindow(FluentWindow):
 			if existing is None:
 				page = CommunityPage(self._worker, community, self)
 				page.changed.connect(self._communities_page.reload)
+				page.publish_requested.connect(self._open_publish_for)
 				self._community_pages[community.id] = page
 				icon = (
 					FluentIcon.CHAT

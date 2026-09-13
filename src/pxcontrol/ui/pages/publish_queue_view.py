@@ -73,12 +73,14 @@ class QueueFilter(StrEnum):
 	ERRORS = "Ошибки"
 
 
-def queue_subtitle(item: QueueItemDto) -> str:
+def queue_subtitle(item: QueueItemDto, *, with_community: bool = True) -> str:
 	"""Подпись карточки очереди: канал, момент публикации и статус.
 
-	Общая для панели на «Публикации» и полного просмотра. Момент
-	хранится в UTC (как отдаётся Telegram) и показывается в местном
-	времени — как пользователь вводил его в форме.
+	Общая для панели на «Публикации», полного просмотра и вкладки
+	«Очередь» страницы сообщества — там название сообщества и так
+	в шапке, и ``with_community=False`` его убирает. Момент хранится
+	в UTC (как отдаётся Telegram) и показывается в местном времени —
+	как пользователь вводил его в форме.
 	"""
 	when_text = "сейчас" if item.when is None else format_local(item.when)
 	if item.status is JobStatus.RUNNING:
@@ -93,7 +95,9 @@ def queue_subtitle(item: QueueItemDto) -> str:
 		status = "ждёт слота отложек"
 	else:
 		status = "в очереди"
-	subtitle = f"{item.community_title} · публикация: {when_text} · {status}"
+	subtitle = f"публикация: {when_text} · {status}"
+	if with_community:
+		subtitle = f"{item.community_title} · {subtitle}"
 	if item.note:
 		subtitle += f" · {item.note}"
 	return subtitle

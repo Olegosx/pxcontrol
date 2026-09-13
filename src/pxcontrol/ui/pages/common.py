@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -12,7 +13,9 @@ from typing import Any, Generic, TypeVar
 
 from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import (
+	QColor,
 	QDesktopServices,
+	QFont,
 	QMouseEvent,
 	QPainter,
 	QPainterPath,
@@ -21,9 +24,12 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
+	QFrame,
+	QGraphicsOpacityEffect,
 	QHBoxLayout,
 	QLabel,
 	QLayout,
+	QPushButton,
 	QSizePolicy,
 	QVBoxLayout,
 	QWidget,
@@ -52,6 +58,8 @@ from qfluentwidgets import (
 	SwitchButton,
 	TextEdit,
 	TransparentToolButton,
+	getFont,
+	isDarkTheme,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -421,6 +429,46 @@ def clear_layout(layout: QLayout) -> None:
 			clear_layout(child)
 
 
+@dataclass(frozen=True)
+class QueueCounts:
+	"""Сводка очереди одного сообщества для карточки дашборда и шапки страницы.
+
+	Attributes:
+		planned: неотправленное без ошибок — включая ждущих слота.
+		waiting: из них ждут слота отложек (ADR-0016) — второе число.
+		errors: элементы с ошибкой: они ждут повтора и требуют внимания,
+			поэтому в «к отправке» не входят.
+	"""
+
+	planned: int = 0
+	waiting: int = 0
+	errors: int = 0
+
+
+def queue_counts(items: list[Any]) -> dict[int, QueueCounts]:
+	"""Считает сводку очереди по сообществам (чистая функция).
+
+	Правило показа — предметное (ADR-0016), поэтому живёт отдельно
+	от вёрстки и закрыто тестом: в вёрстке его проверить нечем.
+	Элементы — ``QueueItemDto`` (поля ``community_id`` и ``status``).
+	"""
+	counts: dict[int, QueueCounts] = {}
+	for item in items:
+		if item.status.left_queue():
+			continue
+		current = counts.get(item.community_id, QueueCounts())
+		if item.status is JobStatus.ERROR:
+			current = replace(current, errors=current.errors + 1)
+		else:
+			current = replace(
+				current,
+				planned=current.planned + 1,
+				waiting=current.waiting + (item.status is JobStatus.WAITING),
+			)
+		counts[item.community_id] = current
+	return counts
+
+
 def plural(count: int, one: str, few: str, many: str) -> str:
 	"""Форма слова по числу (правила русского языка).
 
@@ -446,6 +494,171 @@ def format_count(value: int) -> str:
 	и не расходится, как с обычным пробелом.
 	"""
 	return f"{value:,}".replace(",", "\u202f")
+
+
+# --- оформление: палитра и помощники на чистых виджетах Qt -----------------------
+#
+# Цвета парами «светлая тема, тёмная тема». Тёмные — из макетов, светлые —
+# те же роли на светлом фоне (белая полупрозрачность становится чёрной,
+# цвет ошибки — как у ErrorLabel). Библиотечные виджеты этими стилями
+# не красятся (ADR-0023, п. 5): плашки, разделители и кнопки-обводки
+# собраны на чистых виджетах Qt, у которых своего листа стилей нет.
+
+TITLE_COLOR = ("#1b1b1b", "#ffffff")
+TEXT_COLOR = ("#3a3a3a", "#dfdfdf")
+MUTED_COLOR = ("#6f6f6f", "#9d9d9d")
+DIM_COLOR = ("#8a8a8a", "#8a8a8a")
+COUNT_COLOR = ("#8a8a8a", "#6f6f6f")
+FOOTNOTE_COLOR = ("#8a8a8a", "#7a7a7a")
+HAIRLINE = ("rgba(0,0,0,.08)", "rgba(255,255,255,.08)")
+CARD_HAIRLINE = ("rgba(0,0,0,.07)", "rgba(255,255,255,.07)")
+ROW_HAIRLINE = ("rgba(0,0,0,.055)", "rgba(255,255,255,.055)")
+SUMMARY_BG = ("rgba(0,0,0,.03)", "rgba(255,255,255,.03)")
+SUMMARY_BORDER = ("rgba(0,0,0,.075)", "rgba(255,255,255,.075)")
+DIVIDER = ("rgba(0,0,0,.09)", "rgba(255,255,255,.09)")
+ERROR_TEXT = ("#c42b1c", "#ff99a4")
+ERROR_BORDER = ("rgba(196,43,28,.5)", "rgba(255,153,164,.5)")
+ERROR_HOVER = ("rgba(196,43,28,.08)", "rgba(255,153,164,.08)")
+ACCENT_TEXT = ("#14b8a6", "#14b8a6")
+ACCENT_BORDER = ("rgba(20,184,166,.5)", "rgba(20,184,166,.5)")
+ACCENT_BUTTON_BORDER = ("rgba(20,184,166,.55)", "rgba(20,184,166,.55)")
+ACCENT_HOVER = ("rgba(20,184,166,.10)", "rgba(20,184,166,.10)")
+NEUTRAL_BORDER = ("rgba(0,0,0,.22)", "rgba(255,255,255,.22)")
+BUTTON_BORDER = ("rgba(0,0,0,.16)", "rgba(255,255,255,.16)")
+BUTTON_HOVER = ("rgba(0,0,0,.05)", "rgba(255,255,255,.06)")
+TABLE_BORDER = ("rgba(0,0,0,.075)", "rgba(255,255,255,.075)")
+TABLE_HEADER_BG = ("rgba(0,0,0,.035)", "rgba(255,255,255,.035)")
+ROW_BORDER = ("rgba(0,0,0,.06)", "rgba(255,255,255,.06)")
+
+#: Числа в тексте — их разметка выделяет жирным.
+_DIGITS = re.compile(r"\d+")
+
+
+def theme_pick(pair: tuple[str, str]) -> str:
+	"""Значение пары «светлая, тёмная» по текущей теме."""
+	return pair[1] if isDarkTheme() else pair[0]
+
+
+def font_px(size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+	"""Шрифт библиотеки нужного кегля (уважает масштаб из настроек)."""
+	font: QFont = getFont(size, weight)
+	return font
+
+
+def hairline(parent: QWidget, colors: tuple[str, str] = HAIRLINE) -> QFrame:
+	"""Горизонтальная линия в 1 пиксель."""
+	line = QFrame(parent)
+	line.setFixedHeight(1)
+	line.setStyleSheet(f"background: {theme_pick(colors)};")
+	line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+	return line
+
+
+def outline_badge(
+	parent: QWidget,
+	text: str,
+	border: tuple[str, str],
+	color: tuple[str, str],
+	*,
+	height: int = 22,
+	padding: int = 8,
+) -> QLabel:
+	"""Плашка-обводка: состояние карточки, строка таблицы, сводка, шапка."""
+	label = QLabel(text, parent)
+	label.setFixedHeight(height)
+	label.setFont(font_px(12))
+	label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+	label.setStyleSheet(
+		f"QLabel {{ border: 1px solid {theme_pick(border)}; border-radius: 4px; "
+		f"color: {theme_pick(color)}; padding: 0 {padding}px; background: transparent; }}"
+	)
+	return label
+
+
+def colored(label: QLabel, color: tuple[str, str]) -> QLabel:
+	"""Красит текст надписи по паре цветов (без фона и рамки)."""
+	label.setStyleSheet(f"color: {theme_pick(color)}; background: transparent;")
+	return label
+
+
+def rich_numbers(text: str, number_color: tuple[str, str], tail_color: tuple[str, str]) -> str:
+	"""Разметка «числа жирным цветом заголовка, слова приглушённо»."""
+	bold = f'<span style="color:{theme_pick(number_color)}; font-weight:600">'
+	marked = _DIGITS.sub(lambda match: f"{bold}{match.group(0)}</span>", text)
+	return f'<span style="color:{theme_pick(tail_color)}">{marked}</span>'
+
+
+class OutlineButton(QPushButton):
+	"""Кнопка-обводка (26 пикселей, радиус 4) — карточки и списки.
+
+	Чистый ``QPushButton``, а не библиотечный ``PushButton``: у того
+	свой лист стилей и высота 33 — переопределять его нельзя (ADR-0023,
+	п. 5), а низкую обводку макетов иначе не собрать. ``tone`` —
+	«neutral», «accent» (действие-совет) или «error» (необратимое).
+	"""
+
+	def __init__(
+		self, text: str, parent: QWidget, *, tone: str = "neutral", height: int = 26
+	) -> None:
+		super().__init__(text, parent)
+		self.setFixedHeight(height)
+		self.setFont(font_px(12))
+		self.setCursor(Qt.CursorShape.PointingHandCursor)
+		self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+		border, color, hover = {
+			"accent": (ACCENT_BUTTON_BORDER, ACCENT_TEXT, ACCENT_HOVER),
+			"error": (ERROR_BORDER, ERROR_TEXT, ERROR_HOVER),
+		}.get(tone, (BUTTON_BORDER, TEXT_COLOR, BUTTON_HOVER))
+		self.setStyleSheet(
+			f"QPushButton {{ border: 1px solid {theme_pick(border)}; border-radius: 4px; "
+			f"color: {theme_pick(color)}; padding: 0 11px; background: transparent; }}"
+			f"QPushButton:hover {{ background: {theme_pick(hover)}; }}"
+			f"QPushButton:disabled {{ color: {theme_pick(DIM_COLOR)}; "
+			f"border-color: {theme_pick(ROW_BORDER)}; }}"
+		)
+
+
+def dim_widget(widget: QWidget, opacity: float) -> None:
+	"""Приглушает виджет целиком (выключенное сообщество)."""
+	effect = QGraphicsOpacityEffect(widget)
+	effect.setOpacity(opacity)
+	widget.setGraphicsEffect(effect)
+
+
+def section_header(
+	parent: QWidget,
+	title: str,
+	count: int | None = None,
+	*,
+	icon: FluentIcon | None = None,
+	trailing: Sequence[QWidget] | None = None,
+) -> QWidget:
+	"""Заголовок-хайрлайн раздела: значок, подпись капителью, число, линия.
+
+	``trailing`` — виджеты справа от линии (кнопки заголовка списка).
+	"""
+	box = QWidget(parent)
+	layout = QHBoxLayout(box)
+	layout.setContentsMargins(0, 0, 0, 0)
+	layout.setSpacing(12)
+	if icon is not None:
+		icon_label = QLabel(box)
+		icon_label.setFixedSize(14, 14)
+		icon_label.setPixmap(icon.icon(color=QColor(theme_pick(MUTED_COLOR))).pixmap(14, 14))
+		layout.addWidget(icon_label)
+	caption = QLabel(title.upper(), box)
+	font = font_px(13)
+	font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 106)
+	caption.setFont(font)
+	layout.addWidget(colored(caption, MUTED_COLOR))
+	if count is not None:
+		counter = QLabel(str(count), box)
+		counter.setFont(font_px(13))
+		layout.addWidget(colored(counter, COUNT_COLOR))
+	layout.addWidget(hairline(box), stretch=1)
+	for widget in trailing or []:
+		layout.addWidget(widget)
+	return box
 
 
 def human_size(size_bytes: int) -> str:
@@ -1262,10 +1475,23 @@ class QueuePanel:
 		self._handled: set[int] = set()  # завершённые, уже учтённые
 		self._busy = False
 		self._active = False
-		timer = QTimer(page)
-		timer.setInterval(QUEUE_POLL_MS)
-		timer.timeout.connect(self.poll)
-		timer.start()
+		self._timer = QTimer(page)
+		self._timer.setInterval(QUEUE_POLL_MS)
+		self._timer.timeout.connect(self.poll)
+		self._timer.start()
+
+	def set_polling(self, active: bool) -> None:
+		"""Включает или приостанавливает опрос (панель на невидимой вкладке).
+
+		Возобновление опрашивает сразу, не дожидаясь тика: человек
+		открыл вкладку и ждёт свежих карточек.
+		"""
+		if active:
+			if not self._timer.isActive():
+				self._timer.start()
+				self.poll()
+		else:
+			self._timer.stop()
 
 	def busy(self) -> bool:
 		"""Есть ли незавершённое в очереди (включая ждущих)."""

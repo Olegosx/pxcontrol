@@ -232,21 +232,30 @@ class SchedulePage(ScrollArea):
 			self._list.addWidget(self._item_row(item))
 
 	def _item_row(self, item: ScheduledPostDto) -> CardWidget:
-		"""Карточка записи: момент публикации — первой строкой, акцентом.
+		"""Карточка записи (общая с вкладкой «Отложено» страницы сообщества)."""
+		return scheduled_card(self, item)
 
-		Время показывается местное (хранится UTC, как отдаёт Telegram).
-		Цвет — акцентный цвет темы (``setTextColor`` перекрашивает и при
-		смене темы, в отличие от жёсткого стиля).
-		"""
-		card = CardWidget(self)
-		box = QVBoxLayout(card)
-		box.setContentsMargins(*density.spacing().card_margins)
-		box.setSpacing(2)
-		when = StrongBodyLabel(format_local(item.scheduled_at), card)
-		when.setTextColor(themeColor(), themeColor())
-		box.addWidget(when)
-		text = BodyLabel(item.text_preview, card)
-		text.setWordWrap(True)
-		box.addWidget(text)
+
+def scheduled_card(
+	parent: QWidget, item: ScheduledPostDto, *, with_community: bool = True
+) -> CardWidget:
+	"""Карточка отложенной записи: момент публикации — первой строкой, акцентом.
+
+	Время показывается местное (хранится UTC, как отдаёт Telegram).
+	Цвет — акцентный цвет темы (``setTextColor`` перекрашивает и при
+	смене темы, в отличие от жёсткого стиля). ``with_community=False`` —
+	без названия сообщества (на его странице оно в шапке).
+	"""
+	card = CardWidget(parent)
+	box = QVBoxLayout(card)
+	box.setContentsMargins(*density.spacing().card_margins)
+	box.setSpacing(2)
+	when = StrongBodyLabel(format_local(item.scheduled_at), card)
+	when.setTextColor(themeColor(), themeColor())
+	box.addWidget(when)
+	text = BodyLabel(item.text_preview, card)
+	text.setWordWrap(True)
+	box.addWidget(text)
+	if with_community:
 		box.addWidget(CaptionLabel(item.community_title, card))
-		return card
+	return card

@@ -1,9 +1,25 @@
-"""Страница одного сообщества: сведения, управление, действия.
+"""Страница одного сообщества: шапка, вкладки, всё действующее — по вкладкам.
 
 Открывается из подменю «Каналы и группы» (или кликом по карточке
-дашборда). Здесь живут все действия с сообществом: активность,
-проверка доступов, настройки, участники, привязка бота, удаление.
-Будущие блоки (приборка, плановые работы) добавляются новыми секциями.
+дашборда). Шапка общая для вкладок: аватар, название, плашка
+состояния, подстрочник, «Опубликовать» и меню «…». Ниже —
+переключатель вкладок и стопка их тел:
+
+- **Обзор** — справка и статистика (заглушка до следующего этапа);
+- **Очередь** — вид на очередь отправки этого сообщества с правкой
+  поста в карточке (та же ``QueuePanel``, что на «Публикации»);
+- **Отложено** — отложенные записи сообщества из Telegram (как
+  «Расписание», но по одному сообществу);
+- **Участники** — пул userbot-аккаунтов (тело диалога «Участники…»);
+- **Обслуживание** — уборка (тело окна обслуживания);
+- **Настройки** — активность, публикаторы, пресет и времена, проверка
+  доступов, удаление.
+
+Тела вкладок строятся лениво, при первом открытии: панели очередей
+опрашивают движок, и десяток страниц сообществ не должен опрашивать
+его с невидимых вкладок. Сигнал ``changed`` уходит после каждой
+операции, меняющей данные, — главное окно по нему обновляет дашборд
+и подменю навигации.
 """
 
 from __future__ import annotations
@@ -12,24 +28,35 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QHideEvent, QShowEvent
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
+	Action,
 	BodyLabel,
 	CaptionLabel,
 	FluentIcon,
 	LineEdit,
 	MessageBoxBase,
+	PrimaryPushButton,
 	PushButton,
+	RoundMenu,
 	ScrollArea,
+	SegmentedWidget,
+	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
 	TitleLabel,
+	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto, MemberDto
+from pxcontrol.engine.services.community_stats import CommunityStatsDto
+from pxcontrol.engine.services.posts import ScheduledList
+from pxcontrol.engine.services.publish_queue import EDITABLE_STATUSES, QueueItemDto
 from pxcontrol.engine.services.schedule_plan import parse_hhmm
 from pxcontrol.engine.services.settings import (
 	COMMUNITY_DEFAULT_PRESET,
@@ -41,30 +68,123 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	FOOTNOTE_COLOR,
 	DtoComboBox,
 	ErrorLabel,
+	OutlineButton,
+	QueueCounts,
+	QueuePanel,
 	WorkDialog,
 	account_caption,
 	bind,
 	bot_caption,
 	clear_layout,
+	colored,
 	community_kind_caption,
+	community_logo,
 	confirm_delete,
+	elide_text,
 	error_reporter,
 	exec_dialog,
+	format_local,
+	hairline,
 	list_area,
 	page_layout,
 	role_caption,
+	section_header,
 	show_info,
 	show_success,
 	show_warning,
+	slot_color,
+	slot_label,
 )
-from pxcontrol.ui.pages.maintenance import open_maintenance
+from pxcontrol.ui.pages.community_state import (
+	MAINTENANCE_UNAVAILABLE,
+	community_queue_counts,
+	header_state_text,
+	state_badge,
+	subtitle_text,
+)
+from pxcontrol.ui.pages.maintenance import MaintenancePanel, open_maintenance
+from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
+from pxcontrol.ui.pages.publish_queue_view import (
+	QueueFilter,
+	QueueSort,
+	QueueViewDialog,
+	apply_view,
+	queue_subtitle,
+)
+from pxcontrol.ui.pages.schedule import scheduled_card
+
+#: Размер логотипа в шапке страницы (пиксели).
+_HEADER_LOGO_SIZE = 48
+
+#: Ключи вкладок (маршруты сегментов) в порядке показа.
+TAB_OVERVIEW = "overview"
+TAB_QUEUE = "queue"
+TAB_SCHEDULED = "scheduled"
+TAB_MEMBERS = "members"
+TAB_MAINTENANCE = "maintenance"
+TAB_SETTINGS = "settings"
+_TABS = (TAB_OVERVIEW, TAB_QUEUE, TAB_SCHEDULED, TAB_MEMBERS, TAB_MAINTENANCE, TAB_SETTINGS)
 
 
 def community_route_key(community_id: int) -> str:
 	"""Ключ маршрута страницы сообщества в навигации (objectName)."""
 	return f"community_{community_id}"
+
+
+def tab_title(key: str, count: int | None = None) -> str:
+	"""Подпись вкладки: существительное и число рядом (если есть что считать)."""
+	titles = {
+		TAB_OVERVIEW: "Обзор",
+		TAB_QUEUE: "Очередь",
+		TAB_SCHEDULED: "Отложено",
+		TAB_MEMBERS: "Участники",
+		TAB_MAINTENANCE: "Обслуживание",
+		TAB_SETTINGS: "Настройки",
+	}
+	title = titles[key]
+	return f"{title} {count}" if count else title
+
+
+def queue_footer_text(shown: int) -> str:
+	"""Итоговая строка под очередью сообщества."""
+	if shown == 0:
+		return ""
+	return (
+		f"В очереди {shown} — ближайшие сначала. Клик по карточке раскрывает "
+		"правку; после сохранения пост возвращается в очередь."
+	)
+
+
+def recheck_summary(access: CommunityAccess) -> tuple[bool, str]:
+	"""Итог перепроверки доступов: (всё ли в порядке, текст для строки).
+
+	Правило одно на всплывающую плашку и строку вкладки «Настройки»:
+	«не удалось проверить» — не приговор правам (нет сети — не потеря
+	прав), и различие сохраняется в тексте.
+	"""
+	if access.userbot_ok is None:
+		userbot_text = "не удалось проверить (нет связи или аккаунт не подключён)"
+	elif access.userbot_ok:
+		userbot_text = f"публикатор — {access.community.default_account_label or '—'}"
+	else:
+		userbot_text = "не админ — привязка снята"
+	parts = [f"userbot: {userbot_text}"]
+	if access.community.bot_id is not None:
+		# None у назначенного бота — «не проверили», а не «потерял
+		# права»: приговор правам из-за пропавшей сети — неправда
+		if access.bot_ok is None:
+			bot_text = "проверить не удалось (нет связи или Telegram не ответил)"
+		else:
+			bot_text = "права на месте" if access.bot_ok else "права потеряны"
+		parts.append(f"бот: {bot_text}")
+	ok = bool(access.userbot_ok) and access.bot_ok is not False
+	return ok, " · ".join(parts)
+
+
+# --- диалоги ------------------------------------------------------------------------
 
 
 class _AssignBotDialog(MessageBoxBase):
@@ -92,12 +212,16 @@ class _AssignBotDialog(MessageBoxBase):
 		return bot.id if bot is not None else None
 
 
-class _MembersDialog(WorkDialog):
+class MembersPanel(QWidget):
 	"""Участники сообщества (ADR-0022): роли, умолчание, состав.
 
-	Живой диалог: операции выполняются сразу (движком), список
-	перечитывается после каждой; страница обновляется по закрытии.
+	Живой список: операции выполняются сразу (движком), список
+	перечитывается после каждой, а владелец узнаёт об изменении
+	сигналом ``changed``. Один виджет — и вкладка страницы сообщества,
+	и содержимое диалога «Участники…» (его открывает дашборд).
 	"""
+
+	changed = Signal()
 
 	def __init__(
 		self,
@@ -107,12 +231,15 @@ class _MembersDialog(WorkDialog):
 		parent: QWidget,
 	) -> None:
 		"""``accounts`` — вошедшие userbot-аккаунты (кандидаты)."""
-		super().__init__(f"Участники — {community.title}", parent, size=(560, 520))
+		super().__init__(parent)
 		self._worker = worker
 		self._community = community
 		self._accounts = accounts
 		self._show_error = error_reporter(self)
-		self.content.addWidget(
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(density.spacing().row_spacing)
+		layout.addWidget(
 			BodyLabel(
 				"Публикует аккаунт по умолчанию; остальные — пул сообщества.\n"
 				"Каналу нужен админ с правом публиковать, группе — участник.",
@@ -120,21 +247,21 @@ class _MembersDialog(WorkDialog):
 			)
 		)
 		area, self._rows = list_area(self, spacing=density.spacing().list_spacing)
-		self.content.addWidget(area, stretch=1)
+		layout.addWidget(area, stretch=1)
 		add_row = QHBoxLayout()
 		self._add_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
 		add_row.addWidget(self._add_combo, stretch=1)
 		add_button = PushButton("Добавить", self)
 		add_button.clicked.connect(self._on_add)
 		add_row.addWidget(add_button)
-		self.content.addLayout(add_row)
+		layout.addLayout(add_row)
 		self._error = ErrorLabel(self)
-		self.content.addWidget(self._error)
-		self.add_close_button("Готово")
+		layout.addWidget(self._error)
 		self._members: list[MemberDto] = []
-		self._reload()
+		self.reload()
 
-	def _reload(self) -> None:
+	def reload(self) -> None:
+		"""Перечитывает участников из движка."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.list_members(self._community.id),
@@ -177,6 +304,11 @@ class _MembersDialog(WorkDialog):
 		row.addWidget(remove)
 		return box
 
+	def _after_change(self, members: list[MemberDto]) -> None:
+		"""Операция прошла: перерисовать и сообщить владельцу."""
+		self._show_members(members)
+		self.changed.emit()
+
 	def _on_add(self) -> None:
 		account = self._add_combo.selected()
 		if account is None:
@@ -188,7 +320,7 @@ class _MembersDialog(WorkDialog):
 			self._worker,
 			self._worker.engine.communities.add_member(self._community.id, account.id),
 			self,
-			self._show_members,
+			self._after_change,
 			self._show_error,
 		)
 
@@ -197,9 +329,13 @@ class _MembersDialog(WorkDialog):
 			self._worker,
 			self._worker.engine.communities.set_default(self._community.id, member.account_id),
 			self,
-			lambda _dto: self._reload(),
+			lambda _dto: self._reload_and_notify(),
 			self._show_error,
 		)
+
+	def _reload_and_notify(self) -> None:
+		self.reload()
+		self.changed.emit()
 
 	def _on_remove(self, member: MemberDto) -> None:
 		warning = (
@@ -217,9 +353,24 @@ class _MembersDialog(WorkDialog):
 			self._worker,
 			self._worker.engine.communities.remove_member(self._community.id, member.account_id),
 			self,
-			self._show_members,
+			self._after_change,
 			self._show_error,
 		)
+
+
+class _MembersDialog(WorkDialog):
+	"""Диалог «Участники…» (с дашборда): та же панель, что во вкладке."""
+
+	def __init__(
+		self,
+		worker: EngineWorker,
+		community: CommunityDto,
+		accounts: list[TgAccountDto],
+		parent: QWidget,
+	) -> None:
+		super().__init__(f"Участники — {community.title}", parent, size=(560, 520))
+		self.content.addWidget(MembersPanel(worker, community, accounts, self), stretch=1)
+		self.add_close_button("Готово")
 
 
 def open_members(
@@ -230,10 +381,10 @@ def open_members(
 ) -> None:
 	"""Открывает диалог участников сообщества (ADR-0022).
 
-	Общая точка входа для страницы сообщества и кнопки «Назначить
-	публикатора» на дашборде. Кандидаты — вошедшие userbot-аккаунты,
-	их список читается из движка перед показом; ``on_closed`` зовётся
-	после закрытия — вызывающий перечитывает своё состояние.
+	Точка входа для кнопки «Назначить публикатора» на дашборде.
+	Кандидаты — вошедшие userbot-аккаунты, их список читается из движка
+	перед показом; ``on_closed`` зовётся после закрытия — вызывающий
+	перечитывает своё состояние.
 	"""
 
 	def _open(accounts: list[TgAccountDto]) -> None:
@@ -316,15 +467,216 @@ class _CommunityPrefsDialog(MessageBoxBase):
 		return result
 
 
-class CommunityPage(ScrollArea):
-	"""Страница сообщества: шапка со сведениями и секции действий.
+# --- вкладки ------------------------------------------------------------------------
 
-	Сигнал ``changed`` уходит после каждой операции, меняющей данные
-	(активность, доступы, участники, бот, настройки, удаление) — главное
-	окно по нему обновляет дашборд и подменю навигации.
+
+class _QueueTab(QWidget):
+	"""Вкладка «Очередь»: очередь отправки этого сообщества, ближайшие сначала.
+
+	Та же панель, что на «Публикации»: карточки с прогрессом, «Отмена»
+	у живых, «Повторить»/«Убрать» у ошибок, правка поста в раскрытой
+	карточке. Из подписи карточки убрано название сообщества — оно
+	в шапке страницы.
+	"""
+
+	counts_changed = Signal(object)  # QueueCounts
+
+	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
+		super().__init__(parent)
+		self._worker = worker
+		self._community = community
+		self._shown: list[QueueItemDto] = []
+		self._last_count = -1  # число в заголовке перестраивается только при смене
+		spacing = density.spacing()
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(spacing.row_spacing)
+		self._retry_button = OutlineButton("Повторить ошибки", self, height=28)
+		self._retry_button.setToolTip("Вернуть в очередь все элементы с ошибкой разом")
+		self._retry_button.clicked.connect(self._on_retry_errors)
+		self._retry_button.hide()
+		view_button = OutlineButton("Вся очередь…", self, height=28)
+		view_button.setToolTip("Окно очереди отправки с фильтром по этому сообществу")
+		view_button.clicked.connect(self._on_view_all)
+		self._header_box = QVBoxLayout()
+		layout.addLayout(self._header_box)
+		self._header_trailing = [self._retry_button, view_button]
+		self._render_header(0)
+		self._empty = BodyLabel(
+			"В очереди ничего нет. Создайте пост на «Публикации» — кнопка "
+			"«Опубликовать» в шапке ведёт туда с этим сообществом.",
+			self,
+		)
+		self._empty.setWordWrap(True)
+		layout.addWidget(self._empty)
+		queue_box = QVBoxLayout()
+		queue_box.setSpacing(spacing.list_spacing)
+		layout.addLayout(queue_box)
+		self._footer = CaptionLabel("", self)
+		self._footer.setWordWrap(True)
+		layout.addWidget(colored(self._footer, FOOTNOTE_COLOR))
+		layout.addStretch()
+		self._panel = QueuePanel(
+			worker,
+			self,
+			queue_box,
+			service=lambda: worker.engine.publish_queue,
+			subtitle=lambda item: queue_subtitle(item, with_community=False),
+			transform=self._only_this_community,
+			on_refreshed=self._on_refreshed,
+			# зритель: завершёнными владеет панель страницы «Публикация»
+			dismiss_finished=False,
+			editable=lambda item: item.status in EDITABLE_STATUSES,
+			fill_body=self._fill_editor,
+			leading=self._leading,
+		)
+
+	def set_polling(self, active: bool) -> None:
+		"""Опрос очереди — только пока вкладка видна."""
+		self._panel.set_polling(active)
+
+	def _render_header(self, count: int) -> None:
+		"""Заголовок-хайрлайн с числом и кнопками (перестраивается по числу)."""
+		clear_layout(self._header_box)
+		for widget in self._header_trailing:
+			widget.setParent(self)
+		self._header_box.addWidget(
+			section_header(self, "Очередь отправки", count, trailing=self._header_trailing)
+		)
+
+	def _only_this_community(self, items: list[QueueItemDto]) -> list[QueueItemDto]:
+		"""Правило показа: только это сообщество, ближайшие сначала."""
+		return apply_view(items, QueueSort.NEAREST, QueueFilter.ALL, self._community.id)
+
+	def _on_refreshed(self, shown: list[QueueItemDto]) -> None:
+		"""После опроса: число в заголовке, кнопка повтора, пустое состояние, итог."""
+		self._shown = shown
+		if len(shown) != self._last_count:
+			self._render_header(len(shown))
+			self._last_count = len(shown)
+		errors = sum(1 for item in shown if item.status is JobStatus.ERROR)
+		self._retry_button.setVisible(errors > 0)
+		self._empty.setVisible(not shown)
+		self._footer.setText(queue_footer_text(len(shown)))
+		self.counts_changed.emit(community_queue_counts(shown, self._community.id))
+
+	def _on_retry_errors(self) -> None:
+		"""«Повторить ошибки»: то же, что кнопка на каждой карточке, для всех."""
+		for item in self._shown:
+			if item.status is JobStatus.ERROR:
+				self._panel.retry(item.id)
+
+	def _on_view_all(self) -> None:
+		exec_dialog(QueueViewDialog(self._worker, self.window(), community_id=self._community.id))
+
+	def _fill_editor(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
+		"""Наполняет раскрытую карточку формой правки (ADR-0016, п. 7)."""
+		mount_queue_item_editor(self._worker, self, item_id, body, collapse, self._panel.poll)
+
+	@staticmethod
+	def _leading(item: QueueItemDto, parent: QWidget) -> list[QWidget]:
+		"""Начало шапки карточки: только метка слота — логотип здесь лишний."""
+		label = slot_label(item.when)
+		chip = StrongBodyLabel(f"[{label}]", parent)
+		chip.setTextColor(*slot_color(label))
+		chip.setToolTip("Время публикации (слот)")
+		return [chip]
+
+
+class _ScheduledTab(QWidget):
+	"""Вкладка «Отложено»: отложенные записи сообщества из Telegram.
+
+	Те же данные, что на «Расписании», но по одному сообществу;
+	истина — сам Telegram (ADR-0010), список читается при первом
+	открытии вкладки и кнопкой «Обновить».
+	"""
+
+	count_changed = Signal(int)
+
+	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
+		super().__init__(parent)
+		self._worker = worker
+		self._community = community
+		self._show_error = error_reporter(self)
+		self._loading = False
+		spacing = density.spacing()
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(spacing.row_spacing)
+		refresh = OutlineButton("Обновить", self, height=28)
+		refresh.clicked.connect(self.reload)
+		self._header_box = QVBoxLayout()
+		layout.addLayout(self._header_box)
+		self._refresh_button = refresh
+		self._render_header(0)
+		self._list = QVBoxLayout()
+		self._list.setSpacing(spacing.list_spacing)
+		layout.addLayout(self._list)
+		layout.addStretch()
+		self._list.addWidget(CaptionLabel("Читаю отложенные из Telegram…", self))
+
+	def _render_header(self, count: int) -> None:
+		clear_layout(self._header_box)
+		self._refresh_button.setParent(self)
+		self._header_box.addWidget(
+			section_header(self, "Отложено в Telegram", count, trailing=[self._refresh_button])
+		)
+
+	def reload(self) -> None:
+		"""Перечитывает отложенные записи сообщества (обход не дублируется)."""
+		if self._loading:
+			return
+		self._loading = True
+		run_in_engine(
+			self._worker,
+			self._worker.engine.posts.list_scheduled(self._community.id),
+			self,
+			self._show_scheduled,
+			self._on_failed,
+		)
+
+	def _on_failed(self, message: str) -> None:
+		self._loading = False
+		self._show_error(message)
+
+	def _show_scheduled(self, scheduled: ScheduledList) -> None:
+		self._loading = False
+		clear_layout(self._list)
+		self._render_header(len(scheduled.items))
+		self.count_changed.emit(len(scheduled.items))
+		if scheduled.unread:
+			# честность важнее краткости: прочитать не удалось — список
+			# заведомо неполон (истина живёт на сервере Telegram)
+			warning = CaptionLabel("Не удалось прочитать отложенные записи этого сообщества.", self)
+			warning.setWordWrap(True)
+			self._list.addWidget(warning)
+		if not scheduled.items:
+			self._list.addWidget(
+				CaptionLabel(
+					"Отложенных записей нет. Создайте пост на «Публикации» "
+					"с временем публикации — его сохранит сервер Telegram.",
+					self,
+				)
+			)
+			return
+		for item in scheduled.items:
+			self._list.addWidget(scheduled_card(self, item, with_community=False))
+
+
+# --- страница -------------------------------------------------------------------------
+
+
+class CommunityPage(ScrollArea):
+	"""Страница сообщества: шапка, вкладки, всё действующее — по вкладкам.
+
+	Сигналы: ``changed`` — после каждой операции, меняющей данные
+	(главное окно обновляет дашборд и подменю); ``publish_requested`` —
+	«Опубликовать» в шапке (главное окно открывает «Публикацию»
+	с этим сообществом).
 	"""
 
 	changed = Signal()
+	publish_requested = Signal(int)
 
 	def __init__(
 		self, worker: EngineWorker, community: CommunityDto, parent: QWidget | None = None
@@ -334,8 +686,16 @@ class CommunityPage(ScrollArea):
 		self._worker = worker
 		self._community = community
 		self._show_error = error_reporter(self)
+		self._counts = QueueCounts()
+		self._stats: CommunityStatsDto | None = None
+		self._scheduled_count: int | None = None
+		# итог последней проверки доступов — живёт, пока открыто приложение
+		self._recheck_text: str | None = None
+		self._tabs: dict[str, QWidget] = {}
+		self._current_tab = TAB_OVERVIEW
 		self._build()
-		self._render()
+		self._render_header()
+		self._render_settings()
 
 	@property
 	def community_id(self) -> int:
@@ -345,57 +705,297 @@ class CommunityPage(ScrollArea):
 	def update_community(self, community: CommunityDto) -> None:
 		"""Обновляет страницу свежим снимком (синхронизация главного окна)."""
 		self._community = community
-		self._render()
+		self._render_header()
+		self._render_settings()
+		self._render_tab_titles()
 
 	# --- сборка -----------------------------------------------------------------
 
 	def _build(self) -> None:
-		"""Каркас: шапка и секции; наполнение — в ``_render``."""
+		"""Каркас: шапка, сегменты вкладок, стопка тел."""
 		layout = page_layout(self)
-		self._title = TitleLabel("", self)
-		layout.addWidget(self._title)
-		self._subtitle = BodyLabel("", self)
-		layout.addWidget(self._subtitle)
-		layout.addSpacing(density.spacing().wide_spacing)
-		layout.addWidget(SubtitleLabel("Публикация", self))
-		self._publish_rows = QVBoxLayout()
-		self._publish_rows.setSpacing(density.spacing().list_spacing)
-		layout.addLayout(self._publish_rows)
-		layout.addSpacing(density.spacing().wide_spacing)
-		layout.addWidget(SubtitleLabel("Обслуживание", self))
-		self._service_rows = QVBoxLayout()
-		self._service_rows.setSpacing(density.spacing().list_spacing)
-		layout.addLayout(self._service_rows)
-		layout.addStretch()
+		self._header_box = QVBoxLayout()
+		layout.addLayout(self._header_box)
+		self._segments = SegmentedWidget(self)
+		layout.addWidget(self._segments)
+		self._stack = QStackedWidget(self)
+		self._stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+		layout.addWidget(self._stack, stretch=1)
+		for key in _TABS:
+			placeholder = QWidget(self)
+			self._stack.addWidget(placeholder)
+			self._segments.addItem(
+				routeKey=key, text=tab_title(key), onClick=partial(self._show_tab, key)
+			)
+		self._segments.currentItemChanged.connect(self._show_tab)
+		self._segments.setCurrentItem(TAB_OVERVIEW)
+		self._mount_tab(TAB_OVERVIEW)
+		self._mount_tab(TAB_SETTINGS)
 
-	def _render(self) -> None:
-		"""Перерисовывает шапку и секции по текущему снимку."""
+	def _render_header(self) -> None:
+		"""Шапка: логотип, название с плашкой, подстрочник, «Опубликовать», «…»."""
+		clear_layout(self._header_box)
 		community = self._community
-		self._title.setText(community.title)
-		details = [community_kind_caption(community), f"@{community.username or '—'}"]
-		if not community.enabled:
-			details.append("выключено")
-		self._subtitle.setText(" · ".join(details))
-		clear_layout(self._publish_rows)
-		self._publish_rows.addWidget(self._enabled_row())
-		self._publish_rows.addWidget(self._userbot_row())
-		self._publish_rows.addWidget(self._bot_row())
-		self._publish_rows.addWidget(self._prefs_row())
-		clear_layout(self._service_rows)
-		self._service_rows.addWidget(self._recheck_row())
-		self._service_rows.addWidget(self._maintenance_row())
-		self._service_rows.addWidget(self._delete_row())
+		box = QWidget(self)
+		row = QHBoxLayout(box)
+		row.setContentsMargins(0, 0, 0, 0)
+		row.setSpacing(14)
+		row.setAlignment(Qt.AlignmentFlag.AlignTop)
+		avatar = self._stats.avatar_path if self._stats is not None else None
+		row.addWidget(
+			community_logo(box, community.id, community.title, avatar, _HEADER_LOGO_SIZE),
+			alignment=Qt.AlignmentFlag.AlignTop,
+		)
+		column = QVBoxLayout()
+		column.setSpacing(4)
+		title_row = QHBoxLayout()
+		title_row.setSpacing(10)
+		title = TitleLabel(box)
+		title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		elide_text(title, community.title)
+		title_row.addWidget(title, stretch=1)
+		state, text = header_state_text(community, self._counts)
+		title_row.addWidget(state_badge(box, state, text, height=21))
+		column.addLayout(title_row)
+		participants = self._stats.participants if self._stats is not None else None
+		subtitle = CaptionLabel(box)
+		subtitle.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		elide_text(
+			subtitle,
+			f"{community_kind_caption(community)} · {subtitle_text(community, participants)}",
+		)
+		column.addWidget(subtitle)
+		row.addLayout(column, stretch=1)
+		publish = PrimaryPushButton("Опубликовать", box)
+		publish.setToolTip("Открыть «Публикацию» с этим сообществом")
+		publish.clicked.connect(lambda: self.publish_requested.emit(community.id))
+		row.addWidget(publish, alignment=Qt.AlignmentFlag.AlignTop)
+		more = TransparentToolButton(FluentIcon.MORE, box)
+		more.setToolTip("Проверить доступы, обслуживание, удаление")
+		more.clicked.connect(partial(self._show_menu, more))
+		row.addWidget(more, alignment=Qt.AlignmentFlag.AlignTop)
+		self._header_box.addWidget(box)
 
-	def _action_row(self, text: str, actions: list[QWidget]) -> QWidget:
-		"""Строка секции: описание слева, действия справа."""
+	def _show_menu(self, anchor: QWidget) -> None:
+		"""Меню «…»: редкие и необратимые действия шапки."""
+		menu = RoundMenu(parent=self)
+		recheck = Action("Проверить доступы", menu)
+		recheck.triggered.connect(self._recheck)
+		menu.addAction(recheck)
+		maintenance = Action("Обслуживание…", menu)
+		maintenance.setEnabled(self._community.userbot_assigned)
+		if not self._community.userbot_assigned:
+			maintenance.setToolTip(MAINTENANCE_UNAVAILABLE)
+		maintenance.triggered.connect(self._on_open_maintenance)
+		menu.addAction(maintenance)
+		menu.addSeparator()
+		delete = Action(FluentIcon.DELETE, "Удалить из приложения…", menu)
+		delete.triggered.connect(self._on_delete)
+		menu.addAction(delete)
+		menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+	def _render_tab_titles(self) -> None:
+		"""Числа рядом с подписями вкладок."""
+		counts = {
+			TAB_QUEUE: self._counts.planned + self._counts.errors,
+			TAB_SCHEDULED: self._scheduled_count,
+			TAB_MEMBERS: self._community.members_count,
+		}
+		for key in _TABS:
+			item = self._segments.widget(key)
+			if item is not None:
+				item.setText(tab_title(key, counts.get(key)))
+
+	# --- вкладки ------------------------------------------------------------------
+
+	def _show_tab(self, key: str) -> None:
+		"""Показывает вкладку; тело строится при первом открытии."""
+		if key not in _TABS:
+			return
+		previous = self._tabs.get(self._current_tab)
+		if previous is not None and previous is not self._tabs.get(key):
+			_set_polling(previous, False)
+		self._current_tab = key
+		self._mount_tab(key)
+		self._stack.setCurrentIndex(_TABS.index(key))
+		_set_polling(self._tabs[key], True)
+
+	def _mount_tab(self, key: str) -> None:
+		"""Строит тело вкладки, если ещё не строили, и ставит в стопку."""
+		if key in self._tabs:
+			return
+		body = self._build_tab(key)
+		self._tabs[key] = body
+		index = _TABS.index(key)
+		old = self._stack.widget(index)
+		if old is not None:
+			self._stack.removeWidget(old)
+			old.deleteLater()
+		self._stack.insertWidget(index, body)
+
+	def _build_tab(self, key: str) -> QWidget:
+		"""Фабрика тел вкладок."""
+		if key == TAB_QUEUE:
+			tab = _QueueTab(self._worker, self._community, self)
+			tab.counts_changed.connect(self._on_queue_counts)
+			return tab
+		if key == TAB_SCHEDULED:
+			scheduled = _ScheduledTab(self._worker, self._community, self)
+			scheduled.count_changed.connect(self._on_scheduled_count)
+			scheduled.reload()
+			return scheduled
+		if key == TAB_MEMBERS:
+			return self._members_tab()
+		if key == TAB_MAINTENANCE:
+			return self._maintenance_tab()
+		if key == TAB_SETTINGS:
+			box = QWidget(self)
+			self._settings_rows = QVBoxLayout(box)
+			self._settings_rows.setContentsMargins(0, 0, 0, 0)
+			self._settings_rows.setSpacing(density.spacing().list_spacing)
+			return box
+		box = QWidget(self)
+		layout = QVBoxLayout(box)
+		layout.setContentsMargins(0, 24, 0, 0)
+		hint = BodyLabel(
+			"Обзор — статистика и справка сообщества — появится на следующем этапе. "
+			"Данные под него движок уже собирает (ADR-0027).",
+			box,
+		)
+		hint.setWordWrap(True)
+		layout.addWidget(hint)
+		layout.addStretch()
+		return box
+
+	def _members_tab(self) -> QWidget:
+		"""Вкладка «Участники»: панель строится после чтения кандидатов."""
+		holder = QWidget(self)
+		layout = QVBoxLayout(holder)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.addWidget(CaptionLabel("Читаю аккаунты…", holder))
+
+		def mount(accounts: list[TgAccountDto]) -> None:
+			clear_layout(layout)
+			logged_in = [account for account in accounts if account.logged_in]
+			panel = MembersPanel(self._worker, self._community, logged_in, holder)
+			panel.changed.connect(self._refresh)
+			layout.addWidget(panel, stretch=1)
+
+		run_in_engine(
+			self._worker,
+			self._worker.engine.accounts.list_tg_accounts(),
+			self,
+			mount,
+			self._show_error,
+		)
+		return holder
+
+	def _maintenance_tab(self) -> QWidget:
+		"""Вкладка «Обслуживание»: панель или объяснение, почему нельзя."""
+		if self._community.userbot_assigned:
+			return MaintenancePanel(self._worker, self._community, self)
+		box = QWidget(self)
+		layout = QVBoxLayout(box)
+		layout.setContentsMargins(0, 24, 0, 0)
+		layout.setSpacing(density.spacing().row_spacing)
+		hint = BodyLabel(
+			"Обслуживание доступно только сообществу с userbot-публикатором: "
+			"боту недоступны история ленты и список участников.",
+			box,
+		)
+		hint.setWordWrap(True)
+		layout.addWidget(hint)
+		go = OutlineButton("Участники — назначить публикатора", box, tone="accent", height=28)
+		go.clicked.connect(partial(self._segments.setCurrentItem, TAB_MEMBERS))
+		layout.addWidget(go, alignment=Qt.AlignmentFlag.AlignLeft)
+		layout.addStretch()
+		return box
+
+	def _on_queue_counts(self, counts: QueueCounts) -> None:
+		"""Панель очереди сообщила свежие числа — шапка и вкладка."""
+		if counts != self._counts:
+			self._counts = counts
+			self._render_header()
+			self._render_tab_titles()
+
+	def _on_scheduled_count(self, count: int) -> None:
+		if count != self._scheduled_count:
+			self._scheduled_count = count
+			self._render_tab_titles()
+
+	# --- показ страницы: чтение кэшей ---------------------------------------------
+
+	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
+		"""Читает свежие снимки (очередь, статистика) и возобновляет опрос вкладки."""
+		super().showEvent(event)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.publish_queue.state(),
+			self,
+			self._on_queue_state,
+			self._show_error,
+		)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.community_stats.snapshot(),
+			self,
+			self._on_stats,
+			self._show_error,
+		)
+		_set_polling(self._tabs.get(self._current_tab), True)
+
+	def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 — API Qt
+		"""Невидимая страница движок не опрашивает."""
+		super().hideEvent(event)
+		_set_polling(self._tabs.get(self._current_tab), False)
+
+	def _on_queue_state(self, items: list[QueueItemDto]) -> None:
+		self._on_queue_counts(community_queue_counts(items, self._community.id))
+
+	def _on_stats(self, stats: list[CommunityStatsDto]) -> None:
+		mine = next((item for item in stats if item.community_id == self._community.id), None)
+		self._stats = mine
+		if mine is not None and self._scheduled_count is None:
+			self._scheduled_count = mine.scheduled_count
+		self._render_header()
+		self._render_tab_titles()
+
+	# --- вкладка «Настройки» ----------------------------------------------------------
+
+	def _render_settings(self) -> None:
+		"""Строки настроек и — за хайрлайном — удаление."""
+		if not hasattr(self, "_settings_rows"):
+			return
+		rows = self._settings_rows
+		clear_layout(rows)
+		rows.addWidget(self._enabled_row())
+		rows.addWidget(self._userbot_row())
+		rows.addWidget(self._bot_row())
+		rows.addWidget(self._prefs_row())
+		rows.addWidget(self._recheck_row())
+		rows.addSpacing(density.spacing().row_spacing)
+		rows.addWidget(hairline(self))
+		rows.addSpacing(density.spacing().row_spacing)
+		rows.addWidget(self._delete_row())
+		rows.addStretch()
+
+	def _action_row(self, text: str, actions: list[QWidget], hint: str | None = None) -> QWidget:
+		"""Строка настроек: состояние сверху, пояснение снизу, действия справа."""
 		box = QWidget(self)
 		row = QHBoxLayout(box)
 		row.setContentsMargins(0, 2, 0, 2)
+		column = QVBoxLayout()
+		column.setSpacing(2)
 		label = BodyLabel(text, box)
 		label.setWordWrap(True)
-		row.addWidget(label, stretch=1)
+		column.addWidget(label)
+		if hint:
+			caption = CaptionLabel(hint, box)
+			caption.setWordWrap(True)
+			column.addWidget(caption)
+		row.addLayout(column, stretch=1)
 		for widget in actions:
-			row.addWidget(widget)
+			row.addWidget(widget, alignment=Qt.AlignmentFlag.AlignTop)
 		return box
 
 	def _enabled_row(self) -> QWidget:
@@ -404,82 +1004,67 @@ class CommunityPage(ScrollArea):
 		switch.setChecked(self._community.enabled)
 		switch.setToolTip("Активно: участвует в публикации и опросе расписания")
 		switch.checkedChanged.connect(self._on_toggle_enabled)
-		return self._action_row("Активность (публикация и расписание)", [switch])
+		return self._action_row(
+			"Активность", [switch], "Участвует в публикации и в опросе расписания"
+		)
 
 	def _userbot_row(self) -> QWidget:
 		"""Публикатор userbot: умолчание, роль, прочие участники."""
 		community = self._community
 		if community.default_account_label:
 			role = f" ({role_caption(community.default_role)})" if community.default_role else ""
-			text = f"Userbot-публикатор: {community.default_account_label}{role}"
+			text = f"Публикатор — {community.default_account_label}{role}, userbot"
 		else:
 			text = "Userbot-публикатор не выбран"
 		extras = max(community.members_count - (1 if community.default_account_id else 0), 0)
-		if extras:
-			text += f" · ещё участников: {extras}"
-		members = PushButton("Участники…", self)
-		members.setToolTip("Пул userbot-аккаунтов сообщества: роли и публикатор по умолчанию")
-		members.clicked.connect(self._on_open_members)
-		return self._action_row(text, [members])
+		hint = f"Ещё в пуле сообщества: {extras}" if extras else "Пул userbot-аккаунтов сообщества"
+		members = PushButton("Участники", self)
+		members.setToolTip("Роли и публикатор по умолчанию — вкладка «Участники»")
+		members.clicked.connect(partial(self._segments.setCurrentItem, TAB_MEMBERS))
+		return self._action_row(text, [members], hint)
 
 	def _bot_row(self) -> QWidget:
 		"""Бот-публикатор: запасной путь (до 50 МБ, только «сейчас»)."""
 		community = self._community
+		hint = "Запасной путь: файлы до 50 МБ, только «сейчас»"
 		if community.bot_id is None:
 			action = PushButton("Назначить бота…", self)
 			action.clicked.connect(self._on_assign_bot)
-			return self._action_row("Бот-публикатор не назначен (запасной путь)", [action])
+			return self._action_row("Бот-публикатор не назначен", [action], hint)
 		action = PushButton("Отвязать бота", self)
 		action.clicked.connect(self._on_unassign_bot)
-		return self._action_row(f"Бот-публикатор: {community.bot_label}", [action])
+		return self._action_row(f"Бот-публикатор: {community.bot_label}", [action], hint)
 
 	def _prefs_row(self) -> QWidget:
 		"""Настройки публикации: пресет видео и времена."""
-		action = PushButton("Настройки…", self)
+		action = PushButton("Изменить…", self)
 		action.setToolTip("Пресет видео по умолчанию и времена публикации")
 		action.clicked.connect(self._on_open_prefs)
-		return self._action_row("Пресет видео по умолчанию и времена публикации", [action])
+		return self._action_row(
+			"Пресет видео по умолчанию и времена публикации",
+			[action],
+			"Подставляются в «Видео» и «Публикацию» по умолчанию",
+		)
 
 	def _recheck_row(self) -> QWidget:
-		"""Перепроверка доступов обоих публикаторов."""
+		"""Перепроверка доступов; итог последней проверки — строкой."""
 		action = PushButton("Проверить доступы", self)
 		action.clicked.connect(self._recheck)
+		hint = self._recheck_text or "В этом запуске доступы ещё не проверялись"
 		return self._action_row(
 			"Доступы публикаторов: роли участников, права бота, свойства сообщества",
 			[action],
+			hint,
 		)
-
-	def _maintenance_row(self) -> QWidget:
-		"""Уборка в сообществе: служебные записи и мёртвые аккаунты (ADR-0026).
-
-		Имя входа общее: за ним окно с двумя разделами, и второй
-		необратимо меняет состав участников — обещать в строке только
-		чистку записей было бы неполной правдой.
-
-		Без userbot-публикатора недоступна: списка участников и чужой
-		истории Bot API не отдаёт — и это сказано прямо, а не показано
-		пустым окном.
-		"""
-		action = PushButton("Обслуживание…", self)
-		action.setToolTip(
-			"Служебные записи в ленте и удалённые аккаунты в списке участников: "
-			"посмотреть, сколько их, и убрать"
-		)
-		if self._community.userbot_assigned:
-			action.clicked.connect(self._on_open_maintenance)
-			text = "Чистка служебных записей и удалённых аккаунтов"
-		else:
-			action.setEnabled(False)
-			text = "Обслуживание — нужен userbot-публикатор (боту история недоступна)"
-		return self._action_row(text, [action])
 
 	def _delete_row(self) -> QWidget:
-		"""Удаление сообщества из приложения (не из Telegram)."""
-		action = PushButton(FluentIcon.DELETE, "Удалить…", self)
+		"""Удаление сообщества из приложения — единственная красная обводка."""
+		action = OutlineButton("Удалить из приложения…", self, tone="error", height=28)
 		action.clicked.connect(self._on_delete)
 		return self._action_row(
-			"Удалить из приложения (сам канал или группа в Telegram не трогается)",
+			"Удаление убирает сообщество только из приложения",
 			[action],
+			"Подписчики, записи и права в Telegram не меняются",
 		)
 
 	# --- операции ---------------------------------------------------------------
@@ -500,8 +1085,7 @@ class CommunityPage(ScrollArea):
 		)
 
 	def _on_refreshed(self, community: CommunityDto) -> None:
-		self._community = community
-		self._render()
+		self.update_community(community)
 		self.changed.emit()
 
 	def _on_toggle_enabled(self, checked: bool) -> None:
@@ -520,7 +1104,7 @@ class CommunityPage(ScrollArea):
 		self._refresh()
 
 	def _on_open_maintenance(self) -> None:
-		"""Открывает окно обслуживания сообщества."""
+		"""Меню «…» → окно обслуживания (та же панель, что во вкладке)."""
 		open_maintenance(self._worker, self._community, self)
 
 	def _recheck(self) -> None:
@@ -535,27 +1119,13 @@ class CommunityPage(ScrollArea):
 		)
 
 	def _on_rechecked(self, access: CommunityAccess) -> None:
-		"""Показывает итог перепроверки и обновляет страницу."""
-		if access.userbot_ok is None:
-			userbot_text = "не удалось проверить (нет связи или аккаунт не подключён)"
-		elif access.userbot_ok:
-			userbot_text = f"публикатор — {access.community.default_account_label or '—'}"
-		else:
-			userbot_text = "не админ — привязка снята"
-		parts = [f"userbot: {userbot_text}"]
-		if access.community.bot_id is not None:
-			# None у назначенного бота — «не проверили», а не «потерял
-			# права»: приговор правам из-за пропавшей сети — неправда
-			if access.bot_ok is None:
-				bot_text = "проверить не удалось (нет связи или Telegram не ответил)"
-			else:
-				bot_text = "права на месте" if access.bot_ok else "права потеряны"
-			parts.append(f"бот: {bot_text}")
-		summary = " · ".join(parts)
-		if access.userbot_ok and access.bot_ok is not False:
+		"""Показывает итог перепроверки плашкой и строкой, обновляет страницу."""
+		ok, summary = recheck_summary(access)
+		if ok:
 			show_success(self, access.community.title, summary)
 		else:
 			show_warning(self, access.community.title, summary)
+		self._recheck_text = f"проверено {format_local(_now())} · {summary}"
 		self._refresh()
 
 	# --- настройки (пресет, времена) ---------------------------------------------
@@ -667,12 +1237,6 @@ class CommunityPage(ScrollArea):
 		show_success(self, "Готово", community.title)
 		self._refresh()
 
-	# --- участники (ADR-0022) ----------------------------------------------------
-
-	def _on_open_members(self) -> None:
-		"""Живой диалог участников; по закрытии — обновление страницы."""
-		open_members(self._worker, self._community, self, self._refresh)
-
 	# --- удаление ----------------------------------------------------------------
 
 	def _on_delete(self) -> None:
@@ -685,3 +1249,28 @@ class CommunityPage(ScrollArea):
 			lambda *_a: self.changed.emit(),
 			self._show_error,
 		)
+
+
+def _set_polling(tab: QWidget | None, active: bool) -> None:
+	"""Включает или выключает опрос движка у тела вкладки (если оно опрашивает)."""
+	setter = getattr(tab, "set_polling", None)
+	if callable(setter):
+		setter(active)
+
+
+def _now() -> Any:
+	"""Текущий момент (UTC) — для строки «проверено …»."""
+	from datetime import UTC, datetime
+
+	return datetime.now(UTC)
+
+
+__all__ = [
+	"CommunityPage",
+	"MembersPanel",
+	"community_route_key",
+	"open_members",
+	"queue_footer_text",
+	"recheck_summary",
+	"tab_title",
+]

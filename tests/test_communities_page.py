@@ -10,31 +10,44 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.jobs import JobStatus
+from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
+from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.telegram.types import CommunityKind
-from pxcontrol.ui.pages.common import format_count, plural
+from pxcontrol.ui.pages.common import QueueCounts, format_count, plural
 from pxcontrol.ui.pages.communities import (
 	VIEW_LIST,
 	VIEW_TILES,
-	CardAction,
-	CardState,
-	QueueCounts,
 	Row,
 	TableColumn,
-	action_available,
-	audience_word,
-	card_actions,
-	card_state,
 	grid_columns,
 	matches_search,
 	metrics_text,
 	sort_rows,
-	state_badge_text,
-	subtitle_text,
 	summary_counts,
 	view_from_setting,
 )
+from pxcontrol.ui.pages.community_page import (
+	TAB_MEMBERS,
+	TAB_OVERVIEW,
+	TAB_QUEUE,
+	queue_footer_text,
+	recheck_summary,
+	tab_title,
+)
+from pxcontrol.ui.pages.community_state import (
+	CardAction,
+	CardState,
+	action_available,
+	audience_word,
+	card_actions,
+	card_state,
+	header_state_text,
+	state_badge_text,
+	subtitle_text,
+)
+from pxcontrol.ui.pages.publish_queue_view import queue_subtitle
 
 
 def _community(
@@ -188,14 +201,13 @@ def test_metrics_text_disabled_is_one_phrase() -> None:
 
 
 def test_subtitle_text_variants() -> None:
-	assert subtitle_text(_community(), _stats()) == "@kinohd · 18 420 подписчиков"
-	assert subtitle_text(_community(username=None), _stats()) == (
-		"имя не задано · 18 420 подписчиков"
+	assert subtitle_text(_community(), 18420) == "@kinohd · 18\u202f420 подписчиков"
+	assert subtitle_text(_community(username=None), 18420) == (
+		"имя не задано · 18\u202f420 подписчиков"
 	)
 	assert subtitle_text(_community(), None) == "@kinohd"
-	assert subtitle_text(_community(), _stats(participants=None)) == "@kinohd"
 	group = _community(kind=CommunityKind.GROUP, username="chat")
-	assert subtitle_text(group, _stats(participants=861)) == "@chat · 861 участник"
+	assert subtitle_text(group, 861) == "@chat · 861 участник"
 
 
 # --- сетка, поиск, вид ------------------------------------------------------------
@@ -279,3 +291,57 @@ def test_sort_rows_by_queue_and_state() -> None:
 	# по состоянию: требующие внимания — первыми (ошибки → нет публикатора → выключено)
 	state = sort_rows(_rows(), TableColumn.STATE, descending=False)
 	assert [row.community.title for row in state] == ["Кино", "Сериалы", "Док", "Аниме"]
+
+
+# --- страница сообщества: шапка, вкладки, итоги ----------------------------------------
+
+
+def test_header_state_text_names_normal_state_by_kind() -> None:
+	assert header_state_text(_community(), QueueCounts()) == (CardState.NORMAL, "активен")
+	group = _community(kind=CommunityKind.GROUP)
+	assert header_state_text(group, QueueCounts()) == (CardState.NORMAL, "активна")
+	assert header_state_text(_community(enabled=False), QueueCounts(errors=3)) == (
+		CardState.DISABLED,
+		"выключено",
+	)
+	assert header_state_text(_community(), QueueCounts(errors=2)) == (CardState.ERRORS, "2 ошибки")
+
+
+def test_tab_title_with_and_without_count() -> None:
+	assert tab_title(TAB_OVERVIEW) == "Обзор"
+	assert tab_title(TAB_QUEUE, 5) == "Очередь 5"
+	assert tab_title(TAB_QUEUE, 0) == "Очередь"  # ноль не показывается
+	assert tab_title(TAB_MEMBERS, None) == "Участники"
+
+
+def test_queue_footer_text() -> None:
+	assert queue_footer_text(0) == ""
+	assert queue_footer_text(5).startswith("В очереди 5 — ближайшие сначала.")
+
+
+def test_recheck_summary_distinguishes_unknown_from_lost() -> None:
+	community = _community(bot=True)
+	ok, text = recheck_summary(CommunityAccess(community, userbot_ok=True, bot_ok=True))
+	assert ok and "публикатор — аккаунт" in text and "права на месте" in text
+	ok, text = recheck_summary(CommunityAccess(community, userbot_ok=None, bot_ok=None))
+	assert not ok and "не удалось проверить" in text and "проверить не удалось" in text
+	ok, text = recheck_summary(CommunityAccess(community, userbot_ok=False, bot_ok=False))
+	assert not ok and "привязка снята" in text and "права потеряны" in text
+	# бота нет — про бота ни слова
+	_ok, text = recheck_summary(CommunityAccess(_community(), userbot_ok=True, bot_ok=None))
+	assert "бот" not in text
+
+
+def test_queue_subtitle_without_community_for_community_page() -> None:
+	item = QueueItemDto(
+		id=1,
+		title="пост",
+		community_id=1,
+		community_title="Кино в HD",
+		when=None,
+		status=JobStatus.PENDING,
+		progress=0.0,
+		error=None,
+	)
+	assert queue_subtitle(item) == "Кино в HD · публикация: сейчас · в очереди"
+	assert queue_subtitle(item, with_community=False) == "публикация: сейчас · в очереди"

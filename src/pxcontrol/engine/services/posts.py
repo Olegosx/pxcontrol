@@ -1040,8 +1040,11 @@ class PostsService:
 		if when is not None and when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
 			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
 
-	async def list_scheduled(self) -> ScheduledList:
+	async def list_scheduled(self, community_id: int | None = None) -> ScheduledList:
 		"""Собирает отложенные записи активных userbot-сообществ из Telegram.
+
+		``community_id`` — только это сообщество (вкладка «Отложено»
+		на его странице); None — все активные (страница «Расписание»).
 
 		Канал опрашивается аккаунтом-умолчанием (все админы видят одни
 		и те же отложки), группа — **всеми участниками** (ADR-0022:
@@ -1077,6 +1080,8 @@ class PostsService:
 		items: list[ScheduledPostDto] = []
 		unread: list[str] = []
 		for community in communities:
+			if community_id is not None and community.id != community_id:
+				continue
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
 			for account_id in self._scheduled_readers(community):

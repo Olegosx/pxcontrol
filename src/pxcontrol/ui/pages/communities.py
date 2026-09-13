@@ -19,9 +19,8 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
 
@@ -29,7 +28,6 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import (
 	QColor,
 	QContextMenuEvent,
-	QFont,
 	QMouseEvent,
 	QPainter,
 	QPaintEvent,
@@ -39,7 +37,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
 	QFrame,
-	QGraphicsOpacityEffect,
 	QGridLayout,
 	QHBoxLayout,
 	QLabel,
@@ -64,12 +61,10 @@ from qfluentwidgets import (
 	SegmentedToolWidget,
 	StrongBodyLabel,
 	SubtitleLabel,
-	getFont,
 	isDarkTheme,
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
@@ -79,26 +74,64 @@ from pxcontrol.engine.telegram.types import CommunityKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
+	ACCENT_BORDER,
+	ACCENT_TEXT,
+	CARD_HAIRLINE,
+	DIM_COLOR,
+	DIVIDER,
+	ERROR_BORDER,
+	ERROR_HOVER,
+	ERROR_TEXT,
+	MUTED_COLOR,
+	ROW_BORDER,
+	SUMMARY_BG,
+	SUMMARY_BORDER,
+	TABLE_BORDER,
+	TABLE_HEADER_BG,
+	TEXT_COLOR,
+	TITLE_COLOR,
 	DtoComboBox,
 	ErrorLabel,
+	OutlineButton,
+	QueueCounts,
 	account_caption,
 	bot_caption,
 	clear_layout,
+	colored,
 	community_logo,
+	dim_widget,
 	elide_text,
 	error_reporter,
 	exec_dialog,
+	font_px,
 	format_count,
+	hairline,
 	noop,
+	outline_badge,
 	page_layout,
 	plural,
+	queue_counts,
+	rich_numbers,
+	section_header,
 	show_info,
 	show_success,
+	theme_pick,
 )
 from pxcontrol.ui.pages.community_page import open_members
+from pxcontrol.ui.pages.community_state import (
+	ACTION_LABELS,
+	MAINTENANCE_UNAVAILABLE,
+	CardAction,
+	CardState,
+	action_available,
+	card_actions,
+	card_state,
+	state_badge,
+	state_badge_text,
+	subtitle_text,
+)
 from pxcontrol.ui.pages.maintenance import open_maintenance
 from pxcontrol.ui.pages.publish_queue_view import QueueFilter, QueueViewDialog
-from pxcontrol.ui.theme import ACCENT_COLOR
 
 logger = logging.getLogger(__name__)
 
@@ -134,179 +167,13 @@ _COLUMN_WIDTHS = {"participants": 96, "queue": 104, "scheduled": 92, "state": 13
 _DISABLED_CARD_OPACITY = 0.62
 _DISABLED_ROW_OPACITY = 0.6
 
-#: Цвета оформления парами «светлая тема, тёмная тема». Тёмные — из макета;
-#: светлые — те же роли на светлом фоне (белая полупрозрачность становится
-#: чёрной, цвет ошибки — как у ``ErrorLabel``). Библиотечные виджеты
-#: этими стилями не красятся (ADR-0023, п. 5): плашки, разделители
-#: и кнопки-обводки собраны на чистых виджетах Qt.
-_TITLE_COLOR = ("#1b1b1b", "#ffffff")
-_TEXT_COLOR = ("#3a3a3a", "#dfdfdf")
-_MUTED_COLOR = ("#6f6f6f", "#9d9d9d")
-_DIM_COLOR = ("#8a8a8a", "#8a8a8a")
-_COUNT_COLOR = ("#8a8a8a", "#6f6f6f")
-_HAIRLINE = ("rgba(0,0,0,.08)", "rgba(255,255,255,.08)")
-_CARD_HAIRLINE = ("rgba(0,0,0,.07)", "rgba(255,255,255,.07)")
-_SUMMARY_BG = ("rgba(0,0,0,.03)", "rgba(255,255,255,.03)")
-_SUMMARY_BORDER = ("rgba(0,0,0,.075)", "rgba(255,255,255,.075)")
-_DIVIDER = ("rgba(0,0,0,.09)", "rgba(255,255,255,.09)")
-_ERROR_TEXT = ("#c42b1c", "#ff99a4")
-_ERROR_BORDER = ("rgba(196,43,28,.5)", "rgba(255,153,164,.5)")
-_ERROR_HOVER = ("rgba(196,43,28,.08)", "rgba(255,153,164,.08)")
+#: Рамка карточки с ошибками (пером поверх штатной): пары QColor по темам.
 _ERROR_CARD_BORDER = (QColor(196, 43, 28, 102), QColor(255, 153, 164, 102))
-_ACCENT_TEXT = (ACCENT_COLOR, ACCENT_COLOR)
-_ACCENT_BORDER = ("rgba(20,184,166,.5)", "rgba(20,184,166,.5)")
-_ACCENT_BUTTON_BORDER = ("rgba(20,184,166,.55)", "rgba(20,184,166,.55)")
-_ACCENT_HOVER = ("rgba(20,184,166,.10)", "rgba(20,184,166,.10)")
-_NEUTRAL_BORDER = ("rgba(0,0,0,.22)", "rgba(255,255,255,.22)")
-_BUTTON_BORDER = ("rgba(0,0,0,.16)", "rgba(255,255,255,.16)")
-_BUTTON_HOVER = ("rgba(0,0,0,.05)", "rgba(255,255,255,.06)")
-_TABLE_BORDER = ("rgba(0,0,0,.075)", "rgba(255,255,255,.075)")
-_TABLE_HEADER_BG = ("rgba(0,0,0,.035)", "rgba(255,255,255,.035)")
-_ROW_BORDER = ("rgba(0,0,0,.06)", "rgba(255,255,255,.06)")
 
 #: Ширина поля поиска в шапке (пиксели).
 _SEARCH_WIDTH = 200
 
-#: Числа в тексте метрики — их разметка выделяет жирным.
-_DIGITS = re.compile(r"\d+")
-
-
 # --- правила показа (чистые функции) -----------------------------------------
-
-
-@dataclass(frozen=True)
-class QueueCounts:
-	"""Сводка очереди одного сообщества для карточки дашборда.
-
-	Attributes:
-		planned: неотправленное без ошибок — включая ждущих слота.
-		waiting: из них ждут слота отложек (ADR-0016) — второе число.
-		errors: элементы с ошибкой: они ждут повтора и требуют внимания,
-			поэтому в «к отправке» не входят.
-	"""
-
-	planned: int = 0
-	waiting: int = 0
-	errors: int = 0
-
-
-def queue_counts(items: list[QueueItemDto]) -> dict[int, QueueCounts]:
-	"""Считает сводку очереди по сообществам (чистая функция).
-
-	Правило показа — предметное (ADR-0016), поэтому живёт отдельно
-	от вёрстки и закрыто тестом: в вёрстке его проверить нечем.
-	"""
-	counts: dict[int, QueueCounts] = {}
-	for item in items:
-		if item.status.left_queue():
-			continue
-		current = counts.get(item.community_id, QueueCounts())
-		if item.status is JobStatus.ERROR:
-			current = replace(current, errors=current.errors + 1)
-		else:
-			current = replace(
-				current,
-				planned=current.planned + 1,
-				waiting=current.waiting + (item.status is JobStatus.WAITING),
-			)
-		counts[item.community_id] = current
-	return counts
-
-
-class CardState(StrEnum):
-	"""Состояние сообщества на карточке — плашка справа от метрик.
-
-	Ровно одно на карточку; при совпадении причин действует приоритет
-	:func:`card_state`: выключено → ошибки → нет публикатора.
-	"""
-
-	NORMAL = "normal"  # штатно, плашки нет
-	ERRORS = "errors"  # в очереди есть элементы с ошибкой
-	NO_PUBLISHER = "no_publisher"  # ни userbot-публикатора, ни бота
-	DISABLED = "disabled"  # выключено переключателем активности
-
-
-def card_state(community: CommunityDto, counts: QueueCounts) -> CardState:
-	"""Состояние карточки по приоритету «выключено → ошибки → нет публикатора».
-
-	Выключенное сообщество главнее прочего: пока оно выключено, очередь
-	не разбирается и ошибки не чинятся; ошибки главнее отсутствия
-	публикатора — они уже случились, а публикатор ещё может вернуться.
-	"""
-	if not community.enabled:
-		return CardState.DISABLED
-	if counts.errors > 0:
-		return CardState.ERRORS
-	caps = community.capabilities
-	if not caps.userbot and not caps.bot:
-		return CardState.NO_PUBLISHER
-	return CardState.NORMAL
-
-
-class CardAction(StrEnum):
-	"""Быстрое действие с карточки (и из контекстного меню строки)."""
-
-	PUBLISH = "publish"  # «Публикация» с этим сообществом
-	SCHEDULE = "schedule"  # «Расписание» с фильтром по сообществу
-	QUEUE = "queue"  # окно «Вся очередь…» с фильтром по сообществу
-	ASSIGN_PUBLISHER = "assign_publisher"  # диалог «Участники…»
-	ENABLE = "enable"  # включить сообщество
-	MAINTENANCE = "maintenance"  # окно обслуживания (ADR-0026)
-
-
-#: Подписи действий (кнопка карточки и пункт меню строки — одни и те же).
-ACTION_LABELS: dict[CardAction, str] = {
-	CardAction.PUBLISH: "Опубликовать",
-	CardAction.SCHEDULE: "Расписание",
-	CardAction.QUEUE: "Очередь",
-	CardAction.ASSIGN_PUBLISHER: "Назначить публикатора",
-	CardAction.ENABLE: "Включить",
-	CardAction.MAINTENANCE: "Обслуживание",
-}
-
-
-def card_actions(community: CommunityDto, counts: QueueCounts) -> tuple[CardAction, ...]:
-	"""Набор действий карточки по её состоянию.
-
-	Порядок проверок — от самого ограничивающего состояния: выключенному
-	сначала нужно включиться, сообществу без публикатора — публикатор
-	(остальные действия без него бессмысленны); у группы вместо
-	«Расписания» — «Обслуживание» (уборка нужна именно группам);
-	непустая очередь заслуживает кнопки «Очередь» вместо «Расписания».
-	"""
-	state = card_state(community, counts)
-	if state is CardState.DISABLED:
-		return (CardAction.ENABLE, CardAction.MAINTENANCE)
-	if state is CardState.NO_PUBLISHER:
-		return (CardAction.ASSIGN_PUBLISHER,)
-	if community.kind is CommunityKind.GROUP:
-		return (CardAction.PUBLISH, CardAction.MAINTENANCE)
-	if counts.planned + counts.errors > 0:
-		return (CardAction.PUBLISH, CardAction.QUEUE)
-	return (CardAction.PUBLISH, CardAction.SCHEDULE)
-
-
-def action_available(action: CardAction, community: CommunityDto) -> bool:
-	"""Доступно ли действие сообществу прямо сейчас.
-
-	Обслуживание умеет только userbot (ADR-0026): без публикатора-userbot
-	кнопка показывается, но неактивна — с той же подсказкой, что
-	на странице сообщества.
-	"""
-	if action is CardAction.MAINTENANCE:
-		return community.userbot_assigned
-	return True
-
-
-def state_badge_text(state: CardState, counts: QueueCounts) -> str | None:
-	"""Текст плашки состояния карточки; None — плашка не нужна."""
-	if state is CardState.ERRORS:
-		return f"{counts.errors} {plural(counts.errors, 'ошибка', 'ошибки', 'ошибок')}"
-	if state is CardState.NO_PUBLISHER:
-		return "нет публикатора"
-	if state is CardState.DISABLED:
-		return "выключено"
-	return None
 
 
 @dataclass(frozen=True)
@@ -345,25 +212,6 @@ def metrics_text(
 	scheduled_count = stats.scheduled_count if stats is not None else None
 	scheduled = "нет данных" if scheduled_count is None else f"{scheduled_count} отложено"
 	return MetricsText(queue, scheduled)
-
-
-def subtitle_text(community: CommunityDto, stats: CommunityStatsDto | None) -> str:
-	"""Подстрочник шапки карточки: «@имя · 18 420 подписчиков».
-
-	Без @имени — «имя не задано»; без кэша статистики — только @имя.
-	"""
-	name = f"@{community.username}" if community.username else "имя не задано"
-	participants = stats.participants if stats is not None else None
-	if participants is None:
-		return name
-	return f"{name} · {format_count(participants)} {audience_word(community.kind, participants)}"
-
-
-def audience_word(kind: CommunityKind, count: int) -> str:
-	"""«подписчик(и/ов)» у канала, «участник(а/ов)» у группы — по числу."""
-	if kind is CommunityKind.GROUP:
-		return plural(count, "участник", "участника", "участников")
-	return plural(count, "подписчик", "подписчика", "подписчиков")
 
 
 def grid_columns(width: int, card_min: int = CARD_MIN_WIDTH, spacing: int = GRID_SPACING) -> int:
@@ -480,89 +328,6 @@ def sort_rows(rows: list[Row], column: TableColumn, descending: bool) -> list[Ro
 	return sorted(rows, key=key, reverse=descending)
 
 
-# --- оформление -----------------------------------------------------------------
-
-
-def _pick(pair: tuple[str, str]) -> str:
-	"""Значение пары «светлая, тёмная» по текущей теме."""
-	return pair[1] if isDarkTheme() else pair[0]
-
-
-def _font(size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
-	"""Шрифт библиотеки нужного кегля (уважает масштаб из настроек)."""
-	font: QFont = getFont(size, weight)
-	return font
-
-
-def _hairline(parent: QWidget, colors: tuple[str, str] = _HAIRLINE) -> QFrame:
-	"""Горизонтальная линия в 1 пиксель."""
-	line = QFrame(parent)
-	line.setFixedHeight(1)
-	line.setStyleSheet(f"background: {_pick(colors)};")
-	line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-	return line
-
-
-def _badge(
-	parent: QWidget,
-	text: str,
-	border: tuple[str, str],
-	color: tuple[str, str],
-	*,
-	height: int = _BADGE_HEIGHT,
-	padding: int = 8,
-) -> QLabel:
-	"""Плашка-обводка: состояние карточки, строка таблицы, сводка."""
-	label = QLabel(text, parent)
-	label.setFixedHeight(height)
-	label.setFont(_font(12))
-	label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-	label.setStyleSheet(
-		f"QLabel {{ border: 1px solid {_pick(border)}; border-radius: 4px; "
-		f"color: {_pick(color)}; padding: 0 {padding}px; background: transparent; }}"
-	)
-	return label
-
-
-def _colored(label: QLabel, color: tuple[str, str]) -> QLabel:
-	"""Красит текст надписи по паре цветов (без фона и рамки)."""
-	label.setStyleSheet(f"color: {_pick(color)}; background: transparent;")
-	return label
-
-
-def _rich_metric(text: str, number_color: tuple[str, str], tail_color: tuple[str, str]) -> str:
-	"""Разметка метрики: числа — жирным цветом заголовка, слова — приглушённо."""
-	bold = f'<span style="color:{_pick(number_color)}; font-weight:600">'
-	marked = _DIGITS.sub(lambda match: f"{bold}{match.group(0)}</span>", text)
-	return f'<span style="color:{_pick(tail_color)}">{marked}</span>'
-
-
-class _OutlineButton(QPushButton):
-	"""Кнопка-обводка карточки (26 пикселей, радиус 4).
-
-	Чистый ``QPushButton``, а не библиотечный ``PushButton``: у того
-	свой лист стилей и высота 33 — переопределять его нельзя (ADR-0023,
-	п. 5), а 26-пиксельную обводку макета иначе не собрать.
-	"""
-
-	def __init__(self, text: str, parent: QWidget, *, accent: bool = False) -> None:
-		super().__init__(text, parent)
-		self.setFixedHeight(_ACTION_HEIGHT)
-		self.setFont(_font(12))
-		self.setCursor(Qt.CursorShape.PointingHandCursor)
-		self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-		border = _ACCENT_BUTTON_BORDER if accent else _BUTTON_BORDER
-		color = _ACCENT_TEXT if accent else _TEXT_COLOR
-		hover = _ACCENT_HOVER if accent else _BUTTON_HOVER
-		self.setStyleSheet(
-			f"QPushButton {{ border: 1px solid {_pick(border)}; border-radius: 4px; "
-			f"color: {_pick(color)}; padding: 0 11px; background: transparent; }}"
-			f"QPushButton:hover {{ background: {_pick(hover)}; }}"
-			f"QPushButton:disabled {{ color: {_pick(_DIM_COLOR)}; "
-			f"border-color: {_pick(_ROW_BORDER)}; }}"
-		)
-
-
 # --- карточка (вид «плитка») ------------------------------------------------------
 
 
@@ -589,12 +354,12 @@ class CommunityCard(CardWidget):
 		layout.setContentsMargins(16, 12, 16, 10)
 		layout.setSpacing(9)
 		layout.addWidget(self._header(row))
-		layout.addWidget(_hairline(self, _CARD_HAIRLINE))
+		layout.addWidget(hairline(self, CARD_HAIRLINE))
 		layout.addWidget(self._metrics(row))
 		layout.addStretch()
 		layout.addWidget(self._actions(community, counts, on_action))
 		if self._state is CardState.DISABLED:
-			_dim(self, _DISABLED_CARD_OPACITY)
+			dim_widget(self, _DISABLED_CARD_OPACITY)
 
 	def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 — API Qt
 		"""Рамка карточки с ошибками — цветом ошибки поверх штатной.
@@ -633,7 +398,7 @@ class CommunityCard(CardWidget):
 		column.addWidget(title)
 		details = CaptionLabel(box)
 		details.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		elide_text(details, subtitle_text(community, stats))
+		elide_text(details, subtitle_text(community, stats.participants if stats else None))
 		column.addWidget(details)
 		layout.addLayout(column, stretch=1)
 		return box
@@ -655,23 +420,23 @@ class CommunityCard(CardWidget):
 		for text in (texts.queue, texts.scheduled):
 			if text is None:
 				continue
-			label = QLabel(_rich_metric(text, _TITLE_COLOR, _MUTED_COLOR), group)
-			label.setFont(_font(13))
+			label = QLabel(rich_numbers(text, TITLE_COLOR, MUTED_COLOR), group)
+			label.setFont(font_px(13))
 			label.setStyleSheet("background: transparent;")
 			group_layout.addWidget(label)
 		group_layout.addStretch()
 		layout.addWidget(group, stretch=1)
-		badge = self._state_badge(box, row.counts)
+		badge = self.state_badge(box, row.counts)
 		if badge is not None:
 			layout.addWidget(badge, alignment=Qt.AlignmentFlag.AlignRight)
 		return box
 
-	def _state_badge(self, parent: QWidget, counts: QueueCounts) -> QLabel | None:
+	def state_badge(self, parent: QWidget, counts: QueueCounts) -> QLabel | None:
 		"""Плашка состояния (одна из трёх) или ничего в штатном случае."""
 		text = state_badge_text(self._state, counts)
 		if text is None:
 			return None
-		return _state_badge(parent, self._state, text)
+		return state_badge(parent, self._state, text)
 
 	def _actions(
 		self,
@@ -689,41 +454,23 @@ class CommunityCard(CardWidget):
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(8)
 		for action in card_actions(community, counts):
-			button = _OutlineButton(
-				ACTION_LABELS[action], box, accent=action is CardAction.ASSIGN_PUBLISHER
+			button = OutlineButton(
+				ACTION_LABELS[action],
+				box,
+				tone="accent" if action is CardAction.ASSIGN_PUBLISHER else "neutral",
 			)
 			if not action_available(action, community):
 				button.setEnabled(False)
-				button.setToolTip(_MAINTENANCE_UNAVAILABLE)
+				button.setToolTip(MAINTENANCE_UNAVAILABLE)
 			button.clicked.connect(partial(on_action, action, community))
 			layout.addWidget(button)
 		layout.addStretch()
 		return box
 
 
-#: Подсказка неактивного «Обслуживания» — та же, что на странице сообщества.
-_MAINTENANCE_UNAVAILABLE = "Нужен userbot-публикатор: боту история и участники недоступны"
-
-
 def _pick_color(pair: tuple[QColor, QColor]) -> QColor:
 	"""Цвет пары «светлая, тёмная» по текущей теме (для рисования пером)."""
 	return pair[1] if isDarkTheme() else pair[0]
-
-
-def _dim(widget: QWidget, opacity: float) -> None:
-	"""Приглушает виджет целиком (выключенное сообщество)."""
-	effect = QGraphicsOpacityEffect(widget)
-	effect.setOpacity(opacity)
-	widget.setGraphicsEffect(effect)
-
-
-def _state_badge(parent: QWidget, state: CardState, text: str) -> QLabel:
-	"""Плашка состояния: цвет по виду состояния."""
-	if state is CardState.ERRORS:
-		return _badge(parent, text, _ERROR_BORDER, _ERROR_TEXT)
-	if state is CardState.NO_PUBLISHER:
-		return _badge(parent, text, _ACCENT_BORDER, _ACCENT_TEXT)
-	return _badge(parent, text, _NEUTRAL_BORDER, _TEXT_COLOR)
 
 
 class _TileGrid(QWidget):
@@ -774,9 +521,9 @@ class _HeaderCell(QLabel):
 	def __init__(self, text: str, on_click: Callable[[], None], parent: QWidget) -> None:
 		super().__init__(text, parent)
 		self._on_click = on_click
-		self.setFont(_font(12))
+		self.setFont(font_px(12))
 		self.setCursor(Qt.CursorShape.PointingHandCursor)
-		_colored(self, _MUTED_COLOR)
+		colored(self, MUTED_COLOR)
 
 	def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — API Qt
 		inside = self.rect().contains(event.position().toPoint())
@@ -803,7 +550,7 @@ class _TableRow(QFrame):
 		self.setCursor(Qt.CursorShape.PointingHandCursor)
 		self.setObjectName("communityRow")
 		self.setStyleSheet(
-			f"#communityRow {{ border-top: 1px solid {_pick(_ROW_BORDER)}; "
+			f"#communityRow {{ border-top: 1px solid {theme_pick(ROW_BORDER)}; "
 			"background: transparent; }"
 		)
 		layout = QHBoxLayout(self)
@@ -818,7 +565,7 @@ class _TableRow(QFrame):
 		layout.addWidget(self._number(scheduled, _COLUMN_WIDTHS["scheduled"]))
 		layout.addWidget(self._state_cell(community, counts))
 		if not community.enabled:
-			_dim(self, _DISABLED_ROW_OPACITY)
+			dim_widget(self, _DISABLED_ROW_OPACITY)
 
 	def _name_cell(self) -> QWidget:
 		"""Логотип, название и @имя."""
@@ -834,15 +581,15 @@ class _TableRow(QFrame):
 		column = QVBoxLayout()
 		column.setSpacing(1)
 		title = QLabel(box)
-		title.setFont(_font(14))
+		title.setFont(font_px(14))
 		title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		_colored(title, _TITLE_COLOR)
+		colored(title, TITLE_COLOR)
 		elide_text(title, community.title)
 		column.addWidget(title)
 		name = QLabel(box)
-		name.setFont(_font(12))
+		name.setFont(font_px(12))
 		name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		_colored(name, _DIM_COLOR)
+		colored(name, DIM_COLOR)
 		elide_text(name, f"@{community.username}" if community.username else "имя не задано")
 		column.addWidget(name)
 		layout.addLayout(column, stretch=1)
@@ -852,9 +599,9 @@ class _TableRow(QFrame):
 		"""Числовая ячейка, выровненная вправо; ноль и «—» приглушены."""
 		label = QLabel("—" if value is None else format_count(value), self)
 		label.setFixedWidth(width)
-		label.setFont(_font(13))
+		label.setFont(font_px(13))
 		label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-		_colored(label, _DIM_COLOR if not value else _TEXT_COLOR)
+		colored(label, DIM_COLOR if not value else TEXT_COLOR)
 		return label
 
 	def _queue_cell(self, counts: QueueCounts) -> QLabel:
@@ -862,8 +609,8 @@ class _TableRow(QFrame):
 		label = self._number(counts.planned, _COLUMN_WIDTHS["queue"])
 		if counts.waiting:
 			label.setText(
-				f'<span style="color:{_pick(_TEXT_COLOR)}">{counts.planned}</span> '
-				f'<span style="color:{_pick(_DIM_COLOR)}">+{counts.waiting}</span>'
+				f'<span style="color:{theme_pick(TEXT_COLOR)}">{counts.planned}</span> '
+				f'<span style="color:{theme_pick(DIM_COLOR)}">+{counts.waiting}</span>'
 			)
 		return label
 
@@ -877,10 +624,10 @@ class _TableRow(QFrame):
 		text = state_badge_text(state, counts)
 		if text is None:
 			dash = QLabel("—", box)
-			dash.setFont(_font(13))
-			layout.addWidget(_colored(dash, _DIM_COLOR))
+			dash.setFont(font_px(13))
+			layout.addWidget(colored(dash, DIM_COLOR))
 		else:
-			layout.addWidget(_state_badge(box, state, text))
+			layout.addWidget(state_badge(box, state, text))
 		layout.addStretch()
 		return box
 
@@ -898,7 +645,7 @@ class _TableRow(QFrame):
 			item = Action(ACTION_LABELS[action], menu)
 			if not action_available(action, community):
 				item.setEnabled(False)
-				item.setToolTip(_MAINTENANCE_UNAVAILABLE)
+				item.setToolTip(MAINTENANCE_UNAVAILABLE)
 			item.triggered.connect(partial(self._on_action, action, community))
 			menu.addAction(item)
 		menu.exec(event.globalPos())
@@ -931,7 +678,7 @@ class _Table(QFrame):
 		# как у сетки карточек: высота по содержимому, не по странице
 		self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 		self.setStyleSheet(
-			f"#communityTable {{ border: 1px solid {_pick(_TABLE_BORDER)}; "
+			f"#communityTable {{ border: 1px solid {theme_pick(TABLE_BORDER)}; "
 			"border-radius: 6px; background: transparent; }"
 		)
 		layout = QVBoxLayout(self)
@@ -953,7 +700,7 @@ class _Table(QFrame):
 		box.setObjectName("communityTableHeader")
 		box.setFixedHeight(_TABLE_HEADER_HEIGHT)
 		box.setStyleSheet(
-			f"#communityTableHeader {{ background: {_pick(_TABLE_HEADER_BG)}; "
+			f"#communityTableHeader {{ background: {theme_pick(TABLE_HEADER_BG)}; "
 			"border-top-left-radius: 6px; border-top-right-radius: 6px; }"
 		)
 		layout = QHBoxLayout(box)
@@ -1258,8 +1005,8 @@ class CommunitiesPage(ScrollArea):
 		bar.setObjectName("communitySummary")
 		bar.setFixedHeight(_SUMMARY_HEIGHT)
 		bar.setStyleSheet(
-			f"#communitySummary {{ background: {_pick(_SUMMARY_BG)}; border-radius: 6px; "
-			f"border: 1px solid {_pick(_SUMMARY_BORDER)}; }}"
+			f"#communitySummary {{ background: {theme_pick(SUMMARY_BG)}; border-radius: 6px; "
+			f"border: 1px solid {theme_pick(SUMMARY_BORDER)}; }}"
 		)
 		layout = QHBoxLayout(bar)
 		layout.setContentsMargins(4, 0, 4, 0)
@@ -1269,15 +1016,15 @@ class CommunitiesPage(ScrollArea):
 		layout.addWidget(self._summary_segment(bar, totals.enabled, f"активных из {totals.total}"))
 		if totals.errors:
 			layout.addWidget(self._divider(bar))
-			layout.addWidget(self._errors_badge(bar, totals.errors))
+			layout.addWidget(self._errorsoutline_badge(bar, totals.errors))
 		if totals.without_publisher:
 			layout.addWidget(self._divider(bar))
 			layout.addWidget(
-				_badge(
+				outline_badge(
 					bar,
 					f"{totals.without_publisher} без публикатора",
-					_ACCENT_BORDER,
-					_ACCENT_TEXT,
+					ACCENT_BORDER,
+					ACCENT_TEXT,
 					height=_SUMMARY_BADGE_HEIGHT,
 					padding=14,
 				)
@@ -1289,11 +1036,11 @@ class CommunitiesPage(ScrollArea):
 	def _summary_segment(parent: QWidget, number: int, tail: str) -> QLabel:
 		"""Сегмент сводки: число жирным и подпись прозой."""
 		label = QLabel(
-			f'<span style="color:{_pick(_TITLE_COLOR)}; font-weight:600">{number}</span> '
-			f'<span style="color:{_pick(_TEXT_COLOR)}">{tail}</span>',
+			f'<span style="color:{theme_pick(TITLE_COLOR)}; font-weight:600">{number}</span> '
+			f'<span style="color:{theme_pick(TEXT_COLOR)}">{tail}</span>',
 			parent,
 		)
-		label.setFont(_font(13))
+		label.setFont(font_px(13))
 		label.setContentsMargins(14, 0, 14, 0)
 		label.setStyleSheet("background: transparent;")
 		return label
@@ -1303,21 +1050,21 @@ class CommunitiesPage(ScrollArea):
 		"""Вертикальный разделитель сегментов сводки."""
 		line = QFrame(parent)
 		line.setFixedSize(1, 18)
-		line.setStyleSheet(f"background: {_pick(_DIVIDER)};")
+		line.setStyleSheet(f"background: {theme_pick(DIVIDER)};")
 		return line
 
-	def _errors_badge(self, parent: QWidget, errors: int) -> QPushButton:
+	def _errorsoutline_badge(self, parent: QWidget, errors: int) -> QPushButton:
 		"""Плашка ошибок — кнопка: открывает очередь с фильтром «ошибки»."""
 		button = QPushButton(f"{errors} {plural(errors, 'ошибка', 'ошибки', 'ошибок')}", parent)
 		button.setFixedHeight(_SUMMARY_BADGE_HEIGHT)
-		button.setFont(_font(12))
+		button.setFont(font_px(12))
 		button.setCursor(Qt.CursorShape.PointingHandCursor)
 		button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 		button.setToolTip("Элементы очереди отправки с ошибкой — открыть очередь")
 		button.setStyleSheet(
-			f"QPushButton {{ border: 1px solid {_pick(_ERROR_BORDER)}; border-radius: 4px; "
-			f"color: {_pick(_ERROR_TEXT)}; padding: 0 14px; background: transparent; }}"
-			f"QPushButton:hover {{ background: {_pick(_ERROR_HOVER)}; }}"
+			f"QPushButton {{ border: 1px solid {theme_pick(ERROR_BORDER)}; border-radius: 4px; "
+			f"color: {theme_pick(ERROR_TEXT)}; padding: 0 14px; background: transparent; }}"
+			f"QPushButton:hover {{ background: {theme_pick(ERROR_HOVER)}; }}"
 		)
 		button.clicked.connect(self._open_errors)
 		return button
@@ -1352,24 +1099,7 @@ class CommunitiesPage(ScrollArea):
 
 	def _section_header(self, title: str, icon: FluentIcon, count: int) -> QWidget:
 		"""Заголовок раздела: значок вида, подпись, число, хайрлайн."""
-		box = QWidget(self)
-		layout = QHBoxLayout(box)
-		layout.setContentsMargins(0, 0, 0, 0)
-		layout.setSpacing(12)
-		icon_label = QLabel(box)
-		icon_label.setFixedSize(14, 14)
-		icon_label.setPixmap(icon.icon(color=QColor(_pick(_MUTED_COLOR))).pixmap(14, 14))
-		layout.addWidget(icon_label)
-		caption = QLabel(title.upper(), box)
-		font = _font(13)
-		font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 106)
-		caption.setFont(font)
-		layout.addWidget(_colored(caption, _MUTED_COLOR))
-		counter = QLabel(str(count), box)
-		counter.setFont(_font(13))
-		layout.addWidget(_colored(counter, _COUNT_COLOR))
-		layout.addWidget(_hairline(box), stretch=1)
-		return box
+		return section_header(self, title, count, icon=icon)
 
 	def _section_body(self, kind: CommunityKind, rows: list[Row]) -> QWidget:
 		"""Тело раздела: сетка карточек или таблица — по переключателю."""
