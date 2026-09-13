@@ -1134,6 +1134,9 @@ class CommunitiesPage(ScrollArea):
 		self._view_switch.addItem(VIEW_TILES, FluentIcon.TILES).setToolTip("Плитка")
 		self._view_switch.addItem(VIEW_LIST, FluentIcon.MENU).setToolTip("Список")
 		self._view_switch.setCurrentItem(VIEW_TILES)
+		# размер — по двум значкам: политика библиотеки «может расти»,
+		# и в строке с растяжкой переключатель занимал половину шапки
+		self._view_switch.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 		self._view_switch.currentItemChanged.connect(self._on_view_changed)
 		header.addWidget(self._view_switch)
 		connect_button = PrimaryPushButton(FluentIcon.ADD, "Подключить…", self)
