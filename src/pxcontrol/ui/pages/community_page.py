@@ -5,7 +5,7 @@
 состояния, подстрочник, «Опубликовать» и меню «…». Ниже —
 переключатель вкладок и стопка их тел:
 
-- **Обзор** — справка и статистика (заглушка до следующего этапа);
+- **Обзор** — справка и статистика (:mod:`community_overview`);
 - **Очередь** — вид на очередь отправки этого сообщества с правкой
   поста в карточке (та же ``QueuePanel``, что на «Публикации»);
 - **Отложено** — отложенные записи сообщества из Telegram (как
@@ -98,6 +98,7 @@ from pxcontrol.ui.pages.common import (
 	slot_color,
 	slot_label,
 )
+from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
 	MAINTENANCE_UNAVAILABLE,
 	community_queue_counts,
@@ -708,6 +709,9 @@ class CommunityPage(ScrollArea):
 		self._render_header()
 		self._render_settings()
 		self._render_tab_titles()
+		overview = self._tabs.get(TAB_OVERVIEW)
+		if isinstance(overview, OverviewTab):
+			overview.update_community(community)
 
 	# --- сборка -----------------------------------------------------------------
 
@@ -854,18 +858,7 @@ class CommunityPage(ScrollArea):
 			self._settings_rows.setContentsMargins(0, 0, 0, 0)
 			self._settings_rows.setSpacing(density.spacing().list_spacing)
 			return box
-		box = QWidget(self)
-		layout = QVBoxLayout(box)
-		layout.setContentsMargins(0, 24, 0, 0)
-		hint = BodyLabel(
-			"Обзор — статистика и справка сообщества — появится на следующем этапе. "
-			"Данные под него движок уже собирает (ADR-0027).",
-			box,
-		)
-		hint.setWordWrap(True)
-		layout.addWidget(hint)
-		layout.addStretch()
-		return box
+		return OverviewTab(self._worker, self._community, self)
 
 	def _members_tab(self) -> QWidget:
 		"""Вкладка «Участники»: панель строится после чтения кандидатов."""
