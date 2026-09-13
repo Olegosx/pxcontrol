@@ -37,6 +37,7 @@ from qfluentwidgets import (
 	CaptionLabel,
 	FluentIcon,
 	InfoBadge,
+	InfoLevel,
 	LineEdit,
 	MessageBoxBase,
 	Pivot,
@@ -489,19 +490,16 @@ class _CommunityPrefsDialog(MessageBoxBase):
 _TAB_INDICATOR_LENGTH = 26
 _TAB_FONT_PX = 14
 
-#: Цвета пилюли-счётчика (светлая, тёмная): у активной вкладки — акцент,
-#: у остальных — приглушённая подложка.
-_BADGE_ACTIVE = ("#14b8a6", "#14b8a6")
-_BADGE_IDLE = ("#8a8a8a", "#3d3d3d")
-
 
 class _TabItem(PivotItem):
 	"""Пункт вкладок со счётчиком-пилюлей справа от подписи.
 
 	Пилюля — библиотечный ``InfoBadge`` (официальный элемент для
 	счётчиков), живёт внутри кнопки пункта: под неё отводится правое
-	поле, чтобы подпись не наезжала. У активной вкладки пилюля
-	акцентная, у остальных — приглушённая.
+	поле, чтобы подпись не наезжала. Цвета — пресеты уровней библиотеки:
+	у активной вкладки ``ATTENTION`` (фон — акцент темы, текст — по теме:
+	чёрный в тёмной, белый в светлой), у остальных — приглушённый
+	``INFOAMTION``. Своих цветов здесь нет.
 	"""
 
 	def __init__(self, text: str, parent: QWidget) -> None:
@@ -517,12 +515,12 @@ class _TabItem(PivotItem):
 			self.setContentsMargins(0, 0, 0, 0)
 			self.updateGeometry()
 			return
-		colors = _BADGE_ACTIVE if active else _BADGE_IDLE
+		level = InfoLevel.ATTENTION if active else InfoLevel.INFOAMTION
 		if self._badge is None:
-			self._badge = InfoBadge.custom(str(count), colors[0], colors[1], parent=self)
+			self._badge = InfoBadge(str(count), self, level)
 		else:
 			self._badge.setText(str(count))
-			self._badge.setCustomBackgroundColor(*colors)
+			self._badge.setLevel(level)
 		self._badge.adjustSize()
 		self._badge.show()
 		self.setContentsMargins(0, 0, self._badge.width() + 6, 0)
@@ -853,7 +851,9 @@ class CommunityPage(ScrollArea):
 		for key in _TABS:
 			item = _TabItem(tab_title(key), self._segments)
 			self._tab_items[key] = item
-			self._segments.addWidget(key, item, onClick=partial(self._show_tab, key))
+			# без обработчика клика: библиотека зовёт его с флагом, которого
+			# обработчик не ждёт, а переключение и так идёт по currentItemChanged
+			self._segments.addWidget(key, item)
 		self._segments.setItemFontSize(_TAB_FONT_PX)
 		self._segments.currentItemChanged.connect(self._show_tab)
 		self._mount_tab(TAB_SETTINGS)
