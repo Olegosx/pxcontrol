@@ -19,6 +19,7 @@ from pxcontrol.engine.services.community_stats import (
 	analytics_from_payload,
 	analytics_to_payload,
 	due,
+	window_start,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotFloodError, UserbotNotConnectedError
@@ -157,17 +158,33 @@ async def _history_count(db: Database) -> int:
 
 
 def _service(db: Database, gateway: _FakeStatsGateway, tmp_path: Path) -> CommunityStatsService:
-	return CommunityStatsService(db, gateway, avatars_dir=tmp_path / "avatars")
+	# окна опроса — в UTC: местный пояс машины не должен решать исход теста
+	return CommunityStatsService(db, gateway, avatars_dir=tmp_path / "avatars", tz=UTC)
 
 
 # --- правило «пора» и сериализация ---------------------------------------------------
 
 
-def test_due_rule() -> None:
-	assert due(None, 900, _NOW)
-	assert due(_NOW - timedelta(seconds=900), 900, _NOW)
-	assert not due(_NOW - timedelta(seconds=899), 900, _NOW)
-	assert due(_NOW.replace(tzinfo=None) - timedelta(days=1), 900, _NOW)  # наивное из SQLite
+def test_window_start_is_aligned_to_clock() -> None:
+	"""Окна — по часам суток: :00/:15/:30/:45 и 00/06/12/18."""
+	at = datetime(2026, 9, 14, 12, 7, 30, tzinfo=UTC)
+	assert window_start(at, 15 * 60, UTC) == datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+	assert window_start(at, 6 * 3600, UTC) == datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+	at = datetime(2026, 9, 14, 17, 59, tzinfo=UTC)
+	assert window_start(at, 15 * 60, UTC) == datetime(2026, 9, 14, 17, 45, tzinfo=UTC)
+	assert window_start(at, 6 * 3600, UTC) == datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+
+
+def test_due_rule_by_window_not_by_elapsed_time() -> None:
+	"""Пора, когда прошлый проход — до начала текущего окна, а не по сроку."""
+	now = datetime(2026, 9, 14, 12, 7, tzinfo=UTC)
+	assert due(None, 900, now)
+	assert not due(datetime(2026, 9, 14, 12, 1, tzinfo=UTC), 900, now), "то же окно"
+	assert due(datetime(2026, 9, 14, 11, 59, tzinfo=UTC), 900, now), "прошлое окно"
+	# два прохода в одном окне не случатся, даже если между ними 14 минут
+	assert not due(datetime(2026, 9, 14, 12, 0, 30, tzinfo=UTC), 900, now)
+	assert due(now.replace(tzinfo=None) - timedelta(days=1), 900, now)  # наивное из SQLite
+	assert due(now, 0, now), "нулевое окно — принудительно"
 
 
 def test_analytics_payload_roundtrip() -> None:

@@ -34,7 +34,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -67,10 +67,12 @@ from pxcontrol.paths import cache_dir
 
 logger = logging.getLogger(__name__)
 
-#: Темп опроса ботом (участники, связанный чат), секунды.
+#: Окно опроса ботом (участники, связанный чат), секунды. Окна выровнены
+#: по часам суток, а не по старту приложения: :00, :15, :30, :45.
 BOT_POLL_S = 15 * 60
 
-#: Темп полного опроса userbot-ом (онлайн, отложенные, статистика), секунды.
+#: Окно полного опроса userbot-ом (онлайн, отложенные, статистика),
+#: секунды: 00, 06, 12, 18 часов местного времени.
 FULL_POLL_S = 6 * 60 * 60
 
 #: Шаг периодической задачи: как часто проверять, кому пора. Минута —
@@ -144,10 +146,29 @@ def _as_int(value: object) -> int | None:
 	return value if isinstance(value, int) else None
 
 
-def due(last: datetime | None, every_s: int, now: datetime) -> bool:
-	"""Пора ли опрашивать: прошлого прохода не было или он старше срока."""
+def window_start(now: datetime, every_s: int, tz: tzinfo) -> datetime:
+	"""Начало текущего окна опроса — выровнено по часам суток.
+
+	Сутки делятся на окна длиной ``every_s`` от местной полуночи:
+	при 15 минутах это :00, :15, :30, :45 каждого часа, при 6 часах —
+	00, 06, 12, 18. Так проходы у всех запусков приложения попадают
+	в одни и те же моменты, а не сдвигаются от старта программы.
+	"""
+	local = now.astimezone(tz)
+	midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+	elapsed = (local - midnight).total_seconds()
+	return midnight + timedelta(seconds=elapsed - elapsed % every_s)
+
+
+def due(last: datetime | None, every_s: int, now: datetime, tz: tzinfo = UTC) -> bool:
+	"""Пора ли опрашивать: прошлого прохода не было или он до начала окна.
+
+	``every_s`` не больше нуля — всегда пора (принудительный проход).
+	"""
+	if every_s <= 0:
+		return True
 	last = _aware(last)
-	return last is None or (now - last).total_seconds() >= every_s
+	return last is None or last < window_start(now, every_s, tz)
 
 
 # --- сериализация встроенной статистики -------------------------------------------
@@ -209,14 +230,18 @@ class CommunityStatsService:
 		gateway: _StatsGateway,
 		settings: SettingsService | None = None,
 		avatars_dir: Path | None = None,
+		tz: tzinfo | None = None,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка (None — свой,
 		для тестов); ``avatars_dir`` — каталог файлов аватаров
-		(None — подпапка каталога кэша приложения)."""
+		(None — подпапка каталога кэша приложения); ``tz`` — часовой
+		пояс окон опроса и окон «за N дней» (None — местный; тесты
+		передают UTC ради предсказуемости)."""
 		self._db = db
 		self._gateway = gateway
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._avatars_dir = avatars_dir if avatars_dir is not None else cache_dir() / "avatars"
+		self._tz: tzinfo = tz if tz is not None else (datetime.now(UTC).astimezone().tzinfo or UTC)
 		self._stop = asyncio.Event()
 		self._poller: asyncio.Task[None] | None = None
 
@@ -280,10 +305,14 @@ class CommunityStatsService:
 			HistorySample(_aware(item.at) or datetime.now(UTC), item.participants, item.online)
 			for item in history
 		]
+		# статистика Telegram годится, только пока сервер подтверждает
+		# доступ: право могли отобрать, а прежний ответ остался в кэше
 		analytics = (
-			analytics_from_payload(analytics_row.payload) if analytics_row is not None else None
+			analytics_from_payload(analytics_row.payload)
+			if analytics_row is not None and row is not None and row.can_view_stats
+			else None
 		)
-		now = (now if now is not None else datetime.now(UTC)).astimezone()
+		now = (now if now is not None else datetime.now(UTC)).astimezone(self._tz)
 		return build_overview(
 			community_id,
 			participants=row.participants if row is not None else None,
@@ -291,7 +320,7 @@ class CommunityStatsService:
 			samples=samples,
 			analytics=analytics,
 			today=now.date(),
-			tz=now.tzinfo or UTC,
+			tz=self._tz,
 			can_view_stats=bool(row.can_view_stats) if row is not None else False,
 			linked_chat_id=row.linked_chat_id if row is not None else None,
 			linked_title=linked_title,
@@ -344,10 +373,12 @@ class CommunityStatsService:
 	) -> bool:
 		"""Опрашивает сообщества, чей срок по источнику вышел.
 
-		Только активные сообщества. Бот — где назначен и прошёл его темп;
-		userbot — где есть публикатор и прошёл его темп (у сообщества
-		без бота только он и обновляет участников — раз в 6 часов,
-		и это осознанно: частая беготня userbot-ом задевает публикацию).
+		Только активные сообщества. Бот — где назначен и началось новое
+		окно его темпа (:00, :15, :30, :45); userbot — где есть публикатор
+		и началось новое окно его темпа (00, 06, 12, 18; у сообщества
+		без бота только он и обновляет участников, и это осознанно:
+		частая беготня userbot-ом задевает публикацию). Окна выровнены
+		по часам суток, а не по старту приложения (:func:`window_start`).
 		Каждый успешный проход оставляет снимок в истории; в конце
 		убирается история старше срока хранения.
 
@@ -382,14 +413,16 @@ class CommunityStatsService:
 			if self._stop.is_set():
 				break
 			token = bot_tokens.get(community.id)
-			if token is not None and due(row.bot_fetched_at if row else None, bot_every_s, now):
+			if token is not None and due(
+				row.bot_fetched_at if row else None, bot_every_s, now, self._tz
+			):
 				update = await self._bot_pass(community, token)
 				if update is not None:
 					await self._store(community.id, update, now, stamp="bot_fetched_at")
 					changed = True
 			account_id = community.default_tg_account_id
 			if account_id is not None and due(
-				row.full_fetched_at if row else None, full_every_s, now
+				row.full_fetched_at if row else None, full_every_s, now, self._tz
 			):
 				update = await self._full_pass(community, account_id, row, now)
 				if update is not None:

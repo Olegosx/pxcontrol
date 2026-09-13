@@ -1187,9 +1187,7 @@ def _analytics_from(
 		left=tuple(
 			DayPoint(*point) for point in daily(pick_series(flow, "left", "leav", position=1))
 		),
-		hours=(lambda profile: tuple(profile) if profile is not None else None)(
-			hourly(pick_series(hours, position=0))
-		),
+		hours=tuple(profile) if (profile := hourly(pick_series(hours, position=0))) else None,
 		views_per_post=_abs_pair(views),
 		recent_post_views=tuple(recent),
 	)
