@@ -28,17 +28,19 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QHideEvent, QShowEvent
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QFont, QHideEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
 	BodyLabel,
 	CaptionLabel,
 	FluentIcon,
+	InfoBadge,
 	LineEdit,
 	MessageBoxBase,
 	Pivot,
+	PivotItem,
 	PrimaryPushButton,
 	PushButton,
 	RoundMenu,
@@ -86,6 +88,7 @@ from pxcontrol.ui.pages.common import (
 	elide_text,
 	error_reporter,
 	exec_dialog,
+	font_px,
 	format_local,
 	hairline,
 	list_area,
@@ -153,7 +156,7 @@ def tab_title(key: str, count: int | None = None) -> str:
 		TAB_SETTINGS: "Настройки",
 	}
 	title = titles[key]
-	return f"{title} {count}" if count else title
+	return f"{title} {count}" if count else title  # число — для подписи без пилюли
 
 
 def queue_footer_text(view: QueuePage) -> str:
@@ -482,6 +485,67 @@ class _CommunityPrefsDialog(MessageBoxBase):
 
 # --- вкладки ------------------------------------------------------------------------
 
+#: Полоса под активной вкладкой и кегль подписи — по макету.
+_TAB_INDICATOR_LENGTH = 26
+_TAB_FONT_PX = 14
+
+#: Цвета пилюли-счётчика (светлая, тёмная): у активной вкладки — акцент,
+#: у остальных — приглушённая подложка.
+_BADGE_ACTIVE = ("#14b8a6", "#14b8a6")
+_BADGE_IDLE = ("#8a8a8a", "#3d3d3d")
+
+
+class _TabItem(PivotItem):
+	"""Пункт вкладок со счётчиком-пилюлей справа от подписи.
+
+	Пилюля — библиотечный ``InfoBadge`` (официальный элемент для
+	счётчиков), живёт внутри кнопки пункта: под неё отводится правое
+	поле, чтобы подпись не наезжала. У активной вкладки пилюля
+	акцентная, у остальных — приглушённая.
+	"""
+
+	def __init__(self, text: str, parent: QWidget) -> None:
+		super().__init__(parent)
+		self.setText(text)
+		self._badge: InfoBadge | None = None
+
+	def set_count(self, count: int | None, active: bool) -> None:
+		"""Показывает число (None или 0 — без пилюли) и красит его по активности."""
+		if not count:
+			if self._badge is not None:
+				self._badge.hide()
+			self.setContentsMargins(0, 0, 0, 0)
+			self.updateGeometry()
+			return
+		colors = _BADGE_ACTIVE if active else _BADGE_IDLE
+		if self._badge is None:
+			self._badge = InfoBadge.custom(str(count), colors[0], colors[1], parent=self)
+		else:
+			self._badge.setText(str(count))
+			self._badge.setCustomBackgroundColor(*colors)
+		self._badge.adjustSize()
+		self._badge.show()
+		self.setContentsMargins(0, 0, self._badge.width() + 6, 0)
+		self.updateGeometry()
+		self._place_badge()
+
+	def sizeHint(self) -> QSize:  # noqa: N802 — API Qt
+		hint: QSize = super().sizeHint()
+		if self._badge is not None and self._badge.isVisible():
+			hint.setWidth(hint.width() + self._badge.width() + 6)
+		return hint
+
+	def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 — API Qt
+		super().resizeEvent(event)
+		self._place_badge()
+
+	def _place_badge(self) -> None:
+		if self._badge is None or not self._badge.isVisible():
+			return
+		self._badge.move(
+			self.width() - self._badge.width() - 8, (self.height() - self._badge.height()) // 2
+		)
+
 
 class _QueueTab(QWidget):
 	"""Вкладка «Очередь»: очередь отправки этого сообщества, ближайшие сначала.
@@ -556,6 +620,7 @@ class _QueueTab(QWidget):
 			editable=lambda item: item.status in EDITABLE_STATUSES,
 			fill_body=self._fill_editor,
 			leading=self._leading,
+			compact=True,
 		)
 
 	def set_polling(self, active: bool) -> None:
@@ -630,6 +695,7 @@ class _QueueTab(QWidget):
 		"""Начало шапки карточки: только метка слота — логотип здесь лишний."""
 		label = slot_label(item.when)
 		chip = StrongBodyLabel(f"[{label}]", parent)
+		chip.setFont(font_px(13, QFont.Weight.DemiBold))  # 13 / 600 по макету
 		chip.setTextColor(*slot_color(label))
 		chip.setToolTip("Время публикации (слот)")
 		return [chip]
@@ -774,6 +840,7 @@ class CommunityPage(ScrollArea):
 		# Pivot, а не SegmentedWidget: по макету вкладки — подписи с полосой
 		# под активной, без рамки-подложки (SegmentedWidget рисует её)
 		self._segments = Pivot(self)
+		self._segments.setIndicatorLength(_TAB_INDICATOR_LENGTH)
 		layout.addWidget(self._segments)
 		# тело вкладки — единственный виджет в этой компоновке: скрытые
 		# вкладки в ней не живут, и высота страницы считается по видимой.
@@ -782,10 +849,12 @@ class CommunityPage(ScrollArea):
 		self._body = QVBoxLayout()
 		self._body.setContentsMargins(0, 0, 0, 0)
 		layout.addLayout(self._body, stretch=1)
+		self._tab_items: dict[str, _TabItem] = {}
 		for key in _TABS:
-			self._segments.addItem(
-				routeKey=key, text=tab_title(key), onClick=partial(self._show_tab, key)
-			)
+			item = _TabItem(tab_title(key), self._segments)
+			self._tab_items[key] = item
+			self._segments.addWidget(key, item, onClick=partial(self._show_tab, key))
+		self._segments.setItemFontSize(_TAB_FONT_PX)
 		self._segments.currentItemChanged.connect(self._show_tab)
 		self._mount_tab(TAB_SETTINGS)
 		self._segments.setCurrentItem(TAB_OVERVIEW)
@@ -861,16 +930,14 @@ class CommunityPage(ScrollArea):
 		menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
 	def _render_tab_titles(self) -> None:
-		"""Числа рядом с подписями вкладок."""
+		"""Числа-пилюли рядом с подписями вкладок (у активной — акцентом)."""
 		counts = {
 			TAB_QUEUE: self._counts.planned + self._counts.errors,
 			TAB_SCHEDULED: self._scheduled_count,
 			TAB_MEMBERS: self._community.members_count,
 		}
-		for key in _TABS:
-			item = self._segments.widget(key)
-			if item is not None:
-				item.setText(tab_title(key, counts.get(key)))
+		for key, item in self._tab_items.items():
+			item.set_count(counts.get(key), active=key == self._current_tab)
 
 	# --- вкладки ------------------------------------------------------------------
 
@@ -880,6 +947,7 @@ class CommunityPage(ScrollArea):
 			return
 		previous = self._tabs.get(self._current_tab)
 		self._current_tab = key
+		self._render_tab_titles()  # пилюля активной вкладки — акцентом
 		body = self._mount_tab(key)
 		if previous is body:
 			_set_polling(body, True)

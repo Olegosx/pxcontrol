@@ -11,7 +11,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
-from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, QObject, QRectF, QSize, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import (
 	QColor,
 	QDesktopServices,
@@ -19,6 +19,8 @@ from PySide6.QtGui import (
 	QMouseEvent,
 	QPainter,
 	QPainterPath,
+	QPaintEvent,
+	QPen,
 	QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -723,6 +725,10 @@ def file_action_buttons(
 #: в ``common``) тут не подходит.
 _SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
 
+#: Цвет подписи об ошибке и рамки карточки с ошибкой (светлая, тёмная).
+_ERROR_COLORS = (QColor("#c42b1c"), QColor("#ff99a4"))
+_ERROR_BORDER_COLOR = (QColor(196, 43, 28, 102), QColor(255, 153, 164, 102))
+
 #: Цвета «это ошибка» для светлой и тёмной темы: подпись валидации
 #: (``ErrorLabel``) и счётчик символов при превышении предела.
 ERROR_COLORS = ("#c42b1c", "#ff99a4")
@@ -763,6 +769,7 @@ class CollapsibleCard(CardWidget):
 		trailing: QWidget | None = None,
 		leading: QWidget | None = None,
 		keep_summary: bool = False,
+		stacked: bool = False,
 	) -> None:
 		"""``trailing`` — виджет с кнопками в правом краю шапки (например,
 		просмотр и удаление у карточки файла); ``leading`` — виджет перед
@@ -770,8 +777,12 @@ class CollapsibleCard(CardWidget):
 		их виджетам и карточку не сворачивают (Qt не передаёт их шапке).
 		``keep_summary`` — не прятать сводку у развёрнутой карточки: у
 		элемента очереди она говорит состояние («ждёт слота», «ошибка:…»),
-		и оно нужно как раз тогда, когда карточку раскрыли для правки."""
+		и оно нужно как раз тогда, когда карточку раскрыли для правки.
+		``stacked`` — сводка под названием, а не в строку с ним (макет
+		страницы сообщества); в этом режиме доступны :meth:`set_alert`
+		(рамка цветом ошибки) и :meth:`set_progress` (полоса под названием)."""
 		super().__init__(parent)
+		self._alert = False
 		outer = QVBoxLayout(self)
 		outer.setContentsMargins(0, 0, 0, 0)
 		outer.setSpacing(0)
@@ -783,14 +794,13 @@ class CollapsibleCard(CardWidget):
 		header.setCursor(Qt.CursorShape.PointingHandCursor)
 		header.clicked.connect(self.toggle)
 		head_row = QHBoxLayout(header)
-		head_row.setContentsMargins(12, 8, 16, 8)
-		head_row.setSpacing(8)
+		head_row.setContentsMargins(*((14, 10, 14, 10) if stacked else (12, 8, 16, 8)))
+		head_row.setSpacing(12 if stacked else 8)
 		head_row.addWidget(self._chevron)
 		if leading is not None:
 			leading.setParent(header)
 			head_row.addWidget(leading)
 		self._title = StrongBodyLabel(title, header)
-		head_row.addWidget(self._title)
 		self._keep_summary = keep_summary
 		self._expandable = True
 		self._summary_text = ""
@@ -798,8 +808,34 @@ class CollapsibleCard(CardWidget):
 		self._summary.setTextColor(*_SUMMARY_COLORS)
 		# сводка занимает остаток шапки и обрезается, а не распирает форму
 		self._summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		head_row.addWidget(self._summary, stretch=1)
-		head_row.addStretch()
+		self._progress_row: QWidget | None = None
+		self._bar: ProgressBar | None = None
+		self._progress_text: CaptionLabel | None = None
+		if stacked:
+			# колонка: название сверху, сводка (или полоса прогресса) под ним
+			self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+			column = QVBoxLayout()
+			column.setSpacing(2)
+			column.addWidget(self._title)
+			column.addWidget(self._summary)
+			self._progress_row = QWidget(header)
+			progress = QHBoxLayout(self._progress_row)
+			progress.setContentsMargins(0, 2, 0, 0)
+			progress.setSpacing(10)
+			self._bar = ProgressBar(self._progress_row)
+			self._bar.setRange(0, 100)
+			self._bar.setMaximumWidth(220)
+			progress.addWidget(self._bar, stretch=1)
+			self._progress_text = CaptionLabel("", self._progress_row)
+			self._progress_text.setTextColor(*_SUMMARY_COLORS)
+			progress.addWidget(self._progress_text)
+			column.addWidget(self._progress_row)
+			self._progress_row.hide()
+			head_row.addLayout(column, stretch=1)
+		else:
+			head_row.addWidget(self._title)
+			head_row.addWidget(self._summary, stretch=1)
+			head_row.addStretch()
 		if trailing is not None:
 			trailing.setParent(header)
 			head_row.addWidget(trailing)
@@ -849,19 +885,61 @@ class CollapsibleCard(CardWidget):
 		if changed:
 			self.expanded_changed.emit(expanded)
 
-	def set_summary(self, text: str) -> None:
+	def set_summary(self, text: str, *, alert: bool = False) -> None:
 		"""Сводка значений для шапки.
 
 		По умолчанию видна только у свёрнутой карточки: у развёрнутой
 		она дублировала бы поля прямо под шапкой. Исключение —
-		``keep_summary`` (см. конструктор).
+		``keep_summary`` (см. конструктор). ``alert`` — сводка говорит
+		об ошибке: цвет ошибки (обе темы).
 		"""
 		self._summary_text = text
+		if alert:
+			self._summary.setTextColor(*_ERROR_COLORS)
+		else:
+			self._summary.setTextColor(*_SUMMARY_COLORS)
 		self._refresh_summary()
+
+	def set_alert(self, alert: bool) -> None:
+		"""Рамка цветом ошибки поверх штатной (рисуется пером, не стилем)."""
+		if alert != self._alert:
+			self._alert = alert
+			self.update()
+
+	def set_progress(self, fraction: float | None, text: str = "") -> None:
+		"""Полоса под названием (только ``stacked``): доля 0..1 и подпись.
+
+		None — работа не идёт: полоса прячется, сводка возвращается.
+		"""
+		if self._progress_row is None or self._bar is None or self._progress_text is None:
+			return
+		if fraction is None:
+			self._progress_row.hide()
+			self._refresh_summary()
+			return
+		self._bar.setValue(int(fraction * 100))
+		self._progress_text.setText(text)
+		self._progress_row.show()
+		self._summary.hide()
+
+	def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 — API Qt
+		super().paintEvent(event)
+		if not self._alert:
+			return
+		painter = QPainter(self)
+		painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+		painter.setPen(
+			QPen(_ERROR_BORDER_COLOR[1] if isDarkTheme() else _ERROR_BORDER_COLOR[0], 1.0)
+		)
+		painter.setBrush(Qt.BrushStyle.NoBrush)
+		radius = float(self.borderRadius)
+		painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
 
 	def _refresh_summary(self) -> None:
 		self._summary.setText(self._summary_text)
 		visible = bool(self._summary_text) and (self._keep_summary or not self._body.isVisible())
+		if self._progress_row is not None and self._progress_row.isVisible():
+			visible = False
 		self._summary.setVisible(visible)
 
 
@@ -1267,12 +1345,14 @@ class _QueueCard:
 		self._item = item
 		self._bar: ProgressBar | None = None
 		self._filled = False  # тело уже наполнено формой правки
+		self._compact = panel.compact
 		self.widget = CollapsibleCard(
 			item.title,
 			panel.page,
 			trailing=self._actions,
 			leading=self._leading,
 			keep_summary=True,
+			stacked=self._compact,
 		)
 		self.widget.expanded_changed.connect(self._on_expanded)
 		self.update(item)
@@ -1282,7 +1362,15 @@ class _QueueCard:
 		self._item = item
 		self.refresh_leading()
 		self.widget.set_title(item.title)
-		self.widget.set_summary(self._panel.subtitle(item))
+		is_error = item.status is JobStatus.ERROR
+		self.widget.set_summary(self._panel.subtitle(item), alert=self._compact and is_error)
+		self.widget.set_alert(self._compact and is_error)
+		if self._compact:
+			# полоса под названием вместо сводки, пока идёт отправка
+			self.widget.set_progress(
+				item.progress if item.status.active() else None,
+				f"{int(item.progress * 100)}% · отправляется",
+			)
 		editable = self._panel.can_edit(item)
 		self.widget.set_expandable(editable)
 		if not editable:
@@ -1305,6 +1393,8 @@ class _QueueCard:
 		"""Двигает полосу загрузки (без пересборки карточки)."""
 		if self._bar is not None:
 			self._bar.setValue(int(fraction * 100))
+		if self._compact and self._item.status.active():
+			self.widget.set_progress(fraction, f"{int(fraction * 100)}% · отправляется")
 
 	def editing(self) -> bool:
 		"""Открыта ли в карточке форма правки."""
@@ -1352,24 +1442,33 @@ class _QueueCard:
 			play.setToolTip("Посмотреть файл (системный плеер)")
 			play.clicked.connect(bind(panel.play, media_path))
 			self._actions_box.addWidget(play)
-		# полоса прогресса — только у активных (WAITING/PENDING не растут)
-		if item.status.active():
+		# полоса прогресса — только у активных (WAITING/PENDING не растут);
+		# в компактном режиме она под названием (карточка рисует сама)
+		if item.status.active() and not self._compact:
 			bar = ProgressBar(self._actions)
 			bar.setRange(0, 100)
 			bar.setValue(int(item.progress * 100))
 			bar.setFixedWidth(160)
 			self._actions_box.addWidget(bar)
 			self._bar = bar
+		make = self._button
 		if item.status is JobStatus.ERROR:
-			retry = PushButton("Повторить", self._actions)
+			retry = make("Повторить")
 			retry.clicked.connect(bind(panel.retry, item.id))
 			self._actions_box.addWidget(retry)
-			action = PushButton("Убрать", self._actions)
+			action = make("Убрать")
 			action.clicked.connect(bind(panel.dismiss, item.id))
 		else:
-			action = PushButton("Отмена", self._actions)
+			action = make("Отмена")
 			action.clicked.connect(bind(panel.cancel, item.id))
 		self._actions_box.addWidget(action)
+
+	def _button(self, text: str) -> QPushButton:
+		"""Кнопка шапки: библиотечная (33) или обводка 28 в компактном режиме."""
+		if self._compact:
+			return OutlineButton(text, self._actions, height=28)
+		button: QPushButton = PushButton(text, self._actions)
+		return button
 
 
 class QueuePanel:
@@ -1418,6 +1517,7 @@ class QueuePanel:
 		editable: Callable[[Any], bool] | None = None,
 		fill_body: Callable[[int, QVBoxLayout, Callable[[], None]], None] | None = None,
 		leading: Callable[[Any, QWidget], list[QWidget]] | None = None,
+		compact: bool = False,
 	) -> None:
 		"""Args:
 		worker: мост к движку.
@@ -1452,8 +1552,13 @@ class QueuePanel:
 			слота времени) — получает элемент и родителя. Что именно
 			показывать, решает владелец панели: очередь обработки видео
 			крючок не передаёт, и её шапки начинаются с названия.
+		compact: карточки по макету страницы сообщества — подпись под
+			названием, кнопки-обводки 28, полоса прогресса под названием,
+			ошибка красит подпись и рамку.
 		"""
 		self._worker = worker
+		#: компактные карточки (читают карточки при сборке).
+		self.compact = compact
 		#: страница-владелец: родитель карточек и плашек (читают карточки).
 		self.page = page
 		self._box = box

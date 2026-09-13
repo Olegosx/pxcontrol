@@ -659,6 +659,9 @@ class OverviewTab(QWidget):
 				cell_layout.setContentsMargins(0, 0, 0, 0)
 				cell_layout.setSpacing(0)
 				line = QHBoxLayout()
+				# без внутренних полей: со штатными (по 11 пикселей) от 30
+				# оставалось 8, и хвосты букв резались
+				line.setContentsMargins(0, 0, 0, 0)
 				line.setSpacing(8)
 				label = _label(cell, label_text, 12, MUTED_COLOR)
 				label.setFixedWidth(104)
