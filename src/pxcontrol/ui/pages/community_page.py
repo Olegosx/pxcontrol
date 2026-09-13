@@ -38,11 +38,11 @@ from qfluentwidgets import (
 	FluentIcon,
 	LineEdit,
 	MessageBoxBase,
+	Pivot,
 	PrimaryPushButton,
 	PushButton,
 	RoundMenu,
 	ScrollArea,
-	SegmentedWidget,
 	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
@@ -771,7 +771,9 @@ class CommunityPage(ScrollArea):
 		layout = page_layout(self)
 		self._header_box = QVBoxLayout()
 		layout.addLayout(self._header_box)
-		self._segments = SegmentedWidget(self)
+		# Pivot, а не SegmentedWidget: по макету вкладки — подписи с полосой
+		# под активной, без рамки-подложки (SegmentedWidget рисует её)
+		self._segments = Pivot(self)
 		layout.addWidget(self._segments)
 		# тело вкладки — единственный виджет в этой компоновке: скрытые
 		# вкладки в ней не живут, и высота страницы считается по видимой.
@@ -808,11 +810,18 @@ class CommunityPage(ScrollArea):
 		title_row = QHBoxLayout()
 		title_row.setSpacing(10)
 		title = TitleLabel(box)
+		# «занимай, что дадут», но не больше ширины своего текста: тогда
+		# плашка встаёт сразу за названием, а длинное название сокращается
+		# многоточием, а не выталкивает плашку к кнопкам
 		title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		title.setMaximumWidth(title.fontMetrics().horizontalAdvance(community.title) + 8)
 		elide_text(title, community.title)
+		# коэффициент растяжения обязателен: без него «занимай, что дадут»
+		# получает ноль — всё свободное место уходит растяжке в конце
 		title_row.addWidget(title, stretch=1)
 		state, text = header_state_text(community, self._counts)
 		title_row.addWidget(state_badge(box, state, text, height=21))
+		title_row.addStretch()
 		column.addLayout(title_row)
 		participants = self._stats.participants if self._stats is not None else None
 		subtitle = CaptionLabel(box)
