@@ -61,6 +61,7 @@ from qfluentwidgets import (
 	SubtitleLabel,
 	TableWidget,
 	VerticalSeparator,
+	setCustomStyleSheet,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -491,6 +492,14 @@ _TABLE_COLUMNS: tuple[tuple[str, TableColumn], ...] = (
 	("Состояние", TableColumn.STATE),
 )
 
+#: Добавка к стилю таблицы (официальный ``setCustomStyleSheet``): радиус
+#: рамки 6 и заголовок без вертикальных разделителей — как в макете.
+_TABLE_QSS = (
+	"QTableView{border-radius: 6px}"
+	"QHeaderView::section:horizontal{border: none;"
+	" border-bottom: 1px solid rgba(255, 255, 255, 21)}"
+)
+
 #: Ширины колонок по порядку (None — колонка названия тянется).
 _TABLE_WIDTHS: tuple[int | None, ...] = (
 	None,
@@ -577,7 +586,12 @@ class _Table(TableWidget):
 		self.setHorizontalHeaderLabels(titles)
 		self.setRowCount(len(self._rows))
 		self.setBorderVisible(True)
-		self.setBorderRadius(6)
+		# радиус и заголовок без вертикальных рамок — официальной добавкой
+		# к стилю библиотеки (документация, «Customize style»:
+		# setCustomStyleSheet). Радиус здесь же: setBorderRadius библиотеки
+		# сам кладёт правило через setCustomStyleSheet, и второй вызов
+		# заменил бы первый
+		setCustomStyleSheet(self, _TABLE_QSS, _TABLE_QSS)
 		self.setShowGrid(False)  # макет: только горизонтальные линии строк
 		self.setAlternatingRowColors(False)
 		self.setWordWrap(False)
