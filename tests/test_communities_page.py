@@ -21,6 +21,7 @@ from pxcontrol.ui.pages.communities import (
 	VIEW_TILES,
 	Row,
 	TableColumn,
+	bold_numbers,
 	grid_columns,
 	matches_search,
 	metrics_text,
@@ -211,6 +212,15 @@ def test_subtitle_text_variants() -> None:
 
 
 # --- сетка, поиск, вид ------------------------------------------------------------
+
+
+def test_bold_numbers_marks_numbers_and_escapes_text() -> None:
+	# число с узким неразрывным пробелом (format_count) — одно число
+	assert bold_numbers(f"{format_count(18420)} подписчиков") == "<b>18\u202f420</b> подписчиков"
+	assert bold_numbers("5 к отправке · 2 ждут") == "<b>5</b> к отправке · <b>2</b> ждут"
+	# текст экранируется до разметки: скобки из данных не становятся тегами
+	assert bold_numbers("<3 к отправке>") == "&lt;<b>3</b> к отправке&gt;"
+	assert bold_numbers("очередь пуста") == "очередь пуста"
 
 
 def test_grid_columns_by_width() -> None:

@@ -8,7 +8,7 @@
 > запросов и единый планировщик опроса), [ADR-0024](0024-telegram-account-lane.md)
 > (дорожка аккаунта) и [ADR-0026](0026-community-maintenance.md)
 > (обслуживание). Данные — для вкладки «Обзор» страницы сообщества
-> (макет `_misc/mockups/design_handoff_community_page`).
+> (спека `_misc/mockups/design_handoff/screens/community-page.md`).
 
 ## Контекст
 
