@@ -15,6 +15,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -92,7 +93,6 @@ from pxcontrol.ui.pages.common import (
 from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
-	QueueViewDialog,
 	queue_leading,
 	queue_subtitle,
 )
@@ -136,6 +136,9 @@ def _actor_note(community: CommunityDto) -> str:
 
 class PublishPage(ScrollArea):
 	"""Создание публикации: тип контента, канал, текст, время, отправка."""
+
+	#: «Вся очередь…» — страница «Расписание», вкладка «Очередь».
+	queue_requested = Signal()
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
@@ -289,8 +292,8 @@ class PublishPage(ScrollArea):
 		)
 
 	def _on_queue_view(self) -> None:
-		"""Открывает полный просмотр очереди (сортировка и фильтры)."""
-		exec_dialog(QueueViewDialog(self._worker, self.window()))
+		"""Полный просмотр очереди — «Расписание», вкладка «Очередь»."""
+		self.queue_requested.emit()
 
 	def _fill_editor(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
 		"""Наполняет раскрытую карточку очереди формой правки (ADR-0016)."""

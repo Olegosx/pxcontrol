@@ -97,7 +97,7 @@ class CardAction(StrEnum):
 
 	PUBLISH = "publish"  # «Публикация» с этим сообществом
 	SCHEDULE = "schedule"  # «Расписание» с фильтром по сообществу
-	QUEUE = "queue"  # окно «Вся очередь…» с фильтром по сообществу
+	QUEUE = "queue"  # «Расписание» → «Очередь» с фильтром по сообществу
 	ASSIGN_PUBLISHER = "assign_publisher"  # диалог «Участники…»
 	ENABLE = "enable"  # включить сообщество
 	MAINTENANCE = "maintenance"  # окно обслуживания (ADR-0026)

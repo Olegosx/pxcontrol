@@ -1,261 +1,282 @@
-"""Страница «Расписание»: отложенные записи каналов из Telegram.
+"""Страница «Расписание»: всё, что будет опубликовано, и когда.
 
-Источник истины — сам канал (ADR-0010): список отложенных читается
-из Telegram, править и удалять их можно из любого клиента Telegram.
-Создание постов — на странице «Публикация». Фильтр по каналам —
-презентационный: скрывает карточки, не меняя загруженный список.
+Две вкладки — два списка одного вида (ADR-0016, ADR-0010):
+
+- **Отложено** — записи, которые уже принял сервер Telegram: он
+  опубликует их сам, даже при выключенном компьютере. Список читается
+  с сервера (обход всех включённых сообществ), правится, публикуется
+  «сейчас» и удаляется прямо здесь (:mod:`scheduled_panel`).
+- **Очередь** — посты, которые ждут отправки **в приложении**: слота
+  отложек или своей очереди. Выключите приложение — они не уйдут.
+  Полный живой список с фильтрами (:class:`QueueViewTab`); ближайшие
+  карточки видны и на «Публикации».
+
+Сюда ведут кнопки «Расписание» и «Очередь» с дашборда сообществ,
+«Вся очередь…» с «Публикации» и страницы сообщества. Обход отложенных
+дорогой, поэтому список перечитывается при показе не чаще раза
+в минуту и никогда — поверх идущего обхода.
 """
 
 from __future__ import annotations
 
-from functools import partial
-from time import monotonic
-
-from PySide6.QtGui import QShowEvent
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import (
-	BodyLabel,
-	CaptionLabel,
-	CardWidget,
-	CheckBox,
-	FluentIcon,
-	PushButton,
-	ScrollArea,
-	StrongBodyLabel,
-	SubtitleLabel,
-	themeColor,
-)
+from qfluentwidgets import CaptionLabel, FluentIcon, PushButton, ScrollArea, SubtitleLabel
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.posts import ScheduledList, ScheduledPostDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.common import clear_layout, error_reporter, format_local, page_layout
+from pxcontrol.ui.pages.common import TabItem, error_reporter, noop, page_layout, tab_strip
+from pxcontrol.ui.pages.list_view import (
+	ListPage,
+	PagerRow,
+	ViewBar,
+	paginate,
+	step_page,
+	summary_text,
+)
+from pxcontrol.ui.pages.publish_queue_view import QueueFilter, QueueViewTab, post_leading
+from pxcontrol.ui.pages.scheduled_panel import (
+	SCHEDULED_WORDS,
+	ScheduledPanel,
+	ScheduledSort,
+	apply_scheduled_view,
+)
 
-#: Сколько список считается свежим: повторный показ вкладки в этот срок
-#: не запускает новый обход Telegram. Минута — переключился и вернулся,
-#: а отложенные за это время меняются редко (их создаёт сам человек).
-_FRESH_FOR_S = 60.0
+#: Ключи вкладок (маршруты сегментов) в порядке показа.
+TAB_SCHEDULED = "scheduled"
+TAB_QUEUE = "queue"
+_TABS = (TAB_SCHEDULED, TAB_QUEUE)
+
+#: Подсказка под заголовком: в чём разница двух списков — она неочевидна
+#: и важна (один список переживает выключенный компьютер, другой — нет).
+_HINT = (
+	"«Отложено» — записи уже у сервера Telegram: он опубликует их сам, даже "
+	"при выключенном компьютере. «Очередь» — посты ждут отправки в приложении "
+	"(слота отложек или своей очереди): выключите приложение — они не уйдут."
+)
+
+
+def tab_title(key: str) -> str:
+	"""Подпись вкладки страницы «Расписание»."""
+	return {TAB_SCHEDULED: "Отложено", TAB_QUEUE: "Очередь"}[key]
+
+
+def unread_text(unread: tuple[str, ...]) -> str:
+	"""Предупреждение над списком: какие сообщества прочитать не удалось.
+
+	Пустая строка — прочитано всё. Честность важнее краткости: без этой
+	строки пустой список читался бы как «отложенных нет», хотя часть
+	сообществ просто не спросили (ADR-0010).
+	"""
+	if not unread:
+		return ""
+	names = ", ".join(f"«{title}»" for title in unread)
+	return f"Не удалось прочитать отложенные: {names}."
+
+
+class ScheduledViewTab(QWidget):
+	"""Вкладка «Отложено»: все отложенные записи с фильтрами и страницами."""
+
+	#: Сколько отложенных записей всего (до фильтра) — число на вкладке.
+	count_changed = Signal(int)
+
+	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
+		super().__init__(parent)
+		self._worker = worker
+		self._avatars: dict[int, str | None] = {}
+		self._page = 1
+		self._view: ListPage[ScheduledPostDto] = paginate([], 1)
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(density.spacing().row_spacing)
+		self._bar = ViewBar(self, ScheduledSort)
+		self._bar.changed.connect(self._on_view_changed)
+		refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
+		refresh.setToolTip("Перечитать отложенные из Telegram (обход всех сообществ)")
+		refresh.clicked.connect(self.reload)
+		# кнопка — в строке показа, перед растяжкой
+		self._bar.layout.insertWidget(self._bar.layout.count() - 1, refresh)
+		layout.addLayout(self._bar.layout)
+		self._status = CaptionLabel("", self)
+		self._status.setWordWrap(True)
+		layout.addWidget(self._status)
+		box = QVBoxLayout()
+		box.setSpacing(density.spacing().list_spacing)
+		layout.addLayout(box)
+		self._pager = PagerRow(self, self._step)
+		layout.addLayout(self._pager.layout)
+		self._panel = ScheduledPanel(
+			worker,
+			self,
+			box,
+			transform=self._apply_view,
+			on_loading=lambda: self._status.setText("Читаю отложенные из Telegram…"),
+			on_loaded=self._on_loaded,
+			on_refreshed=self._update_summary,
+			leading=lambda item, parent: post_leading(
+				item.community_id,
+				item.community_title,
+				item.scheduled_at,
+				parent,
+				self._avatars.get(item.community_id),
+			),
+		)
+		run_in_engine(
+			worker, worker.engine.community_stats.snapshot(), self, self._apply_avatars, noop
+		)
+
+	def activate(self) -> None:
+		"""Вкладка показана: перечитать, если список не свежий."""
+		if not self._panel.fresh():
+			self.reload()
+
+	def reload(self) -> None:
+		"""Перечитывает отложенные из Telegram (обход не дублируется)."""
+		self._panel.reload()
+
+	def show_community(self, community_id: int | None) -> None:
+		"""Ставит фильтр по сообществу (переход с дашборда)."""
+		self._bar.want_community(community_id)
+		self._page = 1
+		self._panel.refresh_view()
+
+	def count(self) -> int:
+		"""Сколько отложенных записей всего (до фильтра)."""
+		return len(self._panel.items)
+
+	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
+		self._avatars = {item.community_id: item.avatar_path for item in stats}
+		self._panel.refresh_leading()
+
+	def _on_loaded(self, scheduled: ScheduledList) -> None:
+		self._status.setText(unread_text(scheduled.unread))
+		self.count_changed.emit(len(scheduled.items))
+
+	def _apply_view(self, items: list[ScheduledPostDto]) -> list[ScheduledPostDto]:
+		"""Крючок панели: правило показа и нарезка на страницы."""
+		self._bar.refresh(items)
+		shown = apply_scheduled_view(
+			items,
+			ScheduledSort(self._bar.sort_option()),
+			self._bar.community_id(),
+			self._bar.slot_value(),
+		)
+		self._view = paginate(shown, self._page)
+		self._page = self._view.page
+		return self._view.items
+
+	def _step(self, delta: int) -> None:
+		self._page = step_page(self._page, delta, self._view.pages)
+		self._panel.refresh_view()
+
+	def _on_view_changed(self) -> None:
+		self._page = 1
+		self._panel.refresh_view()
+
+	def _update_summary(self, _shown: list[ScheduledPostDto]) -> None:
+		self._pager.update(
+			self._view, summary_text(self._view, len(self._panel.items), SCHEDULED_WORDS)
+		)
 
 
 class SchedulePage(ScrollArea):
-	"""Отложенные записи каналов (читаются из Telegram)."""
+	"""Страница «Расписание»: вкладки «Отложено» и «Очередь»."""
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
 		self.setObjectName("schedule")
 		self._worker = worker
 		self._show_error = error_reporter(self)
-		self._items: list[ScheduledPostDto] = []
-		# сообщества, чьи отложенные прочитать не удалось: пустой список
-		# при непустом наборе означает «не спросили», а не «записей нет»
-		self._unread: tuple[str, ...] = ()
-		# снятые галки фильтра (id каналов): выбор переживает «Обновить».
-		# Оговорка: канал, пропавший из списка и вернувшийся позже,
-		# останется скрытым, пока галку не поставят заново, — набор
-		# по текущему списку не чистится намеренно (временное отсутствие
-		# отложенных не должно сбрасывать выбор пользователя)
-		self._unchecked: set[int] = set()
-		# идёт ли обход прямо сейчас и когда он закончился в прошлый раз:
-		# показ вкладки не должен запускать второй обход поверх первого
-		self._loading = False
-		self._loaded_at: float | None = None
-		# сообщество, которое просили показать одно (кнопка «Расписание»
-		# на дашборде): применяется к текущему списку или к следующему,
-		# если обход как раз идёт
-		self._only: int | None = None
+		self._current_tab = TAB_SCHEDULED
+		self._shown = False  # видна ли страница (опрос очереди — только при показе)
 		self._build()
-		# первичной загрузки здесь нет: её делает showEvent при первом
-		# показе — Telegram не опрашивается, пока страницу не открыли
-
-	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — имя Qt
-		"""Перечитывает список при показе страницы, но не чаще нужного.
-
-		Истина — сам канал (ADR-0010): отложенные создаются на соседней
-		«Публикации» и правятся из любого клиента Telegram, поэтому
-		страница обновляется при открытии, как «Видео» и «Публикация».
-
-		Но обход дорогой: он опрашивает **каждое** включённое сообщество,
-		а группу — каждым её участником (ADR-0022). Безусловная
-		перезагрузка означала, что праздное листание вкладок ставит
-		обходы один поверх другого; флуд-лимит, пойманный на таком
-		обходе, замораживает дорожку аккаунта целиком — и ждать его
-		будет уже публикация (ADR-0024). Поэтому свежий список
-		не перечитывается, а идущий обход не дублируется; кнопка
-		«Обновить» перечитывает всегда — это явная воля человека.
-		"""
-		super().showEvent(event)
-		if self._loading:
-			return
-		fresh = self._loaded_at is not None and monotonic() - self._loaded_at < _FRESH_FOR_S
-		if not fresh:
-			self._reload()
-
-	def show_only(self, community_id: int) -> None:
-		"""Оставляет в фильтре только одно сообщество (переход с дашборда).
-
-		Список сам не перечитывается: если он свежий, фильтр применяется
-		сразу; если обход идёт, — к его результату. Галки остальных
-		сообществ снимаются — человек вернёт их сам.
-		"""
-		self._only = community_id
-		if not self._loading:
-			self._apply_only()
-
-	def _apply_only(self) -> None:
-		"""Снимает галки всех сообществ, кроме запрошенного (если оно есть)."""
-		if self._only is None:
-			return
-		known = {item.community_id for item in self._items}
-		if self._only in known:
-			self._unchecked = known - {self._only}
-			self._rebuild_filter()
-			self._render()
-		self._only = None
 
 	def _build(self) -> None:
-		"""Шапка с кнопками, фильтр по каналам и область списка."""
 		layout = page_layout(self)
 		header = QHBoxLayout()
-		header.addWidget(SubtitleLabel("Отложенные записи", self))
+		header.addWidget(SubtitleLabel("Расписание", self))
 		header.addStretch()
-		refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
-		refresh.clicked.connect(self._reload)
-		header.addWidget(refresh)
 		layout.addLayout(header)
-		hint = CaptionLabel(
-			"Список читается из Telegram. Создание постов — на странице "
-			"«Публикация»; править и удалять отложенные можно из любого "
-			"клиента Telegram.",
-			self,
-		)
+		hint = CaptionLabel(_HINT, self)
+		hint.setWordWrap(True)
 		layout.addWidget(hint)
-		self._filter_box = QHBoxLayout()
-		self._filter_box.setSpacing(density.spacing().row_spacing)
-		layout.addLayout(self._filter_box)
-		self._list = QVBoxLayout()
-		self._list.setSpacing(density.spacing().list_spacing)
-		layout.addLayout(self._list)
+		self._segments = tab_strip(self, layout)
+		self._tab_items: dict[str, TabItem] = {}
+		for key in _TABS:
+			item = TabItem(tab_title(key), self._segments)
+			self._tab_items[key] = item
+			self._segments.addWidget(key, item)
+		self._segments.currentItemChanged.connect(self._show_tab)
+		# тела вкладок — оба сразу: очередь опрашивается только при показе,
+		# отложенные читаются только при первом показе своей вкладки
+		self._scheduled = ScheduledViewTab(self._worker, self)
+		self._queue = QueueViewTab(self._worker, self)
+		self._queue.count_changed.connect(lambda _count: self._render_tab_titles())
+		self._scheduled.count_changed.connect(lambda _count: self._render_tab_titles())
+		self._queue.hide()
+		self._body = QVBoxLayout()
+		self._body.setContentsMargins(0, 0, 0, 0)
+		self._body.addWidget(self._scheduled)
+		self._body.addWidget(self._queue)
+		layout.addLayout(self._body, stretch=1)
 		layout.addStretch()
+		self._segments.setCurrentItem(TAB_SCHEDULED)
 
-	# --- список отложенных (из Telegram) ---------------------------------------
+	# --- переходы с других страниц ----------------------------------------------
 
-	def _reload(self) -> None:
-		"""Запускает обход Telegram (кнопка «Обновить» и первый показ)."""
-		self._loading = True
-		run_in_engine(
-			self._worker,
-			self._worker.engine.posts.list_scheduled(),
-			self,
-			self._show_scheduled,
-			self._on_failed,
-		)
+	def show_scheduled(self, community_id: int | None = None) -> None:
+		"""Вкладка «Отложено» с фильтром по сообществу (None — все)."""
+		self._segments.setCurrentItem(TAB_SCHEDULED)
+		self._show_tab(TAB_SCHEDULED)
+		self._scheduled.show_community(community_id)
 
-	def _on_failed(self, message: str) -> None:
-		"""Обход не удался: показываем причину и снимаем признак «идёт»."""
-		self._loading = False
-		self._show_error(message)
+	def show_queue(
+		self, community_id: int | None = None, status: QueueFilter | None = None
+	) -> None:
+		"""Вкладка «Очередь» с фильтром по сообществу и/или статусу."""
+		self._segments.setCurrentItem(TAB_QUEUE)
+		self._show_tab(TAB_QUEUE)
+		self._queue.show_filter(community_id, status)
 
-	def _show_scheduled(self, scheduled: ScheduledList) -> None:
-		"""Принимает свежий список: перестраивает фильтр и карточки."""
-		self._loading = False
-		self._loaded_at = monotonic()
-		self._items = scheduled.items
-		self._unread = scheduled.unread
-		self._rebuild_filter()
-		self._render()
-		self._apply_only()
+	# --- вкладки ------------------------------------------------------------------
 
-	# --- фильтр по каналам -------------------------------------------------------
-
-	def _rebuild_filter(self) -> None:
-		"""Строка чекбоксов: по одному на канал с отложенными записями.
-
-		Состояние галок хранится по id канала и переживает обновление
-		списка; канал, исчезнувший из списка, пропадает и из фильтра.
-		"""
-		clear_layout(self._filter_box)
-		communities: dict[int, str] = {}
-		for item in self._items:
-			communities.setdefault(item.community_id, item.community_title)
-		if not communities:
+	def _show_tab(self, key: str) -> None:
+		if key not in _TABS:
 			return
-		self._filter_box.addWidget(CaptionLabel("Показывать:", self))
-		for community_id, title in communities.items():
-			box = CheckBox(title, self)
-			box.setChecked(community_id not in self._unchecked)
-			box.toggled.connect(partial(self._on_filter_toggled, community_id))
-			self._filter_box.addWidget(box)
-		self._filter_box.addStretch()
+		self._current_tab = key
+		self._render_tab_titles()
+		self._scheduled.setVisible(key == TAB_SCHEDULED)
+		self._queue.setVisible(key == TAB_QUEUE)
+		self._sync_activity()
 
-	def _on_filter_toggled(self, community_id: int, checked: bool) -> None:
-		"""Галка канала: показывает/скрывает его карточки (без перезагрузки)."""
-		if checked:
-			self._unchecked.discard(community_id)
-		else:
-			self._unchecked.add(community_id)
-		self._render()
+	def _sync_activity(self) -> None:
+		"""Опрос очереди и чтение отложенных — только у видимой вкладки."""
+		queue_visible = self._shown and self._current_tab == TAB_QUEUE
+		self._queue.set_polling(queue_visible)
+		if self._shown and self._current_tab == TAB_SCHEDULED:
+			self._scheduled.activate()
 
-	# --- карточки ----------------------------------------------------------------
+	def _render_tab_titles(self) -> None:
+		"""Числа рядом с подписями вкладок (у активной — акцентом)."""
+		counts = {TAB_SCHEDULED: self._scheduled.count(), TAB_QUEUE: self._queue_total()}
+		for key, item in self._tab_items.items():
+			item.set_count(counts.get(key), active=key == self._current_tab)
 
-	def _render(self) -> None:
-		"""Перерисовывает карточки с учётом фильтра."""
-		clear_layout(self._list)
-		if self._unread:
-			# честность важнее краткости: часть сообществ опросить
-			# не удалось, и список заведомо неполон (ADR-0010 —
-			# истина живёт на сервере Telegram)
-			names = ", ".join(f"«{title}»" for title in self._unread)
-			warning = CaptionLabel(f"Не удалось прочитать отложенные: {names}.", self)
-			warning.setWordWrap(True)
-			self._list.addWidget(warning)
-		if not self._items:
-			self._list.addWidget(
-				CaptionLabel(
-					"Отложенных записей нет. Создайте пост на странице «Публикация»."
-					if not self._unread
-					else "У остальных сообществ отложенных записей нет.",
-					self,
-				)
-			)
-			return
-		visible = [item for item in self._items if item.community_id not in self._unchecked]
-		if not visible:
-			self._list.addWidget(
-				CaptionLabel(
-					"Всё скрыто фильтром — включите хотя бы одно сообщество.",
-					self,
-				)
-			)
-			return
-		for item in visible:
-			self._list.addWidget(self._item_row(item))
+	def _queue_total(self) -> int:
+		return self._queue.total()
 
-	def _item_row(self, item: ScheduledPostDto) -> CardWidget:
-		"""Карточка записи (общая с вкладкой «Отложено» страницы сообщества)."""
-		return scheduled_card(self, item)
+	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — имя Qt
+		"""Страница показана: включить видимую вкладку."""
+		super().showEvent(event)
+		self._shown = True
+		self._sync_activity()
 
-
-def scheduled_card(
-	parent: QWidget, item: ScheduledPostDto, *, with_community: bool = True
-) -> CardWidget:
-	"""Карточка отложенной записи: момент публикации — первой строкой, акцентом.
-
-	Время показывается местное (хранится UTC, как отдаёт Telegram).
-	Цвет — акцентный цвет темы (``setTextColor`` перекрашивает и при
-	смене темы, в отличие от жёсткого стиля). ``with_community=False`` —
-	без названия сообщества (на его странице оно в шапке).
-	"""
-	card = CardWidget(parent)
-	box = QVBoxLayout(card)
-	box.setContentsMargins(*density.spacing().card_margins)
-	box.setSpacing(2)
-	when = StrongBodyLabel(format_local(item.scheduled_at), card)
-	when.setTextColor(themeColor(), themeColor())
-	box.addWidget(when)
-	text = BodyLabel(item.text_preview, card)
-	text.setWordWrap(True)
-	box.addWidget(text)
-	if with_community:
-		box.addWidget(CaptionLabel(item.community_title, card))
-	return card
+	def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 — имя Qt
+		"""Страница скрыта: очередь не опрашивается."""
+		super().hideEvent(event)
+		self._shown = False
+		self._sync_activity()

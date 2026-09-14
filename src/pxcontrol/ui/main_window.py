@@ -16,6 +16,7 @@ from pxcontrol.ui.pages.common import exec_dialog
 from pxcontrol.ui.pages.communities import CommunitiesPage
 from pxcontrol.ui.pages.community_page import CommunityPage
 from pxcontrol.ui.pages.publish import PublishPage
+from pxcontrol.ui.pages.publish_queue_view import QueueFilter
 from pxcontrol.ui.pages.schedule import SchedulePage
 from pxcontrol.ui.pages.settings import SettingsPage
 from pxcontrol.ui.pages.video import VideoPage
@@ -69,6 +70,8 @@ class MainWindow(FluentWindow):
 		self._communities_page.open_community.connect(self._open_community)
 		self._communities_page.publish_requested.connect(self._open_publish_for)
 		self._communities_page.schedule_requested.connect(self._open_schedule_for)
+		self._communities_page.queue_requested.connect(self._open_queue_for)
+		self._communities_page.queue_errors_requested.connect(self._open_queue_errors)
 		self._video_page = VideoPage(self._worker, self)
 		self.addSubInterface(self._video_page, FluentIcon.VIDEO, "Видео")
 		self._publish_page = PublishPage(self._worker, self)
@@ -78,6 +81,7 @@ class MainWindow(FluentWindow):
 		self._video_page.publish_folder_requested.connect(self._open_publish_batch_folder)
 		self._schedule_page = SchedulePage(self._worker, self)
 		self.addSubInterface(self._schedule_page, FluentIcon.CALENDAR, "Расписание")
+		self._publish_page.queue_requested.connect(lambda: self._open_queue_for(None))
 		# категории настроек (Общие, Аккаунты) — внутри самой страницы
 		self.addSubInterface(
 			SettingsPage(self._worker, self),
@@ -110,6 +114,7 @@ class MainWindow(FluentWindow):
 				page = CommunityPage(self._worker, community, self)
 				page.changed.connect(self._communities_page.reload)
 				page.publish_requested.connect(self._open_publish_for)
+				page.queue_requested.connect(self._open_queue_for)
 				self._community_pages[community.id] = page
 				icon = (
 					FluentIcon.CHAT
@@ -135,9 +140,22 @@ class MainWindow(FluentWindow):
 		self._publish_page.select_community(community_id)
 
 	def _open_schedule_for(self, community_id: int) -> None:
-		"""«Расписание» на карточке дашборда — страница с фильтром по сообществу."""
+		"""«Расписание» на карточке дашборда — «Отложено» с фильтром по сообществу."""
 		self.switchTo(self._schedule_page)
-		self._schedule_page.show_only(community_id)
+		self._schedule_page.show_scheduled(community_id)
+
+	def _open_queue_for(self, community_id: int | None) -> None:
+		"""«Очередь» / «Вся очередь…» — «Расписание», вкладка «Очередь».
+
+		``community_id`` — фильтр по сообществу (None — вся очередь).
+		"""
+		self.switchTo(self._schedule_page)
+		self._schedule_page.show_queue(community_id)
+
+	def _open_queue_errors(self) -> None:
+		"""Плашка ошибок дашборда — вкладка «Очередь» с фильтром «ошибки»."""
+		self.switchTo(self._schedule_page)
+		self._schedule_page.show_queue(None, QueueFilter.ERRORS)
 
 	def _open_publish_with_video(self, path: str, community_id: int) -> None:
 		"""Переходит на «Публикацию» с видеофайлом и каналом со страницы «Видео»."""

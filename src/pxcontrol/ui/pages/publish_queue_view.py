@@ -1,13 +1,15 @@
 """Полный просмотр очереди отправки: сортировка и фильтры (ADR-0016).
 
 Страница «Публикация» показывает только ближайшие карточки очереди;
-кнопка «Вся очередь…» открывает этот диалог со всеми элементами.
-Список живой (опрашивается тем же способом, что панель страницы, —
-через :class:`QueuePanel`), действия у карточек те же: «Отмена»
-у живых, «Повторить»/«Убрать» у ошибок. Правило показа — чистая
-:func:`apply_view` поверх общих правил списков (:mod:`list_view`:
-сортировка, фильтры по сообществу и слоту, страницы); от общего
-у очереди — фильтр по статусу и порядок постановки.
+всё целиком — вкладка «Очередь» страницы «Расписание»
+(:class:`QueueViewTab`), куда ведут кнопки «Вся очередь…» с «Публикации»
+и страницы сообщества и действия дашборда. Список живой (опрашивается
+тем же способом, что панель страницы, — через :class:`QueuePanel`),
+действия у карточек те же: «Отмена» у живых, «Повторить»/«Убрать»
+у ошибок. Правило показа — чистая :func:`apply_view` поверх общих
+правил списков (:mod:`list_view`: сортировка, фильтры по сообществу
+и слоту, страницы); от общего у очереди — фильтр по статусу и порядок
+постановки.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from enum import StrEnum
 
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import StrongBodyLabel
 
@@ -28,10 +32,9 @@ from pxcontrol.engine.services.publish_queue import (
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	WorkDialog,
 	community_logo,
+	font_px,
 	format_local,
-	list_area,
 	noop,
 	slot_color,
 	slot_label,
@@ -107,17 +110,20 @@ def queue_subtitle(item: QueueItemDto, *, with_community: bool = True) -> str:
 LOGO_SIZE = 24
 
 
-def slot_chip(when: object, parent: QWidget) -> StrongBodyLabel:
+def slot_chip(when: object, parent: QWidget, *, compact: bool = False) -> StrongBodyLabel:
 	"""Метка слота времени в шапке карточки: «[ЧЧ:ММ]» цветом слота.
 
 	Цвет выводится из самого времени, поэтому посты одного слота
 	узнаются пачкой — в очереди из сотен постов «когда» и «куда» —
-	два первых вопроса.
+	два первых вопроса. ``compact`` — кегль 13 / 600 по макету
+	страницы сообщества.
 	"""
 	from datetime import datetime
 
 	label = slot_label(when if isinstance(when, datetime) else None)
 	chip = StrongBodyLabel(f"[{label}]", parent)
+	if compact:
+		chip.setFont(font_px(13, QFont.Weight.DemiBold))
 	chip.setTextColor(*slot_color(label))
 	chip.setToolTip("Время публикации (слот)")
 	return chip
@@ -175,23 +181,22 @@ def apply_view(
 	return sorted(items, key=lambda item: item.id)
 
 
-class QueueViewDialog(WorkDialog):
-	"""Вся очередь отправки: живой список с сортировкой и фильтрами."""
+class QueueViewTab(QWidget):
+	"""Вся очередь отправки: живой список с сортировкой и фильтрами.
 
-	def __init__(
-		self,
-		worker: EngineWorker,
-		parent: QWidget,
-		*,
-		status: QueueFilter = QueueFilter.ALL,
-		community_id: int | None = None,
-	) -> None:
-		"""``status`` и ``community_id`` — начальное правило показа: окно
-		открывают не только с «Публикации», но и с дашборда сообществ —
-		плашкой ошибок (фильтр «ошибки») и кнопкой «Очередь» карточки
-		(фильтр по сообществу). Сообщество, которого в очереди нет,
-		фильтром не становится — показывается вся очередь."""
-		super().__init__("Очередь отправки", parent, size=(880, 620))
+	Тело вкладки «Очередь» страницы «Расписание». Опрос очереди —
+	только пока вкладка видна (:meth:`set_polling`); правило показа
+	ставится извне (:meth:`show_filter`) — с дашборда сообществ плашкой
+	ошибок (фильтр «ошибки») и кнопкой «Очередь» карточки (фильтр
+	по сообществу). Сообщество, которого в очереди нет, фильтром
+	не становится — показывается вся очередь.
+	"""
+
+	#: Сколько элементов в очереди всего (до фильтра) — число на вкладке.
+	count_changed = Signal(int)
+
+	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
+		super().__init__(parent)
 		self._worker = worker
 		# аватары сообществ из кэша статистики: карточки рисуют их
 		# в шапке, читать их на каждый опрос незачем
@@ -199,17 +204,18 @@ class QueueViewDialog(WorkDialog):
 		self._total = 0
 		self._page = 1
 		self._view: ListPage[QueueItemDto] = paginate([], 1)
-		self._bar = ViewBar(self, QueueSort, wanted_community=community_id)
-		self._status_combo = self._bar.add_choice(list(QueueFilter), status)
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(density.spacing().row_spacing)
+		self._bar = ViewBar(self, QueueSort)
+		self._status_combo = self._bar.add_choice(list(QueueFilter), QueueFilter.ALL)
 		self._bar.changed.connect(self._on_view_changed)
-		self.content.addLayout(self._bar.layout)
-		area, box = list_area(self, spacing=density.spacing().list_spacing)
-		self.content.addWidget(area, stretch=1)
-		# кнопки «Закрыть» нет намеренно: окно закрывается системным
-		# крестиком и Esc, а отдельная строка под неё съедала высоту
-		# списка — в окне очереди она дороже привычки
+		layout.addLayout(self._bar.layout)
+		box = QVBoxLayout()
+		box.setSpacing(density.spacing().list_spacing)
+		layout.addLayout(box)
 		self._pager = PagerRow(self, self._step)
-		self.content.addLayout(self._pager.layout)
+		layout.addLayout(self._pager.layout)
 		self._panel = QueuePanel(
 			worker,
 			self,
@@ -227,6 +233,7 @@ class QueueViewDialog(WorkDialog):
 				item, parent, self._avatars.get(item.community_id)
 			),
 		)
+		self._panel.set_polling(False)  # включит страница, когда вкладка видна
 		run_in_engine(
 			worker,
 			worker.engine.community_stats.snapshot(),
@@ -235,6 +242,25 @@ class QueueViewDialog(WorkDialog):
 			# аватар — украшение шапки: без него карточка рисует букву
 			noop,
 		)
+
+	def set_polling(self, active: bool) -> None:
+		"""Опрос очереди — только пока вкладка видна."""
+		self._panel.set_polling(active)
+
+	def total(self) -> int:
+		"""Сколько элементов в очереди всего (до фильтра)."""
+		return self._total
+
+	def show_filter(self, community_id: int | None, status: QueueFilter | None = None) -> None:
+		"""Ставит правило показа извне: сообщество и/или статус.
+
+		``community_id`` None — все сообщества; ``status`` None — не менять.
+		"""
+		if status is not None:
+			self._status_combo.setCurrentIndex(list(QueueFilter).index(status))
+		self._bar.want_community(community_id)
+		self._page = 1
+		self._panel.poll()
 
 	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
 		"""Раскладывает аватары сообществ и перерисовывает шапки карточек."""
@@ -255,6 +281,8 @@ class QueueViewDialog(WorkDialog):
 		в :attr:`_page` — очередь живая, и страница, на которую смотрит
 		пользователь, может исчезнуть под ним.
 		"""
+		if len(items) != self._total:
+			self.count_changed.emit(len(items))
 		self._total = len(items)
 		self._bar.refresh(items)
 		status = list(QueueFilter)[int(self._status_combo.currentIndex())]

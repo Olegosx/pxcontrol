@@ -111,7 +111,6 @@ from pxcontrol.ui.pages.community_state import (
 	subtitle_text,
 )
 from pxcontrol.ui.pages.maintenance import open_maintenance
-from pxcontrol.ui.pages.publish_queue_view import QueueFilter, QueueViewDialog
 
 logger = logging.getLogger(__name__)
 
@@ -761,13 +760,18 @@ class CommunitiesPage(ScrollArea):
 	по карточке или строке (переход на страницу сообщества),
 	``publish_requested`` — «Опубликовать» (страница «Публикация»
 	с предвыбранным сообществом), ``schedule_requested`` —
-	«Расписание» (страница «Расписание» с фильтром по сообществу).
+	«Расписание» (вкладка «Отложено» с фильтром по сообществу),
+	``queue_requested`` — «Очередь» (вкладка «Очередь» с фильтром
+	по сообществу), ``queue_errors_requested`` — плашка ошибок сводки
+	(вкладка «Очередь» с фильтром «ошибки»).
 	"""
 
 	communities_changed = Signal(list)
 	open_community = Signal(int)
 	publish_requested = Signal(int)
 	schedule_requested = Signal(int)
+	queue_requested = Signal(int)
+	queue_errors_requested = Signal()
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
@@ -1040,15 +1044,15 @@ class CommunitiesPage(ScrollArea):
 		"""Выполняет быстрое действие карточки или пункт меню строки.
 
 		Переходы на другие страницы — сигналами главному окну; окна
-		(очередь, участники, обслуживание) открываются отсюда теми же
-		точками входа, что и со страницы сообщества.
+		(участники, обслуживание) открываются отсюда теми же точками
+		входа, что и со страницы сообщества.
 		"""
 		if action is CardAction.PUBLISH:
 			self.publish_requested.emit(community.id)
 		elif action is CardAction.SCHEDULE:
 			self.schedule_requested.emit(community.id)
 		elif action is CardAction.QUEUE:
-			exec_dialog(QueueViewDialog(self._worker, self.window(), community_id=community.id))
+			self.queue_requested.emit(community.id)
 		elif action is CardAction.ASSIGN_PUBLISHER:
 			open_members(self._worker, community, self, self.reload)
 		elif action is CardAction.ENABLE:
@@ -1064,7 +1068,7 @@ class CommunitiesPage(ScrollArea):
 
 	def _open_errors(self) -> None:
 		"""Плашка ошибок сводки: очередь отправки с фильтром «ошибки»."""
-		exec_dialog(QueueViewDialog(self._worker, self.window(), status=QueueFilter.ERRORS))
+		self.queue_errors_requested.emit()
 
 	# --- подключение -----------------------------------------------------------
 

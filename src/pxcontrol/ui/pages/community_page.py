@@ -28,8 +28,8 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QFont, QHideEvent, QShowEvent
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
@@ -37,17 +37,12 @@ from qfluentwidgets import (
 	CaptionLabel,
 	FluentIcon,
 	HorizontalSeparator,
-	InfoBadge,
-	InfoLevel,
 	LineEdit,
 	MessageBoxBase,
-	Pivot,
-	PivotItem,
 	PrimaryPushButton,
 	PushButton,
 	RoundMenu,
 	ScrollArea,
-	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
 	TitleLabel,
@@ -72,10 +67,10 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	DIM_TEXT,
 	DtoComboBox,
 	ErrorLabel,
 	QueueCounts,
+	TabItem,
 	WorkDialog,
 	account_caption,
 	bind,
@@ -87,7 +82,6 @@ from pxcontrol.ui.pages.common import (
 	elide_text,
 	error_reporter,
 	exec_dialog,
-	font_px,
 	format_local,
 	list_area,
 	list_button,
@@ -97,9 +91,7 @@ from pxcontrol.ui.pages.common import (
 	show_info,
 	show_success,
 	show_warning,
-	slot_color,
-	slot_label,
-	tinted,
+	tab_strip,
 )
 from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
@@ -115,12 +107,12 @@ from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
 	QueueSort,
-	QueueViewDialog,
 	apply_view,
 	queue_subtitle,
+	slot_chip,
 )
 from pxcontrol.ui.pages.queue_panel import QueuePanel
-from pxcontrol.ui.pages.schedule import scheduled_card
+from pxcontrol.ui.pages.scheduled_panel import ScheduledPanel, scheduled_subtitle
 
 #: Размер логотипа в шапке страницы (пиксели).
 _HEADER_LOGO_SIZE = 48
@@ -485,80 +477,6 @@ class _CommunityPrefsDialog(MessageBoxBase):
 
 # --- вкладки ------------------------------------------------------------------------
 
-#: Полоса под активной вкладкой и кегль подписи — по макету.
-_TAB_INDICATOR_LENGTH = 26
-_TAB_FONT_PX = 14
-_TAB_COUNT_PX = 12
-_TAB_COUNT_GAP = 7
-_TAB_BADGE_HEIGHT = 18
-#: Поля пункта вкладок (лево, верх, право, низ): по макету 14 по бокам.
-_TAB_ITEM_MARGINS = (14, 0, 14, 0)
-
-
-class _TabItem(PivotItem):
-	"""Пункт вкладок: подпись и число рядом (макет, раздел 2).
-
-	Штатный ``PivotItem`` — кнопка; подпись и счётчик лежат в её
-	компоновке, поэтому число стоит вплотную к подписи (зазор 7)
-	при любой ширине пункта. У активной вкладки подпись полужирная,
-	счётчик — пилюля ``InfoBadge`` (акцент темы); у остальных число —
-	приглушённая ``CaptionLabel`` без подложки. Свой текст у кнопки
-	пустой: его рисовала бы кнопка, а не компоновка.
-	"""
-
-	def __init__(self, text: str, parent: QWidget) -> None:
-		super().__init__(parent)
-		self._text = text
-		self._count: QWidget | None = None
-		self._active = False
-		self._box = QHBoxLayout(self)
-		self._box.setContentsMargins(*_TAB_ITEM_MARGINS)
-		self._box.setSpacing(_TAB_COUNT_GAP)
-		self.setMinimumWidth(0)  # ширина — по подписи, а не по умолчанию кнопки
-		self._label = BodyLabel(text, self)
-		self._label.setFont(font_px(_TAB_FONT_PX))
-		# подпись и число — по центру пункта: полоса под активной вкладкой
-		# рисуется по центру пункта, и при любой его ширине она должна
-		# стоять под подписью, а не правее
-		self._box.addStretch()
-		self._box.addWidget(self._label)
-		self._box.addStretch()
-
-	def setSelected(self, isSelected: bool) -> None:  # noqa: N802, N803 — API библиотеки
-		super().setSelected(isSelected)
-		weight = QFont.Weight.DemiBold if isSelected else QFont.Weight.Normal
-		self._label.setFont(font_px(_TAB_FONT_PX, weight))
-		self.updateGeometry()
-
-	def set_count(self, count: int | None, active: bool) -> None:
-		"""Показывает число (None или 0 — без него); активной — пилюлей."""
-		if self._count is not None:
-			self._box.removeWidget(self._count)
-			self._count.hide()  # deleteLater сработает позже, а след виден сразу
-			self._count.deleteLater()
-			self._count = None
-		if count:
-			if active:
-				badge = InfoBadge(str(count), self, InfoLevel.ATTENTION)
-				badge.setFont(font_px(_TAB_COUNT_PX))
-				badge.setContentsMargins(4, 0, 4, 0)
-				badge.setFixedHeight(_TAB_BADGE_HEIGHT)
-				self._count = badge
-			else:
-				self._count = tinted(CaptionLabel(str(count), self), DIM_TEXT)
-				self._count.setFont(font_px(_TAB_COUNT_PX))
-			self._count.adjustSize()
-			self._box.insertWidget(self._box.count() - 1, self._count)  # перед хвостовой растяжкой
-			self._count.show()
-		self.updateGeometry()
-
-	def sizeHint(self) -> QSize:  # noqa: N802 — API Qt
-		hint: QSize = super().sizeHint()
-		return QSize(self._box.sizeHint().width(), hint.height())
-
-	def minimumSizeHint(self) -> QSize:  # noqa: N802 — API Qt
-		return self.sizeHint()
-
 
 class _QueueTab(QWidget):
 	"""Вкладка «Очередь»: очередь отправки этого сообщества, ближайшие сначала.
@@ -570,6 +488,8 @@ class _QueueTab(QWidget):
 	"""
 
 	counts_changed = Signal(object)  # QueueCounts
+	#: «Вся очередь…» — страница «Расписание», вкладка «Очередь» с фильтром.
+	view_all_requested = Signal()
 
 	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
 		super().__init__(parent)
@@ -588,7 +508,9 @@ class _QueueTab(QWidget):
 		self._retry_button.clicked.connect(self._on_retry_errors)
 		self._retry_button.hide()
 		view_button = list_button("Вся очередь…", self)
-		view_button.setToolTip("Окно очереди отправки с фильтром по этому сообществу")
+		view_button.setToolTip(
+			"Вся очередь отправки на «Расписании» с фильтром по этому сообществу"
+		)
 		view_button.clicked.connect(self._on_view_all)
 		self._header_box = QVBoxLayout()
 		layout.addLayout(self._header_box)
@@ -678,7 +600,7 @@ class _QueueTab(QWidget):
 				self._panel.retry(item.id)
 
 	def _on_view_all(self) -> None:
-		exec_dialog(QueueViewDialog(self._worker, self.window(), community_id=self._community.id))
+		self.view_all_requested.emit()
 
 	def _fill_editor(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
 		"""Наполняет раскрытую карточку формой правки (ADR-0016, п. 7)."""
@@ -687,20 +609,16 @@ class _QueueTab(QWidget):
 	@staticmethod
 	def _leading(item: QueueItemDto, parent: QWidget) -> list[QWidget]:
 		"""Начало шапки карточки: только метка слота — логотип здесь лишний."""
-		label = slot_label(item.when)
-		chip = StrongBodyLabel(f"[{label}]", parent)
-		chip.setFont(font_px(13, QFont.Weight.DemiBold))  # 13 / 600 по макету
-		chip.setTextColor(*slot_color(label))
-		chip.setToolTip("Время публикации (слот)")
-		return [chip]
+		return [slot_chip(item.when, parent, compact=True)]
 
 
 class _ScheduledTab(QWidget):
 	"""Вкладка «Отложено»: отложенные записи сообщества из Telegram.
 
-	Те же данные, что на «Расписании», но по одному сообществу;
-	истина — сам Telegram (ADR-0010), список читается при первом
-	открытии вкладки и кнопкой «Обновить».
+	Те же данные и та же панель, что на «Расписании» (правка, «Сейчас»,
+	«Удалить» — :class:`ScheduledPanel`), но по одному сообществу
+	и в компактных карточках; истина — сам Telegram (ADR-0010), список
+	читается при первом открытии вкладки и кнопкой «Обновить».
 	"""
 
 	count_changed = Signal(int)
@@ -709,23 +627,35 @@ class _ScheduledTab(QWidget):
 		super().__init__(parent)
 		self._worker = worker
 		self._community = community
-		self._show_error = error_reporter(self)
-		self._loading = False
 		spacing = density.spacing()
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(spacing.row_spacing)
-		refresh = PushButton(FluentIcon.SYNC, "Обновить", self)
-		refresh.clicked.connect(self.reload)
+		self._refresh_button = list_button("Обновить", self)
+		self._refresh_button.clicked.connect(self.reload)
 		self._header_box = QVBoxLayout()
 		layout.addLayout(self._header_box)
-		self._refresh_button = refresh
 		self._render_header(0)
-		self._list = QVBoxLayout()
-		self._list.setSpacing(spacing.list_spacing)
-		layout.addLayout(self._list)
+		self._status = CaptionLabel("", self)
+		self._status.setWordWrap(True)
+		layout.addWidget(self._status)
+		box = QVBoxLayout()
+		box.setSpacing(spacing.list_spacing)
+		layout.addLayout(box)
 		layout.addStretch()
-		self._list.addWidget(CaptionLabel("Читаю отложенные из Telegram…", self))
+		self._panel = ScheduledPanel(
+			worker,
+			self,
+			box,
+			subtitle=lambda item: scheduled_subtitle(item, with_community=False),
+			community_id=community.id,
+			transform=lambda items: sorted(items, key=lambda item: item.scheduled_at),
+			on_loading=lambda: self._status.setText("Читаю отложенные из Telegram…"),
+			on_loaded=self._on_loaded,
+			# только метка слота — логотип сообщества здесь лишний
+			leading=lambda item, parent: [slot_chip(item.scheduled_at, parent, compact=True)],
+			compact=True,
+		)
 
 	def _render_header(self, count: int) -> None:
 		clear_layout(self._header_box)
@@ -736,43 +666,23 @@ class _ScheduledTab(QWidget):
 
 	def reload(self) -> None:
 		"""Перечитывает отложенные записи сообщества (обход не дублируется)."""
-		if self._loading:
-			return
-		self._loading = True
-		run_in_engine(
-			self._worker,
-			self._worker.engine.posts.list_scheduled(self._community.id),
-			self,
-			self._show_scheduled,
-			self._on_failed,
-		)
+		self._panel.reload()
 
-	def _on_failed(self, message: str) -> None:
-		self._loading = False
-		self._show_error(message)
-
-	def _show_scheduled(self, scheduled: ScheduledList) -> None:
-		self._loading = False
-		clear_layout(self._list)
-		self._render_header(len(scheduled.items))
-		self.count_changed.emit(len(scheduled.items))
+	def _on_loaded(self, scheduled: ScheduledList) -> None:
+		count = len(scheduled.items)
+		self._render_header(count)
+		self.count_changed.emit(count)
 		if scheduled.unread:
 			# честность важнее краткости: прочитать не удалось — список
 			# заведомо неполон (истина живёт на сервере Telegram)
-			warning = CaptionLabel("Не удалось прочитать отложенные записи этого сообщества.", self)
-			warning.setWordWrap(True)
-			self._list.addWidget(warning)
-		if not scheduled.items:
-			self._list.addWidget(
-				CaptionLabel(
-					"Отложенных записей нет. Создайте пост на «Публикации» "
-					"с временем публикации — его сохранит сервер Telegram.",
-					self,
-				)
+			self._status.setText("Не удалось прочитать отложенные записи этого сообщества.")
+		elif not scheduled.items:
+			self._status.setText(
+				"Отложенных записей нет. Создайте пост на «Публикации» "
+				"с временем публикации — его сохранит сервер Telegram."
 			)
-			return
-		for item in scheduled.items:
-			self._list.addWidget(scheduled_card(self, item, with_community=False))
+		else:
+			self._status.setText("")
 
 
 # --- страница -------------------------------------------------------------------------
@@ -789,6 +699,8 @@ class CommunityPage(ScrollArea):
 
 	changed = Signal()
 	publish_requested = Signal(int)
+	#: «Вся очередь…» вкладки — «Расписание» с фильтром по этому сообществу.
+	queue_requested = Signal(int)
 
 	def __init__(
 		self, worker: EngineWorker, community: CommunityDto, parent: QWidget | None = None
@@ -831,25 +743,9 @@ class CommunityPage(ScrollArea):
 		layout = page_layout(self)
 		self._header_box = QVBoxLayout()
 		layout.addLayout(self._header_box)
-		# Pivot, а не SegmentedWidget: по макету вкладки — подписи с полосой
-		# под активной, без рамки-подложки (SegmentedWidget рисует её)
-		self._segments = Pivot(self)
-		self._segments.setIndicatorLength(_TAB_INDICATOR_LENGTH)
-		# ширина полосы вкладок — строго по пунктам: штатная политика
-		# «может расти» отдавала ей лишнее место ряда, пункты растягивались
-		self._segments.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-		# вкладки прижаты влево (сами пункты — своей ширины), под всей
-		# полосой вкладок — разделитель, как в макете
-		tabs_row = QHBoxLayout()
-		tabs_row.setContentsMargins(0, 0, 0, 0)
-		tabs_row.addWidget(self._segments)
-		tabs_row.addStretch()
-		tabs_box = QVBoxLayout()
-		tabs_box.setContentsMargins(0, 0, 0, 0)
-		tabs_box.setSpacing(0)
-		tabs_box.addLayout(tabs_row)
-		tabs_box.addWidget(HorizontalSeparator(self))
-		layout.addLayout(tabs_box)
+		# полоса вкладок — общая с «Расписанием» (подписи с полосой
+		# под активной, разделитель под всей полосой, как в макете)
+		self._segments = tab_strip(self, layout)
 		# тело вкладки — единственный виджет в этой компоновке: скрытые
 		# вкладки в ней не живут, и высота страницы считается по видимой.
 		# Штатный QStackedWidget мерит все страницы разом — длинная
@@ -857,9 +753,9 @@ class CommunityPage(ScrollArea):
 		self._body = QVBoxLayout()
 		self._body.setContentsMargins(0, 0, 0, 0)
 		layout.addLayout(self._body, stretch=1)
-		self._tab_items: dict[str, _TabItem] = {}
+		self._tab_items: dict[str, TabItem] = {}
 		for key in _TABS:
-			item = _TabItem(tab_title(key), self._segments)
+			item = TabItem(tab_title(key), self._segments)
 			self._tab_items[key] = item
 			# без обработчика клика: библиотека зовёт его с флагом, которого
 			# обработчик не ждёт, а переключение и так идёт по currentItemChanged
@@ -988,6 +884,7 @@ class CommunityPage(ScrollArea):
 		if key == TAB_QUEUE:
 			tab = _QueueTab(self._worker, self._community, self)
 			tab.counts_changed.connect(self._on_queue_counts)
+			tab.view_all_requested.connect(lambda: self.queue_requested.emit(self._community.id))
 			return tab
 		if key == TAB_SCHEDULED:
 			scheduled = _ScheduledTab(self._worker, self._community, self)

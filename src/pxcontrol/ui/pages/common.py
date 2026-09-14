@@ -45,10 +45,14 @@ from qfluentwidgets import (
 	FluentStyleSheet,
 	HorizontalSeparator,
 	IconWidget,
+	InfoBadge,
 	InfoBar,
+	InfoLevel,
 	LineEdit,
 	MessageBox,
 	MessageBoxBase,
+	Pivot,
+	PivotItem,
 	PrimaryPushButton,
 	ProgressBar,
 	PushButton,
@@ -1209,6 +1213,111 @@ def slot_color(label: str) -> tuple[str, str]:
 	return _SLOT_COLORS[zlib.crc32(label.encode("utf-8")) % len(_SLOT_COLORS)]
 
 
+# --- вкладки страниц ---------------------------------------------------------------
+
+#: Полоса под активной вкладкой и кегль подписи — по макету страницы
+#: сообщества (раздел 2); страница «Расписание» строит вкладки так же.
+_TAB_INDICATOR_LENGTH = 26
+_TAB_FONT_PX = 14
+_TAB_COUNT_PX = 12
+_TAB_COUNT_GAP = 7
+_TAB_BADGE_HEIGHT = 18
+#: Поля пункта вкладок (лево, верх, право, низ): по макету 14 по бокам.
+_TAB_ITEM_MARGINS = (14, 0, 14, 0)
+
+
+class TabItem(PivotItem):
+	"""Пункт вкладок: подпись и число рядом (макет, раздел 2).
+
+	Штатный ``PivotItem`` — кнопка; подпись и счётчик лежат в её
+	компоновке, поэтому число стоит вплотную к подписи (зазор 7)
+	при любой ширине пункта. У активной вкладки подпись полужирная,
+	счётчик — пилюля ``InfoBadge`` (акцент темы); у остальных число —
+	приглушённая ``CaptionLabel`` без подложки. Свой текст у кнопки
+	пустой: его рисовала бы кнопка, а не компоновка.
+	"""
+
+	def __init__(self, text: str, parent: QWidget) -> None:
+		super().__init__(parent)
+		self._text = text
+		self._count: QWidget | None = None
+		self._active = False
+		self._box = QHBoxLayout(self)
+		self._box.setContentsMargins(*_TAB_ITEM_MARGINS)
+		self._box.setSpacing(_TAB_COUNT_GAP)
+		self.setMinimumWidth(0)  # ширина — по подписи, а не по умолчанию кнопки
+		self._label = BodyLabel(text, self)
+		self._label.setFont(font_px(_TAB_FONT_PX))
+		# подпись и число — по центру пункта: полоса под активной вкладкой
+		# рисуется по центру пункта, и при любой его ширине она должна
+		# стоять под подписью, а не правее
+		self._box.addStretch()
+		self._box.addWidget(self._label)
+		self._box.addStretch()
+
+	def setSelected(self, isSelected: bool) -> None:  # noqa: N802, N803 — API библиотеки
+		super().setSelected(isSelected)
+		weight = QFont.Weight.DemiBold if isSelected else QFont.Weight.Normal
+		self._label.setFont(font_px(_TAB_FONT_PX, weight))
+		self.updateGeometry()
+
+	def set_count(self, count: int | None, active: bool) -> None:
+		"""Показывает число (None или 0 — без него); активной — пилюлей."""
+		if self._count is not None:
+			self._box.removeWidget(self._count)
+			self._count.hide()  # deleteLater сработает позже, а след виден сразу
+			self._count.deleteLater()
+			self._count = None
+		if count:
+			if active:
+				badge = InfoBadge(str(count), self, InfoLevel.ATTENTION)
+				badge.setFont(font_px(_TAB_COUNT_PX))
+				badge.setContentsMargins(4, 0, 4, 0)
+				badge.setFixedHeight(_TAB_BADGE_HEIGHT)
+				self._count = badge
+			else:
+				self._count = tinted(CaptionLabel(str(count), self), DIM_TEXT)
+				self._count.setFont(font_px(_TAB_COUNT_PX))
+			self._count.adjustSize()
+			self._box.insertWidget(self._box.count() - 1, self._count)  # перед хвостовой растяжкой
+			self._count.show()
+		self.updateGeometry()
+
+	def sizeHint(self) -> QSize:  # noqa: N802 — API Qt
+		hint: QSize = super().sizeHint()
+		return QSize(self._box.sizeHint().width(), hint.height())
+
+	def minimumSizeHint(self) -> QSize:  # noqa: N802 — API Qt
+		return self.sizeHint()
+
+
+def tab_strip(parent: QWidget, layout: QVBoxLayout) -> Pivot:
+	"""Полоса вкладок страницы: ``Pivot`` слева и разделитель под ней.
+
+	Общая для страницы сообщества и «Расписания»: две страницы с вкладками
+	не должны расходиться ни полосой под активной, ни разделителем.
+	``Pivot``, а не ``SegmentedWidget``: по макету вкладки — подписи
+	с полосой под активной, без рамки-подложки. Ширина полосы — строго
+	по пунктам: штатная политика «может расти» отдавала ей лишнее место
+	ряда, и пункты растягивались. Пункты — :class:`TabItem`, добавляет
+	их вызывающий (``pivot.addWidget(key, TabItem(title, pivot))``).
+	"""
+	pivot = Pivot(parent)
+	pivot.setIndicatorLength(_TAB_INDICATOR_LENGTH)
+	pivot.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+	row = QHBoxLayout()
+	row.setContentsMargins(0, 0, 0, 0)
+	row.addWidget(pivot)
+	row.addStretch()
+	box = QVBoxLayout()
+	box.setContentsMargins(0, 0, 0, 0)
+	box.setSpacing(0)
+	box.addLayout(row)
+	box.addWidget(HorizontalSeparator(parent))
+	layout.addLayout(box)
+	return pivot
+
+
 def counter_text(length: int, limit: int) -> str:
 	"""Подпись счётчика символов под полем текста.
 
@@ -1425,6 +1534,17 @@ class WhenRow:
 		"""Разрешает/запрещает отложенную публикацию (иначе — только «сейчас»)."""
 		if not allowed:
 			self._now_switch.setChecked(True)
+		self._now_switch.setEnabled(allowed)
+		self._now_switch.setToolTip("" if allowed else hint)
+
+	def set_now_allowed(self, allowed: bool, hint: str = "") -> None:
+		"""Разрешает/запрещает «сейчас» (иначе — только отложенно).
+
+		Обратное :meth:`set_schedule_allowed`: у правки отложенной записи
+		«сейчас» — отдельное действие карточки, а не вариант времени.
+		"""
+		if not allowed:
+			self._now_switch.setChecked(False)
 		self._now_switch.setEnabled(allowed)
 		self._now_switch.setToolTip("" if allowed else hint)
 

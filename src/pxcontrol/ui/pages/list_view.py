@@ -266,6 +266,24 @@ class ViewBar(QObject):
 		self.layout.insertWidget(self._choices, combo)
 		return combo
 
+	def want_community(self, community_id: int | None) -> None:
+		"""Ставит фильтр по сообществу извне (переход с другой страницы).
+
+		None — «все сообщества». Сообщество, которого в списке ещё нет,
+		запоминается и применится при ближайшем наполнении фильтра;
+		если его в списке так и не окажется — фильтром оно не станет.
+		Смена выбора здесь — воля вызывающего, сигнал :attr:`changed`
+		излучается как при выборе рукой.
+		"""
+		if community_id is None:
+			self._wanted_community = None
+			self.community.setCurrentIndex(0)
+			return
+		if any(entry[0] == community_id for entry in self._known_communities):
+			self.community.select(lambda entry: entry[0] == community_id)
+			return
+		self._wanted_community = community_id
+
 	def sort_option(self) -> StrEnum:
 		"""Выбранный порядок показа."""
 		return self._sort_options[int(self.sort.currentIndex())]
@@ -292,6 +310,8 @@ class ViewBar(QObject):
 				communities, label=lambda entry: entry[1], key=lambda entry: entry[0]
 			)
 			if self._wanted_community is not None:
+				# без сигнала: выбор делается внутри обновления списка,
+				# и его обработчик запустил бы второе обновление поверх
 				wanted = self._wanted_community
 				self._wanted_community = None
 				self.community.blockSignals(True)
