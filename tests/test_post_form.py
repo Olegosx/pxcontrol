@@ -16,6 +16,7 @@ from pxcontrol.engine.telegram.types import (
 )
 from pxcontrol.ui.pages.common import (
 	CONTENT_KINDS,
+	READ_ONLY_KIND_LABEL,
 	counter_text,
 	kind_file_filter,
 	kind_label,
@@ -65,12 +66,19 @@ def test_topic_label_marks_closed() -> None:
 
 @pytest.mark.parametrize("kind", list(MediaKind))
 def test_content_kinds_cover_every_media_kind(kind: MediaKind) -> None:
-	"""У каждого типа вложения есть подпись и фильтр файлов.
+	"""У каждого типа вложения есть подпись; у создаваемых — и фильтр файлов.
 
 	Замок контракта: новый тип, забытый в ``CONTENT_KINDS``, уронил бы
 	форму в рантайме (подпись и фильтр ищутся поиском по перечню).
+	Вид, который приложение только читает (``OTHER`` — опрос,
+	геопозиция из клиента Telegram), в форме не выбирается: у него
+	общая подпись и нет фильтра.
 	"""
 	assert kind_label(kind)
+	if not kind.creatable:
+		assert kind_label(kind) == READ_ONLY_KIND_LABEL
+		assert kind not in {item_kind for _label, item_kind, _filter in CONTENT_KINDS}
+		return
 	file_filter = kind_file_filter(kind)
 	if kind is MediaKind.NONE:
 		assert file_filter == ""  # текстовому посту файл не выбирают

@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from pxcontrol.engine.telegram.bot_api import (
 	check_community,
@@ -444,3 +445,63 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
 			return await transport.get_scheduled(chat_id)
+
+	async def get_scheduled_message(
+		self, account_id: int, chat_id: str, message_id: int
+	) -> ScheduledMessage | None:
+		"""Читает одну отложенную запись целиком (None — её уже нет).
+
+		Приоритет интерактивный: человек открыл форму правки и ждёт.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.get_scheduled_message(chat_id, message_id)
+
+	async def edit_scheduled(
+		self, account_id: int, chat_id: str, message_id: int, text: str, when: datetime
+	) -> None:
+		"""Меняет текст и/или время отложенной записи аккаунтом, который её видит.
+
+		В группе отложку видит только её создатель (ADR-0022), поэтому
+		аккаунт — тот, чьим чтением запись попала в список.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotMessageGoneError: Записи в очереди отложенных уже нет.
+			UserbotAccessError: Нет права править (подтверждённый отказ).
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Время отклонено и прочие отказы.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			await transport.edit_scheduled(chat_id, message_id, text, when)
+
+	async def send_scheduled_now(
+		self, account_id: int, chat_id: str, message_ids: list[int]
+	) -> None:
+		"""Публикует отложенные записи немедленно.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotMessageGoneError: Записи в очереди отложенных уже нет.
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			await transport.send_scheduled_now(chat_id, message_ids)
+
+	async def delete_scheduled(self, account_id: int, chat_id: str, message_ids: list[int]) -> None:
+		"""Удаляет отложенные записи, не публикуя.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotMessageGoneError: Записи в очереди отложенных уже нет.
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			await transport.delete_scheduled(chat_id, message_ids)

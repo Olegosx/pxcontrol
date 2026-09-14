@@ -13,10 +13,11 @@ import asyncio
 import logging
 import shutil
 import tempfile
+from collections.abc import Awaitable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -34,7 +35,7 @@ from pxcontrol.engine.services.settings import (
 	SettingsService,
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
-from pxcontrol.engine.telegram.mtproto import UserbotUnavailableError
+from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	ForumTopicInfo,
@@ -75,6 +76,14 @@ _THUMBNAIL_TIMEOUT_S = 120.0
 #: Длина превью текста отложенной записи на странице «Расписание».
 _SCHEDULED_PREVIEW_CHARS = 80
 
+#: Единый текст исхода «записи уже нет»: пустой ответ на чтение
+#: и отказ Telegram на действие звучат одинаково.
+_SCHEDULED_GONE_TEXT = (
+	"Этой записи в Telegram уже нет — она опубликована или удалена. Обновите список."
+)
+
+_T = TypeVar("_T")
+
 
 @dataclass(frozen=True)
 class PublishCapabilities:
@@ -104,12 +113,14 @@ def _dedup_scheduled(items: list[ScheduledPostDto]) -> list[ScheduledPostDto]:
 
 	Ожидаемо каждый аккаунт группы видит только свои отложки и дублей
 	нет; если видимость окажется шире (например, у админов), одна
-	запись пришла бы от нескольких читателей.
+	запись пришла бы от нескольких читателей. Тождество — по id записи
+	в очереди сообщества: два разных поста с одинаковым текстом
+	и временем — это два поста, а не дубль. Остаётся первый читатель.
 	"""
-	seen: set[tuple[int, str, datetime]] = set()
+	seen: set[tuple[int, int]] = set()
 	result: list[ScheduledPostDto] = []
 	for item in items:
-		key = (item.community_id, item.text_preview, item.scheduled_at)
+		key = (item.community_id, item.message_id)
 		if key not in seen:
 			seen.add(key)
 			result.append(item)
@@ -130,6 +141,16 @@ class PostNotReadyError(PostError):
 	(ADR-0016): иначе одно нажатие «выключить» превращало бы всю
 	накопленную очередь канала в десятки карточек с ошибкой, которые
 	пришлось бы перебирать руками.
+	"""
+
+
+class ScheduledGoneError(PostError):
+	"""Отложенной записи в Telegram уже нет — опубликована или удалена.
+
+	Штатная гонка: список читается снимком, а истина живёт на сервере
+	(ADR-0010), и между чтением и действием запись могла уйти из другого
+	клиента. Отдельный класс — сигнал интерфейсу перечитать список,
+	а не показывать «ошибку».
 	"""
 
 
@@ -284,6 +305,22 @@ class _PostPort(Protocol):
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
 
+	async def get_scheduled_message(
+		self, account_id: int, chat_id: str, message_id: int
+	) -> ScheduledMessage | None: ...
+
+	async def edit_scheduled(
+		self, account_id: int, chat_id: str, message_id: int, text: str, when: datetime
+	) -> None: ...
+
+	async def send_scheduled_now(
+		self, account_id: int, chat_id: str, message_ids: list[int]
+	) -> None: ...
+
+	async def delete_scheduled(
+		self, account_id: int, chat_id: str, message_ids: list[int]
+	) -> None: ...
+
 
 @dataclass(frozen=True)
 class PublishPlan:
@@ -308,17 +345,92 @@ class PublishPlan:
 
 
 @dataclass(frozen=True)
+class ScheduledRef:
+	"""Адрес отложенной записи для действий над ней.
+
+	Записи не хранятся в БД (ADR-0010), поэтому адрес — тройка:
+	сообщество, аккаунт, чьим чтением запись попала в список (в группе
+	отложку видит и правит только её создатель, ADR-0022), и id записи
+	в очереди отложенных сообщества.
+	"""
+
+	community_id: int
+	account_id: int
+	message_id: int
+
+
+@dataclass(frozen=True)
 class ScheduledPostDto:
 	"""Отложенная запись канала (прочитана из Telegram) для интерфейса.
 
 	``community_id`` — id канала в нашей БД: по нему интерфейс фильтрует
 	список по каналам (название для этого не годится — не уникально).
+
+	Attributes:
+		community_id: сообщество (id в нашей БД).
+		community_title: название сообщества.
+		account_id: аккаунт, чьим чтением запись попала в список — им же
+			она правится, публикуется сейчас и удаляется.
+		message_id: id записи в очереди отложенных сообщества.
+		text_preview: начало текста для карточки.
+		scheduled_at: момент публикации (UTC).
+		media_kind: вид вложения (``NONE`` — текст).
+		topic_id: тема форума (None — общая лента).
 	"""
 
 	community_id: int
 	community_title: str
+	account_id: int
+	message_id: int
 	text_preview: str
 	scheduled_at: datetime
+	media_kind: MediaKind = MediaKind.NONE
+	topic_id: int | None = None
+
+	@property
+	def ref(self) -> ScheduledRef:
+		"""Адрес записи для действий над ней."""
+		return ScheduledRef(self.community_id, self.account_id, self.message_id)
+
+
+@dataclass(frozen=True)
+class ScheduledDraft:
+	"""Отложенная запись целиком — для формы правки.
+
+	Читается с сервера при открытии формы, а не из снимка списка: запись
+	могли изменить из другого клиента Telegram. Что можно менять —
+	текст и время; вложение и тема показываются, но не правятся
+	(у ``messages.editMessage`` нет адресата темы, а замена файла —
+	загрузка с прогрессом, то есть задание очереди, а не правка).
+
+	Attributes:
+		ref: адрес записи.
+		community_title: название сообщества.
+		text: полный текст (у записи с вложением — подпись).
+		when: момент публикации (UTC).
+		media_kind: вид вложения (``NONE`` — текст, ``OTHER`` — вложение,
+			которого приложение не создаёт: у него правится только время).
+		topic_id: тема форума (None — общая лента).
+		text_limit: предел длины текста для этой записи — по Premium
+			аккаунта, который её правит, и по наличию вложения.
+	"""
+
+	ref: ScheduledRef
+	community_title: str
+	text: str
+	when: datetime
+	media_kind: MediaKind
+	topic_id: int | None
+	text_limit: int
+
+	@property
+	def text_editable(self) -> bool:
+		"""Есть ли у записи текст, который можно править.
+
+		У вложений не наших видов (опрос, геопозиция) подписи нет —
+		Telegram отвечал бы отказом на любую правку текста.
+		"""
+		return self.media_kind is not MediaKind.OTHER
 
 
 @dataclass(frozen=True)
@@ -1034,6 +1146,8 @@ class PostsService:
 			PostsService.check_rename_name(draft.rename_to)
 		if draft.media_path is not None and draft.media_kind is MediaKind.NONE:
 			raise PostError("У вложения не указан тип контента.")
+		if not draft.media_kind.creatable:
+			raise PostError("Вложения такого вида приложение не отправляет.")
 		if draft.media_path is not None and not Path(draft.media_path).is_file():
 			raise PostError(f"Файл не найден: {draft.media_path}")
 		when = draft.when
@@ -1110,7 +1224,7 @@ class PostsService:
 					unread.append(community.title)
 					continue
 				for message in messages:
-					items.append(self._dto(community, message))
+					items.append(self._dto(community, account_id, message))
 		items = _dedup_scheduled(items)
 		items.sort(key=lambda item: item.scheduled_at)
 		# сообщество группы опрашивают несколько участников — в списке
@@ -1170,11 +1284,128 @@ class PostsService:
 		return community
 
 	@staticmethod
-	def _dto(community: Community, message: ScheduledMessage) -> ScheduledPostDto:
-		"""Готовит запись для интерфейса: канал, короткий текст, время."""
+	def _dto(community: Community, account_id: int, message: ScheduledMessage) -> ScheduledPostDto:
+		"""Готовит запись для интерфейса: канал, читатель, короткий текст, время."""
 		text = message.text or "(медиа без текста)"
 		preview = text_preview(text, _SCHEDULED_PREVIEW_CHARS)
-		return ScheduledPostDto(community.id, community.title, preview, message.scheduled_at)
+		return ScheduledPostDto(
+			community_id=community.id,
+			community_title=community.title,
+			account_id=account_id,
+			message_id=message.id,
+			text_preview=preview,
+			scheduled_at=message.scheduled_at,
+			media_kind=message.media_kind,
+			topic_id=message.topic_id,
+		)
+
+	# --- действия над отложенными (истина — сервер Telegram, ADR-0010) --------
+
+	async def scheduled_draft(self, ref: ScheduledRef) -> ScheduledDraft:
+		"""Читает отложенную запись целиком для формы правки.
+
+		Свежее состояние с сервера, а не снимок списка: запись могли
+		изменить из другого клиента. Предел текста считается по Premium
+		аккаунта-читателя — им же запись и правится.
+
+		Raises:
+			ScheduledGoneError: Записи в очереди отложенных уже нет.
+			PostError: Сообщество не найдено.
+			UserbotUnavailableError: Аккаунт недоступен или Telegram отказал.
+		"""
+		community = await self._get_community(ref.community_id)
+		message = await self._scheduled_call(
+			self._gateway.get_scheduled_message(
+				ref.account_id, community.tg_chat_id, ref.message_id
+			)
+		)
+		if message is None:
+			raise ScheduledGoneError(_SCHEDULED_GONE_TEXT)
+		with_media = message.media_kind is not MediaKind.NONE
+		premium = self._gateway.userbot_premium(ref.account_id)
+		return ScheduledDraft(
+			ref=ref,
+			community_title=community.title,
+			text=message.text,
+			when=message.scheduled_at,
+			media_kind=message.media_kind,
+			topic_id=message.topic_id,
+			text_limit=text_length_limit(premium, with_media),
+		)
+
+	async def edit_scheduled(self, draft: ScheduledDraft, text: str, when: datetime) -> None:
+		"""Меняет текст и/или время отложенной записи на сервере.
+
+		``draft`` — запись, как её показала форма (:meth:`scheduled_draft`):
+		по нему известно, есть ли у записи вложение (от этого зависит
+		предел текста и можно ли текст трогать вовсе). Проверки те же,
+		что у постановки поста: непустой текст у записи без вложения,
+		предел длины по Premium аккаунта, время не ближе минуты.
+		Сообщество не меняется — это была бы другая публикация.
+
+		Raises:
+			PostError: Текст пуст или длиннее предела; время слишком
+				близко; у записи нет правимого текста.
+			ScheduledGoneError: Записи в очереди отложенных уже нет.
+			UserbotUnavailableError: Аккаунт недоступен или Telegram
+				отказал (в том числе отклонил время).
+		"""
+		with_media = draft.media_kind is not MediaKind.NONE
+		if not draft.text_editable and text != draft.text:
+			raise PostError(
+				"У этой записи нет текста, который можно править, — меняется только время."
+			)
+		if not text and not with_media:
+			raise PostError("Пост пуст — добавьте текст.")
+		premium = self._gateway.userbot_premium(draft.ref.account_id)
+		check_text_length(text, text_length_limit(premium, with_media), with_media)
+		if when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
+			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
+		community = await self._get_community(draft.ref.community_id)
+		await self._scheduled_call(
+			self._gateway.edit_scheduled(
+				draft.ref.account_id, community.tg_chat_id, draft.ref.message_id, text, when
+			)
+		)
+
+	async def send_scheduled_now(self, ref: ScheduledRef) -> None:
+		"""Публикует отложенную запись немедленно (она уходит в ленту).
+
+		Raises:
+			ScheduledGoneError: Записи в очереди отложенных уже нет.
+			PostError: Сообщество не найдено.
+			UserbotUnavailableError: Аккаунт недоступен или Telegram отказал.
+		"""
+		community = await self._get_community(ref.community_id)
+		await self._scheduled_call(
+			self._gateway.send_scheduled_now(ref.account_id, community.tg_chat_id, [ref.message_id])
+		)
+
+	async def delete_scheduled(self, ref: ScheduledRef) -> None:
+		"""Удаляет отложенную запись, не публикуя.
+
+		Raises:
+			ScheduledGoneError: Записи в очереди отложенных уже нет.
+			PostError: Сообщество не найдено.
+			UserbotUnavailableError: Аккаунт недоступен или Telegram отказал.
+		"""
+		community = await self._get_community(ref.community_id)
+		await self._scheduled_call(
+			self._gateway.delete_scheduled(ref.account_id, community.tg_chat_id, [ref.message_id])
+		)
+
+	@staticmethod
+	async def _scheduled_call(call: Awaitable[_T]) -> _T:
+		"""Выполняет обращение к отложке, переводя «записи уже нет» в исход сервиса.
+
+		Транспорт сообщает об исчезнувшей записи своим классом; наружу
+		сервис отдаёт один класс на оба случая — пустой ответ и отказ
+		Telegram, — чтобы интерфейсу не различать источники.
+		"""
+		try:
+			return await call
+		except UserbotMessageGoneError as exc:
+			raise ScheduledGoneError(str(exc)) from exc
 
 
 def _make_thumbnail(

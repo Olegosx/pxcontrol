@@ -13,12 +13,14 @@ import pytest
 from pxcontrol.engine.telegram.mtproto import (
 	MtprotoTransport,
 	UserbotFloodError,
+	UserbotMessageGoneError,
 	UserbotNotConnectedError,
 	UserbotSessionExpiredError,
 	UserbotUnavailableError,
 	community_kind_from_entity,
 	ensure_userbot_can_post,
 	ensure_userbot_can_send,
+	media_kind_of,
 )
 from pxcontrol.engine.telegram.types import (
 	CommunityKind,
@@ -103,7 +105,9 @@ class _FakeClient:
 			)
 		return SimpleNamespace(
 			messages=[
-				SimpleNamespace(message="из телеграма", date=datetime(2026, 7, 13, tzinfo=UTC)),
+				SimpleNamespace(
+					id=5, message="из телеграма", date=datetime(2026, 7, 13, tzinfo=UTC)
+				),
 			]
 		)
 
@@ -435,8 +439,11 @@ async def test_get_scheduled_returns_messages() -> None:
 	await transport.start()
 	messages = await transport.get_scheduled("-1001234")
 	assert len(messages) == 1
+	assert messages[0].id == 5
 	assert messages[0].text == "из телеграма"
 	assert messages[0].scheduled_at == datetime(2026, 7, 13, tzinfo=UTC)
+	assert messages[0].media_kind is MediaKind.NONE  # у записи нет поля media
+	assert messages[0].topic_id is None
 
 
 async def test_community_stats_reads_full_info() -> None:
@@ -1024,9 +1031,9 @@ async def test_kick_participant_passes_access_hash() -> None:
 	assert client.kicked[1] == 888
 
 
-def _service_like(*, id: int, text: str, date: datetime) -> Any:
+def _service_like(*, id: int, text: str, date: datetime, **extra: Any) -> Any:
 	"""Запись отложки: минимум полей, которые читает транспорт."""
-	return SimpleNamespace(id=id, message=text, date=date)
+	return SimpleNamespace(id=id, message=text, date=date, **extra)
 
 
 async def test_scheduled_skips_empty_records() -> None:
@@ -1136,3 +1143,192 @@ def test_admin_rights_are_read_from_real_permissions() -> None:
 	# обычный участник не может ничего
 	member = ParticipantPermissions(types.ChannelParticipant(user_id=1, date=None), chat=False)
 	assert has_admin_right(member, "delete_messages") is False
+
+
+# --- отложенные записи: вид вложения, тема, действия ---------------------------
+
+
+def _document(*attributes: Any) -> Any:
+	from telethon.tl import types
+
+	return types.MessageMediaDocument(
+		document=types.Document(
+			id=1,
+			access_hash=2,
+			file_reference=b"",
+			date=datetime(2026, 1, 1, tzinfo=UTC),
+			mime_type="application/octet-stream",
+			size=1,
+			dc_id=2,
+			attributes=list(attributes),
+		)
+	)
+
+
+def test_media_kind_of_reads_real_telethon_media() -> None:
+	"""Вид вложения читается по настоящим типам Telethon, а не по заглушкам.
+
+	Превью ссылки — не вложение (это текст); документ различается
+	по атрибутам, как в ``Message.video``/``audio``; всё, чего
+	приложение не создаёт (опрос), — «прочее».
+	"""
+	from telethon.tl import types
+
+	assert media_kind_of(None) is MediaKind.NONE
+	assert media_kind_of(types.MessageMediaWebPage(webpage=types.WebPageEmpty(id=1))) is (
+		MediaKind.NONE
+	)
+	assert media_kind_of(types.MessageMediaPhoto(photo=types.PhotoEmpty(id=1))) is MediaKind.PHOTO
+	video = types.DocumentAttributeVideo(duration=1.0, w=1, h=1)
+	assert media_kind_of(_document(types.DocumentAttributeFilename("a.mp4"), video)) is (
+		MediaKind.VIDEO
+	)
+	assert media_kind_of(_document(types.DocumentAttributeAudio(duration=1))) is MediaKind.AUDIO
+	assert media_kind_of(_document(types.DocumentAttributeFilename("a.pdf"))) is (
+		MediaKind.DOCUMENT
+	)
+	assert media_kind_of(_document()) is MediaKind.DOCUMENT  # документ без атрибутов
+	assert media_kind_of(types.MessageMediaGeo(geo=types.GeoPointEmpty())) is MediaKind.OTHER
+
+
+async def test_scheduled_reads_id_media_and_topic() -> None:
+	"""Запись отложки несёт id, вид вложения и тему форума.
+
+	Тема — корневое сообщение (ADR-0021): у сообщения темы заголовок
+	ответа с ``forum_topic`` и корнем в ``reply_to_top_id`` (ответ
+	внутри темы) либо ``reply_to_msg_id`` (обычное сообщение темы).
+	"""
+	from telethon.tl import types
+
+	class _ScheduledClient(_FakeClient):
+		async def __call__(self, request: Any) -> Any:
+			if type(request).__name__ == "GetScheduledHistoryRequest":
+				return SimpleNamespace(
+					messages=[
+						_service_like(
+							id=2,
+							text="в теме",
+							date=datetime(2026, 9, 1, tzinfo=UTC),
+							media=types.MessageMediaPhoto(photo=types.PhotoEmpty(id=1)),
+							reply_to=types.MessageReplyHeader(
+								forum_topic=True, reply_to_msg_id=8, reply_to_top_id=40
+							),
+						),
+						_service_like(
+							id=3,
+							text="обычный ответ",
+							date=datetime(2026, 9, 2, tzinfo=UTC),
+							reply_to=types.MessageReplyHeader(reply_to_msg_id=8),
+						),
+						_service_like(
+							id=4,
+							text="в теме без вложенности",
+							date=datetime(2026, 9, 3, tzinfo=UTC),
+							reply_to=types.MessageReplyHeader(forum_topic=True, reply_to_msg_id=40),
+						),
+					]
+				)
+			return await super().__call__(request)
+
+	transport = _transport(_ScheduledClient())
+	await transport.start()
+	scheduled = await transport.get_scheduled("-1001")
+	assert [(item.id, item.media_kind, item.topic_id) for item in scheduled] == [
+		(2, MediaKind.PHOTO, 40),
+		(3, MediaKind.NONE, None),
+		(4, MediaKind.NONE, 40),
+	]
+
+
+class _ScheduledActionsClient(_FakeClient):
+	"""Клиент, помнящий запросы к очереди отложенных и правки."""
+
+	def __init__(self) -> None:
+		super().__init__()
+		self.requests: list[Any] = []
+		self.edits: list[tuple[Any, int, str, Any]] = []
+		self.edit_error: Exception | None = None
+		self.by_id: dict[int, Any] = {}
+
+	async def edit_message(self, entity: Any, message: int, text: str, **kwargs: Any) -> Any:
+		if self.edit_error is not None:
+			raise self.edit_error
+		self.edits.append((entity, message, text, kwargs.get("schedule")))
+		return SimpleNamespace(id=message)
+
+	async def __call__(self, request: Any) -> Any:
+		self.requests.append(request)
+		if type(request).__name__ == "GetScheduledMessagesRequest":
+			found = [self.by_id[i] for i in request.id if i in self.by_id]
+			return SimpleNamespace(messages=found)
+		return SimpleNamespace(updates=[])
+
+
+async def test_get_scheduled_message_reads_one_or_none() -> None:
+	"""Одна запись читается по id; пустышка или пустой список — None."""
+	from telethon.tl import types
+
+	client = _ScheduledActionsClient()
+	client.by_id[7] = _service_like(id=7, text="одна", date=datetime(2026, 9, 1, tzinfo=UTC))
+	client.by_id[8] = types.MessageEmpty(id=8, peer_id=types.PeerChannel(1))
+	transport = _transport(client)
+	await transport.start()
+	message = await transport.get_scheduled_message("-1001", 7)
+	assert message is not None and (message.id, message.text) == (7, "одна")
+	assert await transport.get_scheduled_message("-1001", 8) is None  # пустышка
+	assert await transport.get_scheduled_message("-1001", 9) is None  # нет вовсе
+	assert [list(r.id) for r in client.requests] == [[7], [8], [9]]
+
+
+async def test_edit_scheduled_passes_schedule_date() -> None:
+	"""Правка идёт через editMessage с датой отложки (иначе Telegram
+	искал бы запись в ленте, а не в очереди отложенных)."""
+	client = _ScheduledActionsClient()
+	transport = _transport(client)
+	await transport.start()
+	when = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+	await transport.edit_scheduled("-1001", 7, "новый текст", when)
+	assert client.edits == [("entity:-1001", 7, "новый текст", when)]
+
+
+async def test_edit_scheduled_treats_not_modified_as_done() -> None:
+	"""«Ничего не изменилось» — не сбой: запись уже в запрошенном виде."""
+	from telethon import errors
+
+	client = _ScheduledActionsClient()
+	client.edit_error = errors.MessageNotModifiedError(request=None)
+	transport = _transport(client)
+	await transport.start()
+	await transport.edit_scheduled("-1001", 7, "тот же", datetime(2026, 9, 20, tzinfo=UTC))
+
+
+async def test_scheduled_actions_translate_gone_and_bad_date() -> None:
+	"""Исчезнувшая запись — свой класс; отклонённое время — понятный текст."""
+	from telethon import errors
+
+	client = _ScheduledActionsClient()
+	transport = _transport(client)
+	await transport.start()
+	client.edit_error = errors.MessageIdInvalidError(request=None)
+	with pytest.raises(UserbotMessageGoneError, match="уже нет"):
+		await transport.edit_scheduled("-1001", 7, "x", datetime(2026, 9, 20, tzinfo=UTC))
+	client.edit_error = errors.ScheduleDateInvalidError(request=None)
+	with pytest.raises(UserbotUnavailableError, match="время"):
+		await transport.edit_scheduled("-1001", 7, "x", datetime(2026, 9, 20, tzinfo=UTC))
+
+
+async def test_send_now_and_delete_use_scheduled_queue_requests() -> None:
+	"""«Сейчас» и удаление — собственные запросы очереди отложенных.
+
+	Обычное ``delete_messages`` для отложек не годится: у очереди
+	свои id и свой метод (``messages.deleteScheduledMessages``).
+	"""
+	client = _ScheduledActionsClient()
+	transport = _transport(client)
+	await transport.start()
+	await transport.send_scheduled_now("-1001", [7, 8])
+	await transport.delete_scheduled("-1001", [9])
+	assert [(type(r).__name__, r.peer, list(r.id)) for r in client.requests] == [
+		("SendScheduledMessagesRequest", "entity:-1001", [7, 8]),
+		("DeleteScheduledMessagesRequest", "entity:-1001", [9]),
+	]

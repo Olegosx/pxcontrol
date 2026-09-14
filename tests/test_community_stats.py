@@ -82,7 +82,9 @@ class _FakeStatsGateway:
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		self._check(account_id)
 		return [
-			ScheduledMessage(text=f"пост {i}", scheduled_at=datetime(2026, 9, 9, tzinfo=UTC))
+			ScheduledMessage(
+				id=i + 1, text=f"пост {i}", scheduled_at=datetime(2026, 9, 9, tzinfo=UTC)
+			)
 			for i in range(self.scheduled)
 		]
 

@@ -29,7 +29,8 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `BotDto`, `TgAccountDto`, `TgApiDto`, `AiKeyDto` | `accounts.py` | аккаунты: боты, userbot, ключ API приложения (ADR-0018), ключи ИИ |
 | `CommunityDto`, `CommunityAccess` | `communities.py` | канал и итог перепроверки доступов |
 | `PostDraft` | `posts.py` | черновик публикации — единый вход для всех типов контента |
-| `PublishCapabilities`, `ScheduledPostDto` | `posts.py` | возможности канала; отложенная запись из Telegram |
+| `PublishCapabilities`, `ScheduledPostDto` | `posts.py` | возможности канала; отложенная запись из Telegram (с адресом `ScheduledRef`: сообщество, аккаунт-читатель, id записи в очереди отложенных) |
+| `ScheduledRef`, `ScheduledDraft` | `posts.py` | адрес отложенной записи для действий над ней; запись целиком для формы правки (текст, время, вид вложения, тема, предел текста по аккаунту) |
 | `QueueItemDto` | `publish_queue.py` | элемент очереди отправки (статус — общий `JobStatus`) |
 | `PresetDto`, `PresetFields`, `FrameCandidate` | `video.py` | пресет обработки видео и кадры-кандидаты |
 | `BitrateAdvice` | `video.py` | рекомендация битрейта для исходника больше лимита Telegram |
@@ -48,10 +49,10 @@ Pydantic не нужна, а неизменяемость защищает от 
 
 | Тип | Роль |
 | --- | --- |
-| `MediaKind` | тип вложения поста (текст/фото/видео/аудио/файл) |
+| `MediaKind` | тип вложения поста (текст/фото/видео/аудио/файл; `OTHER` — вложение, которого приложение не создаёт, а только читает в отложенных: опрос, геопозиция — признак `creatable`) |
 | `CommunityInfo` | канал, проверенный любым транспортом (бот или userbot) |
 | `OutgoingPost` | исходящий пост для транспорта |
-| `ScheduledMessage` | отложенная запись, прочитанная из Telegram |
+| `ScheduledMessage` | отложенная запись, прочитанная из Telegram: id в очереди отложенных, текст, время, вид вложения, тема форума |
 | `ServiceMessageKind`, `ServiceMessageInfo`, `ServiceMessagesPage` | вид служебной записи, сама запись и страница истории (ADR-0026) |
 | `ParticipantsPage` | страница списка участников с удалёнными аккаунтами (ADR-0026) |
 

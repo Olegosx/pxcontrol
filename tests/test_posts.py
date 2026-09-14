@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,11 +15,18 @@ from pxcontrol.engine.services.posts import (
 	PostError,
 	PostNotReadyError,
 	PostsService,
+	ScheduledDraft,
+	ScheduledGoneError,
 	ScheduledList,
 	ScheduledPostDto,
+	ScheduledRef,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
-from pxcontrol.engine.telegram.mtproto import UserbotFloodError, UserbotUnavailableError
+from pxcontrol.engine.telegram.mtproto import (
+	UserbotFloodError,
+	UserbotMessageGoneError,
+	UserbotUnavailableError,
+)
 from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	MediaKind,
@@ -43,6 +51,13 @@ class _FakeGateway:
 		self.published: list[tuple[int, str, OutgoingPost]] = []
 		self.userbot_ok = True
 		self.premium_ids: set[int] = set()
+		# отложки: чтение одной записи, журнал действий и признак «уже нет»
+		self.scheduled_by_id: dict[int, ScheduledMessage] = {}
+		self.scheduled_reads: list[tuple[int, str, int]] = []
+		self.scheduled_edits: list[tuple[int, str, int, str, datetime]] = []
+		self.scheduled_sent: list[tuple[int, str, tuple[int, ...]]] = []
+		self.scheduled_deleted: list[tuple[int, str, tuple[int, ...]]] = []
+		self.scheduled_gone = False
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return account_id in self.premium_ids
@@ -90,10 +105,34 @@ class _FakeGateway:
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		return [
 			ScheduledMessage(
+				id=501,
 				text="Отложенный текст",
 				scheduled_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
 			)
 		]
+
+	async def get_scheduled_message(
+		self, account_id: int, chat_id: str, message_id: int
+	) -> ScheduledMessage | None:
+		self.scheduled_reads.append((account_id, chat_id, message_id))
+		return self.scheduled_by_id.get(message_id)
+
+	async def edit_scheduled(
+		self, account_id: int, chat_id: str, message_id: int, text: str, when: datetime
+	) -> None:
+		if self.scheduled_gone:
+			raise UserbotMessageGoneError("Этой записи в Telegram уже нет.")
+		self.scheduled_edits.append((account_id, chat_id, message_id, text, when))
+
+	async def send_scheduled_now(
+		self, account_id: int, chat_id: str, message_ids: list[int]
+	) -> None:
+		self.scheduled_sent.append((account_id, chat_id, tuple(message_ids)))
+
+	async def delete_scheduled(self, account_id: int, chat_id: str, message_ids: list[int]) -> None:
+		if self.scheduled_gone:
+			raise UserbotMessageGoneError("Этой записи в Telegram уже нет.")
+		self.scheduled_deleted.append((account_id, chat_id, tuple(message_ids)))
 
 
 async def _add_account(db: Database, label: str = "@ub") -> int:
@@ -201,6 +240,11 @@ async def test_publish_validations(db: Database, tmp_path: Path) -> None:
 		await service.publish(PostDraft(community_id))
 	with pytest.raises(PostError, match="не указан тип"):
 		await service.publish(PostDraft(community_id, media_path="x.bin"))
+	# вид «прочее» приложение только читает (отложки из клиента Telegram)
+	with pytest.raises(PostError, match="не отправляет"):
+		await service.publish(
+			PostDraft(community_id, media_path="x.bin", media_kind=MediaKind.OTHER)
+		)
 	with pytest.raises(PostError, match="не найден"):
 		await service.publish(
 			PostDraft(
@@ -442,10 +486,12 @@ async def test_list_scheduled_reads_from_telegram(db: Database) -> None:
 	scheduled = await service.list_scheduled()
 	assert scheduled.items == [
 		ScheduledPostDto(
-			community_id,
-			"Канал",
-			"Отложенный текст",
-			datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+			community_id=community_id,
+			community_title="Канал",
+			account_id=await _bound_account(db, community_id) or 0,
+			message_id=501,
+			text_preview="Отложенный текст",
+			scheduled_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
 		)
 	]
 	assert scheduled.unread == ()  # все сообщества опрошены
@@ -753,7 +799,7 @@ async def test_list_scheduled_isolates_flooded_account(db: Database) -> None:
 		async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 			if account_id == self.flooded_id:
 				raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
-			return [ScheduledMessage(text="жив", scheduled_at=datetime.now(UTC))]
+			return [ScheduledMessage(id=1, text="жив", scheduled_at=datetime.now(UTC))]
 
 	flooded_community = await _add_community(db)
 	flooded_id = await _bound_account(db, flooded_community)
@@ -877,8 +923,8 @@ async def test_list_scheduled_group_reads_all_members(db: Database) -> None:
 	service = PostsService(db, gateway)
 	_community_id, (first, second) = await _add_group_with_members(db)
 	gateway.per_account = {
-		first: [ScheduledMessage("от первого", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))],
-		second: [ScheduledMessage("от второго", datetime(2026, 7, 13, 11, 0, tzinfo=UTC))],
+		first: [ScheduledMessage(1, "от первого", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))],
+		second: [ScheduledMessage(2, "от второго", datetime(2026, 7, 13, 11, 0, tzinfo=UTC))],
 	}
 	scheduled = await service.list_scheduled()
 	assert [item.text_preview for item in scheduled.items] == ["от второго", "от первого"]
@@ -916,7 +962,7 @@ async def test_list_scheduled_flood_of_member_spares_others(db: Database) -> Non
 	_community_id, (first, second) = await _add_group_with_members(db)
 	gateway.flooded_accounts = {first}
 	gateway.per_account = {
-		second: [ScheduledMessage("живой", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))],
+		second: [ScheduledMessage(3, "живой", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))],
 	}
 	scheduled = await service.list_scheduled()
 	assert [item.text_preview for item in scheduled.items] == ["живой"]
@@ -929,10 +975,145 @@ async def test_list_scheduled_dedups_identical(db: Database) -> None:
 	gateway = _PerAccountGateway()
 	service = PostsService(db, gateway)
 	_community_id, (first, second) = await _add_group_with_members(db)
-	same = ScheduledMessage("общая", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))
+	same = ScheduledMessage(7, "общая", datetime(2026, 7, 13, 12, 0, tzinfo=UTC))
 	gateway.per_account = {first: [same], second: [same]}
 	scheduled = await service.list_scheduled()
 	assert [item.text_preview for item in scheduled.items] == ["общая"]
+	assert scheduled.items[0].account_id == first  # остаётся первый читатель
+
+
+async def test_list_scheduled_keeps_twins_with_different_ids(db: Database) -> None:
+	"""Два поста с одинаковым текстом и временем — два поста, а не дубль.
+
+	Тождество записи — её id в очереди сообщества, а не содержимое:
+	раньше схлопывание по «текст + время» прятало бы второй из двух
+	одинаковых постов, и его нельзя было бы ни увидеть, ни удалить.
+	"""
+	gateway = _PerAccountGateway()
+	service = PostsService(db, gateway)
+	_community_id, (first, _second) = await _add_group_with_members(db)
+	when = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+	gateway.per_account = {
+		first: [ScheduledMessage(1, "близнец", when), ScheduledMessage(2, "близнец", when)]
+	}
+	scheduled = await service.list_scheduled()
+	assert [item.message_id for item in scheduled.items] == [1, 2]
+
+
+# --- действия над отложенными (истина — сервер Telegram) --------------------
+
+
+def _scheduled_service(db: Database) -> tuple[PostsService, _FakeGateway]:
+	gateway = _FakeGateway()
+	return PostsService(db, gateway), gateway
+
+
+async def _scheduled_ref(db: Database, community_id: int, message_id: int = 501) -> ScheduledRef:
+	account_id = await _bound_account(db, community_id)
+	assert account_id is not None
+	return ScheduledRef(community_id, account_id, message_id)
+
+
+async def test_scheduled_draft_reads_fresh_record_with_limit(db: Database) -> None:
+	"""Форма правки получает запись с сервера и предел текста по аккаунту."""
+	service, gateway = _scheduled_service(db)
+	community_id = await _add_community(db)
+	ref = await _scheduled_ref(db, community_id)
+	when = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+	gateway.scheduled_by_id[501] = ScheduledMessage(
+		501, "полный текст подписи", when, media_kind=MediaKind.PHOTO, topic_id=None
+	)
+	draft = await service.scheduled_draft(ref)
+	assert draft.ref == ref
+	assert draft.community_title == "Канал"
+	assert draft.text == "полный текст подписи"
+	assert draft.when == when
+	assert draft.media_kind is MediaKind.PHOTO
+	assert draft.text_limit == 1024  # подпись, аккаунт без Premium
+	assert draft.text_editable is True
+	assert gateway.scheduled_reads == [(ref.account_id, "-1001", 501)]
+
+	gateway.premium_ids.add(ref.account_id)
+	assert (await service.scheduled_draft(ref)).text_limit == 4096
+
+
+async def test_scheduled_draft_of_gone_record(db: Database) -> None:
+	"""Пустой ответ на чтение — «записи уже нет», а не пустая форма."""
+	service, _gateway = _scheduled_service(db)
+	community_id = await _add_community(db)
+	with pytest.raises(ScheduledGoneError, match="уже нет"):
+		await service.scheduled_draft(await _scheduled_ref(db, community_id))
+
+
+def _draft(ref: ScheduledRef, **overrides: Any) -> ScheduledDraft:
+	fields: dict[str, Any] = {
+		"ref": ref,
+		"community_title": "Канал",
+		"text": "было",
+		"when": datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+		"media_kind": MediaKind.NONE,
+		"topic_id": None,
+		"text_limit": 4096,
+	}
+	fields.update(overrides)
+	return ScheduledDraft(**fields)
+
+
+async def test_edit_scheduled_passes_to_reader_account(db: Database) -> None:
+	"""Правка уходит тем аккаунтом, чьим чтением запись попала в список."""
+	service, gateway = _scheduled_service(db)
+	community_id = await _add_community(db)
+	ref = await _scheduled_ref(db, community_id)
+	when = datetime.now(UTC) + timedelta(hours=1)
+	await service.edit_scheduled(_draft(ref), "стало", when)
+	assert gateway.scheduled_edits == [(ref.account_id, "-1001", 501, "стало", when)]
+
+
+async def test_edit_scheduled_rejects_bad_input(db: Database) -> None:
+	"""Пустой текст у записи без вложения, длина и близкое время — отказ до сети."""
+	service, gateway = _scheduled_service(db)
+	community_id = await _add_community(db)
+	ref = await _scheduled_ref(db, community_id)
+	soon = datetime.now(UTC) + timedelta(seconds=10)
+	later = datetime.now(UTC) + timedelta(hours=1)
+	with pytest.raises(PostError, match="пуст"):
+		await service.edit_scheduled(_draft(ref), "", later)
+	with pytest.raises(PostError, match="минуту"):
+		await service.edit_scheduled(_draft(ref), "текст", soon)
+	# предел подписи (1024) у записи с вложением, аккаунт без Premium
+	with pytest.raises(PostError, match="1024"):
+		await service.edit_scheduled(_draft(ref, media_kind=MediaKind.VIDEO), "я" * 1025, later)
+	# у вложения не наших видов текста нет — правится только время
+	with pytest.raises(PostError, match="только время"):
+		await service.edit_scheduled(_draft(ref, media_kind=MediaKind.OTHER), "текст", later)
+	assert gateway.scheduled_edits == []
+	# а пустая подпись у вложения и время у «прочего» — законны
+	await service.edit_scheduled(_draft(ref, media_kind=MediaKind.VIDEO), "", later)
+	await service.edit_scheduled(_draft(ref, media_kind=MediaKind.OTHER), "было", later)
+	assert [edit[3] for edit in gateway.scheduled_edits] == ["", "было"]
+
+
+async def test_send_now_and_delete_scheduled(db: Database) -> None:
+	"""«Сейчас» и «Удалить» адресуются аккаунтом читателя и id записи."""
+	service, gateway = _scheduled_service(db)
+	community_id = await _add_community(db)
+	ref = await _scheduled_ref(db, community_id, 77)
+	await service.send_scheduled_now(ref)
+	await service.delete_scheduled(ref)
+	assert gateway.scheduled_sent == [(ref.account_id, "-1001", (77,))]
+	assert gateway.scheduled_deleted == [(ref.account_id, "-1001", (77,))]
+
+
+async def test_scheduled_actions_translate_gone_record(db: Database) -> None:
+	"""Отказ Telegram «записи нет» приходит одним классом с пустым чтением."""
+	service, gateway = _scheduled_service(db)
+	community_id = await _add_community(db)
+	ref = await _scheduled_ref(db, community_id)
+	gateway.scheduled_gone = True
+	with pytest.raises(ScheduledGoneError):
+		await service.delete_scheduled(ref)
+	with pytest.raises(ScheduledGoneError):
+		await service.edit_scheduled(_draft(ref), "x", datetime.now(UTC) + timedelta(hours=1))
 
 
 # --- пределы длины текста ---------------------------------------------------

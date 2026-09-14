@@ -142,8 +142,20 @@ CONTENT_KINDS: list[tuple[str, MediaKind, str]] = [
 ]
 
 
+#: Подпись вложения, которого приложение не создаёт (опрос, геопозиция…):
+#: такие приходят только из Telegram — в отложенных, поставленных из клиента.
+READ_ONLY_KIND_LABEL = "Вложение"
+
+
 def kind_label(kind: MediaKind) -> str:
-	"""Подпись типа контента («Видео», «Файл»…) для сообщений и сегментов."""
+	"""Подпись типа контента («Видео», «Файл»…) для сообщений и сегментов.
+
+	Перечень ``CONTENT_KINDS`` знает только виды, которые человек
+	выбирает в форме; вид, который приложение лишь читает, получает
+	общую подпись — иначе карточка отложки с опросом падала бы поиском.
+	"""
+	if not kind.creatable:
+		return READ_ONLY_KIND_LABEL
 	return next(label for label, item_kind, _filter in CONTENT_KINDS if item_kind is kind)
 
 

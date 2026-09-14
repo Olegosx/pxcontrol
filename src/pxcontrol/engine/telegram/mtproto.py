@@ -104,6 +104,16 @@ class UserbotScheduleFullError(UserbotUnavailableError):
 	"""
 
 
+class UserbotMessageGoneError(UserbotUnavailableError):
+	"""Записи, к которой обращались, в Telegram уже нет (``MESSAGE_ID_INVALID``).
+
+	Отложка ушла в ленту или удалена из другого клиента между чтением
+	списка и действием — штатная гонка (истина живёт на сервере,
+	ADR-0010). Отдельный класс: это не отказ в правах и не сбой связи,
+	а сигнал перечитать список.
+	"""
+
+
 class UserbotFloodError(TelegramFloodError, UserbotUnavailableError):
 	"""Флуд-лимит на userbot-аккаунте: «подождите N секунд».
 
@@ -174,6 +184,14 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		# Перевод живёт здесь, а не отдельной веткой except у операции:
 		# там его уже не поймать — этот маппер переводит раньше
 		return UserbotDeleteForbiddenError("Telegram не разрешает удалить эти записи.")
+	if isinstance(exc, errors.MessageIdInvalidError):
+		return UserbotMessageGoneError(
+			"Этой записи в Telegram уже нет — она опубликована или удалена. Обновите список."
+		)
+	if isinstance(exc, errors.ScheduleDateInvalidError):
+		return UserbotUnavailableError(
+			"Telegram отклонил время публикации — выберите другое время."
+		)
 	if isinstance(exc, errors.SlowModeWaitError):
 		# медленный режим группы действует на участников (ADR-0022):
 		# по природе это «подожди и повтори» — очередь умеет сама
@@ -418,6 +436,60 @@ def service_message_kind(action: Any) -> ServiceMessageKind:
 	):
 		return ServiceMessageKind.PROTECTED
 	return ServiceMessageKind.OTHER
+
+
+def media_kind_of(media: Any) -> MediaKind:
+	"""Переводит вложение сообщения Telegram в вид вложения приложения.
+
+	Чистая функция (тестируется без сети). Превью ссылки
+	(``MessageMediaWebPage``) вложением не считается — это текст.
+	Документ различается по атрибутам так же, как его различает
+	Telethon (``Message.video``/``audio``): видео — атрибут видео,
+	аудио и голосовое — атрибут аудио, остальное — файл. Всё, чего
+	приложение не создаёт (опрос, геопозиция, контакт, стикер…), —
+	``OTHER``: у такой записи правится только время.
+	"""
+	from telethon.tl import types
+
+	if media is None or isinstance(media, types.MessageMediaWebPage):
+		return MediaKind.NONE
+	if isinstance(media, types.MessageMediaPhoto):
+		return MediaKind.PHOTO
+	if isinstance(media, types.MessageMediaDocument):
+		document = getattr(media, "document", None)
+		for attribute in getattr(document, "attributes", None) or ():
+			if isinstance(attribute, types.DocumentAttributeVideo):
+				return MediaKind.VIDEO
+			if isinstance(attribute, types.DocumentAttributeAudio):
+				return MediaKind.AUDIO
+		return MediaKind.DOCUMENT
+	return MediaKind.OTHER
+
+
+def _topic_of(message: Any) -> int | None:
+	"""Тема форума, в которую адресовано сообщение (None — общая лента).
+
+	Тема Telegram — это её корневое сообщение (ADR-0021): сообщение
+	в теме несёт заголовок ответа с признаком ``forum_topic``, где
+	корень темы — ``reply_to_top_id`` (у ответа внутри темы) либо
+	``reply_to_msg_id`` (у обычного сообщения темы).
+	"""
+	header = getattr(message, "reply_to", None)
+	if header is None or not getattr(header, "forum_topic", False):
+		return None
+	top = getattr(header, "reply_to_top_id", None)
+	return int(top) if top is not None else getattr(header, "reply_to_msg_id", None)
+
+
+def _scheduled_from(message: Any) -> ScheduledMessage:
+	"""Собирает запись границы из сообщения Telethon (у него есть дата)."""
+	return ScheduledMessage(
+		id=int(message.id),
+		text=getattr(message, "message", "") or "",
+		scheduled_at=message.date,
+		media_kind=media_kind_of(getattr(message, "media", None)),
+		topic_id=_topic_of(message),
+	)
 
 
 def _can_delete_messages(perms: Any) -> bool:
@@ -1145,13 +1217,117 @@ class MtprotoTransport:
 		# а среди записей попадаются пустышки (удалённая отложка) —
 		# у них нет даты, и дальше по коду она обещана как дата
 		return [
-			ScheduledMessage(
-				text=getattr(message, "message", "") or "",
-				scheduled_at=message.date,
-			)
+			_scheduled_from(message)
 			for message in getattr(result, "messages", [])
 			if getattr(message, "date", None) is not None
 		]
+
+	async def get_scheduled_message(self, chat_id: str, message_id: int) -> ScheduledMessage | None:
+		"""Читает одну отложенную запись целиком (свежее состояние с сервера).
+
+		Форма правки открывается по этому чтению, а не по снимку списка:
+		запись могли изменить из другого клиента Telegram (ADR-0010).
+
+		Returns:
+			Запись или None — её в очереди отложенных больше нет
+			(опубликована или удалена): Telegram отвечает пустышкой
+			без даты либо пустым списком.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.messages import GetScheduledMessagesRequest
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			result = await client(GetScheduledMessagesRequest(peer=entity, id=[message_id]))
+		for message in getattr(result, "messages", []):
+			if getattr(message, "date", None) is not None and message.id == message_id:
+				return _scheduled_from(message)
+		return None
+
+	async def edit_scheduled(
+		self, chat_id: str, message_id: int, text: str, when: datetime
+	) -> None:
+		"""Меняет текст и/или время отложенной записи (``messages.editMessage``).
+
+		Тот же метод, что правит обычные сообщения, но с ``schedule_date``:
+		так Telegram понимает, что правится запись из очереди отложенных
+		(core.telegram.org/api/scheduled-messages). Вложение и тема
+		здесь не меняются: у метода нет поля адресата, а замена файла —
+		загрузка с прогрессом, то есть задание очереди, а не правка.
+		Ответ «ничего не изменилось» (``MESSAGE_NOT_MODIFIED``) — не сбой:
+		запись уже в запрошенном состоянии.
+
+		Args:
+			chat_id: сообщество.
+			message_id: id записи в очереди отложенных.
+			text: новый текст (у записи с вложением — подпись; пустая
+				строка снимает подпись).
+			when: новый момент публикации.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotMessageGoneError: Записи в очереди уже нет.
+			UserbotAccessError: Нет права править (подтверждённый отказ).
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Время отклонено и прочие отказы.
+		"""
+		from telethon import errors
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			try:
+				await client.edit_message(entity, message_id, text, schedule=when)
+			except errors.MessageNotModifiedError:
+				logger.info(
+					"Отложка %s в чате %s уже в запрошенном виде — правка не нужна.",
+					message_id,
+					chat_id,
+				)
+				return
+		logger.info("Отложка %s в чате %s изменена (публикация %s).", message_id, chat_id, when)
+
+	async def send_scheduled_now(self, chat_id: str, message_ids: list[int]) -> None:
+		"""Публикует отложенные записи немедленно (``messages.sendScheduledMessages``).
+
+		Записи уходят из очереди отложенных в ленту сообщества; в ленте
+		у них будут другие id.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotMessageGoneError: Записи в очереди уже нет.
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.messages import SendScheduledMessagesRequest
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			await client(SendScheduledMessagesRequest(peer=entity, id=message_ids))
+		logger.info("Отложки %s в чате %s опубликованы сейчас.", message_ids, chat_id)
+
+	async def delete_scheduled(self, chat_id: str, message_ids: list[int]) -> None:
+		"""Удаляет отложенные записи, не публикуя (``messages.deleteScheduledMessages``).
+
+		Обычное удаление сообщений (``delete_messages``) для очереди
+		отложенных не годится — у неё собственный метод и собственные id.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotMessageGoneError: Записи в очереди уже нет.
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.messages import DeleteScheduledMessagesRequest
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			await client(DeleteScheduledMessagesRequest(peer=entity, id=message_ids))
+		logger.info("Отложки %s в чате %s удалены без публикации.", message_ids, chat_id)
 
 
 async def _fetch_stats(client: Any, entity: Any) -> tuple[Any, int | None]:
