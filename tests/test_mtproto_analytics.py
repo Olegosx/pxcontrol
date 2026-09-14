@@ -65,3 +65,63 @@ def test_analytics_from_takes_every_field() -> None:
 	assert analytics.mute == ()
 	assert analytics.languages[0].name == "Русский" and analytics.languages[0].value == 70
 	assert analytics.weekdays == ()
+
+
+class _Migrating:
+	"""Подставной клиент: домашний дата-центр статистику не отдаёт, шлёт в другой.
+
+	Токен графика принимает только одолженный канал того дата-центра —
+	как настоящий Telegram (домашний отвечает GRAPH_INVALID_RELOAD).
+	"""
+
+	def __init__(self) -> None:
+		from telethon.tl.types import DataJSON, StatsGraph
+
+		self.home_calls: list[str] = []
+		self.borrowed: list[int] = []
+		self.returned = 0
+		self.graph = StatsGraph(json=DataJSON('{"columns": [["x", 1], ["y0", 5]]}'))
+
+	async def __call__(self, request: object) -> object:
+		from telethon.errors import GraphInvalidReloadError, StatsMigrateError
+		from telethon.tl.functions.stats import LoadAsyncGraphRequest
+
+		self.home_calls.append(type(request).__name__)
+		if isinstance(request, LoadAsyncGraphRequest):
+			raise GraphInvalidReloadError(request)
+		raise StatsMigrateError(request, capture=4)
+
+	async def _borrow_exported_sender(self, dc: int) -> SimpleNamespace:
+		self.borrowed.append(dc)
+
+		async def send(request: object) -> object:
+			from telethon.tl.functions.stats import LoadAsyncGraphRequest
+			from telethon.tl.types import StatsGraphAsync
+
+			if isinstance(request, LoadAsyncGraphRequest):
+				assert request.token == "t1"
+				return self.graph
+			return SimpleNamespace(
+				period=None,
+				followers=_pair(10.0, 9.0),
+				growth_graph=StatsGraphAsync(token="t1"),
+			)
+
+		return SimpleNamespace(send=send)
+
+	async def _return_exported_sender(self, sender: object) -> None:
+		self.returned += 1
+
+
+async def test_async_graphs_load_through_stats_dc() -> None:
+	from pxcontrol.engine.telegram.mtproto import _fetch_stats, _graph
+
+	client = _Migrating()
+	stats, dc = await _fetch_stats(client, "entity")
+	assert dc == 4 and client.borrowed == [4] and client.returned == 1
+	assert stats.followers.current == 10.0
+	# догрузка через канал того же дата-центра — ряд читается
+	sender = await client._borrow_exported_sender(dc)
+	assert [s.points for s in await _graph(sender.send, stats.growth_graph)] == [((1, 5.0),)]
+	# через домашний дата-центр токен отклоняется — пустой ряд, не ошибка
+	assert await _graph(client, stats.growth_graph) == []

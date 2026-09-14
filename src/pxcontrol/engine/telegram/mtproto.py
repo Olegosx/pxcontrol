@@ -857,12 +857,15 @@ class MtprotoTransport:
 	async def community_analytics(self, chat_id: str) -> CommunityAnalytics:
 		"""Встроенная статистика Telegram: рост, приходы/уходы, часы, просмотры.
 
-		``client.get_stats`` сам выбирает метод по виду сообщества
-		(канал / супергруппа) и переотправляет запрос в дата-центр
-		статистики (ошибка миграции ``STATS_MIGRATE``). Графики, отданные
-		«по токену» (``StatsGraphAsync``), догружаются вторым запросом —
-		тоже в тот дата-центр. Сырые объекты дальше транспорта не уходят:
-		JSON графиков разбирает :mod:`stats_graph`.
+		Метод выбирается по виду сообщества (канал / супергруппа — как
+		в ``client.get_stats`` Telethon); Telegram может ответить
+		«мигрируй» (``STATS_MIGRATE``) — тогда и статистика, и все
+		догрузки графиков «по токену» (``StatsGraphAsync``) идут через
+		один одолженный канал в дата-центр статистики: токен выдан им,
+		и домашний дата-центр отвечает на него не миграцией,
+		а ``GRAPH_INVALID_RELOAD`` (ловилось живьём). Сырые объекты
+		дальше транспорта не уходят: JSON графиков разбирает
+		:mod:`stats_graph`.
 
 		Raises:
 			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
@@ -873,52 +876,31 @@ class MtprotoTransport:
 		"""
 		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
-			stats = await client.get_stats(entity)
-			growth = await self._graph(client, getattr(stats, "growth_graph", None))
-			# у канала ряд подписок/отписок — followers_graph, у группы — members_graph
-			flow = await self._graph(
-				client,
-				getattr(stats, "followers_graph", None) or getattr(stats, "members_graph", None),
-			)
-			hours = await self._graph(client, getattr(stats, "top_hours_graph", None))
-			# остальные графики — все, что отдал ответ: ряды по дням и доли
-			daily_graphs = {
-				field: await self._graph(client, getattr(stats, attr, None))
-				for field, attr in _DAILY_GRAPHS.items()
-			}
-			share_graphs = {
-				field: await self._graph(client, _first_attr(stats, attrs))
-				for field, attrs in _SHARE_GRAPHS.items()
-			}
-		return _analytics_from(stats, growth, flow, hours, daily_graphs, share_graphs)
-
-	async def _graph(self, client: Any, graph: Any) -> list[GraphSeries]:
-		"""Ряды графика: готовый JSON или догрузка по токену.
-
-		График с ошибкой построения (``StatsGraphError``) и отсутствующий
-		график — пустой список: вкладка покажет «нет данных».
-		"""
-		from telethon.errors import StatsMigrateError
-		from telethon.tl.functions.stats import LoadAsyncGraphRequest
-		from telethon.tl.types import StatsGraph, StatsGraphAsync
-
-		if isinstance(graph, StatsGraphAsync):
-			request = LoadAsyncGraphRequest(token=graph.token)
+			stats, dc = await _fetch_stats(client, entity)
+			sender = await client._borrow_exported_sender(dc) if dc is not None else None  # noqa: SLF001 — приём самого Telethon
 			try:
-				graph = await client(request)
-			except StatsMigrateError as exc:
-				# тот же дата-центр статистики, что и у основного запроса:
-				# Telethon переотправляет сам только get_stats, а догрузку
-				# по токену приходится проводить через одолженный канал
-				sender = await client._borrow_exported_sender(exc.dc)  # noqa: SLF001 — приём самого Telethon
-				try:
-					graph = await sender.send(request)
-				finally:
+				send = sender.send if sender is not None else client
+				growth = await _graph(send, getattr(stats, "growth_graph", None))
+				# у канала ряд подписок/отписок — followers_graph, у группы — members_graph
+				flow = await _graph(
+					send,
+					getattr(stats, "followers_graph", None)
+					or getattr(stats, "members_graph", None),
+				)
+				hours = await _graph(send, getattr(stats, "top_hours_graph", None))
+				# остальные графики — все, что отдал ответ: ряды по дням и доли
+				daily_graphs = {
+					field: await _graph(send, getattr(stats, attr, None))
+					for field, attr in _DAILY_GRAPHS.items()
+				}
+				share_graphs = {
+					field: await _graph(send, _first_attr(stats, attrs))
+					for field, attrs in _SHARE_GRAPHS.items()
+				}
+			finally:
+				if sender is not None:
 					await client._return_exported_sender(sender)  # noqa: SLF001
-		if not isinstance(graph, StatsGraph):
-			return []
-		payload = getattr(getattr(graph, "json", None), "data", None)
-		return parse_graph(payload) if isinstance(payload, str) else []
+		return _analytics_from(stats, growth, flow, hours, daily_graphs, share_graphs)
 
 	async def history_marks(self, chat_id: str, *, with_created: bool) -> HistoryMarks:
 		"""Момент последнего сообщения и — по запросу — создания сообщества.
@@ -1170,6 +1152,60 @@ class MtprotoTransport:
 			for message in getattr(result, "messages", [])
 			if getattr(message, "date", None) is not None
 		]
+
+
+async def _fetch_stats(client: Any, entity: Any) -> tuple[Any, int | None]:
+	"""Ответ статистики и дата-центр, куда Telegram отправил за ней.
+
+	Повторяет выбор метода ``client.get_stats`` Telethon (сначала канал,
+	по ``BROADCAST_REQUIRED`` — супергруппа), но дата-центр из ошибки
+	миграции возвращает наружу: он нужен и догрузкам графиков. None —
+	миграции не было, всё идёт обычным путём.
+	"""
+	from telethon.errors import BroadcastRequiredError, StatsMigrateError
+	from telethon.tl.functions.stats import GetBroadcastStatsRequest, GetMegagroupStatsRequest
+
+	request: Any = GetBroadcastStatsRequest(entity)
+	try:
+		return await client(request), None
+	except StatsMigrateError as exc:
+		dc = exc.dc
+	except BroadcastRequiredError:
+		request = GetMegagroupStatsRequest(entity)
+		try:
+			return await client(request), None
+		except StatsMigrateError as exc:
+			dc = exc.dc
+	sender = await client._borrow_exported_sender(dc)  # noqa: SLF001 — приём самого Telethon
+	try:
+		return await sender.send(request), dc
+	finally:
+		await client._return_exported_sender(sender)  # noqa: SLF001
+
+
+async def _graph(send: Any, graph: Any) -> list[GraphSeries]:
+	"""Ряды графика: готовый JSON или догрузка по токену через ``send``.
+
+	``send`` — клиент или ``sender.send`` одолженного канала в дата-центр
+	статистики. График с ошибкой построения (``StatsGraphError``),
+	отсутствующий и не догрузившийся (``GRAPH_INVALID_RELOAD`` — токен
+	протух или чужой) — пустой список: вкладка покажет «нет данных»,
+	а остальные графики прохода не пострадают.
+	"""
+	from telethon.errors import GraphInvalidReloadError
+	from telethon.tl.functions.stats import LoadAsyncGraphRequest
+	from telethon.tl.types import StatsGraph, StatsGraphAsync
+
+	if isinstance(graph, StatsGraphAsync):
+		try:
+			graph = await send(LoadAsyncGraphRequest(token=graph.token))
+		except GraphInvalidReloadError:
+			logger.warning("График статистики Telegram не догрузился: токен отклонён.")
+			return []
+	if not isinstance(graph, StatsGraph):
+		return []
+	payload = getattr(getattr(graph, "json", None), "data", None)
+	return parse_graph(payload) if isinstance(payload, str) else []
 
 
 #: Графики «ряды по дням»: поле границы → атрибут ответа Telegram.
