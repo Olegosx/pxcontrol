@@ -52,7 +52,6 @@ from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	ErrorLabel,
-	QueuePanel,
 	WorkDialog,
 	clear_layout,
 	confirm_delete,
@@ -61,6 +60,7 @@ from pxcontrol.ui.pages.common import (
 	format_local,
 	list_area,
 )
+from pxcontrol.ui.pages.queue_panel import QueuePanel
 
 #: Человеческие названия видов служебных записей (ADR-0026).
 _KIND_TITLES = {

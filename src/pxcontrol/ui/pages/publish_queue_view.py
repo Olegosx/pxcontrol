@@ -4,20 +4,19 @@
 кнопка «Вся очередь…» открывает этот диалог со всеми элементами.
 Список живой (опрашивается тем же способом, что панель страницы, —
 через :class:`QueuePanel`), действия у карточек те же: «Отмена»
-у живых, «Повторить»/«Убрать» у ошибок. Правило показа (фильтр
-по статусу и каналу + сортировка) и нарезка на страницы — чистые
-функции :func:`apply_view` и :func:`paginate`, они тестируются без Qt.
+у живых, «Повторить»/«Убрать» у ошибок. Правило показа — чистая
+:func:`apply_view` поверх общих правил списков (:mod:`list_view`:
+сортировка, фильтры по сообществу и слоту, страницы); от общего
+у очереди — фильтр по статусу и порядок постановки.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from enum import StrEnum
 
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, ComboBox, PushButton, StrongBodyLabel
+from PySide6.QtWidgets import QVBoxLayout, QWidget
+from qfluentwidgets import StrongBodyLabel
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
@@ -29,11 +28,7 @@ from pxcontrol.engine.services.publish_queue import (
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	SLOT_NOW,
-	DtoComboBox,
-	QueuePanel,
 	WorkDialog,
-	bind,
 	community_logo,
 	format_local,
 	list_area,
@@ -41,19 +36,24 @@ from pxcontrol.ui.pages.common import (
 	slot_color,
 	slot_label,
 )
+from pxcontrol.ui.pages.list_view import (
+	ListPage,
+	ListWords,
+	PagerRow,
+	ViewBar,
+	filter_by_community,
+	filter_by_slot,
+	paginate,
+	sort_by_community,
+	sort_nearest,
+	step_page,
+	summary_text,
+)
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
+from pxcontrol.ui.pages.queue_panel import QueuePanel
 
-#: Служебный первый пункт фильтра по сообществу.
-_ALL_COMMUNITIES = "Все сообщества"
-
-#: Служебный первый пункт фильтра по слоту времени.
-_ALL_SLOTS = "Все слоты"
-
-#: Сколько элементов очереди показывать на одной странице. Полсотни
-#: карточек перекрывают экран с запасом и строятся мгновенно, а очередь
-#: (ADR-0016) — это хвост сверх сотни отложек на канал: показ всей разом
-#: перестраивал бы сотни виджетов при каждой смене состава.
-PAGE_SIZE = 50
+#: Слова итоговой строки под очередью.
+QUEUE_WORDS = ListWords(empty="Очередь пуста.", of_all="элементов очереди", within="в очереди")
 
 
 class QueueSort(StrEnum):
@@ -103,32 +103,43 @@ def queue_subtitle(item: QueueItemDto, *, with_community: bool = True) -> str:
 	return subtitle
 
 
-#: Размер логотипа сообщества в шапке карточки очереди (пиксели).
-_LOGO_SIZE = 24
+#: Размер логотипа сообщества в шапке карточки (пиксели).
+LOGO_SIZE = 24
 
 
-def queue_leading(item: QueueItemDto, parent: QWidget, avatar_path: str | None) -> list[QWidget]:
-	"""Начало шапки карточки: логотип сообщества и метка слота времени.
+def slot_chip(when: object, parent: QWidget) -> StrongBodyLabel:
+	"""Метка слота времени в шапке карточки: «[ЧЧ:ММ]» цветом слота.
 
-	Логотип отвечает на «в какой канал», метка — на «когда»: в очереди
-	из сотен постов это два первых вопроса. Цвет метки выводится
-	из самого времени, поэтому посты одного слота узнаются пачкой.
+	Цвет выводится из самого времени, поэтому посты одного слота
+	узнаются пачкой — в очереди из сотен постов «когда» и «куда» —
+	два первых вопроса.
 	"""
-	label = slot_label(item.when)
+	from datetime import datetime
+
+	label = slot_label(when if isinstance(when, datetime) else None)
 	chip = StrongBodyLabel(f"[{label}]", parent)
 	chip.setTextColor(*slot_color(label))
 	chip.setToolTip("Время публикации (слот)")
+	return chip
+
+
+def post_leading(
+	community_id: int, community_title: str, when: object, parent: QWidget, avatar_path: str | None
+) -> list[QWidget]:
+	"""Начало шапки карточки поста: логотип сообщества и метка слота.
+
+	Общее для очереди и отложенных записей: логотип отвечает на «в какой
+	канал», метка — на «когда».
+	"""
 	return [
-		community_logo(parent, item.community_id, item.community_title, avatar_path, _LOGO_SIZE),
-		chip,
+		community_logo(parent, community_id, community_title, avatar_path, LOGO_SIZE),
+		slot_chip(when, parent),
 	]
 
 
-def queue_slots(items: list[QueueItemDto]) -> list[str]:
-	"""Слоты, встречающиеся в очереди: «сейчас» первым, дальше по времени."""
-	labels = {slot_label(item.when) for item in items}
-	timed = sorted(label for label in labels if label != SLOT_NOW)
-	return ([SLOT_NOW] if SLOT_NOW in labels else []) + timed
+def queue_leading(item: QueueItemDto, parent: QWidget, avatar_path: str | None) -> list[QWidget]:
+	"""Начало шапки карточки очереди: логотип сообщества и метка слота."""
+	return post_leading(item.community_id, item.community_title, item.when, parent, avatar_path)
 
 
 def apply_view(
@@ -149,10 +160,7 @@ def apply_view(
 		slot: слот времени публикации, «ЧЧ:ММ» или «сейчас»
 			(None — все слоты).
 	"""
-	if community_id is not None:
-		items = [item for item in items if item.community_id == community_id]
-	if slot is not None:
-		items = [item for item in items if slot_label(item.when) == slot]
+	items = filter_by_slot(filter_by_community(items, community_id), slot)
 	if status is QueueFilter.SENDABLE:
 		wanted = (JobStatus.PENDING, JobStatus.RUNNING)
 		items = [item for item in items if item.status in wanted]
@@ -160,90 +168,11 @@ def apply_view(
 		items = [item for item in items if item.status is JobStatus.WAITING]
 	elif status is QueueFilter.ERRORS:
 		items = [item for item in items if item.status is JobStatus.ERROR]
-	nearest = datetime.min.replace(tzinfo=UTC)  # «сейчас» — раньше любых дат
 	if sort is QueueSort.NEAREST:
-		return sorted(items, key=lambda item: (item.when or nearest, item.id))
+		return sort_nearest(items, lambda item: item.id)
 	if sort is QueueSort.COMMUNITY:
-		# id в ключе разводит каналы-тёзки, чтобы их посты не перемешивались
-		return sorted(
-			items,
-			key=lambda item: (
-				item.community_title.casefold(),
-				item.community_id,
-				item.when or nearest,
-				item.id,
-			),
-		)
+		return sort_by_community(items, lambda item: item.id)
 	return sorted(items, key=lambda item: item.id)
-
-
-@dataclass(frozen=True)
-class QueuePage:
-	"""Страница показа очереди: срез элементов и его место в целом.
-
-	Attributes:
-		items: элементы страницы (после фильтра и сортировки).
-		page: номер страницы с 1 (уже зажат в существующие границы).
-		pages: сколько всего страниц (минимум 1 — даже у пустого списка).
-		total: сколько элементов прошло фильтр.
-		first: номер первого элемента страницы в общем счёте (с 1);
-			0 — показывать нечего.
-		last: номер последнего элемента страницы (0 — показывать нечего).
-	"""
-
-	items: list[QueueItemDto]
-	page: int
-	pages: int
-	total: int
-	first: int
-	last: int
-
-
-def paginate(items: list[QueueItemDto], page: int, per_page: int = PAGE_SIZE) -> QueuePage:
-	"""Нарезает список на страницы и отдаёт запрошенную.
-
-	Номер страницы зажимается в существующие границы, а не отвергается:
-	очередь живая, и пока пользователь смотрит последнюю страницу, посты
-	уходят — страница исчезает под ним. Зажим возвращает его на последнюю
-	существующую вместо пустого экрана.
-
-	Args:
-		items: элементы после фильтра и сортировки.
-		page: желаемый номер страницы (с 1).
-		per_page: сколько элементов на странице (меньше 1 не бывает).
-	"""
-	per_page = max(1, per_page)
-	total = len(items)
-	pages = max(1, -(-total // per_page))  # деление с округлением вверх
-	page = min(max(1, page), pages)
-	start = (page - 1) * per_page
-	chunk = items[start : start + per_page]
-	return QueuePage(
-		items=chunk,
-		page=page,
-		pages=pages,
-		total=total,
-		first=start + 1 if chunk else 0,
-		last=start + len(chunk),
-	)
-
-
-def summary_text(view: QueuePage, total: int) -> str:
-	"""Итоговая строка под списком: сколько показано и из скольки.
-
-	``total`` — сколько элементов в очереди вообще, ``view.total`` —
-	сколько из них прошло фильтр. Диапазон номеров появляется только
-	при нескольких страницах: у единственной «показаны 1–7 из 7»
-	звучит канцелярски и ничего не добавляет.
-	"""
-	if total == 0:
-		return "Очередь пуста."
-	if view.total == 0:
-		return f"Ни один из {total} элементов очереди не подходит под фильтр."
-	if view.pages == 1:
-		return f"Показано {view.total} из {total} элементов очереди."
-	tail = "элементов очереди" if view.total == total else f"подходящих (в очереди {total})"
-	return f"Показаны {view.first}–{view.last} из {view.total} {tail}."
 
 
 class QueueViewDialog(WorkDialog):
@@ -264,28 +193,23 @@ class QueueViewDialog(WorkDialog):
 		фильтром не становится — показывается вся очередь."""
 		super().__init__("Очередь отправки", parent, size=(880, 620))
 		self._worker = worker
-		self._sort = QueueSort.NEAREST
-		self._status = status
-		self._community: int | None = None
-		# сообщество применяется при первом наполнении фильтра: пункты
-		# списка строятся по элементам очереди, которых до опроса ещё нет
-		self._wanted_community = community_id
-		self._slot: str | None = None
-		self._known_communities: list[tuple[int, str]] = []
-		self._known_slots: list[str] = []
 		# аватары сообществ из кэша статистики: карточки рисуют их
 		# в шапке, читать их на каждый опрос незачем
 		self._avatars: dict[int, str | None] = {}
 		self._total = 0
 		self._page = 1
-		self._view = paginate([], 1)
-		self._build_controls()
+		self._view: ListPage[QueueItemDto] = paginate([], 1)
+		self._bar = ViewBar(self, QueueSort, wanted_community=community_id)
+		self._status_combo = self._bar.add_choice(list(QueueFilter), status)
+		self._bar.changed.connect(self._on_view_changed)
+		self.content.addLayout(self._bar.layout)
 		area, box = list_area(self, spacing=density.spacing().list_spacing)
 		self.content.addWidget(area, stretch=1)
-		self._build_footer()
 		# кнопки «Закрыть» нет намеренно: окно закрывается системным
 		# крестиком и Esc, а отдельная строка под неё съедала высоту
 		# списка — в окне очереди она дороже привычки
+		self._pager = PagerRow(self, self._step)
+		self.content.addLayout(self._pager.layout)
 		self._panel = QueuePanel(
 			worker,
 			self,
@@ -321,57 +245,6 @@ class QueueViewDialog(WorkDialog):
 		"""Наполняет раскрытую карточку формой правки (ADR-0016, п. 7)."""
 		mount_queue_item_editor(self._worker, self, item_id, body, collapse, self._panel.poll)
 
-	# --- сборка ----------------------------------------------------------------
-
-	def _build_controls(self) -> None:
-		"""Строка управления показом: сортировка и два фильтра."""
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Показ:", self))
-		self._sort_combo = ComboBox(self)
-		for option in QueueSort:
-			self._sort_combo.addItem(option.value)
-		self._sort_combo.currentIndexChanged.connect(self._on_view_changed)
-		row.addWidget(self._sort_combo)
-		self._status_combo = ComboBox(self)
-		for status_option in QueueFilter:
-			self._status_combo.addItem(status_option.value)
-		# начальный фильтр — до подключения сигнала: обработчик опрашивает
-		# панель, а её ещё нет
-		self._status_combo.setCurrentIndex(list(QueueFilter).index(self._status))
-		self._status_combo.currentIndexChanged.connect(self._on_view_changed)
-		row.addWidget(self._status_combo)
-		self._community_combo: DtoComboBox[tuple[int, str]] = DtoComboBox(
-			self, placeholder=_ALL_COMMUNITIES
-		)
-		self._community_combo.currentIndexChanged.connect(self._on_view_changed)
-		row.addWidget(self._community_combo)
-		self._slot_combo: DtoComboBox[str] = DtoComboBox(self, placeholder=_ALL_SLOTS)
-		self._slot_combo.setToolTip("Слот — время публикации поста")
-		self._slot_combo.currentIndexChanged.connect(self._on_view_changed)
-		row.addWidget(self._slot_combo)
-		row.addStretch()
-		self.content.addLayout(row)
-
-	def _build_footer(self) -> None:
-		"""Нижняя строка: сводка слева, перелистывание справа."""
-		row = QHBoxLayout()
-		self._summary = CaptionLabel("", self)
-		row.addWidget(self._summary)
-		row.addStretch()
-		self._prev_button = PushButton("Назад", self)
-		self._prev_button.clicked.connect(bind(self._step, -1))
-		row.addWidget(self._prev_button)
-		self._page_label = CaptionLabel("", self)
-		row.addWidget(self._page_label)
-		self._next_button = PushButton("Вперёд", self)
-		self._next_button.clicked.connect(bind(self._step, 1))
-		row.addWidget(self._next_button)
-		# до первого опроса (полсекунды) страниц ещё нет: показать
-		# перелистывание сразу значило бы мигнуть им и спрятать
-		for widget in (self._prev_button, self._page_label, self._next_button):
-			widget.hide()
-		self.content.addLayout(row)
-
 	# --- правило показа --------------------------------------------------------
 
 	def _apply_view(self, items: list[QueueItemDto]) -> list[QueueItemDto]:
@@ -383,71 +256,21 @@ class QueueViewDialog(WorkDialog):
 		пользователь, может исчезнуть под ним.
 		"""
 		self._total = len(items)
-		self._refresh_communities(items)
-		self._refresh_slots(items)
-		shown = apply_view(items, self._sort, self._status, self._community, self._slot)
+		self._bar.refresh(items)
+		status = list(QueueFilter)[int(self._status_combo.currentIndex())]
+		sort = QueueSort(self._bar.sort_option())
+		shown = apply_view(items, sort, status, self._bar.community_id(), self._bar.slot_value())
 		self._view = paginate(shown, self._page)
 		self._page = self._view.page
 		return self._view.items
 
 	def _step(self, delta: int) -> None:
 		"""Листает страницу; показ обновляется сразу, не по таймеру."""
-		self._page = min(max(1, self._page + delta), self._view.pages)
+		self._page = step_page(self._page, delta, self._view.pages)
 		self._panel.poll()
 
-	def _refresh_communities(self, items: list[QueueItemDto]) -> None:
-		"""Обновляет пункты фильтра канала по каналам, живущим в очереди.
-
-		Пересборка — только при смене набора (каждые полсекунды дёргать
-		комбобокс незачем). Восстановление выбора и служебный пункт —
-		забота ``DtoComboBox``: выбранный канал сохраняется по id,
-		исчезнувший из очереди — сбрасывается на «Все сообщества».
-		"""
-		communities = sorted(
-			{(item.community_id, item.community_title) for item in items},
-			key=lambda entry: (entry[1].casefold(), entry[0]),
-		)
-		if communities == self._known_communities:
-			return
-		self._known_communities = communities
-		self._community_combo.set_items(
-			communities, label=lambda entry: entry[1], key=lambda entry: entry[0]
-		)
-		if self._wanted_community is not None:
-			# без сигнала: выбор делается внутри опроса панели, и его
-			# обработчик запустил бы второй опрос поверх первого
-			wanted = self._wanted_community
-			self._wanted_community = None
-			self._community_combo.blockSignals(True)
-			try:
-				self._community_combo.select(lambda entry: entry[0] == wanted)
-			finally:
-				self._community_combo.blockSignals(False)
-		selected = self._community_combo.selected()
-		self._community = selected[0] if selected is not None else None
-
-	def _refresh_slots(self, items: list[QueueItemDto]) -> None:
-		"""Обновляет пункты фильтра слотов по временам, живущим в очереди.
-
-		Пересборка — только при смене набора (как у фильтра сообществ):
-		выбранный слот ``DtoComboBox`` хранит по значению и сам
-		сбрасывает его на «Все слоты», когда такого времени в очереди
-		не осталось.
-		"""
-		slots = queue_slots(items)
-		if slots == self._known_slots:
-			return
-		self._known_slots = slots
-		self._slot_combo.set_items(slots, label=lambda slot: slot, key=lambda slot: slot)
-		self._slot = self._slot_combo.selected()
-
-	def _on_view_changed(self, _index: int = 0) -> None:
-		"""Читает правило показа из списков; следующий опрос его применит."""
-		self._sort = list(QueueSort)[int(self._sort_combo.currentIndex())]
-		self._status = list(QueueFilter)[int(self._status_combo.currentIndex())]
-		selected = self._community_combo.selected()
-		self._community = selected[0] if selected is not None else None
-		self._slot = self._slot_combo.selected()
+	def _on_view_changed(self) -> None:
+		"""Правило показа сменилось: листаем с начала, следующий опрос его применит."""
 		self._page = 1  # набор изменился — листаем с начала
 		self._panel.poll()  # показ обновляется сразу, не по таймеру
 
@@ -456,16 +279,5 @@ class QueueViewDialog(WorkDialog):
 
 		Считается по снимку страницы (:attr:`_view`), а не по списку
 		показанных: номера элементов в общем счёте знает только он.
-		Перелистывание прячется целиком, пока страница одна: кнопки,
-		которые никуда не ведут, — шум.
 		"""
-		view = self._view
-		self._summary.setText(summary_text(view, self._total))
-		multipage = view.pages > 1
-		self._prev_button.setVisible(multipage)
-		self._next_button.setVisible(multipage)
-		self._page_label.setVisible(multipage)
-		if multipage:
-			self._page_label.setText(f"Страница {view.page} из {view.pages}")
-			self._prev_button.setEnabled(view.page > 1)
-			self._next_button.setEnabled(view.page < view.pages)
+		self._pager.update(self._view, summary_text(self._view, self._total, QUEUE_WORDS))

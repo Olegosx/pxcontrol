@@ -76,7 +76,6 @@ from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
 	QueueCounts,
-	QueuePanel,
 	WorkDialog,
 	account_caption,
 	bind,
@@ -110,17 +109,17 @@ from pxcontrol.ui.pages.community_state import (
 	state_badge,
 	subtitle_text,
 )
+from pxcontrol.ui.pages.list_view import ListPage, PagerRow, paginate, step_page
 from pxcontrol.ui.pages.maintenance import MaintenancePanel, open_maintenance
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
-	QueuePage,
 	QueueSort,
 	QueueViewDialog,
 	apply_view,
-	paginate,
 	queue_subtitle,
 )
+from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.schedule import scheduled_card
 
 #: Размер логотипа в шапке страницы (пиксели).
@@ -160,7 +159,7 @@ def tab_title(key: str, count: int | None = None) -> str:
 	return f"{title} {count}" if count else title  # число — для подписи без пилюли
 
 
-def queue_footer_text(view: QueuePage) -> str:
+def queue_footer_text(view: ListPage[Any]) -> str:
 	"""Итоговая строка под очередью сообщества: сколько показано и из скольких."""
 	if view.total == 0:
 		return ""
@@ -578,7 +577,7 @@ class _QueueTab(QWidget):
 		self._community = community
 		self._all: list[QueueItemDto] = []  # вся очередь сообщества (до нарезки)
 		self._page = 1
-		self._view = paginate([], 1, QUEUE_TAB_PAGE_SIZE)
+		self._view: ListPage[QueueItemDto] = paginate([], 1, QUEUE_TAB_PAGE_SIZE)
 		self._last_count = -1  # число в заголовке перестраивается только при смене
 		spacing = density.spacing()
 		layout = QVBoxLayout(self)
@@ -605,21 +604,9 @@ class _QueueTab(QWidget):
 		queue_box = QVBoxLayout()
 		queue_box.setSpacing(spacing.list_spacing)
 		layout.addLayout(queue_box)
-		footer = QHBoxLayout()
-		self._footer = CaptionLabel("", self)
-		self._footer.setWordWrap(True)
-		footer.addWidget(self._footer, stretch=1)
-		# перелистывание — как в окне «Вся очередь…»: видно только при
-		# нескольких страницах, кнопки, которые никуда не ведут, — шум
-		self._prev_button = list_button("Назад", self)
-		self._prev_button.clicked.connect(bind(self._step, -1))
-		self._page_label = CaptionLabel("", self)
-		self._next_button = list_button("Вперёд", self)
-		self._next_button.clicked.connect(bind(self._step, 1))
-		for widget in (self._prev_button, self._page_label, self._next_button):
-			footer.addWidget(widget, alignment=Qt.AlignmentFlag.AlignTop)
-			widget.hide()
-		layout.addLayout(footer)
+		# итог и перелистывание — общие с окном «Вся очередь…»
+		self._pager = PagerRow(self, self._step, compact=True)
+		layout.addLayout(self._pager.layout)
 		layout.addStretch()
 		self._panel = QueuePanel(
 			worker,
@@ -665,7 +652,7 @@ class _QueueTab(QWidget):
 
 	def _step(self, delta: int) -> None:
 		"""Листает страницу; показ обновляется сразу, не по таймеру."""
-		self._page = min(max(1, self._page + delta), self._view.pages)
+		self._page = step_page(self._page, delta, self._view.pages)
 		self._panel.poll()
 
 	def _on_refreshed(self, _shown: list[QueueItemDto]) -> None:
@@ -681,14 +668,7 @@ class _QueueTab(QWidget):
 		errors = sum(1 for item in self._all if item.status is JobStatus.ERROR)
 		self._retry_button.setVisible(errors > 0)
 		self._empty.setVisible(not self._all)
-		self._footer.setText(queue_footer_text(self._view))
-		multipage = self._view.pages > 1
-		for widget in (self._prev_button, self._page_label, self._next_button):
-			widget.setVisible(multipage)
-		if multipage:
-			self._page_label.setText(f"Страница {self._view.page} из {self._view.pages}")
-			self._prev_button.setEnabled(self._view.page > 1)
-			self._next_button.setEnabled(self._view.page < self._view.pages)
+		self._pager.update(self._view, queue_footer_text(self._view))
 		self.counts_changed.emit(community_queue_counts(self._all, self._community.id))
 
 	def _on_retry_errors(self) -> None:

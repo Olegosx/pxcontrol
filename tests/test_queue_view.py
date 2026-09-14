@@ -8,18 +8,31 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.publish_queue import QueueItemDto
-from pxcontrol.ui.pages.common import SLOT_NOW, card_signature, plan_cards, slot_color, slot_label
+from pxcontrol.ui.pages.card_list import plan_cards
+from pxcontrol.ui.pages.common import SLOT_NOW, slot_color, slot_label
+from pxcontrol.ui.pages.list_view import list_slots, paginate
+from pxcontrol.ui.pages.list_view import summary_text as list_summary
 from pxcontrol.ui.pages.publish_queue_view import (
+	QUEUE_WORDS,
 	QueueFilter,
 	QueueSort,
 	apply_view,
-	paginate,
-	queue_slots,
-	summary_text,
 )
+from pxcontrol.ui.pages.queue_panel import queue_signature as card_signature
+
+
+def summary_text(view: Any, total: int) -> str:
+	"""Итог под очередью — общая функция со словами очереди."""
+	return list_summary(view, total, QUEUE_WORDS)
+
+
+def queue_slots(items: list[QueueItemDto]) -> list[str]:
+	return list_slots(items)
+
 
 #: Точка отсчёта времён в тестах: фиксированная, а не «сейчас».
 #: Момент публикации входит в отпечаток карточки (он задаёт метку слота),
@@ -206,7 +219,7 @@ def _known(items: list[QueueItemDto]) -> dict[int, tuple[object, ...]]:
 def test_plan_cards_adds_and_removes() -> None:
 	"""Новые карточки добавляются, ушедшие — убираются; остальные не трогаются."""
 	known = _known([_item(1), _item(2)])
-	plan = plan_cards([_item(2), _item(3)], known)
+	plan = plan_cards([_item(2), _item(3)], known, signature=card_signature)
 	assert plan.added == [3]
 	assert plan.removed == [1]
 	assert plan.changed == []
@@ -218,7 +231,7 @@ def test_plan_cards_marks_only_changed() -> None:
 	items = [_item(1), _item(2), _item(3)]
 	known = _known(items)
 	edited = replace(items[1], title="поправленный текст")
-	plan = plan_cards([items[0], edited, items[2]], known)
+	plan = plan_cards([items[0], edited, items[2]], known, signature=card_signature)
 	assert plan.changed == [2]
 	assert (plan.added, plan.removed) == ([], [])
 
@@ -230,14 +243,14 @@ def test_plan_cards_reports_order_without_touching_cards() -> None:
 	не должна пересоздавать карточку, в которой набирают текст.
 	"""
 	items = [_item(1), _item(2)]
-	plan = plan_cards([items[1], items[0]], _known(items))
+	plan = plan_cards([items[1], items[0]], _known(items), signature=card_signature)
 	assert plan.order == [2, 1]
 	assert (plan.added, plan.removed, plan.changed) == ([], [], [])
 
 
 def test_plan_cards_from_empty_state() -> None:
 	"""Первый показ: всё новое, убирать нечего."""
-	plan = plan_cards([_item(1), _item(2)], {})
+	plan = plan_cards([_item(1), _item(2)], {}, signature=card_signature)
 	assert plan.added == [1, 2]
 	assert (plan.removed, plan.changed) == ([], [])
 

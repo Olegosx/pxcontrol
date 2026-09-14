@@ -392,6 +392,21 @@ class ScheduledPostDto:
 		"""Адрес записи для действий над ней."""
 		return ScheduledRef(self.community_id, self.account_id, self.message_id)
 
+	@property
+	def when(self) -> datetime:
+		"""Момент публикации — под тем же именем, что у элемента очереди.
+
+		Общие правила показа списков (сортировка «ближайшие сначала»,
+		фильтр по слоту времени) читают момент одним именем у обоих
+		видов элементов; у отложенной записи он есть всегда.
+		"""
+		return self.scheduled_at
+
+	@property
+	def title(self) -> str:
+		"""Заголовок карточки — начало текста (общее имя с элементом очереди)."""
+		return self.text_preview
+
 
 @dataclass(frozen=True)
 class ScheduledDraft:

@@ -48,7 +48,8 @@ from pxcontrol.ui.pages.community_state import (
 	state_badge_text,
 	subtitle_text,
 )
-from pxcontrol.ui.pages.publish_queue_view import paginate, queue_subtitle
+from pxcontrol.ui.pages.list_view import paginate
+from pxcontrol.ui.pages.publish_queue_view import queue_subtitle
 
 
 def _community(

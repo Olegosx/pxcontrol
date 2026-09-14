@@ -68,7 +68,6 @@ from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
 	CharCounter,
 	DtoComboBox,
-	QueuePanel,
 	WhenRow,
 	caption_placeholder,
 	closed_topics_hint,
@@ -97,6 +96,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 	queue_leading,
 	queue_subtitle,
 )
+from pxcontrol.ui.pages.queue_panel import QueuePanel
 
 #: Сколько карточек очереди показывать на странице (хвост ждущих —
 #: в сводке числом; всё целиком — кнопка «Вся очередь…», ADR-0016).

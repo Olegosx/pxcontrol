@@ -64,7 +64,6 @@ from pxcontrol.ui.pages.common import (
 	CollapsibleCard,
 	DtoComboBox,
 	FormDialog,
-	QueuePanel,
 	bind,
 	checked_or_single,
 	clear_layout,
@@ -86,6 +85,7 @@ from pxcontrol.ui.pages.common import (
 	show_warning,
 )
 from pxcontrol.ui.pages.frame_picker import FramePickerDialog
+from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.video_batch import BatchScanDialog
 from pxcontrol.ui.pages.video_form import PresetForm
 
