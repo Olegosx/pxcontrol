@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_overview import CommunityOverviewDto, SeriesSource
-from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, UserbotRole
+from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, NamedSeries, Share, UserbotRole
 from pxcontrol.ui.pages.common import ACCENT_TEXT, DIM_TEXT, ERROR_TEXT
 from pxcontrol.ui.pages.community_overview import (
 	axis_dates,
@@ -17,9 +17,14 @@ from pxcontrol.ui.pages.community_overview import (
 	hours_subtitle,
 	kind_text,
 	linked_text,
+	pair_caption,
+	percent_text,
 	period_caption,
 	reference_rows,
+	series_days,
+	series_title,
 	share_caption,
+	share_rows,
 	signed,
 	source_note,
 	updated_text,
@@ -133,3 +138,40 @@ def test_source_note_names_the_source() -> None:
 	assert "оценка по разности" in snapshots
 	none = source_note(CommunityOverviewDto(community_id=1), _community(bot_id=7))
 	assert "бот раз в 15 минут" in none and "Истории пока нет" in none
+
+
+def test_series_title_translates_known_names() -> None:
+	assert series_title("Views") == "Просмотры"
+	assert series_title(" private chats ") == "Личные чаты"
+	assert series_title("Monday") == "Пн"
+	assert series_title("Russian") == "Russian"  # языки — как отдал Telegram
+
+
+def test_pair_and_percent_captions() -> None:
+	assert pair_caption((7, 5), 7) == ("+2 за 7 дней", ACCENT_TEXT)
+	assert pair_caption((12, 15), 7) == ("−3 за 7 дней", ERROR_TEXT)
+	assert pair_caption(None, 7) == ("нет данных", DIM_TEXT)
+	assert percent_text(38, 100) == "38\u202f%"
+	assert percent_text(1, 3) == "33\u202f%"
+	assert percent_text(None, 100) == "—" and percent_text(5, 0) == "—"
+
+
+def test_share_rows_sort_limit_and_keep_order() -> None:
+	shares = tuple(Share(f"s{i}", 100 - i * 10) for i in range(10))
+	rows = share_rows(shares, limit=3)
+	assert [name for name, _percent in rows] == ["s0", "s1", "s2", "прочее"]
+	assert rows[0] == ("s0", 18) and rows[-1][1] == 51  # 280 из 550
+	week = (Share("Monday", 10), Share("Tuesday", 30))
+	assert share_rows(week, keep_order=True) == [("Пн", 25), ("Вт", 75)]
+	assert share_rows(week) == [("Вт", 75), ("Пн", 25)]
+	assert share_rows(()) == [] and share_rows((Share("x", 0),)) == []
+
+
+def test_series_days_union() -> None:
+	d1, d2 = date(2026, 9, 1), date(2026, 9, 2)
+	series = (
+		NamedSeries("Views", (DayPoint(d2, 1),)),
+		NamedSeries("Shares", (DayPoint(d1, 2), DayPoint(d2, 3))),
+	)
+	assert series_days(series) == [d1, d2]
+	assert series_days(()) == []

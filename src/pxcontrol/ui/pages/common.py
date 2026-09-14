@@ -19,11 +19,13 @@ from PySide6.QtGui import (
 	QPainter,
 	QPainterPath,
 	QPixmap,
+	QResizeEvent,
 )
 from PySide6.QtWidgets import (
 	QDialog,
 	QFileDialog,
 	QGraphicsOpacityEffect,
+	QGridLayout,
 	QHBoxLayout,
 	QLabel,
 	QLayout,
@@ -535,6 +537,60 @@ def list_button(text: str, parent: QWidget, *, height: int = LIST_BUTTON_HEIGHT)
 	button.setFixedHeight(height)
 	button.setFont(font_px(LIST_BUTTON_FONT_PX))
 	return button
+
+
+def flow_columns(width: int, min_width: int, spacing: int) -> int:
+	"""Сколько карточек шириной не меньше ``min_width`` помещается в ``width``.
+
+	Между колонками ``spacing``; меньше одной колонки не бывает.
+	"""
+	return max(1, (width + spacing) // (min_width + spacing))
+
+
+class FlowGrid(QWidget):
+	"""Потоковая сетка карточек: число колонок — по своей ширине, колонки тянутся.
+
+	Общая сборка (дашборд, «Обзор» сообщества): карточки перекладываются
+	при смене числа колонок — на широком окне в ряд встаёт больше,
+	на узком меньше; на каждое движение окна перекладывать незачем.
+	Высота строго по содержимому: лишнее место страницы забирает её
+	растяжка, а не сетка. Сетка усыновляет карточки.
+	"""
+
+	def __init__(
+		self, cards: Sequence[QWidget], parent: QWidget, *, min_width: int, spacing: int
+	) -> None:
+		super().__init__(parent)
+		self._cards = list(cards)
+		self._min_width = min_width
+		self._spacing = spacing
+		self._columns = 0
+		self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+		self._grid = QGridLayout(self)
+		self._grid.setContentsMargins(0, 0, 0, 0)
+		self._grid.setHorizontalSpacing(spacing)
+		self._grid.setVerticalSpacing(spacing)
+		self._place(1)
+
+	def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 — API Qt
+		super().resizeEvent(event)
+		columns = flow_columns(self.width(), self._min_width, self._spacing)
+		if columns != self._columns:
+			self._place(columns)
+			# высота сетки — по новой раскладке: без этого родитель оставил бы
+			# высоту от прежнего числа колонок, и строки растянулись бы под неё
+			self.updateGeometry()
+
+	def _place(self, columns: int) -> None:
+		"""Раскладывает карточки по колонкам, колонки — на всю ширину."""
+		previous = self._columns
+		self._columns = columns
+		while self._grid.count():
+			self._grid.takeAt(0)
+		for index, card in enumerate(self._cards):
+			self._grid.addWidget(card, index // columns, index % columns)
+		for column in range(max(columns, previous)):
+			self._grid.setColumnStretch(column, 1 if column < columns else 0)
 
 
 def dim_widget(widget: QWidget, opacity: float) -> None:

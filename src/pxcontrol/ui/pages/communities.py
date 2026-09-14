@@ -27,10 +27,9 @@ from enum import StrEnum
 from functools import partial
 
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QResizeEvent, QShowEvent
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
 	QAbstractItemView,
-	QGridLayout,
 	QHBoxLayout,
 	QHeaderView,
 	QPushButton,
@@ -76,6 +75,7 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
+	FlowGrid,
 	QueueCounts,
 	account_caption,
 	bot_caption,
@@ -85,6 +85,7 @@ from pxcontrol.ui.pages.common import (
 	elide_text,
 	error_reporter,
 	exec_dialog,
+	flow_columns,
 	font_px,
 	format_count,
 	list_button,
@@ -207,12 +208,8 @@ def bold_numbers(text: str) -> str:
 
 
 def grid_columns(width: int, card_min: int = CARD_MIN_WIDTH, spacing: int = GRID_SPACING) -> int:
-	"""Сколько колонок карточек помещается в ширину (не меньше одной).
-
-	Карточка занимает не меньше ``card_min``; между колонками —
-	``spacing``. Колонки затем растягиваются на всю ширину.
-	"""
-	return max(1, (width + spacing) // (card_min + spacing))
+	"""Сколько колонок карточек помещается в ширину (общее правило ``flow_columns``)."""
+	return flow_columns(width, card_min, spacing)
 
 
 def matches_search(community: CommunityDto, query: str) -> bool:
@@ -440,45 +437,6 @@ class CommunityCard(CardWidget):
 			layout.addWidget(button)
 		layout.addStretch()
 		return box
-
-
-class _TileGrid(QWidget):
-	"""Сетка карточек с растяжением: число колонок — по своей ширине.
-
-	Пересборка идёт только при смене числа колонок: на каждое движение
-	окна перекладывать карточки незачем.
-	"""
-
-	def __init__(self, cards: list[QWidget], parent: QWidget) -> None:
-		super().__init__(parent)
-		self._cards = cards
-		self._columns = 0
-		# высота — строго по содержимому: лишнее место страницы забирает
-		# её растяжка, а не сетка (иначе карточки последнего раздела
-		# вытягивались бы вниз вместе с сеткой)
-		self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-		self._grid = QGridLayout(self)
-		self._grid.setContentsMargins(0, 0, 0, 0)
-		self._grid.setHorizontalSpacing(GRID_SPACING)
-		self._grid.setVerticalSpacing(GRID_SPACING)
-		self._place(1)
-
-	def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 — API Qt
-		super().resizeEvent(event)
-		columns = grid_columns(self.width())
-		if columns != self._columns:
-			self._place(columns)
-
-	def _place(self, columns: int) -> None:
-		"""Раскладывает карточки по колонкам, колонки — на всю ширину."""
-		previous = self._columns
-		self._columns = columns
-		while self._grid.count():
-			self._grid.takeAt(0)
-		for index, card in enumerate(self._cards):
-			self._grid.addWidget(card, index // columns, index % columns)
-		for column in range(max(columns, previous)):
-			self._grid.setColumnStretch(column, 1 if column < columns else 0)
 
 
 # --- таблица (вид «список») -------------------------------------------------------
@@ -1057,7 +1015,7 @@ class CommunitiesPage(ScrollArea):
 			card = CommunityCard(row, self._run_action, self)
 			card.clicked.connect(partial(self.open_community.emit, row.community.id))
 			cards.append(card)
-		return _TileGrid(cards, self)  # сетка усыновляет карточки
+		return FlowGrid(cards, self, min_width=CARD_MIN_WIDTH, spacing=GRID_SPACING)
 
 	def _empty_state(self, searched: bool) -> QWidget:
 		"""Пустое состояние: ничего не подключено или поиск ничего не нашёл."""

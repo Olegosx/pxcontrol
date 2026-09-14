@@ -18,18 +18,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent, QPen
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+	QAbstractItemView,
+	QGridLayout,
+	QHBoxLayout,
+	QHeaderView,
+	QLabel,
+	QSizePolicy,
+	QTableWidgetItem,
+	QVBoxLayout,
+	QWidget,
+)
 from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
 	CardWidget,
 	DotInfoBadge,
 	HorizontalSeparator,
+	ProgressBar,
 	StrongBodyLabel,
+	TableWidget,
 	isDarkTheme,
 )
 
@@ -43,13 +55,14 @@ from pxcontrol.engine.services.community_overview import (
 	CommunityOverviewDto,
 	SeriesSource,
 )
-from pxcontrol.engine.telegram.types import CommunityKind, DayPoint
+from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, NamedSeries, Share
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	ACCENT_TEXT,
 	DIM_TEXT,
 	ERROR_TEXT,
+	FlowGrid,
 	clear_layout,
 	elide_text,
 	error_reporter,
@@ -74,6 +87,51 @@ _BAR_DIM = ("rgba(20,184,166,.45)", "rgba(20,184,166,.4)")
 _BAR_LEFT = ("#c42b1c", "#ff99a4")
 _ZERO_LINE = ("rgba(0,0,0,.18)", "rgba(255,255,255,.14)")
 _AXIS_TEXT = ("#8a8a8a", "#7a7a7a")
+#: Второй ряд сгруппированных столбцов — серый пресета ``InfoLevel.INFOAMTION``
+#: (точка легенды — ``DotInfoBadge.info``), чтобы легенда и полотно совпадали.
+_BAR_SECOND = ("#8a8a8a", "#9d9d9d")
+
+#: Потоковая сетка карточек: минимальные ширины и интервал (макет: 10).
+_TILE_MIN_WIDTH = 180
+_CHART_MIN_WIDTH = 340
+_CARD_SPACING = 10
+#: Строка долей: ширина подписи и процента; сколько долей показывать.
+_SHARE_LABEL_WIDTH = 110
+_SHARE_PERCENT_WIDTH = 44
+_SHARE_ROWS = 8
+#: Сколько недавних постов и активных участников показывать в таблицах.
+_TABLE_ROWS = 10
+
+#: Имена рядов и долей Telegram — по-русски; незнакомое остаётся как есть.
+_SERIES_RU = {
+	"views": "Просмотры",
+	"shares": "Пересылки",
+	"forwards": "Пересылки",
+	"reactions": "Реакции",
+	"followers": "Подписчики",
+	"members": "Участники",
+	"joined": "Пришли",
+	"left": "Ушли",
+	"muted": "Заглушили",
+	"unmuted": "Включили звук",
+	"messages": "Сообщения",
+	"viewers": "Читающие",
+	"posters": "Пишущие",
+	"search": "Поиск",
+	"channels": "Каналы",
+	"groups": "Группы",
+	"private chats": "Личные чаты",
+	"url": "Ссылки",
+	"urls": "Ссылки",
+	"other": "Прочее",
+	"monday": "Пн",
+	"tuesday": "Вт",
+	"wednesday": "Ср",
+	"thursday": "Чт",
+	"friday": "Пт",
+	"saturday": "Сб",
+	"sunday": "Вс",
+}
 
 
 def _qcolor(pair: tuple[str, str]) -> QColor:
@@ -255,6 +313,51 @@ def source_note(overview: CommunityOverviewDto, community: CommunityDto) -> str:
 	)
 
 
+def series_title(name: str) -> str:
+	"""Имя ряда или доли по-русски (словарь известных, иначе как отдал Telegram)."""
+	return _SERIES_RU.get(name.strip().casefold(), name)
+
+
+def pair_caption(pair: tuple[int, int] | None, days: int) -> tuple[str, tuple[str, str]]:
+	"""Подпись плитки по паре «сейчас, раньше»: «+2 за 7 дней» и цвет."""
+	if pair is None:
+		return "нет данных", DIM_TEXT
+	return delta_caption(pair[0] - pair[1], days)
+
+
+def percent_text(part: int | None, total: int | None) -> str:
+	"""«38 %» из части и целого; «—» без данных."""
+	if part is None or not total:
+		return "—"
+	return f"{round(part * 100 / total)}\u202f%"
+
+
+def share_rows(
+	shares: tuple[Share, ...], limit: int = _SHARE_ROWS, *, keep_order: bool = False
+) -> list[tuple[str, int]]:
+	"""Строки карточки долей: имя и процент, по убыванию; хвост — «прочее».
+
+	Проценты считаются от суммы всех долей; при переполнении лимита
+	оставшиеся складываются в одну строку. ``keep_order`` — порядок
+	Telegram, а не по убыванию (дни недели читаются с понедельника).
+	"""
+	total = sum(share.value for share in shares)
+	if total <= 0:
+		return []
+	ordered = list(shares) if keep_order else sorted(shares, key=lambda s: s.value, reverse=True)
+	head, tail = ordered[:limit], ordered[limit:]
+	rows = [(series_title(share.name), round(share.value * 100 / total)) for share in head]
+	rest = sum(share.value for share in tail)
+	if rest > 0:
+		rows.append(("прочее", round(rest * 100 / total)))
+	return rows
+
+
+def series_days(series: tuple[NamedSeries, ...]) -> list[date]:
+	"""Все дни, встречающиеся в рядах (объединение), по порядку."""
+	return sorted({point.day for item in series for point in item.points})
+
+
 def _date_text(moment: datetime | None) -> str:
 	return moment.astimezone().strftime("%d.%m.%Y") if moment else "—"
 
@@ -332,6 +435,53 @@ class _BarsChart(QWidget):
 		_draw_axis(painter, self._labels, width, self._gap, canvas, self.width())
 
 
+class _GroupedBars(QWidget):
+	"""Несколько рядов столбцами рядом на каждый день, база в нуле.
+
+	Первый ряд — акцент, второй — серый пресета библиотеки; больше двух
+	рядов Telegram в таких графиках не отдаёт, лишние рисуются серым.
+	"""
+
+	def __init__(
+		self,
+		series: list[list[int]],
+		labels: list[tuple[int, str]],
+		parent: QWidget,
+		*,
+		canvas: int = _CANVAS_TALL,
+	) -> None:
+		super().__init__(parent)
+		self._series = series
+		self._labels = labels
+		self._gap = 3
+		self.setFixedHeight(canvas + (_AXIS_HEIGHT if labels else 0))
+		self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+	def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 — API Qt
+		painter = QPainter(self)
+		painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+		count = max((len(row) for row in self._series), default=0)
+		if not count or not self._series:
+			return
+		canvas = self.height() - (_AXIS_HEIGHT if self._labels else 0)
+		peak = max([value for row in self._series for value in row] + [1])
+		group_w = max(2.0, (self.width() - self._gap * (count - 1)) / count)
+		bar_w = max(1.0, group_w / len(self._series))
+		painter.setPen(Qt.PenStyle.NoPen)
+		for index in range(count):
+			x = index * (group_w + self._gap)
+			for position, row in enumerate(self._series):
+				value = row[index] if index < len(row) else 0
+				if value <= 0:
+					continue
+				bar_h = max(1.0, value / peak * canvas)
+				painter.setBrush(_qcolor(_BAR_FULL if position == 0 else _BAR_SECOND))
+				painter.drawRoundedRect(
+					QRectF(x + position * bar_w, canvas - bar_h, bar_w, bar_h), 1, 1
+				)
+		_draw_axis(painter, self._labels, group_w, self._gap, canvas, self.width())
+
+
 class _FlowChart(QWidget):
 	"""Приходы вверх (акцент) и уходы вниз (цвет ошибки) от линии нуля."""
 
@@ -399,8 +549,8 @@ def _draw_axis(
 # --- сборка вкладки ---------------------------------------------------------------------
 
 
-def _card(parent: QWidget, margins: tuple[int, int, int, int]) -> tuple[CardWidget, QVBoxLayout]:
-	card = CardWidget(parent)
+def _card(parent: QWidget, margins: tuple[int, int, int, int]) -> tuple[QWidget, QVBoxLayout]:
+	card: QWidget = CardWidget(parent)
 	layout = QVBoxLayout(card)
 	layout.setContentsMargins(*margins)
 	layout.setSpacing(10)
@@ -485,16 +635,18 @@ class OverviewTab(QWidget):
 	def _render(self, overview: CommunityOverviewDto) -> None:
 		clear_layout(self._layout)
 		# справка — первой: «что за сообщество» читают раньше, чем «что
-		# с ним происходит»; числа и графики — следом
+		# с ним происходит»; числа и графики — следом, потоковой сеткой:
+		# на широком окне карточек в ряд больше, на узком меньше
 		self._layout.addWidget(self._reference(overview))
-		self._layout.addWidget(self._tiles(overview))
-		charts = self._charts(overview)
-		if charts is not None:
-			self._layout.addWidget(charts)
-		hours = self._hours(overview)
-		if hours is not None:
-			self._layout.addWidget(hours)
-		if charts is None and hours is None:
+		self._layout.addWidget(
+			FlowGrid(self._tiles(overview), self, min_width=_TILE_MIN_WIDTH, spacing=_CARD_SPACING)
+		)
+		cards = self._chart_cards(overview)
+		if cards:
+			self._layout.addWidget(
+				FlowGrid(cards, self, min_width=_CHART_MIN_WIDTH, spacing=_CARD_SPACING)
+			)
+		else:
 			empty = CaptionLabel(
 				"Данных пока нет: статистика накопится за неделю наблюдений.", self
 			)
@@ -504,29 +656,20 @@ class OverviewTab(QWidget):
 		self._layout.addWidget(tinted(note, DIM_TEXT))
 		self._layout.addStretch()
 
-	def _tiles(self, overview: CommunityOverviewDto) -> QWidget:
-		"""Четыре плитки чисел равной ширины."""
-		box = QWidget(self)
-		row = QHBoxLayout(box)
-		row.setContentsMargins(0, 0, 0, 0)
-		row.setSpacing(10)
+	# --- плитки чисел ------------------------------------------------------------------
+
+	def _tiles(self, overview: CommunityOverviewDto) -> list[QWidget]:
+		"""Плитки чисел: четыре основные и всё, что ещё отдал Telegram."""
 		community = self._community
 		is_group = community.kind is CommunityKind.GROUP
 		audience = "Участников" if is_group else "Подписчиков"
 		delta_text, delta_color = delta_caption(overview.participants_delta)
-		tiles: list[
-			tuple[str, list[tuple[str, int, tuple[str, str] | None]], str, tuple[str, str]]
-		] = [
-			(
-				audience,
-				[(_count(overview.participants), 24, None)],
-				delta_text,
-				delta_color,
-			),
+		tiles: list[_Tile] = [
+			_Tile(audience, [(_count(overview.participants), 24, None)], delta_text, delta_color)
 		]
 		if is_group:
 			tiles.append(
-				(
+				_Tile(
 					"Онлайн сейчас",
 					[(_count(overview.online), 24, None)],
 					share_caption(overview.online, overview.participants, "участников"),
@@ -535,7 +678,7 @@ class OverviewTab(QWidget):
 			)
 		else:
 			tiles.append(
-				(
+				_Tile(
 					"Просмотров на пост",
 					[(_count(overview.views_per_post), 24, None)],
 					"медиана последних постов"
@@ -545,7 +688,7 @@ class OverviewTab(QWidget):
 				)
 			)
 		tiles.append(
-			(
+			_Tile(
 				f"Пришли · ушли, {PERIOD_DAYS} дней",
 				[
 					(signed(overview.joined), 24, ACCENT_TEXT if overview.joined else DIM_TEXT),
@@ -560,7 +703,7 @@ class OverviewTab(QWidget):
 			)
 		)
 		tiles.append(
-			(
+			_Tile(
 				"Удалённых аккаунтов",
 				[(_count(overview.deleted_found), 24, None)],
 				deleted_caption(
@@ -569,82 +712,214 @@ class OverviewTab(QWidget):
 				DIM_TEXT,
 			)
 		)
-		for title, values, caption, caption_color in tiles:
-			card, layout = _card(box, (14, 11, 14, 11))
-			layout.setSpacing(2)
-			layout.addWidget(_label(card, title, 12))
-			values_row = QHBoxLayout()
-			values_row.setSpacing(8)
-			for text, size, color in values:
-				values_row.addWidget(
-					_label(card, text, size, color, bold=True),
-					alignment=Qt.AlignmentFlag.AlignBottom,
-				)
-			values_row.addStretch()
-			layout.addLayout(values_row)
-			layout.addWidget(_label(card, caption, 12, caption_color))
-			row.addWidget(card, stretch=1)
-		return box
+		tiles.extend(self._telegram_tiles(overview))
+		return [self._tile_card(tile) for tile in tiles]
 
-	def _charts(self, overview: CommunityOverviewDto) -> QWidget | None:
-		"""Два графика в ряд: участники за 30 дней и приходы/уходы за 14."""
-		growth = overview.growth
-		flow_days = sorted(
-			{p.day for p in overview.flow_joined} | {p.day for p in overview.flow_left}
-		)
-		if not growth and not flow_days:
-			return None
-		box = QWidget(self)
-		row = QHBoxLayout(box)
-		row.setContentsMargins(0, 0, 0, 0)
-		row.setSpacing(10)
-		if growth:
-			card, layout = _card(box, (14, 12, 14, 10))
-			head = QHBoxLayout()
-			who = "Участники" if self._community.kind is CommunityKind.GROUP else "Подписчики"
-			head.addWidget(_label(card, f"{who}, {GROWTH_DAYS} дней", 13))
-			head.addStretch()
-			head.addWidget(_label(card, growth_subtitle(growth), 12, DIM_TEXT))
-			layout.addLayout(head)
-			layout.addWidget(_BarsChart([p.value for p in growth], axis_dates(growth), card))
-			row.addWidget(card, stretch=145)
-		if flow_days:
-			joined = {p.day: p.value for p in overview.flow_joined}
-			left = {p.day: p.value for p in overview.flow_left}
-			card, layout = _card(box, (14, 12, 14, 10))
-			layout.addWidget(_label(card, f"Пришли и ушли, {FLOW_DAYS} дней", 13))
-			layout.addWidget(
-				_FlowChart(
-					[joined.get(d, 0) for d in flow_days], [left.get(d, 0) for d in flow_days], card
+	def _telegram_tiles(self, overview: CommunityOverviewDto) -> list[_Tile]:
+		"""Плитки по парам «сейчас, раньше» из статистики Telegram (только непустые)."""
+		days = overview.period_days
+		pairs: list[tuple[str, tuple[int, int] | None]] = [
+			("Пересылок на пост", overview.shares_per_post),
+			("Реакций на пост", overview.reactions_per_post),
+			("Просмотров на историю", overview.views_per_story),
+			("Пересылок на историю", overview.shares_per_story),
+			("Реакций на историю", overview.reactions_per_story),
+			(f"Сообщений за {days} дней", overview.messages),
+			("Читающих", overview.viewers),
+			("Пишущих", overview.posters),
+		]
+		tiles = []
+		for title, pair in pairs:
+			if pair is None:
+				continue
+			text, color = pair_caption(pair, days)
+			tiles.append(_Tile(title, [(_count(pair[0]), 24, None)], text, color))
+		if overview.notifications is not None:
+			part, total = overview.notifications
+			tiles.append(
+				_Tile(
+					"Уведомления включены",
+					[(percent_text(part, total), 24, None)],
+					f"{_count(part)} из {_count(total)}",
+					DIM_TEXT,
 				)
 			)
-			legend = QHBoxLayout()
-			legend.setSpacing(6)
-			legend.addWidget(_swatch(card))
-			legend.addWidget(_label(card, "пришли", 11))
-			legend.addSpacing(8)
-			legend.addWidget(_swatch(card, error=True))
-			legend.addWidget(_label(card, "ушли", 11))
-			legend.addStretch()
-			period = tuple(DayPoint(d, 0) for d in flow_days)
-			legend.addWidget(_label(card, period_caption(period), 11, DIM_TEXT))
-			layout.addLayout(legend)
-			row.addWidget(card, stretch=100)
-		return box
+		return tiles
 
-	def _hours(self, overview: CommunityOverviewDto) -> QWidget | None:
-		"""Профиль по часам суток на всю ширину."""
+	def _tile_card(self, tile: _Tile) -> QWidget:
+		card, layout = _card(self, (14, 11, 14, 11))
+		layout.setSpacing(2)
+		layout.addWidget(_label(card, tile.title, 12))
+		values_row = QHBoxLayout()
+		values_row.setSpacing(8)
+		for text, size, color in tile.values:
+			values_row.addWidget(
+				_label(card, text, size, color, bold=True),
+				alignment=Qt.AlignmentFlag.AlignBottom,
+			)
+		values_row.addStretch()
+		layout.addLayout(values_row)
+		layout.addWidget(_label(card, tile.caption, 12, tile.caption_color))
+		return card
+
+	# --- карточки графиков, долей и таблиц ---------------------------------------------
+
+	def _chart_cards(self, overview: CommunityOverviewDto) -> list[QWidget]:
+		"""Все карточки под сетку, в порядке важности; без данных карточки нет."""
+		cards: list[QWidget | None] = [
+			self._growth_card(overview),
+			self._flow_card(overview),
+			self._hours_card(overview),
+			self._daily_card("Просмотры и пересылки", overview.interactions),
+			self._daily_card("Сообщения по дням", overview.messages_daily),
+			self._daily_card("Читающие и пишущие", overview.actions),
+			self._daily_card("Instant View", overview.iv_interactions),
+			self._mute_card(overview),
+			self._daily_card("Истории: просмотры и пересылки", overview.story_interactions),
+			self._shares_card("Откуда просмотры", overview.views_by_source),
+			self._shares_card(
+				"Откуда новые участники"
+				if self._community.kind is CommunityKind.GROUP
+				else "Откуда новые подписчики",
+				overview.members_by_source,
+			),
+			self._shares_card("Языки аудитории", overview.languages),
+			self._shares_card("Реакции", overview.reactions_by_emotion),
+			self._shares_card("Реакции на истории", overview.story_reactions),
+			self._shares_card("По дням недели", overview.weekdays, keep_order=True),
+			self._recent_posts_card(overview),
+			self._top_card(
+				"Самые активные",
+				["Участник", "Сообщений", "Символов"],
+				[(p.name, p.messages, p.avg_chars) for p in overview.top_posters],
+			),
+			self._top_card(
+				"Администраторы",
+				["Админ", "Удалил", "Исключил", "Забанил"],
+				[(a.name, a.deleted, a.kicked, a.banned) for a in overview.top_admins],
+			),
+			self._top_card(
+				"Пригласили больше всех",
+				["Участник", "Пригласил"],
+				[(i.name, i.invitations) for i in overview.top_inviters],
+			),
+		]
+		ready = [card for card in cards if card is not None]
+		for card in ready:
+			layout = card.layout()
+			if isinstance(layout, QVBoxLayout):
+				# строка сетки — по самой высокой карточке; лишняя высота
+				# остаётся снизу, а не растягивает строки долей и таблицы
+				layout.addStretch()
+		return ready
+
+	def _chart_card(self, title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
+		"""Карточка графика: заголовок слева, подзаголовок приглушённо справа."""
+		card, layout = _card(self, (14, 12, 14, 10))
+		head = QHBoxLayout()
+		head.addWidget(_label(card, title, 13))
+		head.addStretch()
+		if subtitle:
+			# «занимай, что дадут»: длинный подзаголовок сокращается, а не
+			# распирает карточку — колонки сетки должны остаться равными
+			sub = _label(card, "", 12, DIM_TEXT)
+			sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+			sub.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+			elide_text(sub, subtitle)
+			head.addWidget(sub, stretch=1)
+		layout.addLayout(head)
+		return card, layout
+
+	def _growth_card(self, overview: CommunityOverviewDto) -> QWidget | None:
+		growth = overview.growth
+		if not growth:
+			return None
+		who = "Участники" if self._community.kind is CommunityKind.GROUP else "Подписчики"
+		card, layout = self._chart_card(f"{who}, {GROWTH_DAYS} дней", growth_subtitle(growth))
+		layout.addWidget(_BarsChart([p.value for p in growth], axis_dates(growth), card))
+		return card
+
+	def _flow_card(self, overview: CommunityOverviewDto) -> QWidget | None:
+		days = series_days(
+			(
+				NamedSeries("joined", overview.flow_joined),
+				NamedSeries("left", overview.flow_left),
+			)
+		)
+		if not days:
+			return None
+		joined = {p.day: p.value for p in overview.flow_joined}
+		left = {p.day: p.value for p in overview.flow_left}
+		card, layout = self._chart_card(f"Пришли и ушли, {FLOW_DAYS} дней")
+		layout.addWidget(
+			_FlowChart([joined.get(d, 0) for d in days], [left.get(d, 0) for d in days], card)
+		)
+		period = tuple(DayPoint(d, 0) for d in days)
+		layout.addLayout(
+			self._legend(card, [("пришли", False), ("ушли", True)], period_caption(period))
+		)
+		return card
+
+	def _mute_card(self, overview: CommunityOverviewDto) -> QWidget | None:
+		"""Звук: включили — вверх (акцент), заглушили — вниз (цвет ошибки)."""
+		series = overview.mute
+		days = series_days(series)
+		if not days:
+			return None
+		by_name = {item.name.casefold(): {p.day: p.value for p in item.points} for item in series}
+		muted = next((v for k, v in by_name.items() if "unmute" not in k and "mute" in k), {})
+		unmuted = next((v for k, v in by_name.items() if "unmute" in k), {})
+		card, layout = self._chart_card("Звук уведомлений")
+		layout.addWidget(
+			_FlowChart([unmuted.get(d, 0) for d in days], [muted.get(d, 0) for d in days], card)
+		)
+		period = tuple(DayPoint(d, 0) for d in days)
+		layout.addLayout(
+			self._legend(card, [("включили", False), ("заглушили", True)], period_caption(period))
+		)
+		return card
+
+	def _daily_card(self, title: str, series: tuple[NamedSeries, ...]) -> QWidget | None:
+		"""Ряды по дням сгруппированными столбцами с легендой по именам Telegram."""
+		days = series_days(series)
+		if not days:
+			return None
+		card, layout = self._chart_card(title)
+		rows = [[{p.day: p.value for p in item.points}.get(d, 0) for d in days] for item in series]
+		period = tuple(DayPoint(d, 0) for d in days)
+		layout.addWidget(_GroupedBars(rows, axis_dates(period), card))
+		legend = [(series_title(item.name), position > 0) for position, item in enumerate(series)]
+		layout.addLayout(self._legend(card, legend, "", grey=True))
+		return card
+
+	def _legend(
+		self,
+		card: QWidget,
+		items: list[tuple[str, bool]],
+		caption: str,
+		*,
+		grey: bool = False,
+	) -> QHBoxLayout:
+		"""Легенда: точки ``DotInfoBadge`` с подписями; справа — период."""
+		legend = QHBoxLayout()
+		legend.setSpacing(6)
+		for position, (text, second) in enumerate(items):
+			if position:
+				legend.addSpacing(8)
+			legend.addWidget(_swatch(card, error=second and not grey, info=second and grey))
+			legend.addWidget(_label(card, text, 11))
+		legend.addStretch()
+		if caption:
+			legend.addWidget(_label(card, caption, 11, DIM_TEXT))
+		return legend
+
+	def _hours_card(self, overview: CommunityOverviewDto) -> QWidget | None:
+		"""Профиль по часам суток."""
 		hours = overview.hours
 		if not hours:
 			return None
-		card: QWidget
-		card, layout = _card(self, (14, 12, 14, 10))
-		head = QHBoxLayout()
 		title = "Онлайн по часам суток" if overview.hours_online else "Активность по часам суток"
-		head.addWidget(_label(card, title, 13))
-		head.addStretch()
-		head.addWidget(_label(card, hours_subtitle(hours, overview.hours_online), 12, DIM_TEXT))
-		layout.addLayout(head)
+		card, layout = self._chart_card(title, hours_subtitle(hours, overview.hours_online))
 		labels = [(0, "00"), (6, "06"), (12, "12"), (18, "18"), (23, "23")]
 		layout.addWidget(
 			_BarsChart(
@@ -658,6 +933,53 @@ class OverviewTab(QWidget):
 				from_zero=True,
 			)
 		)
+		return card
+
+	def _shares_card(
+		self, title: str, shares: tuple[Share, ...], *, keep_order: bool = False
+	) -> QWidget | None:
+		"""Доли строками «имя — полоса — %» на штатном ``ProgressBar``."""
+		rows = share_rows(shares, keep_order=keep_order)
+		if not rows:
+			return None
+		card, layout = self._chart_card(title)
+		for name, percent in rows:
+			line = QHBoxLayout()
+			line.setSpacing(8)
+			label = _label(card, "", 12)
+			label.setFixedWidth(_SHARE_LABEL_WIDTH)
+			elide_text(label, name)
+			line.addWidget(label)
+			bar = ProgressBar(card)
+			bar.setRange(0, 100)
+			bar.setValue(percent)
+			line.addWidget(bar, stretch=1)
+			value = _label(card, f"{percent}\u202f%", 12, DIM_TEXT)
+			value.setFixedWidth(_SHARE_PERCENT_WIDTH)
+			value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+			line.addWidget(value)
+			layout.addLayout(line)
+		return card
+
+	def _recent_posts_card(self, overview: CommunityOverviewDto) -> QWidget | None:
+		posts = overview.recent_posts[:_TABLE_ROWS]
+		if not posts:
+			return None
+		return self._top_card(
+			"Недавние посты",
+			["Пост", "Просмотры", "Пересылки", "Реакции"],
+			[(f"#{p.msg_id}", p.views, p.forwards, p.reactions) for p in posts],
+		)
+
+	def _top_card(
+		self, title: str, titles: list[str], rows: list[tuple[object, ...]]
+	) -> QWidget | None:
+		"""Таблица в карточке: первая колонка — имя, остальные — числа вправо."""
+		if not rows:
+			return None
+		card, layout = self._chart_card(title)
+		table = _CardTable(titles, rows[:_TABLE_ROWS], card)
+		layout.addWidget(table)
 		return card
 
 	def _reference(self, overview: CommunityOverviewDto) -> QWidget:
@@ -699,10 +1021,67 @@ class OverviewTab(QWidget):
 		return box
 
 
-def _swatch(parent: QWidget, *, error: bool = False) -> QWidget:
-	"""Точка легенды — штатный ``DotInfoBadge``: акцент или цвет ошибки."""
-	badge: QWidget = DotInfoBadge.error(parent) if error else DotInfoBadge.attension(parent)
+def _swatch(parent: QWidget, *, error: bool = False, info: bool = False) -> QWidget:
+	"""Точка легенды — штатный ``DotInfoBadge``: акцент, цвет ошибки или серый."""
+	badge: QWidget
+	if error:
+		badge = DotInfoBadge.error(parent)
+	elif info:
+		badge = DotInfoBadge.info(parent)
+	else:
+		badge = DotInfoBadge.attension(parent)
 	return badge
+
+
+@dataclass(frozen=True)
+class _Tile:
+	"""Плитка числа: заголовок, значения (текст, кегль, цвет), подпись и её цвет."""
+
+	title: str
+	values: list[tuple[str, int, tuple[str, str] | None]]
+	caption: str
+	caption_color: tuple[str, str]
+
+
+class _CardTable(TableWidget):
+	"""Штатная таблица внутри карточки: высота по строкам, без своих полос."""
+
+	def __init__(self, titles: list[str], rows: list[tuple[object, ...]], parent: QWidget) -> None:
+		super().__init__(parent)
+		self.setColumnCount(len(titles))
+		self.setHorizontalHeaderLabels(titles)
+		self.setRowCount(len(rows))
+		self.setBorderVisible(True)
+		self.setBorderRadius(6)
+		self.setWordWrap(False)
+		# ширина — от колонки сетки, а не от содержимого: колонки равные
+		self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+		self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+		self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+		vertical = self.verticalHeader()
+		if vertical is not None:
+			vertical.hide()
+		for row_index, row in enumerate(rows):
+			for column, value in enumerate(row):
+				item = QTableWidgetItem("—" if value is None else str(value))
+				if column:
+					item.setText("—" if value is None else format_count(int(value)))  # type: ignore[call-overload]
+					item.setTextAlignment(
+						Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+					)
+				self.setItem(row_index, column, item)
+		header = self.horizontalHeader()
+		if header is not None:
+			header.setStretchLastSection(False)
+			header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+			for column in range(1, len(titles)):
+				header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+		self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+		self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+		height = header.sizeHint().height() if header is not None else 0
+		for index in range(self.rowCount()):
+			height += self.rowHeight(index)
+		self.setFixedHeight(height + 2 * self.frameWidth())
 
 
 def _count(value: int | None) -> str:
