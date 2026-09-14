@@ -684,7 +684,7 @@ class OverviewTab(QWidget):
 				label = _label(cell, label_text, 12)
 				label.setFixedWidth(104)
 				line.addWidget(label)
-				value = _label(cell, "", 13)
+				value = _label(cell, "", 14)  # BodyLabel штатно, кегль не задаётся
 				value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 				elide_text(value, value_text)
 				line.addWidget(value, stretch=1)

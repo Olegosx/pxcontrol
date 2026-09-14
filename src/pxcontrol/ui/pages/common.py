@@ -504,10 +504,12 @@ def format_count(value: int) -> str:
 # текста надписей задаётся их же API ``setTextColor`` — пары ниже
 # для него (светлая тема, тёмная), это не листы стилей.
 
-#: Цвета текста для ``setTextColor``: акцент, ошибка, приглушённый.
+#: Цвета текста для ``setTextColor`` — одна пара на роль (спека страницы
+#: сообщества, раздел 1): акцент, ошибка, предупреждение, приглушённый.
 ACCENT_TEXT = (ACCENT_COLOR, ACCENT_COLOR)
 ERROR_TEXT = ("#c42b1c", "#ff99a4")
-DIM_TEXT = ("#8a8a8a", "#8a8a8a")
+WARNING_TEXT = ("#9d5d00", "#fff100")
+DIM_TEXT = ("#5f5f5f", "#9c9c9c")
 
 
 def font_px(size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
@@ -631,19 +633,6 @@ def file_action_buttons(
 	return trailing
 
 
-#: Приглушённый цвет сводки в шапке карточки: светлая/тёмная тема.
-#: Подпись, а не ошибка — единая точка цветов ошибок (``ErrorLabel``
-#: в ``common``) тут не подходит.
-_SUMMARY_COLORS = ("#5f5f5f", "#9c9c9c")
-
-#: Цвет подписи об ошибке (светлая, тёмная) — для ``setTextColor``.
-_ERROR_COLORS = (QColor("#c42b1c"), QColor("#ff99a4"))
-
-#: Цвета «это ошибка» для светлой и тёмной темы: подпись валидации
-#: (``ErrorLabel``) и счётчик символов при превышении предела.
-ERROR_COLORS = ("#c42b1c", "#ff99a4")
-
-
 class _CardHeader(QWidget):
 	"""Шапка сворачиваемой карточки: ловит клик по всей своей площади."""
 
@@ -716,7 +705,7 @@ class CollapsibleCard(CardWidget):
 		self._expandable = True
 		self._summary_text = ""
 		self._summary = CaptionLabel("", header)
-		self._summary.setTextColor(*_SUMMARY_COLORS)
+		self._summary.setTextColor(*DIM_TEXT)
 		# сводка занимает остаток шапки и обрезается, а не распирает форму
 		self._summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 		self._progress_row: QWidget | None = None
@@ -740,7 +729,7 @@ class CollapsibleCard(CardWidget):
 			self._bar.setMaximumWidth(220)
 			progress.addWidget(self._bar, stretch=1)
 			self._progress_text = CaptionLabel("", self._progress_row)
-			self._progress_text.setTextColor(*_SUMMARY_COLORS)
+			self._progress_text.setTextColor(*DIM_TEXT)
 			progress.addWidget(self._progress_text)
 			column.addWidget(self._progress_row)
 			self._progress_row.hide()
@@ -821,9 +810,9 @@ class CollapsibleCard(CardWidget):
 		"""
 		self._summary_text = text
 		if alert:
-			self._summary.setTextColor(*_ERROR_COLORS)
+			self._summary.setTextColor(*ERROR_TEXT)
 		else:
-			self._summary.setTextColor(*_SUMMARY_COLORS)
+			self._summary.setTextColor(*DIM_TEXT)
 		self._refresh_summary()
 
 	def set_progress(self, fraction: float | None, text: str = "") -> None:
@@ -1157,7 +1146,7 @@ def slot_color(label: str) -> tuple[str, str]:
 	цвет подписи.
 	"""
 	if label == SLOT_NOW:
-		return _SUMMARY_COLORS
+		return DIM_TEXT
 	return _SLOT_COLORS[zlib.crc32(label.encode("utf-8")) % len(_SLOT_COLORS)]
 
 
@@ -1717,7 +1706,7 @@ class CharCounter:
 		"""Пересчитывает длину и красит подпись по факту превышения."""
 		length = telegram_text_length(self._edit.toPlainText())
 		self.label.setText(counter_text(length, self._limit))
-		self.label.setTextColor(*(ERROR_COLORS if length > self._limit else _SUMMARY_COLORS))
+		self.label.setTextColor(*(ERROR_TEXT if length > self._limit else DIM_TEXT))
 
 
 class ErrorLabel(CaptionLabel):
@@ -1735,7 +1724,7 @@ class ErrorLabel(CaptionLabel):
 		# у подкласса это снова этот метод — бесконечная рекурсия
 		# (RecursionError, ловилось вживую на диалоге пакета).
 		super().__init__(parent)
-		self.setTextColor(*ERROR_COLORS)
+		self.setTextColor(*ERROR_TEXT)
 		self.hide()
 
 	def fail(self, message: str) -> bool:
@@ -1762,7 +1751,7 @@ class WarningLabel(CaptionLabel):
 		# текст базовому классу не передаём — причина в комментарии
 		# конструктора ErrorLabel (рекурсия в диспетчере QFluentWidgets)
 		super().__init__(parent)
-		self.setTextColor("#9d5d00", "#fff100")
+		self.setTextColor(*WARNING_TEXT)
 		self.hide()
 
 	def set_note(self, message: str) -> None:

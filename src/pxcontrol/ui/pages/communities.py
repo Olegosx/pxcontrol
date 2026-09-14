@@ -492,13 +492,10 @@ _TABLE_COLUMNS: tuple[tuple[str, TableColumn], ...] = (
 	("Состояние", TableColumn.STATE),
 )
 
-#: Добавка к стилю таблицы (официальный ``setCustomStyleSheet``): радиус
-#: рамки 6 и заголовок без вертикальных разделителей — как в макете.
-_TABLE_QSS = (
-	"QTableView{border-radius: 6px}"
-	"QHeaderView::section:horizontal{border: none;"
-	" border-bottom: 1px solid rgba(255, 255, 255, 21)}"
-)
+#: Добавка к стилю таблицы (официальный ``setCustomStyleSheet``, ADR-0023
+#: п. 5: только метрики, без цвета): радиус рамки 6 и заголовок без
+#: вертикальных разделителей — как в макете.
+_TABLE_QSS = "QTableView{border-radius: 6px}QHeaderView::section:horizontal{border: none}"
 
 #: Ширины колонок по порядку (None — колонка названия тянется).
 _TABLE_WIDTHS: tuple[int | None, ...] = (

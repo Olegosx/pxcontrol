@@ -56,7 +56,7 @@
   «сейчас/дата+время» (`WhenRow`), заголовок раздела
   (`section_header` — значок, подпись, число и `HorizontalSeparator`),
   пары цветов текста для `setTextColor` библиотечных надписей
-  (`ACCENT_TEXT`/`ERROR_TEXT`/`DIM_TEXT`, `tinted`) — ADR-0023, п. 5:
+  (`ACCENT_TEXT`/`ERROR_TEXT`/`WARNING_TEXT`/`DIM_TEXT` — одна пара на роль, `tinted`) — ADR-0023, п. 5:
   только штатные элементы, без своих стилей и рисования; сводка очереди
   по сообществам (`QueueCounts`/`queue_counts`), пауза опроса панели
   очереди (`QueuePanel.set_polling` — невидимая вкладка движок
