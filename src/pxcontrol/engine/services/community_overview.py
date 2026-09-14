@@ -19,7 +19,19 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
 from enum import StrEnum
 
-from pxcontrol.engine.telegram.types import CommunityAnalytics, DayPoint
+from pxcontrol.engine.telegram.types import (
+	ANALYTICS_DAILY,
+	ANALYTICS_PAIRS,
+	ANALYTICS_SHARES,
+	CommunityAnalytics,
+	DayPoint,
+	NamedSeries,
+	RecentPost,
+	Share,
+	TopAdmin,
+	TopInviter,
+	TopPoster,
+)
 
 #: Горизонты рядов вкладки (дни): участники, приходы/уходы, часы, «за период».
 GROWTH_DAYS = 30
@@ -73,6 +85,12 @@ class CommunityOverviewDto:
 			Bot API; название — если оно подключено в приложении).
 		tg_created_at / last_post_at: создано, последний пост.
 		fetched_at: когда кэш обновлялся последний раз.
+		Дальше — всё остальное из статистики Telegram (только при живом
+		доступе к ней; иначе пусто): пары «сейчас, раньше» за период
+		Telegram (``period_days``) — пересылки и реакции на пост,
+		истории, уведомления (часть, всего), сообщения / читающие /
+		пишущие группы; ряды по дням за ``GROWTH_DAYS`` с именами
+		Telegram; доли за период; недавние посты; самые активные.
 	"""
 
 	community_id: int
@@ -97,6 +115,66 @@ class CommunityOverviewDto:
 	tg_created_at: datetime | None = None
 	last_post_at: datetime | None = None
 	fetched_at: datetime | None = None
+	period_days: int = PERIOD_DAYS
+	shares_per_post: tuple[int, int] | None = None
+	reactions_per_post: tuple[int, int] | None = None
+	views_per_story: tuple[int, int] | None = None
+	shares_per_story: tuple[int, int] | None = None
+	reactions_per_story: tuple[int, int] | None = None
+	notifications: tuple[int, int] | None = None
+	messages: tuple[int, int] | None = None
+	viewers: tuple[int, int] | None = None
+	posters: tuple[int, int] | None = None
+	interactions: tuple[NamedSeries, ...] = ()
+	iv_interactions: tuple[NamedSeries, ...] = ()
+	mute: tuple[NamedSeries, ...] = ()
+	story_interactions: tuple[NamedSeries, ...] = ()
+	messages_daily: tuple[NamedSeries, ...] = ()
+	actions: tuple[NamedSeries, ...] = ()
+	views_by_source: tuple[Share, ...] = ()
+	members_by_source: tuple[Share, ...] = ()
+	languages: tuple[Share, ...] = ()
+	reactions_by_emotion: tuple[Share, ...] = ()
+	story_reactions: tuple[Share, ...] = ()
+	weekdays: tuple[Share, ...] = ()
+	recent_posts: tuple[RecentPost, ...] = ()
+	top_posters: tuple[TopPoster, ...] = ()
+	top_admins: tuple[TopAdmin, ...] = ()
+	top_inviters: tuple[TopInviter, ...] = ()
+
+
+def telegram_extras(analytics: CommunityAnalytics, today: date) -> dict[str, object]:
+	"""Поля снимка, которые берутся из статистики Telegram как есть.
+
+	Пары «сейчас, раньше» — без пересчёта (период задаёт Telegram),
+	ряды по дням — хвост за ``GROWTH_DAYS``, доли и списки — целиком.
+	"""
+	# участники и просмотры на пост снимок считает сам (дельта, медиана)
+	extras: dict[str, object] = {
+		field: getattr(analytics, field)
+		for field in ANALYTICS_PAIRS
+		if field not in ("members", "views_per_post")
+	}
+	extras.update(
+		{
+			field: tuple(
+				NamedSeries(series.name, _tail(series.points, GROWTH_DAYS, today))
+				for series in getattr(analytics, field)
+			)
+			for field in ANALYTICS_DAILY
+		}
+	)
+	extras.update({field: getattr(analytics, field) for field in ANALYTICS_SHARES})
+	extras.update(
+		{
+			"period_days": max(1, (analytics.period_to - analytics.period_from).days + 1),
+			"recent_posts": analytics.recent_posts,
+			"top_posters": analytics.top_posters,
+			"top_admins": analytics.top_admins,
+			"top_inviters": analytics.top_inviters,
+		}
+	)
+	return extras
 
 
 # --- расчёты по локальным снимкам (чистые функции) -------------------------------
@@ -280,6 +358,7 @@ def build_overview(
 			hours=hours,
 			hours_online=analytics.hours is None and online_hours is not None,
 			source=SeriesSource.TELEGRAM,
+			**telegram_extras(analytics, today),  # type: ignore[arg-type]
 			**base,  # type: ignore[arg-type]  # ключи совпадают с полями
 		)
 	growth = daily_last(samples, GROWTH_DAYS, today, tz)

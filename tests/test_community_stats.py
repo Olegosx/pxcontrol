@@ -28,7 +28,13 @@ from pxcontrol.engine.telegram.types import (
 	CommunityStatsInfo,
 	DayPoint,
 	HistoryMarks,
+	NamedSeries,
+	RecentPost,
 	ScheduledMessage,
+	Share,
+	TopAdmin,
+	TopInviter,
+	TopPoster,
 )
 
 _NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
@@ -198,8 +204,28 @@ def test_analytics_payload_roundtrip() -> None:
 		hours=tuple(range(24)),
 		views_per_post=None,
 		recent_post_views=(5, 6),
+		shares_per_post=(3, 4),
+		notifications=(38, 100),
+		messages=(120, 90),
+		interactions=(
+			NamedSeries("Views", (DayPoint(date(2026, 9, 14), 500),)),
+			NamedSeries("Shares", ()),
+		),
+		languages=(Share("Русский", 70), Share("English", 30)),
+		recent_posts=(RecentPost(41, 500, None, 12),),
+		top_posters=(TopPoster("Олег К.", 12, 80),),
+		top_admins=(TopAdmin("Админ", 3, 1, 0),),
+		top_inviters=(TopInviter("@inviter", 5),),
 	)
 	assert analytics_from_payload(analytics_to_payload(analytics)) == analytics
+	# запись прежнего формата (без новых полей) читается: новое — пустое
+	old = {
+		k: v
+		for k, v in analytics_to_payload(analytics).items()
+		if k in ("period_from", "period_to")
+	}
+	legacy = analytics_from_payload(old)
+	assert legacy is not None and legacy.languages == () and legacy.messages is None
 	assert analytics_from_payload({"period_from": "битая"}) is None
 	assert analytics_from_payload(None) is None
 

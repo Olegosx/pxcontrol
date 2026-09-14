@@ -22,8 +22,10 @@ from pxcontrol.engine.telegram.stats_graph import (
 	GraphSeries,
 	daily,
 	hourly,
+	named_daily,
 	parse_graph,
 	pick_series,
+	shares,
 )
 from pxcontrol.engine.telegram.types import (
 	FORUM_TOPICS_PAGE,
@@ -37,13 +39,19 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	HistoryMarks,
 	MediaKind,
+	NamedSeries,
 	OutgoingPost,
 	ParticipantsPage,
+	RecentPost,
 	ScheduledMessage,
 	ServiceMessageInfo,
 	ServiceMessageKind,
 	ServiceMessagesPage,
+	Share,
 	TelegramFloodError,
+	TopAdmin,
+	TopInviter,
+	TopPoster,
 	UserbotProfile,
 	UserbotRole,
 )
@@ -873,7 +881,16 @@ class MtprotoTransport:
 				getattr(stats, "followers_graph", None) or getattr(stats, "members_graph", None),
 			)
 			hours = await self._graph(client, getattr(stats, "top_hours_graph", None))
-		return _analytics_from(stats, growth, flow, hours)
+			# остальные графики — все, что отдал ответ: ряды по дням и доли
+			daily_graphs = {
+				field: await self._graph(client, getattr(stats, attr, None))
+				for field, attr in _DAILY_GRAPHS.items()
+			}
+			share_graphs = {
+				field: await self._graph(client, _first_attr(stats, attrs))
+				for field, attrs in _SHARE_GRAPHS.items()
+			}
+		return _analytics_from(stats, growth, flow, hours, daily_graphs, share_graphs)
 
 	async def _graph(self, client: Any, graph: Any) -> list[GraphSeries]:
 		"""Ряды графика: готовый JSON или догрузка по токену.
@@ -1155,11 +1172,43 @@ class MtprotoTransport:
 		]
 
 
+#: Графики «ряды по дням»: поле границы → атрибут ответа Telegram.
+_DAILY_GRAPHS = {
+	"interactions": "interactions_graph",
+	"iv_interactions": "iv_interactions_graph",
+	"mute": "mute_graph",
+	"story_interactions": "story_interactions_graph",
+	"messages_daily": "messages_graph",
+	"actions": "actions_graph",
+}
+#: Графики долей: поле границы → атрибуты ответа (первый непустой; у канала
+#: и группы источники новых участников названы по-разному).
+_SHARE_GRAPHS = {
+	"views_by_source": ("views_by_source_graph",),
+	"members_by_source": ("new_followers_by_source_graph", "new_members_by_source_graph"),
+	"languages": ("languages_graph",),
+	"reactions_by_emotion": ("reactions_by_emotion_graph",),
+	"story_reactions": ("story_reactions_by_emotion_graph",),
+	"weekdays": ("weekdays_graph",),
+}
+
+
+def _first_attr(obj: Any, attrs: tuple[str, ...]) -> Any:
+	"""Первый непустой атрибут из перечисленных (None — ни одного)."""
+	for attr in attrs:
+		value = getattr(obj, attr, None)
+		if value is not None:
+			return value
+	return None
+
+
 def _analytics_from(
 	stats: Any,
 	growth: list[GraphSeries],
 	flow: list[GraphSeries],
 	hours: list[GraphSeries],
+	daily_graphs: dict[str, list[GraphSeries]] | None = None,
+	share_graphs: dict[str, list[GraphSeries]] | None = None,
 ) -> CommunityAnalytics:
 	"""Собирает границу из ответа статистики и разобранных графиков.
 
@@ -1167,17 +1216,40 @@ def _analytics_from(
 	в клиентах Telegram), при промахе — по позиции: первый ряд —
 	пришли, второй — ушли. Числа за период: у канала ``followers``,
 	у группы ``members``; просмотры на пост есть только у канала.
+	Остальное берётся как есть: пары «сейчас, раньше» по именам полей
+	ответа, ряды по дням с именами Telegram, доли — суммой за период;
+	имена людей в списках самых активных — из ``users`` ответа.
 	"""
 	period = getattr(stats, "period", None)
 	period_from = getattr(period, "min_date", None)
 	period_to = getattr(period, "max_date", None)
 	members_value = getattr(stats, "followers", None) or getattr(stats, "members", None)
 	views = getattr(stats, "views_per_post", None)
-	recent = [
-		int(getattr(item, "views", 0))
+	recent_posts = tuple(
+		RecentPost(
+			int(getattr(item, "msg_id", 0)),
+			_opt_int(getattr(item, "views", None)),
+			_opt_int(getattr(item, "forwards", None)),
+			_opt_int(getattr(item, "reactions", None)),
+		)
 		for item in getattr(stats, "recent_posts_interactions", None) or []
-		if getattr(item, "views", None) is not None
-	]
+		if getattr(item, "msg_id", None) is not None
+	)
+	names = _user_names(getattr(stats, "users", None) or [])
+	graphs: dict[str, Any] = {
+		field: tuple(
+			NamedSeries(name, tuple(DayPoint(*point) for point in points))
+			for name, points in named_daily(series)
+			if points
+		)
+		for field, series in (daily_graphs or {}).items()
+	}
+	graphs.update(
+		{
+			field: tuple(Share(name, value) for name, value in shares(series))
+			for field, series in (share_graphs or {}).items()
+		}
+	)
 	return CommunityAnalytics(
 		period_from=period_from.date() if period_from else datetime.now(UTC).date(),
 		period_to=period_to.date() if period_to else datetime.now(UTC).date(),
@@ -1189,8 +1261,70 @@ def _analytics_from(
 		),
 		hours=tuple(profile) if (profile := hourly(pick_series(hours, position=0))) else None,
 		views_per_post=_abs_pair(views),
-		recent_post_views=tuple(recent),
+		recent_post_views=tuple(post.views for post in recent_posts if post.views is not None),
+		shares_per_post=_abs_pair(getattr(stats, "shares_per_post", None)),
+		reactions_per_post=_abs_pair(getattr(stats, "reactions_per_post", None)),
+		views_per_story=_abs_pair(getattr(stats, "views_per_story", None)),
+		shares_per_story=_abs_pair(getattr(stats, "shares_per_story", None)),
+		reactions_per_story=_abs_pair(getattr(stats, "reactions_per_story", None)),
+		notifications=_percent_pair(getattr(stats, "enabled_notifications", None)),
+		messages=_abs_pair(getattr(stats, "messages", None)),
+		viewers=_abs_pair(getattr(stats, "viewers", None)),
+		posters=_abs_pair(getattr(stats, "posters", None)),
+		recent_posts=recent_posts,
+		top_posters=tuple(
+			TopPoster(
+				names.get(int(item.user_id), str(item.user_id)),
+				int(item.messages),
+				int(item.avg_chars),
+			)
+			for item in getattr(stats, "top_posters", None) or []
+		),
+		top_admins=tuple(
+			TopAdmin(
+				names.get(int(item.user_id), str(item.user_id)),
+				int(item.deleted),
+				int(item.kicked),
+				int(item.banned),
+			)
+			for item in getattr(stats, "top_admins", None) or []
+		),
+		top_inviters=tuple(
+			TopInviter(names.get(int(item.user_id), str(item.user_id)), int(item.invitations))
+			for item in getattr(stats, "top_inviters", None) or []
+		),
+		**graphs,  # ключи — поля границы
 	)
+
+
+def _opt_int(value: Any) -> int | None:
+	return None if value is None else int(value)
+
+
+def _percent_pair(value: Any) -> tuple[int, int] | None:
+	"""«Часть и всего» из ``StatsPercentValue``; None — поля нет."""
+	part = getattr(value, "part", None)
+	total = getattr(value, "total", None)
+	if part is None or total is None:
+		return None
+	return int(round(part)), int(round(total))
+
+
+def _user_names(users: list[Any]) -> dict[int, str]:
+	"""Имена людей из ответа статистики: «Имя Фамилия», иначе @имя, иначе id."""
+	names: dict[int, str] = {}
+	for user in users:
+		user_id = getattr(user, "id", None)
+		if user_id is None:
+			continue
+		full = " ".join(
+			part
+			for part in (getattr(user, "first_name", None), getattr(user, "last_name", None))
+			if part
+		)
+		username = getattr(user, "username", None)
+		names[int(user_id)] = full or (f"@{username}" if username else str(user_id))
+	return names
 
 
 def _abs_pair(value: Any) -> tuple[int, int] | None:

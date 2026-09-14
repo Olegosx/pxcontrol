@@ -43,7 +43,9 @@ def parse_graph(json_text: str) -> list[GraphSeries]:
 
 	Колонка типа ``x`` даёт моменты, каждая остальная — ряд. Ряд короче
 	оси или длиннее — обрезается по общей длине: график с рассинхроном
-	колонок считается частично пригодным, а не битым.
+	колонок считается частично пригодным, а не битым. График без оси
+	(«пирог»: языки, дни недели — по одному значению на ряд) получает
+	порядковые моменты 0, 1, 2… — для долей ось не нужна.
 
 	Returns:
 		Ряды в порядке колонок; пустой список — график пуст или
@@ -73,8 +75,10 @@ def parse_graph(json_text: str) -> list[GraphSeries]:
 			(str(names.get(key, key)), [float(v) for v in raw if isinstance(v, int | float)])
 		)
 	if axis is None:
-		logger.warning("График статистики Telegram: нет оси времени.")
-		return []
+		if not values:
+			logger.warning("График статистики Telegram: нет ни оси, ни рядов.")
+			return []
+		axis = list(range(max(len(series) for _name, series in values)))
 	result = []
 	for name, series in values:
 		length = min(len(axis), len(series))
@@ -114,6 +118,25 @@ def daily(series: GraphSeries | None) -> list[tuple[date, int]]:
 	if series is None:
 		return []
 	return [(day_of(moment), int(round(value))) for moment, value in series.points]
+
+
+def named_daily(series: list[GraphSeries]) -> list[tuple[str, list[tuple[date, int]]]]:
+	"""Все ряды графика по дням с именами (порядок — как в графике)."""
+	return [(item.name, daily(item)) for item in series]
+
+
+def shares(series: list[GraphSeries]) -> list[tuple[str, int]]:
+	"""Доли: имя ряда и сумма его значений за период (нулевые ряды выброшены).
+
+	Одинаково подходит графику «по дням» (источники просмотров по дням
+	складываются в долю источника) и «пирогу» с одним значением на ряд.
+	"""
+	result = []
+	for item in series:
+		total = int(round(sum(value for _moment, value in item.points)))
+		if total > 0:
+			result.append((item.name, total))
+	return result
 
 
 def hourly(series: GraphSeries | None) -> list[int] | None:

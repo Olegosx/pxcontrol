@@ -56,12 +56,21 @@ from pxcontrol.engine.services.community_overview import (
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.types import (
+	ANALYTICS_DAILY,
+	ANALYTICS_PAIRS,
+	ANALYTICS_SHARES,
 	CommunityAnalytics,
 	CommunityStatsInfo,
 	DayPoint,
 	HistoryMarks,
+	NamedSeries,
+	RecentPost,
 	ScheduledMessage,
+	Share,
 	TelegramFloodError,
+	TopAdmin,
+	TopInviter,
+	TopPoster,
 )
 from pxcontrol.paths import cache_dir
 
@@ -180,19 +189,30 @@ def analytics_to_payload(analytics: CommunityAnalytics) -> dict[str, Any]:
 	def points(series: tuple[DayPoint, ...]) -> list[list[Any]]:
 		return [[point.day.isoformat(), point.value] for point in series]
 
-	return {
+	payload: dict[str, Any] = {
 		"period_from": analytics.period_from.isoformat(),
 		"period_to": analytics.period_to.isoformat(),
-		"members": list(analytics.members) if analytics.members is not None else None,
 		"growth": points(analytics.growth),
 		"joined": points(analytics.joined),
 		"left": points(analytics.left),
 		"hours": list(analytics.hours) if analytics.hours is not None else None,
-		"views_per_post": (
-			list(analytics.views_per_post) if analytics.views_per_post is not None else None
-		),
 		"recent_post_views": list(analytics.recent_post_views),
+		"recent_posts": [
+			[post.msg_id, post.views, post.forwards, post.reactions]
+			for post in analytics.recent_posts
+		],
+		"top_posters": [[p.name, p.messages, p.avg_chars] for p in analytics.top_posters],
+		"top_admins": [[a.name, a.deleted, a.kicked, a.banned] for a in analytics.top_admins],
+		"top_inviters": [[i.name, i.invitations] for i in analytics.top_inviters],
 	}
+	for field in ANALYTICS_PAIRS:
+		pair = getattr(analytics, field)
+		payload[field] = list(pair) if pair is not None else None
+	for field in ANALYTICS_DAILY:
+		payload[field] = [[s.name, points(s.points)] for s in getattr(analytics, field)]
+	for field in ANALYTICS_SHARES:
+		payload[field] = [[s.name, s.value] for s in getattr(analytics, field)]
+	return payload
 
 
 def analytics_from_payload(payload: Any) -> CommunityAnalytics | None:
@@ -204,17 +224,50 @@ def analytics_from_payload(payload: Any) -> CommunityAnalytics | None:
 	def pair(raw: Any) -> tuple[int, int] | None:
 		return (int(raw[0]), int(raw[1])) if raw else None
 
+	def opt(raw: Any) -> int | None:
+		return None if raw is None else int(raw)
+
 	try:
+		extras: dict[str, Any] = {field: pair(payload.get(field)) for field in ANALYTICS_PAIRS}
+		extras.update(
+			{
+				field: tuple(
+					NamedSeries(str(name), points(raw)) for name, raw in payload.get(field, [])
+				)
+				for field in ANALYTICS_DAILY
+			}
+		)
+		extras.update(
+			{
+				field: tuple(Share(str(name), int(value)) for name, value in payload.get(field, []))
+				for field in ANALYTICS_SHARES
+			}
+		)
 		return CommunityAnalytics(
 			period_from=date.fromisoformat(payload["period_from"]),
 			period_to=date.fromisoformat(payload["period_to"]),
-			members=pair(payload.get("members")),
 			growth=points(payload.get("growth", [])),
 			joined=points(payload.get("joined", [])),
 			left=points(payload.get("left", [])),
 			hours=tuple(int(v) for v in payload["hours"]) if payload.get("hours") else None,
-			views_per_post=pair(payload.get("views_per_post")),
 			recent_post_views=tuple(int(v) for v in payload.get("recent_post_views", [])),
+			recent_posts=tuple(
+				RecentPost(int(msg_id), opt(views), opt(forwards), opt(reactions))
+				for msg_id, views, forwards, reactions in payload.get("recent_posts", [])
+			),
+			top_posters=tuple(
+				TopPoster(str(name), int(messages), int(avg_chars))
+				for name, messages, avg_chars in payload.get("top_posters", [])
+			),
+			top_admins=tuple(
+				TopAdmin(str(name), int(deleted), int(kicked), int(banned))
+				for name, deleted, kicked, banned in payload.get("top_admins", [])
+			),
+			top_inviters=tuple(
+				TopInviter(str(name), int(invitations))
+				for name, invitations in payload.get("top_inviters", [])
+			),
+			**extras,  # ключи — поля границы
 		)
 	except (KeyError, TypeError, ValueError, AttributeError):
 		logger.warning("Запись статистики Telegram не разобрана — считаю, что её нет.")

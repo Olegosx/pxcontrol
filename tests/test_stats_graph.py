@@ -9,8 +9,10 @@ from pxcontrol.engine.telegram.stats_graph import (
 	GraphSeries,
 	daily,
 	hourly,
+	named_daily,
 	parse_graph,
 	pick_series,
+	shares,
 )
 
 #: 1 сентября 2026, полночь UTC — в миллисекундах от эпохи.
@@ -47,7 +49,11 @@ def test_parse_graph_trims_to_common_length_and_ignores_junk() -> None:
 
 
 def test_parse_graph_without_axis_or_bad_json_is_empty() -> None:
-	assert parse_graph(json.dumps({"columns": [["y0", 1, 2]]})) == []
+	# без оси («пирог») ряд получает порядковые моменты — для долей ось не нужна
+	assert parse_graph(json.dumps({"columns": [["y0", 1, 2]]})) == [
+		GraphSeries("y0", ((0, 1.0), (1, 2.0)))
+	]
+	assert parse_graph(json.dumps({"columns": []})) == []
 	assert parse_graph("not json") == []
 	assert parse_graph(json.dumps({"nope": 1})) == []
 
@@ -69,3 +75,14 @@ def test_daily_and_hourly_projections() -> None:
 	assert hourly(hours) == list(range(24))
 	assert hourly(GraphSeries("Views", ((0, 1.0),))) is None
 	assert hourly(None) is None
+
+
+def test_shares_sum_series_and_drop_empty() -> None:
+	by_day = [
+		GraphSeries("Followers", ((_SEP_1, 10.0), (_SEP_1 + _DAY_MS, 20.4))),
+		GraphSeries("Search", ((_SEP_1, 0.0), (_SEP_1 + _DAY_MS, 0.0))),
+	]
+	assert shares(by_day) == [("Followers", 30)]
+	pie = [GraphSeries("Русский", ((0, 70.0),)), GraphSeries("English", ((1, 30.0),))]
+	assert shares(pie) == [("Русский", 70), ("English", 30)]
+	assert named_daily(by_day)[0] == ("Followers", [(date(2026, 9, 1), 10), (date(2026, 9, 2), 20)])

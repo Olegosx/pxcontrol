@@ -14,7 +14,13 @@ from pxcontrol.engine.services.community_overview import (
 	hourly_online,
 	median,
 )
-from pxcontrol.engine.telegram.types import CommunityAnalytics, DayPoint
+from pxcontrol.engine.telegram.types import (
+	CommunityAnalytics,
+	DayPoint,
+	NamedSeries,
+	RecentPost,
+	Share,
+)
 
 _TODAY = date(2026, 9, 14)
 
@@ -81,6 +87,18 @@ def test_build_overview_prefers_telegram_analytics() -> None:
 		hours=None,
 		views_per_post=(1500, 1200),
 		recent_post_views=(100, 300, 200),
+		shares_per_post=(7, 5),
+		notifications=(38, 100),
+		interactions=(
+			NamedSeries(
+				"Views",
+				tuple(
+					DayPoint(_TODAY - timedelta(days=offset), 100) for offset in range(40, -1, -1)
+				),
+			),
+		),
+		languages=(Share("Русский", 70),),
+		recent_posts=(RecentPost(41, 100, 2, 1),),
 	)
 	dto = build_overview(
 		1,
@@ -98,6 +116,11 @@ def test_build_overview_prefers_telegram_analytics() -> None:
 	assert dto.views_per_post == 200
 	assert len(dto.growth) == 30  # хвост ряда за 30 дней
 	assert dto.hours is not None and dto.hours_online  # часов у Telegram нет — онлайн из снимков
+	# остальное из Telegram — как есть; ряды по дням обрезаны до 30 дней
+	assert dto.shares_per_post == (7, 5) and dto.notifications == (38, 100)
+	assert dto.period_days == 7
+	assert dto.interactions[0].name == "Views" and len(dto.interactions[0].points) == 30
+	assert dto.languages == (Share("Русский", 70),) and dto.recent_posts[0].msg_id == 41
 
 
 def test_build_overview_falls_back_to_snapshots_and_none() -> None:

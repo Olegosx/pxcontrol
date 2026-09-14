@@ -331,6 +331,59 @@ class DayPoint:
 
 
 @dataclass(frozen=True)
+class NamedSeries:
+	"""Именованный ряд по дням графика Telegram («Views», «Shares»…)."""
+
+	name: str
+	points: tuple[DayPoint, ...]
+
+
+@dataclass(frozen=True)
+class Share:
+	"""Доля: имя (язык, источник, эмодзи, день недели) и её вес за период."""
+
+	name: str
+	value: int
+
+
+@dataclass(frozen=True)
+class RecentPost:
+	"""Недавний пост канала: просмотры, пересылки, реакции (None — нет)."""
+
+	msg_id: int
+	views: int | None
+	forwards: int | None
+	reactions: int | None
+
+
+@dataclass(frozen=True)
+class TopPoster:
+	"""Самый активный участник группы: сообщений и средняя длина."""
+
+	name: str
+	messages: int
+	avg_chars: int
+
+
+@dataclass(frozen=True)
+class TopAdmin:
+	"""Самый активный администратор: удалил записей, исключил, забанил."""
+
+	name: str
+	deleted: int
+	kicked: int
+	banned: int
+
+
+@dataclass(frozen=True)
+class TopInviter:
+	"""Кто привёл больше всех участников."""
+
+	name: str
+	invitations: int
+
+
+@dataclass(frozen=True)
 class CommunityAnalytics:
 	"""Встроенная статистика Telegram, разобранная транспортом.
 
@@ -354,6 +407,27 @@ class CommunityAnalytics:
 			каналы); None — нет.
 		recent_post_views: просмотры последних постов (только каналы),
 			от новых к старым.
+		shares_per_post / reactions_per_post: пересылок и реакций
+			на пост (канал), сейчас и раньше.
+		views_per_story / shares_per_story / reactions_per_story:
+			то же по историям канала.
+		notifications: подписчики с включёнными уведомлениями —
+			(часть, всего); None — нет.
+		messages / viewers / posters: сообщений, читающих и пишущих
+			за период (группа), сейчас и раньше.
+		interactions: просмотры и пересылки по дням (канал).
+		iv_interactions: просмотры Instant View по дням (канал).
+		mute: заглушили и включили звук по дням (канал).
+		story_interactions: просмотры и пересылки историй по дням.
+		messages_daily: сообщения по дням (группа).
+		actions: действия по дням — читающие и пишущие (группа).
+		views_by_source: откуда просмотры (канал) — доли за период.
+		members_by_source: откуда новые подписчики / участники — доли.
+		languages: языки аудитории — доли.
+		reactions_by_emotion / story_reactions: реакции по эмодзи — доли.
+		weekdays: активность по дням недели (группа) — доли.
+		recent_posts: недавние посты с просмотрами, пересылками, реакциями.
+		top_posters / top_admins / top_inviters: самые активные (группа).
 	"""
 
 	period_from: date
@@ -365,6 +439,65 @@ class CommunityAnalytics:
 	hours: tuple[int, ...] | None = None
 	views_per_post: tuple[int, int] | None = None
 	recent_post_views: tuple[int, ...] = ()
+	shares_per_post: tuple[int, int] | None = None
+	reactions_per_post: tuple[int, int] | None = None
+	views_per_story: tuple[int, int] | None = None
+	shares_per_story: tuple[int, int] | None = None
+	reactions_per_story: tuple[int, int] | None = None
+	notifications: tuple[int, int] | None = None
+	messages: tuple[int, int] | None = None
+	viewers: tuple[int, int] | None = None
+	posters: tuple[int, int] | None = None
+	interactions: tuple[NamedSeries, ...] = ()
+	iv_interactions: tuple[NamedSeries, ...] = ()
+	mute: tuple[NamedSeries, ...] = ()
+	story_interactions: tuple[NamedSeries, ...] = ()
+	messages_daily: tuple[NamedSeries, ...] = ()
+	actions: tuple[NamedSeries, ...] = ()
+	views_by_source: tuple[Share, ...] = ()
+	members_by_source: tuple[Share, ...] = ()
+	languages: tuple[Share, ...] = ()
+	reactions_by_emotion: tuple[Share, ...] = ()
+	story_reactions: tuple[Share, ...] = ()
+	weekdays: tuple[Share, ...] = ()
+	recent_posts: tuple[RecentPost, ...] = ()
+	top_posters: tuple[TopPoster, ...] = ()
+	top_admins: tuple[TopAdmin, ...] = ()
+	top_inviters: tuple[TopInviter, ...] = ()
+
+
+#: Поля :class:`CommunityAnalytics` с парами «сейчас, раньше».
+ANALYTICS_PAIRS = (
+	"members",
+	"views_per_post",
+	"shares_per_post",
+	"reactions_per_post",
+	"views_per_story",
+	"shares_per_story",
+	"reactions_per_story",
+	"notifications",
+	"messages",
+	"viewers",
+	"posters",
+)
+#: Поля с именованными рядами по дням.
+ANALYTICS_DAILY = (
+	"interactions",
+	"iv_interactions",
+	"mute",
+	"story_interactions",
+	"messages_daily",
+	"actions",
+)
+#: Поля с долями.
+ANALYTICS_SHARES = (
+	"views_by_source",
+	"members_by_source",
+	"languages",
+	"reactions_by_emotion",
+	"story_reactions",
+	"weekdays",
+)
 
 
 @dataclass(frozen=True)
