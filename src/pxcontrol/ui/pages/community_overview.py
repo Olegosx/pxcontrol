@@ -259,10 +259,13 @@ def updated_text(overview: CommunityOverviewDto, community: CommunityDto) -> str
 	"""«сегодня, 14:02 · бот раз в 15 мин, userbot раз в 6 ч»."""
 	if overview.fetched_at is None:
 		return "ещё не обновлялось"
+	# приостановленный публикатор (ADR-0029) опросом пропускается —
+	# темп называется только по действующим
+	caps = community.capabilities
 	cadence = []
-	if community.bot_id is not None:
+	if caps.bot:
 		cadence.append("бот раз в 15 мин")
-	if community.userbot_assigned:
+	if caps.userbot:
 		cadence.append("userbot раз в 6 ч")
 	tail = f" · {', '.join(cadence)}" if cadence else ""
 	return f"{format_local(overview.fetched_at)}{tail}"
@@ -275,9 +278,11 @@ def reference_rows(
 	publisher = "—"
 	if community.default_account_label:
 		role = f" · {role_caption(community.default_role)}" if community.default_role else ""
-		publisher = f"{community.default_account_label}{role}"
+		paused = " · приостановлен" if community.default_account_paused else ""
+		publisher = f"{community.default_account_label}{role}{paused}"
 	elif community.bot_label:
-		publisher = f"бот {community.bot_label}"
+		paused = " · приостановлен" if community.bot_paused else ""
+		publisher = f"бот {community.bot_label}{paused}"
 	return [
 		("Тип", kind_text(community)),
 		("Создана", _date_text(overview.tg_created_at)),

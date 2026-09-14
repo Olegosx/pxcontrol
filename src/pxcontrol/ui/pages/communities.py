@@ -286,8 +286,9 @@ class TableColumn(StrEnum):
 _STATE_RANK = {
 	CardState.ERRORS: 0,
 	CardState.NO_PUBLISHER: 1,
-	CardState.DISABLED: 2,
-	CardState.NORMAL: 3,
+	CardState.PUBLISHER_PAUSED: 2,
+	CardState.DISABLED: 3,
+	CardState.NORMAL: 4,
 }
 
 
@@ -717,10 +718,11 @@ class _ConnectDialog(MessageBoxBase):
 		if not self.chat_ref():
 			return self._error.fail("Укажите @имя, ссылку или ID канала либо группы.")
 		if self.way() == "bot" and self.bot_id() is None:
-			return self._error.fail("Сначала добавьте бота: Настройки → Аккаунты.")
+			return self._error.fail("Сначала добавьте бота: «Пользователи и боты».")
 		if self.way() == "userbot" and self.account_id() is None:
 			return self._error.fail(
-				"Нет вошедших userbot-аккаунтов — войдите: Настройки → Аккаунты."
+				"Нет вошедших активных userbot-аккаунтов — войдите или возобновите: "
+				"«Пользователи и боты»."
 			)
 		return self._error.succeed()
 
@@ -1093,21 +1095,27 @@ class CommunitiesPage(ScrollArea):
 		)
 
 	def _open_connect_dialog(self, bots: list[BotDto], accounts: list[TgAccountDto]) -> None:
-		logged_in = [account for account in accounts if account.logged_in]
-		dialog = _ConnectDialog(bots, logged_in, self.window())
+		# приостановленные (ADR-0029) не предлагаются: зонд прав к ним
+		# не пойдёт, а подключать сообщество исполнителем, которого
+		# приложение не использует, бессмысленно
+		dialog = _ConnectDialog(
+			[bot for bot in bots if not bot.paused],
+			[account for account in accounts if account.logged_in and not account.paused],
+			self.window(),
+		)
 		if not exec_dialog(dialog):
 			return
 		# пригодность ввода проверил validate() диалога — здесь только сборка
 		if dialog.way() == "bot":
 			bot_id = dialog.bot_id()
 			if bot_id is None:  # недостижимо после validate(), страховка типа
-				self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
+				self._show_error("Сначала добавьте бота: «Пользователи и боты».")
 				return
 			coro = self._worker.engine.communities.add_community(bot_id, dialog.chat_ref())
 		else:
 			account_id = dialog.account_id()
 			if account_id is None:  # недостижимо после validate(), страховка типа
-				self._show_error("Войдите в userbot-аккаунт: Настройки → Аккаунты.")
+				self._show_error("Войдите в userbot-аккаунт: «Пользователи и боты».")
 				return
 			coro = self._worker.engine.communities.add_community_via_userbot(
 				account_id, dialog.chat_ref()

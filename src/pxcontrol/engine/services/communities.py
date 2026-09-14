@@ -95,10 +95,19 @@ class CommunityDto:
 	members_count: int = 0
 	kind: CommunityKind = CommunityKind.CHANNEL
 	forum: bool = False
+	# публикаторы приостановлены человеком (ADR-0029): назначение
+	# сохранено, но приложение их не использует
+	default_account_paused: bool = False
+	bot_paused: bool = False
 
 	@property
 	def userbot_assigned(self) -> bool:
-		"""Назначен ли публикатор по умолчанию (ADR-0022)."""
+		"""Назначен ли публикатор по умолчанию (ADR-0022).
+
+		Именно назначен — приостановленный тоже считается: признак
+		отвечает на вопрос «кому принадлежит лицо поста», а не «уйдёт
+		ли пост сейчас» (за это отвечает :attr:`capabilities`).
+		"""
 		return self.default_account_id is not None
 
 	@property
@@ -108,9 +117,27 @@ class CommunityDto:
 		Перевод «сообщество → способы публикации» живёт здесь, рядом
 		с самими признаками: прежде интерфейс собирал его руками
 		в трёх местах, и правило «бот назначен» пришлось бы менять
-		в каждом.
+		в каждом. Приостановленный публикатор (ADR-0029) не считается —
+		то же правило, что у движка (``community_capabilities``).
 		"""
-		return publish_capabilities(self.bot_id is not None, self.userbot_assigned)
+		return publish_capabilities(
+			self.bot_id is not None and not self.bot_paused,
+			self.userbot_assigned and not self.default_account_paused,
+		)
+
+	@property
+	def publisher_paused(self) -> bool:
+		"""Публиковать некому только из-за паузы (ADR-0029).
+
+		Истинно, когда действующего публикатора нет, но назначенный есть
+		и приостановлен: дашборд показывает «публикатор приостановлен»
+		вместо «нет публикатора» — назначать нового не нужно, нужно
+		возобновить прежнего.
+		"""
+		caps = self.capabilities
+		if caps.userbot or caps.bot:
+			return False
+		return self.default_account_paused or self.bot_paused
 
 
 @dataclass(frozen=True)
@@ -272,14 +299,15 @@ class CommunitiesService:
 		"""Ищет аккаунт, способный публиковать (первый подходящий), с ролью.
 
 		Для попутного членства на бот-пути и перепроверки сообщества без
-		участников. Порядок — по id аккаунта; сбои проверок пропускаются.
+		участников. Порядок — по id аккаунта; сбои проверок пропускаются;
+		приостановленные (ADR-0029) не опрашиваются.
 		"""
 		async with self._db.session_factory() as session:
 			account_ids = (
 				(
 					await session.execute(
 						select(TgAccount.id)
-						.where(TgAccount.session.is_not(None))
+						.where(TgAccount.session.is_not(None), TgAccount.paused.is_(False))
 						.order_by(TgAccount.id)
 					)
 				)
@@ -346,6 +374,8 @@ class CommunitiesService:
 		(авто-восстановление, как раньше); при живых участниках без
 		умолчания авто-выбора нет — выбор лица за пользователем.
 		Потеря прав бота его не отвязывает — только сообщается.
+		Приостановленные участники и бот (ADR-0029) не зондируются:
+		обращений к ним нет, их роли и членства остаются как были.
 
 		Raises:
 			CommunityError: Сообщество не найдено.
@@ -357,10 +387,17 @@ class CommunitiesService:
 			tg_chat_id = community.tg_chat_id
 			default_id = community.default_tg_account_id
 			member_ids = [member.tg_account_id for member in community.members]
-			bot_token = community.bot.token if community.bot is not None else None
+			paused_ids = {
+				member.tg_account_id for member in community.members if member.tg_account.paused
+			}
+			bot = community.bot
+			bot_token = bot.token if bot is not None and not bot.paused else None
 		userbot_ok: bool | None = None
 		fresh_info: CommunityInfo | None = None
 		for account_id in member_ids:
+			if account_id in paused_ids:
+				logger.info("Доступы: аккаунт id=%s приостановлен — зонд пропущен.", account_id)
+				continue
 			probe = await self._probe_userbot(account_id, tg_chat_id)
 			if account_id == default_id:
 				userbot_ok = probe.ok
@@ -738,4 +775,6 @@ class CommunitiesService:
 			members_count=len(community.members),
 			kind=CommunityKind(community.kind),
 			forum=community.forum,
+			default_account_paused=default is not None and default.paused,
+			bot_paused=community.bot is not None and community.bot.paused,
 		)

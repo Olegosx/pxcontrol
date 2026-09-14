@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Community
+from pxcontrol.engine.db.models import Community, CommunityMember
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.captions import filename_complaint
 from pxcontrol.engine.services.settings import (
@@ -103,9 +103,33 @@ def publish_capabilities(bot_assigned: bool, userbot_assigned: bool) -> PublishC
 
 	Единственный источник правды для движка и интерфейса; приоритет
 	транспорта — MTProto (ADR-0011), userbot-путь доступен при
-	назначенном публикаторе по умолчанию (ADR-0022).
+	назначенном публикаторе по умолчанию (ADR-0022). Приостановленный
+	публикатор (ADR-0029) вызывающей стороной считается неназначенным —
+	см. :func:`community_capabilities` и ``CommunityDto.capabilities``.
 	"""
 	return PublishCapabilities(userbot=userbot_assigned, bot=bot_assigned)
+
+
+def community_capabilities(community: Community) -> PublishCapabilities:
+	"""Возможности публикации строки сообщества (связи должны быть подгружены).
+
+	Приостановленный публикатор (ADR-0029) не считается: приложение его
+	не использует, и пост через него не пойдёт. Одна точка на подготовку
+	публикации и проверку препятствий — прежде правило «назначен ли»
+	было написано в обеих.
+	"""
+	bot = community.bot
+	account = community.default_account
+	return publish_capabilities(
+		bot is not None and not bot.paused, account is not None and not account.paused
+	)
+
+
+def publisher_paused(community: Community) -> bool:
+	"""Есть ли у сообщества приостановленный публикатор (ADR-0029)."""
+	bot = community.bot
+	account = community.default_account
+	return (bot is not None and bot.paused) or (account is not None and account.paused)
 
 
 def _dedup_scheduled(items: list[ScheduledPostDto]) -> list[ScheduledPostDto]:
@@ -520,10 +544,13 @@ class PostsService:
 		community = await self._get_community(community_id)
 		if not await self._settings.get_for(COMMUNITY_ENABLED, community_id):
 			return f"Сообщество «{community.title}» выключено — пост ждёт, пока его включат."
-		caps = publish_capabilities(
-			community.bot is not None, community.default_tg_account_id is not None
-		)
+		caps = community_capabilities(community)
 		if not caps.userbot and not caps.bot:
+			if publisher_paused(community):
+				return (
+					f"Публикатор «{community.title}» приостановлен — пост ждёт, "
+					"пока его возобновят в разделе «Пользователи и боты»."
+				)
 			return (
 				f"У «{community.title}» нет публикатора — пост ждёт, "
 				"пока аккаунт или бот вернётся в доступы."
@@ -558,9 +585,7 @@ class PostsService:
 				f"У «{community.title}» нет тем (форум выключен) — "
 				"обновите выбор темы или перепроверьте доступы."
 			)
-		caps = publish_capabilities(
-			community.bot is not None, community.default_tg_account_id is not None
-		)
+		caps = community_capabilities(community)
 		self._check_transport(caps, draft, community.default_tg_account_id)
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
@@ -1199,7 +1224,12 @@ class PostsService:
 				(
 					await session.execute(
 						select(Community)
-						.options(selectinload(Community.members))
+						.options(
+							selectinload(Community.members).selectinload(
+								CommunityMember.tg_account
+							),
+							selectinload(Community.default_account),
+						)
 						.order_by(Community.id)
 					)
 				)
@@ -1253,14 +1283,21 @@ class PostsService:
 		Канал — только умолчание: отложки канала общие для админов,
 		опрос каждого дал бы одни и те же записи. Группа — все участники
 		(отложку видит создатель) плюс умолчание, если оно вне списка
-		(страховка рассинхрона инварианта).
+		(страховка рассинхрона инварианта). Приостановленные аккаунты
+		(ADR-0029) не спрашиваются: обращений к ним нет, а их сообщество
+		в «непрочитанные» не попадает — его и не пытались читать.
+		Связи ``members → tg_account`` и ``default_account`` должны быть
+		подгружены.
 		"""
-		default = community.default_tg_account_id
+		default = community.default_account
+		default_id = default.id if default is not None and not default.paused else None
 		if community.kind != "group":
-			return [default] if default is not None else []
-		readers = [member.tg_account_id for member in community.members]
-		if default is not None and default not in readers:
-			readers.append(default)
+			return [default_id] if default_id is not None else []
+		readers = [
+			member.tg_account_id for member in community.members if not member.tg_account.paused
+		]
+		if default_id is not None and default_id not in readers:
+			readers.append(default_id)
 		return readers
 
 	async def scheduled_times(self, community_id: int) -> list[datetime]:
@@ -1285,12 +1322,16 @@ class PostsService:
 		return [message.scheduled_at for message in messages]
 
 	async def _get_community(self, community_id: int) -> Community:
-		"""Возвращает канал с ботом или объясняет, что канал не найден."""
+		"""Возвращает сообщество с публикаторами или объясняет, что оно не найдено.
+
+		Бот и аккаунт-умолчание подгружаются сразу: у обоих есть признак
+		паузы (ADR-0029), по которому решается, кто публикует.
+		"""
 		async with self._db.session_factory() as session:
 			community = (
 				await session.execute(
 					select(Community)
-					.options(selectinload(Community.bot))
+					.options(selectinload(Community.bot), selectinload(Community.default_account))
 					.where(Community.id == community_id)
 				)
 			).scalar_one_or_none()

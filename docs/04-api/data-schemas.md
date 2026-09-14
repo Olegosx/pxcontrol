@@ -1,6 +1,6 @@
 # Схемы данных (типы границы движка)
 
-> Статус: 🟢 готов · Обновлено: 2026-08-25 · Владелец: olegosx
+> Статус: 🟢 готов · Обновлено: 2026-09-15 · Владелец: olegosx
 
 ## Назначение документа
 
@@ -26,8 +26,8 @@ Pydantic не нужна, а неизменяемость защищает от 
 
 | Тип | Модуль | Роль |
 | --- | --- | --- |
-| `BotDto`, `TgAccountDto`, `TgApiDto`, `AiKeyDto` | `accounts.py` | аккаунты: боты, userbot, ключ API приложения (ADR-0018), ключи ИИ |
-| `CommunityDto`, `CommunityAccess` | `communities.py` | канал и итог перепроверки доступов |
+| `BotDto`, `TgAccountDto`, `TgApiDto`, `AiKeyDto` | `accounts.py` | аккаунты: боты (`paused`, `publisher_of`), userbot (`connected`, `paused`, `memberships`, `publisher_of` — ADR-0029), ключ API приложения (ADR-0018), ключи ИИ |
+| `CommunityDto`, `CommunityAccess` | `communities.py` | канал и итог перепроверки доступов; `default_account_paused`/`bot_paused` и вычисляемое `publisher_paused` (ADR-0029) |
 | `PostDraft` | `posts.py` | черновик публикации — единый вход для всех типов контента |
 | `PublishCapabilities`, `ScheduledPostDto` | `posts.py` | возможности канала; отложенная запись из Telegram (с адресом `ScheduledRef`: сообщество, аккаунт-читатель, id записи в очереди отложенных) |
 | `ScheduledRef`, `ScheduledDraft` | `posts.py` | адрес отложенной записи для действий над ней; запись целиком для формы правки (текст, время, вид вложения, тема, предел текста по аккаунту) |

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from pxcontrol.engine.db.database import Database
+from pxcontrol.engine.db.models import TgAccount
 from pxcontrol.engine.services.accounts import (
 	AccountsError,
 	AccountsService,
@@ -53,9 +54,21 @@ class _FakeGateway:
 		self.premium_ids: set[int] = set()
 		# профиль «кто я» аккаунта; нет в словаре — «не подключён»
 		self.profiles: dict[int, UserbotProfile] = {}
+		# приостановленные (ADR-0029): пауза закрывает транспорт
+		self.paused: set[int] = set()
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return account_id in self.premium_ids
+
+	def userbot_connected(self, account_id: int) -> bool:
+		return account_id in self.activated
+
+	async def pause_userbot(self, account_id: int) -> None:
+		await self.deactivate_userbot(account_id)
+		self.paused.add(account_id)
+
+	def resume_userbot(self, account_id: int) -> None:
+		self.paused.discard(account_id)
 
 	async def userbot_me(self, account_id: int) -> UserbotProfile:
 		profile = self.profiles.get(account_id)
@@ -404,3 +417,100 @@ async def test_add_ai_key_rejects_blank(db: Database) -> None:
 	with pytest.raises(AccountsError, match="ключ"):
 		await service.add_ai_key("Основной", "  ")
 	assert await service.list_ai_keys() == []
+
+
+# --- приостановка (ADR-0029) -------------------------------------------------------
+
+
+async def test_pause_and_resume_tg_account(db: Database) -> None:
+	"""Пауза закрывает транспорт и помечает аккаунт; возобновление подключает без входа."""
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	await service.set_tg_api(123, "app-hash-app-hash")
+	account = await service.add_tg_account("", "+7900")
+	assert await service.confirm_login_code(account.id, "12345") is True
+	assert account.id in gateway.activated
+
+	paused = await service.set_tg_account_paused(account.id, True)
+	assert paused.paused is True and paused.logged_in is True, "сессия остаётся"
+	assert gateway.paused == {account.id}
+	assert account.id not in gateway.activated, "транспорт закрыт"
+
+	resumed = await service.set_tg_account_paused(account.id, False)
+	assert resumed.paused is False
+	assert gateway.paused == set()
+	assert account.id in gateway.activated, "подключён по сохранённой сессии, без входа"
+	with pytest.raises(AccountsError, match="не найден"):
+		await service.set_tg_account_paused(999_999, True)
+
+
+async def test_login_while_paused_does_not_connect(db: Database) -> None:
+	"""Вход не отменяет паузу: приостановленный аккаунт после входа не подключается."""
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	await service.set_tg_api(123, "app-hash-app-hash")
+	account = await service.add_tg_account("", "+7900")
+	await service.set_tg_account_paused(account.id, True)
+	assert await service.confirm_login_code(account.id, "12345") is True
+	assert gateway.activated == {}, "пауза снимается явно, а не входом"
+	assert gateway.paused == {account.id}
+	listed = (await service.list_tg_accounts())[0]
+	assert listed.logged_in is True and listed.paused is True
+
+
+async def test_startup_registers_paused_and_skips_them(db: Database) -> None:
+	"""При старте приостановленные регистрируются в шлюзе, но не подключаются."""
+	service = AccountsService(db, _FakeGateway())
+	await service.set_tg_api(123, "app-hash-app-hash")
+	async with db.session_factory() as session:
+		live = TgAccount(label="живой", phone="+1", session="s1")
+		paused = TgAccount(label="на паузе", phone="+2", session="s2", paused=True)
+		no_session = TgAccount(label="без сессии", phone="+3", paused=True)
+		session.add_all([live, paused, no_session])
+		await session.commit()
+		await session.refresh(live)
+		await session.refresh(paused)
+		await session.refresh(no_session)
+	gateway = _FakeGateway()  # свежий шлюз — как после запуска приложения
+	await AccountsService(db, gateway).activate_stored_userbots()
+	assert set(gateway.activated) == {live.id}
+	assert gateway.paused == {paused.id, no_session.id}, "регистрация не зависит от сессии"
+
+
+async def test_bot_pause_and_publisher_counts(db: Database) -> None:
+	"""Пауза бота — признак в БД; списки считают участие и назначения публикатором."""
+	from pxcontrol.engine.db.models import Community, CommunityMember
+
+	gateway = _FakeGateway()
+	service = AccountsService(db, gateway)
+	bot = await service.add_bot("Бот", "123456:AAAbbbCCCddd")
+	account = await service.add_tg_account("", "+7900")
+	other = await service.add_tg_account("", "+7901")
+	async with db.session_factory() as session:
+		first = Community(
+			title="Первое", tg_chat_id="-1001", bot_id=bot.id, default_tg_account_id=account.id
+		)
+		second = Community(title="Второе", tg_chat_id="-1002")
+		session.add_all([first, second])
+		await session.flush()
+		session.add_all(
+			[
+				CommunityMember(community_id=first.id, tg_account_id=account.id, role="admin"),
+				CommunityMember(community_id=second.id, tg_account_id=account.id, role="member"),
+				CommunityMember(community_id=second.id, tg_account_id=other.id, role="member"),
+			]
+		)
+		await session.commit()
+
+	bots = await service.list_bots()
+	assert (bots[0].paused, bots[0].publisher_of) == (False, 1)
+	paused = await service.set_bot_paused(bot.id, True)
+	assert paused.paused is True
+	assert (await service.list_bots())[0].paused is True
+	assert gateway.paused == set(), "у бота нет транспорта — шлюз не трогается"
+	with pytest.raises(AccountsError, match="не найден"):
+		await service.set_bot_paused(999_999, True)
+
+	accounts = {a.id: a for a in await service.list_tg_accounts()}
+	assert (accounts[account.id].memberships, accounts[account.id].publisher_of) == (2, 1)
+	assert (accounts[other.id].memberships, accounts[other.id].publisher_of) == (1, 0)

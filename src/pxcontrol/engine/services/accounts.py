@@ -9,12 +9,21 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import AiCredential, Bot, TgAccount, TgApiCredential
+from pxcontrol.engine.db.models import (
+	AiCredential,
+	Bot,
+	Community,
+	CommunityMember,
+	TgAccount,
+	TgApiCredential,
+)
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.security.secrets import SecretDecryptionError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
@@ -67,7 +76,13 @@ class _TelegramPort(Protocol):
 
 	async def deactivate_userbot(self, account_id: int) -> None: ...
 
+	async def pause_userbot(self, account_id: int) -> None: ...
+
+	def resume_userbot(self, account_id: int) -> None: ...
+
 	def userbot_premium(self, account_id: int | None) -> bool: ...
+
+	def userbot_connected(self, account_id: int) -> bool: ...
 
 	async def userbot_me(self, account_id: int) -> UserbotProfile: ...
 
@@ -90,6 +105,19 @@ def account_display(
 	return label or full_name or at_name or phone or "аккаунт"
 
 
+async def _count_by(session: AsyncSession, column: InstrumentedAttribute[Any]) -> dict[int, int]:
+	"""Число строк на каждое значение колонки-ссылки (NULL не считается).
+
+	Один групповой запрос на весь список вместо запроса на строку:
+	членства и назначения публикатором считаются так для всех аккаунтов
+	и ботов разом.
+	"""
+	rows = await session.execute(
+		select(column, func.count()).where(column.is_not(None)).group_by(column)
+	)
+	return {int(key): int(count) for key, count in rows.tuples()}
+
+
 def mask_secret(secret: str) -> str:
 	"""Возвращает замаскированное представление секрета для показа в UI.
 
@@ -104,12 +132,20 @@ def mask_secret(secret: str) -> str:
 
 @dataclass(frozen=True)
 class BotDto:
-	"""Бот для показа в интерфейсе."""
+	"""Бот для показа в интерфейсе.
+
+	Attributes:
+		paused: приостановлен человеком (ADR-0029) — приложение бота
+			не использует.
+		publisher_of: в скольких сообществах бот назначен публикатором.
+	"""
 
 	id: int
 	label: str
 	username: str | None
 	token_masked: str
+	paused: bool = False
+	publisher_of: int = 0
 
 
 @dataclass(frozen=True)
@@ -133,6 +169,15 @@ class TgAccountDto:
 	не собирает его сам. ``premium`` — статус подписки подключённого
 	аккаунта (True только у активного: от него зависит лимит файла
 	2/4 ГБ).
+
+	Attributes:
+		connected: есть живое соединение с Telegram прямо сейчас
+			(снимок в момент чтения списка; вошедший, но не подключённый
+			аккаунт — нет сети или ключа API — показывается честно).
+		paused: приостановлен человеком (ADR-0029): транспорт закрыт,
+			сессия и членства сохранены.
+		memberships: в скольких сообществах аккаунт состоит (ADR-0022).
+		publisher_of: в скольких из них он публикатор по умолчанию.
 	"""
 
 	id: int
@@ -144,6 +189,10 @@ class TgAccountDto:
 	first_name: str | None = None
 	last_name: str | None = None
 	display: str = ""
+	connected: bool = False
+	paused: bool = False
+	memberships: int = 0
+	publisher_of: int = 0
 
 
 @dataclass(frozen=True)
@@ -166,10 +215,33 @@ class AccountsService:
 	# --- боты -------------------------------------------------------------
 
 	async def list_bots(self) -> list[BotDto]:
-		"""Возвращает всех ботов."""
+		"""Возвращает всех ботов с числом сообществ, где каждый — публикатор."""
 		async with self._db.session_factory() as session:
-			bots = (await session.execute(select(Bot).order_by(Bot.id))).scalars()
-			return [self._bot_dto(b) for b in bots]
+			bots = list((await session.execute(select(Bot).order_by(Bot.id))).scalars())
+			publisher_of = await _count_by(session, Community.bot_id)
+		return [self._bot_dto(b, publisher_of.get(b.id, 0)) for b in bots]
+
+	async def set_bot_paused(self, bot_id: int, paused: bool) -> BotDto:
+		"""Приостанавливает бота или возобновляет (ADR-0029).
+
+		У бота нет соединения, поэтому пауза — только признак в БД:
+		публикация и опрос статистики читают его сами. Назначения
+		в сообществах сохраняются.
+
+		Raises:
+			AccountsError: Бот не найден.
+		"""
+		async with self._db.session_factory() as session:
+			bot = await session.get(Bot, bot_id)
+			if bot is None:
+				raise AccountsError("Бот не найден — обновите список.")
+			bot.paused = paused
+			await session.commit()
+			await session.refresh(bot)
+		logger.info(
+			"Бот «%s» (id=%s) %s.", bot.label, bot_id, "приостановлен" if paused else "возобновлён"
+		)
+		return self._bot_dto(bot)
 
 	async def add_bot(self, label: str, token: str) -> BotDto:
 		"""Проверяет токен через Telegram (getMe) и сохраняет бота.
@@ -233,8 +305,15 @@ class AccountsService:
 		return bot
 
 	@staticmethod
-	def _bot_dto(bot: Bot) -> BotDto:
-		return BotDto(bot.id, bot.label, bot.username, mask_secret(bot.token))
+	def _bot_dto(bot: Bot, publisher_of: int = 0) -> BotDto:
+		return BotDto(
+			bot.id,
+			bot.label,
+			bot.username,
+			mask_secret(bot.token),
+			paused=bot.paused,
+			publisher_of=publisher_of,
+		)
 
 	# --- ключ API Telegram (один на приложение, ADR-0018) ---------------------
 
@@ -302,10 +381,95 @@ class AccountsService:
 		Статус Premium запрашивается у шлюза по id каждого аккаунта
 		(пул клиентов, ADR-0019): True — только у фактически
 		подключённого клиента, приписывать его всем вошедшим нельзя.
+		Участие в сообществах и число сообществ-умолчаний считаются
+		двумя групповыми запросами — по одному на список, а не на аккаунт.
 		"""
 		async with self._db.session_factory() as session:
 			rows = list((await session.execute(select(TgAccount).order_by(TgAccount.id))).scalars())
-		return [self._acc_dto(a, premium=self._gateway.userbot_premium(a.id)) for a in rows]
+			memberships = await _count_by(session, CommunityMember.tg_account_id)
+			publisher_of = await _count_by(session, Community.default_tg_account_id)
+		return [
+			self._acc_dto(
+				a,
+				premium=self._gateway.userbot_premium(a.id),
+				connected=self._gateway.userbot_connected(a.id),
+				memberships=memberships.get(a.id, 0),
+				publisher_of=publisher_of.get(a.id, 0),
+			)
+			for a in rows
+		]
+
+	async def set_tg_account_paused(self, account_id: int, paused: bool) -> TgAccountDto:
+		"""Приостанавливает userbot-аккаунт или возобновляет (ADR-0029).
+
+		Пауза: признак в БД и закрытие транспорта в шлюзе — дальше любое
+		обращение к аккаунту получает отказ «приостановлен», очередь
+		отправки придерживает его посты, фоновые чтения его пропускают.
+		Сессия, пометка и членства остаются.
+
+		Возобновление: признак снимается, и при сохранённой сессии
+		аккаунт подключается сразу — без нового входа. Неудача
+		подключения (нет сети) не ошибка операции: аккаунт возобновлён,
+		а транспорт починится первой операцией, как после старта.
+
+		Raises:
+			AccountsError: Аккаунт не найден.
+		"""
+		async with self._db.session_factory() as session:
+			account = await session.get(TgAccount, account_id)
+			if account is None:
+				raise _account_not_found()
+			account.paused = paused
+			await session.commit()
+			await session.refresh(account)
+		display = self._display(account)
+		if paused:
+			await self._gateway.pause_userbot(account_id)
+			logger.info("Аккаунт «%s» (id=%s) приостановлен.", display, account_id)
+		else:
+			self._gateway.resume_userbot(account_id)
+			logger.info("Аккаунт «%s» (id=%s) возобновлён.", display, account_id)
+			if account.session is not None:
+				await self._activate(account, account.session)
+		return self._acc_dto(
+			account,
+			premium=self._gateway.userbot_premium(account_id),
+			connected=self._gateway.userbot_connected(account_id),
+		)
+
+	async def _activate(self, account: TgAccount, session_string: str) -> bool:
+		"""Подключает аккаунт по сессии; неудача — в журнал, не наружу.
+
+		Общий шаг старта, входа и возобновления: реквизиты подключения —
+		общий ключ API (ADR-0018). Без ключа подключать нечем — это
+		тоже не сбой, а состояние, которое человек поправит в настройках.
+
+		Returns:
+			True — подключён (профиль актуализирован), False — нет.
+		"""
+		display = self._display(account)
+		try:
+			credential = await self._require_tg_api()
+			await self._gateway.activate_userbot(
+				account.id, credential.api_id, credential.api_hash, session_string
+			)
+		except (AccountsError, UserbotUnavailableError) as exc:
+			logger.warning("Userbot «%s» не подключён: %s", display, exc)
+			return False
+		except Exception:  # noqa: BLE001 — подключение вспомогательно: старт и вход уже удались
+			logger.exception("Userbot «%s»: подключение не удалось.", display)
+			return False
+		logger.info("Userbot «%s» подключён.", display)
+		# соединение только что установлено — момент актуализации
+		await self.sync_profile(account.id)
+		return True
+
+	@staticmethod
+	def _display(account: TgAccount) -> str:
+		"""Отображаемое имя записи (единая точка — :func:`account_display`)."""
+		return account_display(
+			account.label, account.username, account.first_name, account.last_name, account.phone
+		)
 
 	async def add_tg_account(self, label: str, phone: str) -> TgAccountDto:
 		"""Сохраняет userbot-аккаунт: телефон и необязательную пометку.
@@ -403,13 +567,7 @@ class AccountsService:
 				# нужен: иначе непонятно, почему аккаунт «удалён» дважды
 				logger.info("Аккаунт id=%s уже отсутствует — удалять нечего.", account_id)
 				return
-			display = account_display(
-				account.label,
-				account.username,
-				account.first_name,
-				account.last_name,
-				account.phone,
-			)
+			display = self._display(account)
 			await session.delete(account)
 			await session.commit()
 		logger.info("Удалён userbot-аккаунт «%s» (id=%s).", display, account_id)
@@ -423,18 +581,17 @@ class AccountsService:
 		одного аккаунта (нет сети, сессия отозвана) не ошибка и не мешает
 		остальным: приложение работает дальше, транспорт чинится первой
 		операцией или повторным входом.
+
+		Приостановленные (ADR-0029) не подключаются вовсе, но
+		регистрируются в шлюзе — чтобы обращение к ним получало отказ
+		«приостановлен», а не «войдите»; регистрация не зависит от того,
+		есть ли у аккаунта сессия.
 		"""
 		try:
 			credential = await self._read_tg_api()
 			async with self._db.session_factory() as session:
 				accounts = (
-					(
-						await session.execute(
-							select(TgAccount)
-							.where(TgAccount.session.is_not(None))
-							.order_by(TgAccount.id)
-						)
-					)
+					(await session.execute(select(TgAccount).order_by(TgAccount.id)))
 					.scalars()
 					.all()
 				)
@@ -443,33 +600,28 @@ class AccountsService:
 			# пользователь увидит ту же ошибку на странице аккаунтов
 			logger.warning("Userbot-аккаунты не активированы: %s", exc)
 			return
+		for account in accounts:
+			if account.paused:
+				await self._gateway.pause_userbot(account.id)
+				logger.info("Аккаунт «%s» приостановлен — не подключается.", self._display(account))
+		stored = [a for a in accounts if a.session is not None and not a.paused]
 		if credential is None:
-			if accounts:
+			if stored:
 				logger.info("Ключ API Telegram не задан — userbot-аккаунты отключены.")
 			return
-		for account in accounts:
-			if account.session is None:  # для mypy: выборка уже отфильтровала
+		for account in stored:
+			if account.session is None:  # для mypy: список уже отфильтрован
 				continue
-			display = account_display(
-				account.label,
-				account.username,
-				account.first_name,
-				account.last_name,
-				account.phone,
-			)
-			try:
-				await self._gateway.activate_userbot(
-					account.id, credential.api_id, credential.api_hash, account.session
-				)
-			except UserbotUnavailableError as exc:
-				logger.warning("Userbot «%s» не подключён: %s", display, exc)
-				continue
-			logger.info("Userbot «%s» подключён.", display)
-			# соединение только что установлено — момент актуализации
-			await self.sync_profile(account.id)
+			await self._activate(account, account.session)
 
 	@staticmethod
-	def _acc_dto(acc: TgAccount, premium: bool = False) -> TgAccountDto:
+	def _acc_dto(
+		acc: TgAccount,
+		premium: bool = False,
+		connected: bool = False,
+		memberships: int = 0,
+		publisher_of: int = 0,
+	) -> TgAccountDto:
 		return TgAccountDto(
 			acc.id,
 			acc.label,
@@ -482,6 +634,10 @@ class AccountsService:
 			display=account_display(
 				acc.label, acc.username, acc.first_name, acc.last_name, acc.phone
 			),
+			connected=connected,
+			paused=acc.paused,
+			memberships=memberships,
+			publisher_of=publisher_of,
 		)
 
 	# --- вход userbot ---------------------------------------------------------
@@ -548,26 +704,26 @@ class AccountsService:
 
 	async def _save_session(self, account_id: int, session_string: str) -> None:
 		"""Сохраняет строку сессии (шифруется прозрачно, ADR-0009)
-		и сразу подключает userbot — без перезапуска приложения."""
+		и сразу подключает userbot — без перезапуска приложения.
+
+		Приостановленный аккаунт (ADR-0029) после входа не подключается:
+		паузу человек снимает явно, вход её не отменяет — иначе
+		«войти заново» тихо возвращало бы аккаунт в работу.
+		"""
 		async with self._db.session_factory() as session:
 			account = await session.get(TgAccount, account_id)
 			if account is None:
 				raise _account_not_found()
 			account.session = session_string
 			await session.commit()
+			await session.refresh(account)
 		logger.info("Userbot id=%s: сессия сохранена.", account_id)
-		try:
-			# ключ не мог исчезнуть между шагами входа, но страховка честная:
-			# _require_tg_api даст понятный текст вместо падения активации
-			credential = await self._require_tg_api()
-			await self._gateway.activate_userbot(
-				account_id, credential.api_id, credential.api_hash, session_string
+		if account.paused:
+			logger.info(
+				"Аккаунт id=%s приостановлен — подключится после возобновления.", account_id
 			)
-		except Exception:  # noqa: BLE001 — вход удался, подключение не критично
-			logger.exception("Не удалось подключить userbot сразу после входа.")
 			return
-		# вход завершён, соединение живое — заполняем имя и @имя из Telegram
-		await self.sync_profile(account_id)
+		await self._activate(account, session_string)
 
 	# --- ключи ИИ -----------------------------------------------------------
 

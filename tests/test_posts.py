@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
@@ -1243,3 +1245,61 @@ async def test_bot_path_uses_base_limits(db: Database) -> None:
 	with pytest.raises(PostError, match="Текст поста длиннее"):
 		await service.publish(PostDraft(community_id, text="я" * 4097))
 	assert len(gateway.sent) == 1
+
+
+# --- приостановленные публикаторы (ADR-0029) --------------------------------------
+
+
+async def _set_paused(db: Database, community_id: int, *, account: bool, bot: bool) -> None:
+	"""Ставит на паузу публикаторов сообщества прямо в БД."""
+	async with db.session_factory() as session:
+		community = (
+			await session.execute(
+				select(Community)
+				.options(selectinload(Community.bot), selectinload(Community.default_account))
+				.where(Community.id == community_id)
+			)
+		).scalar_one()
+		if community.default_account is not None:
+			community.default_account.paused = account
+		if community.bot is not None:
+			community.bot.paused = bot
+		await session.commit()
+
+
+async def test_publish_waits_while_publishers_paused(db: Database) -> None:
+	"""Оба публикатора на паузе — пост ждёт (поправимо), а не падает ошибкой.
+
+	Класс тот же, что у выключенного сообщества: очередь придерживает
+	пост, пока аккаунт или бота не возобновят.
+	"""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	await _set_paused(db, community_id, account=True, bot=True)
+	with pytest.raises(PostNotReadyError, match="приостановлен"):
+		await service.publish(PostDraft(community_id, text="x"))
+	assert gateway.published == [] and gateway.sent == []
+
+
+async def test_paused_userbot_falls_back_to_bot(db: Database) -> None:
+	"""Userbot на паузе — «сейчас» уходит ботом, отложка ждёт userbot."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	await _set_paused(db, community_id, account=True, bot=False)
+	await service.publish(PostDraft(community_id, text="сейчас"))
+	assert gateway.published == [], "приостановленным аккаунтом не публикуем"
+	assert [text for _t, _c, text in gateway.sent] == ["сейчас"]
+	when = datetime.now(UTC) + timedelta(hours=1)
+	with pytest.raises(PostNotReadyError, match="userbot-админа"):
+		await service.publish(PostDraft(community_id, text="позже", when=when))
+
+
+async def test_list_scheduled_skips_paused_readers(db: Database) -> None:
+	"""Приостановленный аккаунт отложки не читает; сообщество — не «непрочитанное»."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db, with_bot=False)
+	assert len((await service.list_scheduled()).items) == 1
+	await _set_paused(db, community_id, account=True, bot=False)
+	assert await service.list_scheduled() == ScheduledList(items=[], unread=())

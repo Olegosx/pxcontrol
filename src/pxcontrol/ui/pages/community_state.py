@@ -33,20 +33,27 @@ class CardState(StrEnum):
 	NORMAL = "normal"  # штатно
 	ERRORS = "errors"  # в очереди есть элементы с ошибкой
 	NO_PUBLISHER = "no_publisher"  # ни userbot-публикатора, ни бота
+	# публикатор назначен, но приостановлен человеком (ADR-0029):
+	# назначать нового не нужно — нужно возобновить прежнего
+	PUBLISHER_PAUSED = "publisher_paused"
 	DISABLED = "disabled"  # выключено переключателем активности
 
 
 def card_state(community: CommunityDto, counts: QueueCounts) -> CardState:
-	"""Состояние по приоритету «выключено → ошибки → нет публикатора».
+	"""Состояние по приоритету «выключено → ошибки → публикатор на паузе → нет публикатора».
 
 	Выключенное сообщество главнее прочего: пока оно выключено, очередь
 	не разбирается и ошибки не чинятся; ошибки главнее отсутствия
 	публикатора — они уже случились, а публикатор ещё может вернуться.
+	Пауза публикатора главнее его отсутствия: назначенный есть,
+	а «нет публикатора» звало бы назначать нового.
 	"""
 	if not community.enabled:
 		return CardState.DISABLED
 	if counts.errors > 0:
 		return CardState.ERRORS
+	if community.publisher_paused:
+		return CardState.PUBLISHER_PAUSED
 	caps = community.capabilities
 	if not caps.userbot and not caps.bot:
 		return CardState.NO_PUBLISHER
@@ -59,6 +66,8 @@ def state_badge_text(state: CardState, counts: QueueCounts) -> str | None:
 		return f"{counts.errors} {plural(counts.errors, 'ошибка', 'ошибки', 'ошибок')}"
 	if state is CardState.NO_PUBLISHER:
 		return "нет публикатора"
+	if state is CardState.PUBLISHER_PAUSED:
+		return "публикатор приостановлен"
 	if state is CardState.DISABLED:
 		return "выключено"
 	return None
@@ -128,6 +137,11 @@ def card_actions(community: CommunityDto, counts: QueueCounts) -> tuple[CardActi
 		return (CardAction.ENABLE, CardAction.MAINTENANCE)
 	if state is CardState.NO_PUBLISHER:
 		return (CardAction.ASSIGN_PUBLISHER,)
+	if state is CardState.PUBLISHER_PAUSED:
+		# действие живёт в разделе «Пользователи и боты» — возобновить
+		# аккаунт или бота; с карточки сообщества ничего не предлагается,
+		# чтобы не звать назначать нового публикатора вместо возврата прежнего
+		return ()
 	if community.kind is CommunityKind.GROUP:
 		return (CardAction.PUBLISH, CardAction.MAINTENANCE)
 	if counts.planned + counts.errors > 0:

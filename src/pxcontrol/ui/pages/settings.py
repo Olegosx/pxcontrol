@@ -4,8 +4,8 @@
 полей, шрифт; ключ API Telegram — один на приложение, ADR-0018;
 путь к ffmpeg; период проверки слотов отложек, ADR-0016), «Папки»
 (базовые папки видео: исходники / результаты / опубликованные)
-и «Аккаунты» (боты, userbot, ключи ИИ — встроенная
-:class:`AccountsPage`).
+и «Ключи ИИ» (:class:`AiKeysPanel`). Боты и userbot-аккаунты живут
+в разделе «Пользователи и боты» (ADR-0029).
 
 Значения общих настроек живут в ``app_settings`` (ADR-0013)
 и переживают перезапуск; тема применяется на лету, плотность
@@ -46,7 +46,7 @@ from pxcontrol.engine.services.settings import (
 from pxcontrol.engine.services.video import VIDEO_DIR_DEFAULTS
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.accounts import AccountsPage
+from pxcontrol.ui.pages.ai_keys import AiKeysPanel
 from pxcontrol.ui.pages.common import (
 	INPUT_DEBOUNCE_MS,
 	bind,
@@ -83,7 +83,7 @@ class SettingsPage(QWidget):
 		# категория = пункт списка + панель в стеке (порядок общий)
 		self._add_category("Общие", _GeneralSettings(worker, self))
 		self._add_category("Папки", _FoldersSettings(worker, self))
-		self._add_category("Аккаунты", AccountsPage(worker, self))
+		self._add_category("Ключи ИИ", AiKeysPanel(worker, self))
 		self._categories.currentRowChanged.connect(self._stack.setCurrentIndex)
 		self._categories.setCurrentRow(0)
 		layout.addWidget(self._categories)
@@ -205,8 +205,8 @@ class _GeneralSettings(QWidget):
 		"""Блок «API Telegram»: ключ приложения — один на всё приложение.
 
 		Пара api_id/api_hash с my.telegram.org — реквизиты приложения,
-		а не аккаунта (ADR-0018): задаётся здесь один раз, аккаунты
-		добавляются в «Аккаунтах» только названием и телефоном.
+		а не аккаунта (ADR-0018): задаётся здесь один раз, пользователи
+		добавляются в «Пользователях и ботах» только телефоном и пометкой.
 		"""
 		layout.addWidget(SubtitleLabel("API Telegram", self))
 		row = QHBoxLayout()
@@ -226,7 +226,7 @@ class _GeneralSettings(QWidget):
 		layout.addLayout(row)
 		self._api_status = CaptionLabel(
 			"Ключ приложения — один на всё приложение; с ним входят все "
-			"userbot-аккаунты (их телефоны добавляются в «Аккаунтах»).",
+			"пользователи (их телефоны добавляются в «Пользователях и ботах»).",
 			self,
 		)
 		self._api_status.setWordWrap(True)

@@ -1,0 +1,179 @@
+"""Тесты правил показа дашборда «Пользователи и боты» (без Qt, ADR-0029).
+
+Импортируются только чистые функции и перечисления — виджеты
+не создаются. Правила: состояние карточки и его приоритет, набор
+действий, подписи, участие, сводка, поиск, тексты удаления.
+"""
+
+from __future__ import annotations
+
+from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
+from pxcontrol.ui.pages.user_state import (
+	BotAction,
+	BotState,
+	UserAction,
+	UserState,
+	bot_actions,
+	bot_participation_text,
+	bot_state,
+	bot_subtitle,
+	delete_bot_text,
+	delete_user_text,
+	matches_bot_search,
+	matches_user_search,
+	participation_text,
+	premium_text,
+	primary_user_action,
+	user_actions,
+	user_state,
+	user_subtitle,
+	users_summary,
+)
+
+
+def _account(
+	account_id: int = 1,
+	*,
+	label: str | None = None,
+	username: str | None = "lara",
+	first_name: str | None = "Lara",
+	last_name: str | None = "Croft",
+	phone: str | None = "+7900",
+	logged_in: bool = True,
+	connected: bool = True,
+	paused: bool = False,
+	premium: bool = False,
+	memberships: int = 0,
+	publisher_of: int = 0,
+) -> TgAccountDto:
+	full_name = " ".join(part for part in (first_name, last_name) if part)
+	display = label or full_name or (f"@{username}" if username else None) or phone or "аккаунт"
+	return TgAccountDto(
+		id=account_id,
+		label=label,
+		phone=phone,
+		logged_in=logged_in,
+		premium=premium,
+		username=username,
+		first_name=first_name,
+		last_name=last_name,
+		display=display,
+		connected=connected,
+		paused=paused,
+		memberships=memberships,
+		publisher_of=publisher_of,
+	)
+
+
+def _bot(bot_id: int = 1, *, paused: bool = False, publisher_of: int = 0) -> BotDto:
+	return BotDto(
+		bot_id, "Публикатор", "pub_bot", "1234…cdef", paused=paused, publisher_of=publisher_of
+	)
+
+
+# --- состояние --------------------------------------------------------------------
+
+
+def test_user_state_priority_paused_over_login_over_connection() -> None:
+	assert user_state(_account(paused=True, logged_in=False)) is UserState.PAUSED
+	assert user_state(_account(logged_in=False, connected=False)) is UserState.NOT_LOGGED_IN
+	assert user_state(_account(connected=False)) is UserState.OFFLINE
+	assert user_state(_account()) is UserState.ACTIVE
+
+
+def test_bot_state_only_pause() -> None:
+	assert bot_state(_bot()) is BotState.ACTIVE
+	assert bot_state(_bot(paused=True)) is BotState.PAUSED
+
+
+# --- действия -----------------------------------------------------------------------
+
+
+def test_user_actions_by_state() -> None:
+	assert user_actions(_account(paused=True)) == (UserAction.RESUME, UserAction.LABEL)
+	assert user_actions(_account(logged_in=False)) == (
+		UserAction.LOGIN,
+		UserAction.PAUSE,
+		UserAction.LABEL,
+	)
+	assert user_actions(_account()) == (UserAction.PAUSE, UserAction.LABEL)
+	assert user_actions(_account(connected=False)) == (UserAction.PAUSE, UserAction.LABEL)
+	assert primary_user_action(UserAction.LOGIN) and primary_user_action(UserAction.RESUME)
+	assert not primary_user_action(UserAction.PAUSE)
+
+
+def test_bot_actions_by_state() -> None:
+	assert bot_actions(_bot()) == (BotAction.WHEREABOUTS, BotAction.PAUSE)
+	assert bot_actions(_bot(paused=True)) == (BotAction.RESUME,)
+
+
+# --- подписи -----------------------------------------------------------------------
+
+
+def test_user_subtitle_skips_parts_equal_to_display() -> None:
+	# заголовок «Lara Croft» — имя не повторяется, @имя и телефон остаются
+	assert user_subtitle(_account()) == "@lara · +7900"
+	# заголовок — пометка: и имя, и @имя в подстрочнике
+	assert user_subtitle(_account(label="рабочий")) == "@lara · Lara Croft · +7900"
+	# заголовок — @имя (имени нет): только телефон
+	assert user_subtitle(_account(first_name=None, last_name=None)) == "+7900"
+	assert user_subtitle(_account(username=None, phone=None)) == "без телефона"
+
+
+def test_bot_subtitle() -> None:
+	assert bot_subtitle(_bot()) == "@pub_bot · 1234…cdef"
+	assert bot_subtitle(BotDto(1, "б", None, "••••")) == "@— · ••••"
+
+
+def test_participation_texts() -> None:
+	assert participation_text(_account()) == "не состоит в сообществах"
+	assert participation_text(_account(memberships=1)) == "в 1 сообществе"
+	assert participation_text(_account(memberships=3, publisher_of=2)) == (
+		"в 3 сообществах · публикатор в 2"
+	)
+	assert bot_participation_text(_bot()) == "не назначен публикатором"
+	assert bot_participation_text(_bot(publisher_of=1)) == "публикатор в 1 сообществе"
+	assert bot_participation_text(_bot(publisher_of=5)) == "публикатор в 5 сообществах"
+
+
+def test_premium_text_names_file_limit() -> None:
+	assert premium_text(_account()) is None
+	assert premium_text(_account(premium=True)) == "Premium · файлы до 4 ГБ"
+
+
+# --- сводка и поиск ------------------------------------------------------------------
+
+
+def test_users_summary_counts() -> None:
+	accounts = [
+		_account(1),
+		_account(2, logged_in=False),
+		_account(3, paused=True, logged_in=False),  # пауза главнее «без входа»
+	]
+	bots = [_bot(1), _bot(2, paused=True)]
+	totals = users_summary(accounts, bots)
+	assert (totals.users, totals.bots, totals.paused, totals.not_logged_in) == (3, 2, 2, 1)
+
+
+def test_search_matches_name_username_label_and_phone() -> None:
+	account = _account(label="Рабочий")
+	assert matches_user_search(account, "")
+	assert matches_user_search(account, "  рабоч ")
+	assert matches_user_search(account, "@LARA")
+	assert matches_user_search(account, "croft")
+	assert matches_user_search(account, "7900")
+	assert not matches_user_search(account, "боб")
+	assert matches_bot_search(_bot(), "публик") and matches_bot_search(_bot(), "@pub_")
+	assert not matches_bot_search(_bot(), "lara")
+
+
+# --- тексты удаления ---------------------------------------------------------------
+
+
+def test_delete_texts_name_consequences() -> None:
+	plain = delete_user_text(_account(), [])
+	assert plain == "Удалить пользователя «Lara Croft»?"
+	bound = delete_user_text(_account(), ["Кино", "Чат"])
+	assert "«Кино», «Чат»" in bound and "будут ждать" in bound
+	assert delete_bot_text(_bot(), []) == "Удалить бота «Публикатор»?"
+	assert "«Кино»" in delete_bot_text(_bot(), ["Кино"])

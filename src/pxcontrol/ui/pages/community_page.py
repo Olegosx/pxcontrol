@@ -195,6 +195,15 @@ def recheck_summary(access: CommunityAccess) -> tuple[bool, str]:
 # --- диалоги ------------------------------------------------------------------------
 
 
+def usable_accounts(accounts: list[TgAccountDto]) -> list[TgAccountDto]:
+	"""Аккаунты, которых можно добавлять участниками: вошедшие и не на паузе.
+
+	Приостановленный (ADR-0029) зонд прав не пройдёт — предлагать его
+	значило бы обещать проверку, которая не состоится.
+	"""
+	return [account for account in accounts if account.logged_in and not account.paused]
+
+
 class _AssignBotDialog(MessageBoxBase):
 	"""Выбор бота для назначения каналу."""
 
@@ -320,7 +329,10 @@ class MembersPanel(QWidget):
 	def _on_add(self) -> None:
 		account = self._add_combo.selected()
 		if account is None:
-			self._error.fail("Нет свободных вошедших аккаунтов — войдите: Настройки → Аккаунты.")
+			self._error.fail(
+				"Нет свободных вошедших активных аккаунтов — войдите или возобновите: "
+				"«Пользователи и боты»."
+			)
 			return
 		self._error.succeed()
 		show_info(self, "Проверка", "Проверяю права аккаунта…")
@@ -396,8 +408,7 @@ def open_members(
 	"""
 
 	def _open(accounts: list[TgAccountDto]) -> None:
-		logged_in = [account for account in accounts if account.logged_in]
-		exec_dialog(_MembersDialog(worker, community, logged_in, parent.window()))
+		exec_dialog(_MembersDialog(worker, community, usable_accounts(accounts), parent.window()))
 		on_closed()
 
 	run_in_engine(
@@ -912,8 +923,7 @@ class CommunityPage(ScrollArea):
 
 		def mount(accounts: list[TgAccountDto]) -> None:
 			clear_layout(layout)
-			logged_in = [account for account in accounts if account.logged_in]
-			panel = MembersPanel(self._worker, self._community, logged_in, holder)
+			panel = MembersPanel(self._worker, self._community, usable_accounts(accounts), holder)
 			panel.changed.connect(self._refresh)
 			layout.addWidget(panel, stretch=1)
 
@@ -1235,9 +1245,16 @@ class CommunityPage(ScrollArea):
 		)
 
 	def _open_assign_dialog(self, bots: list[BotDto]) -> None:
-		"""Диалог выбора бота; после выбора — проверка его прав."""
+		"""Диалог выбора бота; после выбора — проверка его прав.
+
+		Приостановленные боты (ADR-0029) не предлагаются: зонд прав
+		к ним не пойдёт.
+		"""
+		bots = [bot for bot in bots if not bot.paused]
 		if not bots:
-			self._show_error("Сначала добавьте бота: Настройки → Аккаунты.")
+			self._show_error(
+				"Нет активных ботов — добавьте или возобновите: «Пользователи и боты»."
+			)
 			return
 		dialog = _AssignBotDialog(bots, self.window())
 		if not exec_dialog(dialog):

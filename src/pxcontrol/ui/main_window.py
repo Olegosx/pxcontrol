@@ -19,6 +19,7 @@ from pxcontrol.ui.pages.publish import PublishPage
 from pxcontrol.ui.pages.publish_queue_view import QueueFilter
 from pxcontrol.ui.pages.schedule import SchedulePage
 from pxcontrol.ui.pages.settings import SettingsPage
+from pxcontrol.ui.pages.users import UsersPage
 from pxcontrol.ui.pages.video import VideoPage
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,10 @@ class MainWindow(FluentWindow):
 
 	def _build_navigation(self) -> None:
 		"""Наполняет боковую навигацию разделами приложения."""
+		# пользователи и боты — над сообществами (ADR-0029): без них
+		# подключать сообщества нечем, порядок разделов — порядок настройки
+		self._users_page = UsersPage(self._worker, self)
+		self.addSubInterface(self._users_page, FluentIcon.PEOPLE, "Пользователи и боты")
 		self._communities_page = CommunitiesPage(self._worker, self)
 		self.addSubInterface(self._communities_page, FluentIcon.HOME, "Каналы и группы")
 		# подменю сообществ — живое: дашборд после каждой загрузки шлёт

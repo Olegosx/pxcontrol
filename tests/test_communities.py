@@ -585,3 +585,49 @@ async def test_bot_probe_separates_refusal_from_no_connection(db: Database) -> N
 
 	offline = CommunitiesService(db, _BrokenBotGateway(ConnectionError("нет сети")))
 	assert (await offline.recheck_community(dto.id)).bot_ok is None
+
+
+# --- приостановленные публикаторы (ADR-0029) --------------------------------------
+
+
+async def _pause_account(db: Database, account_id: int, paused: bool = True) -> None:
+	async with db.session_factory() as session:
+		account = await session.get(TgAccount, account_id)
+		assert account is not None
+		account.paused = paused
+		await session.commit()
+
+
+async def test_dto_reports_paused_publisher(db: Database) -> None:
+	"""Снимок сообщества знает о паузе: возможности без него, плашка — «приостановлен»."""
+	gateway = _FakeGateway()
+	account_id = await _make_account(db)
+	gateway.userbot_admins.add(account_id)
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
+	assert dto.capabilities.userbot and not dto.publisher_paused
+	await _pause_account(db, account_id)
+	dto = await service.get_community(dto.id)
+	assert dto.default_account_paused is True
+	assert dto.userbot_assigned is True, "назначение сохранено — лицо поста то же"
+	assert not dto.capabilities.userbot, "но публиковать им сейчас нельзя"
+	assert dto.publisher_paused is True, "публиковать некому именно из-за паузы"
+	# с активным ботом действующий публикатор есть — паузы «нет»
+	bot_id = await _make_bot(db)
+	dto = await service.assign_bot(dto.id, bot_id)
+	assert dto.capabilities.bot and not dto.publisher_paused
+
+
+async def test_recheck_skips_paused_members(db: Database) -> None:
+	"""Перепроверка не зондирует приостановленных: их членство и роль не трогаются."""
+	gateway = _FakeGateway()
+	account_id = await _make_account(db)
+	gateway.userbot_admins.add(account_id)
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
+	await _pause_account(db, account_id)
+	gateway.userbot_admins.clear()  # зонд ответил бы «отказ» и снял членство
+	access = await service.recheck_community(dto.id)
+	assert access.userbot_ok is None, "не проверяли — не утверждаем"
+	assert access.community.default_account_id == account_id
+	assert access.community.members_count == 1

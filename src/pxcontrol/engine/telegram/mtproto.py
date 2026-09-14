@@ -77,6 +77,18 @@ class UserbotNotConnectedError(UserbotUnavailableError):
 	"""Userbot не подключён или соединение с Telegram не удалось."""
 
 
+class UserbotPausedError(UserbotNotConnectedError):
+	"""Аккаунт приостановлен человеком (ADR-0029) — обращений к нему нет.
+
+	Подкласс «не подключён» сознательно: для всех потребителей это
+	та же временная недоступность (очередь ждёт, фоновые чтения
+	пропускают аккаунт, зонды прав ничего не меняют), отличается лишь
+	причина и текст — человеку нужно не «войти», а возобновить
+	аккаунт в разделе «Пользователи и боты». Бросает шлюз, не транспорт:
+	пауза — состояние приложения, а не соединения.
+	"""
+
+
 class UserbotSessionExpiredError(UserbotUnavailableError):
 	"""Сессия userbot отозвана или недействительна — нужен повторный вход."""
 
@@ -254,7 +266,7 @@ async def _mtproto_errors() -> AsyncIterator[None]:
 #: «не администратор» не сводимы к одному raise, но текст у них обязан
 #: быть общим — врозь формулировки уже начинали расходиться.
 _SESSION_EXPIRED_TEXT = (
-	"Сессия userbot недействительна — войдите в аккаунт заново: Настройки → Аккаунты."
+	"Сессия userbot недействительна — войдите в аккаунт заново: «Пользователи и боты»."
 )
 _NOT_ADMIN_TEXT = (
 	"Userbot не администратор канала — добавьте аккаунт администратором с правом публиковать."
@@ -587,6 +599,16 @@ class MtprotoTransport:
 		"""
 		return self._premium
 
+	@property
+	def connected(self) -> bool:
+		"""Есть ли сейчас живое соединение с Telegram (снимок, без запросов).
+
+		Для показа состояния аккаунта: клиент создан и соединение
+		не потеряно. Само соединение это свойство не чинит — чинит
+		первая операция (:meth:`_connected_client`).
+		"""
+		return self._client is not None and bool(self._client.is_connected())
+
 	def configure(self, api_id: int, api_hash: str, session: str) -> None:
 		"""Задаёт реквизиты подключения (из БД, ADR-0009)."""
 		self._creds = (api_id, api_hash, session)
@@ -661,7 +683,7 @@ class MtprotoTransport:
 		"""Возвращает клиента (возможно, без соединения) или объясняет, чего не хватает."""
 		if self._client is None:
 			raise UserbotNotConnectedError(
-				"Userbot не подключён — войдите в аккаунт: Настройки → Аккаунты."
+				"Userbot не подключён — войдите в аккаунт: «Пользователи и боты»."
 			)
 		return self._client
 

@@ -372,3 +372,30 @@ def test_queue_subtitle_without_community_for_community_page() -> None:
 	)
 	assert queue_subtitle(item) == "Кино в HD · публикация: сейчас · в очереди"
 	assert queue_subtitle(item, with_community=False) == "публикация: сейчас · в очереди"
+
+
+# --- приостановленный публикатор (ADR-0029) ------------------------------------------
+
+
+def test_card_state_publisher_paused_between_errors_and_no_publisher() -> None:
+	"""Пауза публикатора: своя плашка без действий; ошибки главнее, «нет публикатора» — ниже."""
+	from dataclasses import replace
+
+	paused = replace(_community(), default_account_paused=True)
+	assert card_state(paused, QueueCounts()) is CardState.PUBLISHER_PAUSED
+	assert state_badge_text(CardState.PUBLISHER_PAUSED, QueueCounts()) == "публикатор приостановлен"
+	assert card_actions(paused, QueueCounts()) == ()
+	assert card_state(paused, QueueCounts(errors=1)) is CardState.ERRORS
+	# с активным ботом действующий публикатор есть — состояние штатное
+	with_bot = replace(_community(bot=True), default_account_paused=True)
+	assert card_state(with_bot, QueueCounts()) is CardState.NORMAL
+	# оба на паузе — тоже «приостановлен», а не «нет публикатора»
+	both = replace(_community(bot=True), default_account_paused=True, bot_paused=True)
+	assert card_state(both, QueueCounts()) is CardState.PUBLISHER_PAUSED
+	rows = [
+		Row(paused, QueueCounts(), None),
+		Row(_community(2, "Без", userbot=False), QueueCounts(), None),
+		Row(_community(3, "Норма"), QueueCounts(), None),
+	]
+	ordered = sort_rows(rows, TableColumn.STATE, descending=False)
+	assert [row.community.id for row in ordered] == [2, 1, 3]

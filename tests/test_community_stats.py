@@ -446,3 +446,21 @@ async def test_avatar_absence_and_drop(db: Database, tmp_path: Path) -> None:
 	assert restored is not None and Path(restored).exists()
 	await service.drop(community_id)
 	assert not Path(restored).exists()
+
+
+async def test_paused_publishers_not_polled(db: Database, tmp_path: Path) -> None:
+	"""Приостановленные бот и userbot (ADR-0029) опросом пропускаются."""
+	gateway = _FakeStatsGateway()
+	account_id = await _add_account(db)
+	bot_id = await _add_bot(db)
+	await _add_community(db, "-1001", account_id, bot_id)
+	async with db.session_factory() as session:
+		account = await session.get(TgAccount, account_id)
+		bot = await session.get(Bot, bot_id)
+		assert account is not None and bot is not None
+		account.paused = True
+		bot.paused = True
+		await session.commit()
+	service = _service(db, gateway, tmp_path)
+	assert await service.refresh_due(_NOW) is False
+	assert gateway.stats_calls == [] and gateway.bot_calls == []

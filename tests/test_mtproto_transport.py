@@ -1332,3 +1332,39 @@ async def test_send_now_and_delete_use_scheduled_queue_requests() -> None:
 		("SendScheduledMessagesRequest", "entity:-1001", [7, 8]),
 		("DeleteScheduledMessagesRequest", "entity:-1001", [9]),
 	]
+
+
+async def test_gateway_paused_account_refuses_without_network() -> None:
+	"""Приостановленный аккаунт (ADR-0029): отказ шлюза, Telegram не тревожится.
+
+	Класс отказа — ``UserbotPausedError``, наследник «не подключён»:
+	прежние ветки временной недоступности узнают его, а текст говорит
+	не «войдите», а «возобновите». Возобновление снимает пометку,
+	повторная активация возвращает аккаунт в работу.
+	"""
+	from pxcontrol.engine.telegram.gateway import TelegramGateway
+	from pxcontrol.engine.telegram.mtproto import UserbotNotConnectedError, UserbotPausedError
+
+	client = _FakeClient()
+	gateway = TelegramGateway()
+	gateway.transport_factory = lambda: MtprotoTransport(client_factory=lambda a, b, c: client)
+	await gateway.activate_userbot(10, 1, "h", "s1")
+	await gateway.pause_userbot(10)
+	assert gateway.userbot_paused(10)
+	assert client.connected is False, "транспорт закрыт"
+	with pytest.raises(UserbotPausedError, match="возобновите") as refused:
+		await gateway.publish(10, "-1001", OutgoingPost(text="раз"))
+	assert isinstance(refused.value, UserbotNotConnectedError)
+	assert client.sent == []
+	assert gateway.userbot_premium(10) is False
+
+	gateway.resume_userbot(10)
+	assert not gateway.userbot_paused(10)
+	await gateway.activate_userbot(10, 1, "h", "s1")
+	await gateway.publish(10, "-1001", OutgoingPost(text="два"))
+	assert len(client.sent) == 1
+	# удаление снимает пометку: id может достаться следующей записи
+	await gateway.pause_userbot(10)
+	await gateway.deactivate_userbot(10)
+	assert not gateway.userbot_paused(10)
+	await gateway.stop()

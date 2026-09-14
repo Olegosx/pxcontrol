@@ -446,7 +446,9 @@ class CommunityStatsService:
 				(
 					await session.execute(
 						select(Community)
-						.options(selectinload(Community.bot))
+						.options(
+							selectinload(Community.bot), selectinload(Community.default_account)
+						)
 						.order_by(Community.id)
 					)
 				)
@@ -457,7 +459,17 @@ class CommunityStatsService:
 				row.community_id: row
 				for row in (await session.execute(select(CommunityStats))).scalars()
 			}
-			bot_tokens = {c.id: c.bot.token for c in communities if c.bot is not None}
+			# приостановленные публикаторы (ADR-0029) не опрашиваются:
+			# бот — просто пропуск, userbot получил бы отказ шлюза
+			# на каждом тике и засорял бы журнал
+			bot_tokens = {
+				c.id: c.bot.token for c in communities if c.bot is not None and not c.bot.paused
+			}
+			account_ids = {
+				c.id: c.default_account.id
+				for c in communities
+				if c.default_account is not None and not c.default_account.paused
+			}
 		changed = False
 		for community in communities:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
@@ -473,7 +485,7 @@ class CommunityStatsService:
 				if update is not None:
 					await self._store(community.id, update, now, stamp="bot_fetched_at")
 					changed = True
-			account_id = community.default_tg_account_id
+			account_id = account_ids.get(community.id)
 			if account_id is not None and due(
 				row.full_fetched_at if row else None, full_every_s, now, self._tz
 			):

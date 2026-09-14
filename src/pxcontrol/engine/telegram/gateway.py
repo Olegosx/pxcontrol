@@ -41,6 +41,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	MtprotoTransport,
 	UserbotFloodError,
 	UserbotNotConnectedError,
+	UserbotPausedError,
 )
 from pxcontrol.engine.telegram.types import (
 	CommunityAnalytics,
@@ -73,6 +74,11 @@ class TelegramGateway:
 		# их замену: флуд-лимит Telegram назначает аккаунту, а не сессии,
 		# и повторный вход не должен стирать знание о нём
 		self._lanes: dict[int, AccountLane] = {}
+		# приостановленные человеком аккаунты (ADR-0029): транспорта у них
+		# нет, а любая операция получает отказ с причиной «приостановлен»,
+		# а не «войдите» — иначе человек шёл бы входить в аккаунт, который
+		# сам же и остановил
+		self._paused: set[int] = set()
 		self.login = MtprotoLoginManager()
 		# точка подмены в тестах: фабрика транспорта с подставным клиентом
 		self.transport_factory: Callable[[], MtprotoTransport] = MtprotoTransport
@@ -84,6 +90,7 @@ class TelegramGateway:
 			await transport.stop()
 		self._userbots.clear()
 		self._lanes.clear()
+		self._paused.clear()
 
 	async def activate_userbot(
 		self, account_id: int, api_id: int, api_hash: str, session: str
@@ -109,12 +116,50 @@ class TelegramGateway:
 		await transport.start()
 
 	async def deactivate_userbot(self, account_id: int) -> None:
-		"""Отключает userbot аккаунта (например, после его удаления)."""
+		"""Отключает userbot аккаунта (например, после его удаления).
+
+		Пометка паузы снимается: аккаунт покидает приложение целиком,
+		а SQLite может отдать его id следующей записи — та не должна
+		унаследовать чужую паузу.
+		"""
+		self._paused.discard(account_id)
 		transport = self._userbots.pop(account_id, None)
 		if transport is not None:
 			await transport.stop()
 		# дорожка аккаунта намеренно остаётся: действующая заморозка
 		# принадлежит аккаунту Telegram, а не нашему соединению с ним
+
+	async def pause_userbot(self, account_id: int) -> None:
+		"""Приостанавливает аккаунт (ADR-0029): транспорт закрыт, операции — отказ.
+
+		Идемпотентно: при старте так регистрируются аккаунты, которые
+		человек приостановил в прошлой сессии, — их транспорт вовсе
+		не поднимается. Возобновляет :meth:`resume_userbot` вместе
+		с новой активацией (реквизиты знает сервис аккаунтов).
+		"""
+		await self.deactivate_userbot(account_id)
+		self._paused.add(account_id)
+
+	def resume_userbot(self, account_id: int) -> None:
+		"""Снимает пометку паузы — дальше аккаунт активируется штатно.
+
+		Подключение здесь не поднимается: без сохранённой сессии
+		возобновлённый аккаунт просто ждёт входа, как новый.
+		"""
+		self._paused.discard(account_id)
+
+	def userbot_paused(self, account_id: int) -> bool:
+		"""Приостановлен ли аккаунт в этом шлюзе."""
+		return account_id in self._paused
+
+	def userbot_connected(self, account_id: int) -> bool:
+		"""Есть ли у аккаунта живое соединение прямо сейчас (снимок для показа).
+
+		False — не активирован, приостановлен или связь потеряна;
+		различать причины — дело сервиса аккаунтов, у него есть БД.
+		"""
+		transport = self._userbots.get(account_id)
+		return transport is not None and transport.connected
 
 	def _lane(self, account_id: int) -> AccountLane:
 		"""Дорожка аккаунта (заводится при первом обращении)."""
@@ -141,6 +186,7 @@ class TelegramGateway:
 		отказ дорожки пролетал бы мимо их обработчиков.
 
 		Raises:
+			UserbotPausedError: Аккаунт приостановлен человеком (ADR-0029).
 			UserbotNotConnectedError: Аккаунт не активирован.
 			UserbotFloodError: Аккаунт под флуд-лимитом (ADR-0024) —
 				в ``retry_after_s`` остаток названного сервером срока.
@@ -177,14 +223,23 @@ class TelegramGateway:
 	def _userbot(self, account_id: int) -> MtprotoTransport:
 		"""Транспорт аккаунта из пула — или понятная ошибка.
 
+		Пауза проверяется раньше пула: у приостановленного аккаунта
+		транспорта нет по замыслу, и отказ должен называть причину.
+
 		Raises:
+			UserbotPausedError: Аккаунт приостановлен человеком (ADR-0029).
 			UserbotNotConnectedError: Аккаунт не активирован (нет сессии
-				или ключа API) — нужен вход: Настройки → Аккаунты.
+				или ключа API) — нужен вход: «Пользователи и боты».
 		"""
+		if account_id in self._paused:
+			raise UserbotPausedError(
+				"Аккаунт приостановлен — возобновите его в разделе «Пользователи и боты»."
+			)
 		transport = self._userbots.get(account_id)
 		if transport is None:
 			raise UserbotNotConnectedError(
-				"Userbot этого канала не подключён — войдите в его аккаунт: Настройки → Аккаунты."
+				"Userbot этого сообщества не подключён — войдите в его аккаунт: "
+				"«Пользователи и боты»."
 			)
 		return transport
 

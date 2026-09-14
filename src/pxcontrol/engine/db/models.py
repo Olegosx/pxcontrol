@@ -76,7 +76,12 @@ class CommunitySetting(Base):
 
 
 class Bot(TimestampMixin, Base):
-	"""Telegram-бот для публикации. Токен шифруется."""
+	"""Telegram-бот для публикации. Токен шифруется.
+
+	``paused`` — приостановлен человеком (ADR-0029): приложение бота
+	не использует (ни публикация, ни опрос статистики), но помнит —
+	вместе с назначениями в сообществах.
+	"""
 
 	__tablename__ = "bots"
 
@@ -84,6 +89,7 @@ class Bot(TimestampMixin, Base):
 	label: Mapped[str] = mapped_column(String(128))
 	token: Mapped[str] = mapped_column(EncryptedStr(512))
 	username: Mapped[str | None] = mapped_column(String(255), default=None)
+	paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
 
 
 class TgApiCredential(TimestampMixin, Base):
@@ -112,6 +118,9 @@ class TgAccount(TimestampMixin, Base):
 	раздельно — как отдаёт Telegram) заполняются и актуализируются
 	автоматически: вход, старт приложения, зонды прав. Ключ API
 	приложения — общий, в ``tg_api_credentials`` (ADR-0018).
+	``paused`` — приостановлен человеком (ADR-0029): транспорт закрыт,
+	обращений к аккаунту нет, но сессия, пометка и членства сохранены —
+	возобновление подключает без нового входа.
 	"""
 
 	__tablename__ = "tg_accounts"
@@ -123,6 +132,7 @@ class TgAccount(TimestampMixin, Base):
 	username: Mapped[str | None] = mapped_column(String(255), default=None)
 	first_name: Mapped[str | None] = mapped_column(String(255), default=None)
 	last_name: Mapped[str | None] = mapped_column(String(255), default=None)
+	paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
 
 
 class AiCredential(TimestampMixin, Base):
