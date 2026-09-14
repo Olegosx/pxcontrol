@@ -518,7 +518,12 @@ class _TabItem(PivotItem):
 		self.setMinimumWidth(0)  # ширина — по подписи, а не по умолчанию кнопки
 		self._label = BodyLabel(text, self)
 		self._label.setFont(font_px(_TAB_FONT_PX))
+		# подпись и число — по центру пункта: полоса под активной вкладкой
+		# рисуется по центру пункта, и при любой его ширине она должна
+		# стоять под подписью, а не правее
+		self._box.addStretch()
 		self._box.addWidget(self._label)
+		self._box.addStretch()
 
 	def setSelected(self, isSelected: bool) -> None:  # noqa: N802, N803 — API библиотеки
 		super().setSelected(isSelected)
@@ -544,7 +549,7 @@ class _TabItem(PivotItem):
 				self._count = tinted(CaptionLabel(str(count), self), DIM_TEXT)
 				self._count.setFont(font_px(_TAB_COUNT_PX))
 			self._count.adjustSize()
-			self._box.addWidget(self._count)
+			self._box.insertWidget(self._box.count() - 1, self._count)  # перед хвостовой растяжкой
 			self._count.show()
 		self.updateGeometry()
 
@@ -850,6 +855,9 @@ class CommunityPage(ScrollArea):
 		# под активной, без рамки-подложки (SegmentedWidget рисует её)
 		self._segments = Pivot(self)
 		self._segments.setIndicatorLength(_TAB_INDICATOR_LENGTH)
+		# ширина полосы вкладок — строго по пунктам: штатная политика
+		# «может расти» отдавала ей лишнее место ряда, пункты растягивались
+		self._segments.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 		# вкладки прижаты влево (сами пункты — своей ширины), под всей
 		# полосой вкладок — разделитель, как в макете
 		tabs_row = QHBoxLayout()
