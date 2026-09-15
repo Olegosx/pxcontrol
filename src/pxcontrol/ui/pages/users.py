@@ -58,6 +58,7 @@ from pxcontrol.ui.pages.common import (
 	ACCENT_TEXT,
 	FlowGrid,
 	FormDialog,
+	TitleEditor,
 	WarningLabel,
 	clear_layout,
 	dim_widget,
@@ -79,14 +80,17 @@ from pxcontrol.ui.pages.user_actions import (
 	delete_bot,
 	delete_user,
 	diagnose_bot,
-	rename_user,
+	save_bot_label,
+	save_user_label,
 	set_bot_paused,
 	set_user_paused,
 	start_login,
 )
 from pxcontrol.ui.pages.user_state import (
 	BOT_ACTION_LABELS,
+	BOT_LABEL_PLACEHOLDER,
 	USER_ACTION_LABELS,
+	USER_LABEL_PLACEHOLDER,
 	BotAction,
 	UserAction,
 	activity_text,
@@ -183,9 +187,18 @@ class _Card(CardWidget):
 		subtitle: str,
 		paused: bool,
 		on_delete: Callable[[], None],
+		rename_initial: str,
+		rename_placeholder: str,
+		on_rename: Callable[[str], None],
 	) -> None:
+		"""``rename_*`` — правка заголовка на месте: начальный текст поля
+		(пометка, не отображаемое имя), подсказка пустого поля и колбэк
+		с введённым текстом (обрезанным)."""
 		super().__init__(parent)
 		self.setMinimumHeight(_CARD_MIN_HEIGHT)
+		self._rename_initial = rename_initial
+		self._rename_placeholder = rename_placeholder
+		self._on_rename = on_rename
 		# клик мимо кнопок открывает страницу аккаунта (ADR-0030);
 		# кнопки перехватывают свои нажатия сами
 		self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -233,12 +246,21 @@ class _Card(CardWidget):
 		# «занимай, что дадут»: длинное имя не должно распирать карточку
 		title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 		elide_text(title_label, title)
-		column.addWidget(title_label)
+		# правка на месте: карандаш в шапке сменяет подпись полем ввода
+		self._title_editor = TitleEditor(title_label, box)
+		self._title_editor.submitted.connect(self._on_rename)
+		column.addWidget(self._title_editor)
 		details = CaptionLabel(box)
 		details.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 		elide_text(details, subtitle)
 		column.addWidget(details)
 		layout.addLayout(column, stretch=1)
+		rename = TransparentToolButton(FluentIcon.EDIT, box)
+		rename.setToolTip("Переименовать (Enter — сохранить, Esc — отмена)")
+		rename.clicked.connect(
+			lambda: self._title_editor.begin(self._rename_initial, self._rename_placeholder)
+		)
+		layout.addWidget(rename, alignment=Qt.AlignmentFlag.AlignTop)
 		delete = TransparentToolButton(FluentIcon.DELETE, box)
 		delete.setToolTip("Удалить")
 		delete.clicked.connect(on_delete)
@@ -292,6 +314,7 @@ class UserCard(_Card):
 		account: TgAccountDto,
 		on_action: Callable[[UserAction, TgAccountDto], None],
 		on_delete: Callable[[TgAccountDto], None],
+		on_rename: Callable[[TgAccountDto, str], None],
 		parent: QWidget,
 	) -> None:
 		super().__init__(
@@ -301,6 +324,9 @@ class UserCard(_Card):
 			subtitle=user_subtitle(account),
 			paused=account.paused,
 			on_delete=partial(on_delete, account),
+			rename_initial=account.label or "",
+			rename_placeholder=USER_LABEL_PLACEHOLDER,
+			on_rename=partial(on_rename, account),
 		)
 		texts = [participation_text(account)]
 		premium = premium_text(account)
@@ -324,6 +350,7 @@ class BotCard(_Card):
 		bot: BotDto,
 		on_action: Callable[[BotAction, BotDto], None],
 		on_delete: Callable[[BotDto], None],
+		on_rename: Callable[[BotDto, str], None],
 		parent: QWidget,
 	) -> None:
 		super().__init__(
@@ -333,6 +360,9 @@ class BotCard(_Card):
 			subtitle=bot_subtitle(bot),
 			paused=bot.paused,
 			on_delete=partial(on_delete, bot),
+			rename_initial=bot.label,
+			rename_placeholder=BOT_LABEL_PLACEHOLDER,
+			on_rename=partial(on_rename, bot),
 		)
 		self.add_info([bot_participation_text(bot)], state_badge(self, bot_state(bot)))
 		self._live_shown = live_shown(bot_state(bot))
@@ -555,7 +585,9 @@ class UsersPage(ScrollArea):
 			)
 			cards: list[QWidget] = []
 			for account in accounts:
-				card = UserCard(account, self._run_user_action, self._delete_user, self)
+				card = UserCard(
+					account, self._run_user_action, self._delete_user, self._rename_user, self
+				)
 				card.set_activity(self._activity.get(LaneOwner(OwnerKind.USER, account.id)))
 				card.clicked.connect(
 					partial(self.open_user.emit, LaneOwner(OwnerKind.USER, account.id))
@@ -569,7 +601,9 @@ class UsersPage(ScrollArea):
 			self._sections.addWidget(section_header(self, "Боты", len(bots), icon=FluentIcon.ROBOT))
 			bot_cards: list[QWidget] = []
 			for bot in bots:
-				bot_card = BotCard(bot, self._run_bot_action, self._delete_bot, self)
+				bot_card = BotCard(
+					bot, self._run_bot_action, self._delete_bot, self._rename_bot, self
+				)
 				bot_card.set_activity(self._activity.get(LaneOwner(OwnerKind.BOT, bot.id)))
 				bot_card.clicked.connect(
 					partial(self.open_user.emit, LaneOwner(OwnerKind.BOT, bot.id))
@@ -612,8 +646,9 @@ class UsersPage(ScrollArea):
 			set_user_paused(self._worker, self, account, True, self.reload)
 		elif action is UserAction.RESUME:
 			set_user_paused(self._worker, self, account, False, self.reload)
-		elif action is UserAction.LABEL:
-			rename_user(self._worker, self, account, self.reload)
+
+	def _rename_user(self, account: TgAccountDto, label: str) -> None:
+		save_user_label(self._worker, self, account, label, self.reload)
 
 	def _delete_user(self, account: TgAccountDto) -> None:
 		delete_user(self._worker, self, account, self.reload)
@@ -659,6 +694,9 @@ class UsersPage(ScrollArea):
 			set_bot_paused(self._worker, self, bot, True, self.reload)
 		elif action is BotAction.RESUME:
 			set_bot_paused(self._worker, self, bot, False, self.reload)
+
+	def _rename_bot(self, bot: BotDto, label: str) -> None:
+		save_bot_label(self._worker, self, bot, label, self.reload)
 
 	def _delete_bot(self, bot: BotDto) -> None:
 		delete_bot(self._worker, self, bot, self.reload)

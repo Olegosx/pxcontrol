@@ -14,6 +14,7 @@ from PySide6.QtGui import (
 	QColor,
 	QDesktopServices,
 	QFont,
+	QKeyEvent,
 	QMouseEvent,
 	QPainter,
 	QPainterPath,
@@ -1370,6 +1371,80 @@ class CharCounter:
 		length = telegram_text_length(self._edit.toPlainText())
 		self.label.setText(counter_text(length, self._limit))
 		self.label.setTextColor(*(ERROR_TEXT if length > self._limit else DIM_TEXT))
+
+
+class _EscapableLineEdit(LineEdit):
+	"""Поле ввода, сообщающее об Esc отдельным сигналом."""
+
+	cancelled = Signal()
+
+	def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 — API Qt
+		if event.key() == Qt.Key.Key_Escape:
+			self.cancelled.emit()
+			return
+		super().keyPressEvent(event)
+
+
+class TitleEditor(QWidget):
+	"""Правка заголовка на месте: подпись сменяется полем ввода и обратно.
+
+	Владелец отдаёт подпись (любой ``QLabel``), виджет кладёт под ней
+	скрытое поле. :meth:`begin` показывает поле с начальным текстом;
+	Enter или уход фокуса — сигнал ``submitted`` с обрезанным текстом,
+	Esc — отмена без сигнала. Что значит пустой текст (снять пометку
+	или отказ), решает владелец.
+	"""
+
+	submitted = Signal(str)
+
+	def __init__(self, label: QLabel, parent: QWidget) -> None:
+		super().__init__(parent)
+		self._label = label
+		self._active = False
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(0)
+		label.setParent(self)
+		layout.addWidget(label)
+		self._edit = _EscapableLineEdit(self)
+		self._edit.setClearButtonEnabled(True)
+		self._edit.hide()
+		self._edit.editingFinished.connect(self._finish)
+		self._edit.cancelled.connect(self.cancel)
+		layout.addWidget(self._edit)
+		# «занимай, что дадут»: как у самой подписи — иначе поле требовало
+		# бы свою ширину и распирало строку
+		self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+	def begin(self, initial: str, placeholder: str) -> None:
+		"""Показывает поле ввода вместо подписи."""
+		self._active = True
+		self._edit.setPlaceholderText(placeholder)
+		self._edit.setText(initial)
+		self._label.hide()
+		self._edit.show()
+		self._edit.setFocus()
+		self._edit.selectAll()
+
+	def cancel(self) -> None:
+		"""Прячет поле без сохранения (Esc)."""
+		if not self._active:
+			return
+		# флаг снимается до потери фокуса: editingFinished после hide()
+		# не должен считаться сохранением
+		self._active = False
+		self._edit.hide()
+		self._label.show()
+
+	def _finish(self) -> None:
+		"""Enter или уход фокуса: один сигнал на одну правку."""
+		if not self._active:
+			return
+		self._active = False
+		text = str(self._edit.text()).strip()
+		self._edit.hide()
+		self._label.show()
+		self.submitted.emit(text)
 
 
 class ErrorLabel(CaptionLabel):

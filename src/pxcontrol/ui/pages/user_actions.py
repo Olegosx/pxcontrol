@@ -68,20 +68,34 @@ def set_user_paused(
 	)
 
 
-def rename_user(worker: EngineWorker, owner: QWidget, account: TgAccountDto, done: Done) -> None:
-	"""Переназначение ручной пометки (пусто — снять)."""
-	dialog = FormDialog(
-		"Пометка пользователя",
-		[("label", "Пометка (пусто — имя из Telegram)")],
-		owner.window(),
-		accept_text="Сохранить",
-		initial={"label": account.label or ""},
-	)
-	if not exec_dialog(dialog):
+def save_user_label(
+	worker: EngineWorker, owner: QWidget, account: TgAccountDto, label: str, done: Done
+) -> None:
+	"""Сохраняет пометку, введённую на месте (пусто — снять: имя из Telegram).
+
+	Тот же текст, что и был, не сохраняется: правка отменена уходом
+	фокуса без изменений.
+	"""
+	if label == (account.label or ""):
 		return
 	run_in_engine(
 		worker,
-		worker.engine.accounts.set_account_label(account.id, dialog.value("label")),
+		worker.engine.accounts.set_account_label(account.id, label),
+		owner,
+		lambda *_a: done(),
+		error_reporter(owner),
+	)
+
+
+def save_bot_label(
+	worker: EngineWorker, owner: QWidget, bot: BotDto, label: str, done: Done
+) -> None:
+	"""Сохраняет название бота, введённое на месте; пустое отклоняет движок."""
+	if label == bot.label:
+		return
+	run_in_engine(
+		worker,
+		worker.engine.accounts.set_bot_label(bot.id, label),
 		owner,
 		lambda *_a: done(),
 		error_reporter(owner),

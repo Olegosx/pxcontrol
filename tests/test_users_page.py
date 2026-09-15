@@ -90,14 +90,11 @@ def test_bot_state_only_pause() -> None:
 
 
 def test_user_actions_by_state() -> None:
-	assert user_actions(_account(paused=True)) == (UserAction.RESUME, UserAction.LABEL)
-	assert user_actions(_account(logged_in=False)) == (
-		UserAction.LOGIN,
-		UserAction.PAUSE,
-		UserAction.LABEL,
-	)
-	assert user_actions(_account()) == (UserAction.PAUSE, UserAction.LABEL)
-	assert user_actions(_account(connected=False)) == (UserAction.PAUSE, UserAction.LABEL)
+	# пометка — не действие, а правка заголовка на месте
+	assert user_actions(_account(paused=True)) == (UserAction.RESUME,)
+	assert user_actions(_account(logged_in=False)) == (UserAction.LOGIN, UserAction.PAUSE)
+	assert user_actions(_account()) == (UserAction.PAUSE,)
+	assert user_actions(_account(connected=False)) == (UserAction.PAUSE,)
 	assert primary_user_action(UserAction.LOGIN) and primary_user_action(UserAction.RESUME)
 	assert not primary_user_action(UserAction.PAUSE)
 

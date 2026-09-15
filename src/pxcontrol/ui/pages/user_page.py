@@ -56,6 +56,7 @@ from pxcontrol.ui.pages.common import (
 	ACCENT_TEXT,
 	DIM_TEXT,
 	FlowGrid,
+	TitleEditor,
 	clear_layout,
 	community_logo,
 	elide_text,
@@ -75,14 +76,17 @@ from pxcontrol.ui.pages.user_actions import (
 	delete_bot,
 	delete_user,
 	diagnose_bot,
-	rename_user,
+	save_bot_label,
+	save_user_label,
 	set_bot_paused,
 	set_user_paused,
 	start_login,
 )
 from pxcontrol.ui.pages.user_state import (
 	BOT_ACTION_LABELS,
+	BOT_LABEL_PLACEHOLDER,
 	USER_ACTION_LABELS,
+	USER_LABEL_PLACEHOLDER,
 	BotAction,
 	UserAction,
 	bot_actions,
@@ -291,7 +295,10 @@ class UserPage(ScrollArea):
 		title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 		title.setMaximumWidth(title.fontMetrics().horizontalAdvance(title_text) + 8)
 		elide_text(title, title_text)
-		title_row.addWidget(title, stretch=1)
+		# правка на месте: карандаш справа сменяет заголовок полем ввода
+		self._title_editor = TitleEditor(title, box)
+		self._title_editor.submitted.connect(self._on_renamed)
+		title_row.addWidget(self._title_editor, stretch=1)
 		state = user_state(subject) if isinstance(subject, TgAccountDto) else bot_state(subject)
 		title_row.addWidget(state_badge(box, state))
 		self._live = tinted(CaptionLabel(box), ACCENT_TEXT)
@@ -309,19 +316,38 @@ class UserPage(ScrollArea):
 		main = self._main_action(box)
 		if main is not None:
 			row.addWidget(main, alignment=Qt.AlignmentFlag.AlignTop)
+		rename = TransparentToolButton(FluentIcon.EDIT, box)
+		rename.setToolTip("Переименовать (Enter — сохранить, Esc — отмена)")
+		rename.clicked.connect(self._begin_rename)
+		row.addWidget(rename, alignment=Qt.AlignmentFlag.AlignTop)
 		more = TransparentToolButton(FluentIcon.MORE, box)
-		more.setToolTip("Пометка, диагностика, удаление")
+		more.setToolTip("Диагностика, удаление")
 		more.clicked.connect(partial(self._show_menu, more))
 		row.addWidget(more, alignment=Qt.AlignmentFlag.AlignTop)
 		self._header_box.addWidget(box)
 		self._apply_live()
+
+	def _begin_rename(self) -> None:
+		"""Карандаш: поле ввода на месте заголовка — пометка или название бота."""
+		subject = self._subject
+		if isinstance(subject, TgAccountDto):
+			self._title_editor.begin(subject.label or "", USER_LABEL_PLACEHOLDER)
+		else:
+			self._title_editor.begin(subject.label, BOT_LABEL_PLACEHOLDER)
+
+	def _on_renamed(self, text: str) -> None:
+		subject = self._subject
+		if isinstance(subject, TgAccountDto):
+			save_user_label(self._worker, self, subject, text, self._after_change)
+		else:
+			save_bot_label(self._worker, self, subject, text, self._after_change)
 
 	def _main_action(self, parent: QWidget) -> QPushButton | None:
 		"""Главное действие шапки — первое из набора по состоянию."""
 		subject = self._subject
 		button: QPushButton
 		if isinstance(subject, TgAccountDto):
-			actions = [a for a in user_actions(subject) if a is not UserAction.LABEL]
+			actions = user_actions(subject)
 			if not actions:
 				return None
 			action = actions[0]
@@ -346,20 +372,16 @@ class UserPage(ScrollArea):
 		return button
 
 	def _show_menu(self, anchor: QWidget) -> None:
-		"""Меню «…»: пометка, диагностика бота, удаление."""
+		"""Меню «…»: диагностика бота, удаление."""
 		menu = RoundMenu(parent=self)
 		subject = self._subject
-		if isinstance(subject, TgAccountDto):
-			rename = Action(FluentIcon.TAG, "Пометка…", menu)
-			rename.triggered.connect(partial(self._run_user_action, UserAction.LABEL, subject))
-			menu.addAction(rename)
-		else:
+		if isinstance(subject, BotDto):
 			whereabouts = Action(FluentIcon.SEARCH, "Где состоит?", menu)
 			whereabouts.triggered.connect(
 				partial(self._run_bot_action, BotAction.WHEREABOUTS, subject)
 			)
 			menu.addAction(whereabouts)
-		menu.addSeparator()
+			menu.addSeparator()
 		delete = Action(FluentIcon.DELETE, "Удалить из приложения…", menu)
 		delete.triggered.connect(self._on_delete)
 		menu.addAction(delete)
@@ -501,8 +523,6 @@ class UserPage(ScrollArea):
 			set_user_paused(self._worker, self, account, True, self._after_change)
 		elif action is UserAction.RESUME:
 			set_user_paused(self._worker, self, account, False, self._after_change)
-		elif action is UserAction.LABEL:
-			rename_user(self._worker, self, account, self._after_change)
 
 	def _run_bot_action(self, action: BotAction, bot: BotDto) -> None:
 		if action is BotAction.WHEREABOUTS:

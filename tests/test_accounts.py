@@ -514,3 +514,16 @@ async def test_bot_pause_and_publisher_counts(db: Database) -> None:
 	accounts = {a.id: a for a in await service.list_tg_accounts()}
 	assert (accounts[account.id].memberships, accounts[account.id].publisher_of) == (2, 1)
 	assert (accounts[other.id].memberships, accounts[other.id].publisher_of) == (1, 0)
+
+
+async def test_bot_label_rename_requires_text(db: Database) -> None:
+	"""Название бота меняется на месте; пустое — отказ, бот не найден — отказ."""
+	service = AccountsService(db, _FakeGateway())
+	bot = await service.add_bot("Старый", "123456:AAAbbbCCCddd")
+	renamed = await service.set_bot_label(bot.id, "  Новый  ")
+	assert renamed.label == "Новый"
+	assert (await service.list_bots())[0].label == "Новый"
+	with pytest.raises(AccountsError, match="пустым"):
+		await service.set_bot_label(bot.id, "   ")
+	with pytest.raises(AccountsError, match="не найден"):
+		await service.set_bot_label(999_999, "x")

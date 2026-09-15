@@ -221,6 +221,25 @@ class AccountsService:
 			publisher_of = await _count_by(session, Community.bot_id)
 		return [self._bot_dto(b, publisher_of.get(b.id, 0)) for b in bots]
 
+	async def set_bot_label(self, bot_id: int, label: str) -> BotDto:
+		"""Переименовывает бота (название — для себя, обязательно).
+
+		Raises:
+			AccountsError: Бот не найден или название пустое.
+		"""
+		label = label.strip()
+		if not label:
+			raise AccountsError("Укажите название бота — пустым оно быть не может.")
+		async with self._db.session_factory() as session:
+			bot = await session.get(Bot, bot_id)
+			if bot is None:
+				raise AccountsError("Бот не найден — обновите список.")
+			bot.label = label
+			await session.commit()
+			await session.refresh(bot)
+		logger.info("Бот id=%s переименован: «%s».", bot_id, label)
+		return self._bot_dto(bot)
+
 	async def set_bot_paused(self, bot_id: int, paused: bool) -> BotDto:
 		"""Приостанавливает бота или возобновляет (ADR-0029).
 

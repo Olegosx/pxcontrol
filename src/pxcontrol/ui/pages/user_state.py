@@ -111,7 +111,6 @@ class UserAction(StrEnum):
 	LOGIN = "login"  # пошаговый вход: код и 2FA
 	PAUSE = "pause"  # приостановить (ADR-0029)
 	RESUME = "resume"  # возобновить
-	LABEL = "label"  # своя пометка вместо имени из Telegram
 
 
 class BotAction(StrEnum):
@@ -127,7 +126,6 @@ USER_ACTION_LABELS: dict[UserAction, str] = {
 	UserAction.LOGIN: "Войти",
 	UserAction.PAUSE: "Приостановить",
 	UserAction.RESUME: "Возобновить",
-	UserAction.LABEL: "Пометка…",
 }
 BOT_ACTION_LABELS: dict[BotAction, str] = {
 	BotAction.WHEREABOUTS: "Где состоит?",
@@ -139,16 +137,17 @@ BOT_ACTION_LABELS: dict[BotAction, str] = {
 def user_actions(account: TgAccountDto) -> tuple[UserAction, ...]:
 	"""Набор действий карточки пользователя по её состоянию.
 
-	Приостановленному предлагается только возобновление (и пометка):
-	вход на паузе ничего не даёт — аккаунт всё равно не подключится
-	(ADR-0029). Не вошедшему — вход первым: это главное действие.
+	Приостановленному предлагается только возобновление: вход на паузе
+	ничего не даёт — аккаунт всё равно не подключится (ADR-0029).
+	Не вошедшему — вход первым: это главное действие. Пометка —
+	не действие, а правка заголовка на месте (карандаш в шапке).
 	"""
 	state = user_state(account)
 	if state is UserState.PAUSED:
-		return (UserAction.RESUME, UserAction.LABEL)
+		return (UserAction.RESUME,)
 	if state is UserState.NOT_LOGGED_IN:
-		return (UserAction.LOGIN, UserAction.PAUSE, UserAction.LABEL)
-	return (UserAction.PAUSE, UserAction.LABEL)
+		return (UserAction.LOGIN, UserAction.PAUSE)
+	return (UserAction.PAUSE,)
 
 
 def bot_actions(bot: BotDto) -> tuple[BotAction, ...]:
@@ -462,3 +461,9 @@ def bot_community_caption(community: CommunityDto) -> str:
 	if not community.enabled:
 		parts.append("выключено")
 	return " · ".join(parts)
+
+
+#: Подсказка в пустом поле пометки: пустая пометка значит «имя из Telegram».
+USER_LABEL_PLACEHOLDER = "имя из Telegram"
+#: Подсказка в поле названия бота: пустым оно быть не может.
+BOT_LABEL_PLACEHOLDER = "название бота"
