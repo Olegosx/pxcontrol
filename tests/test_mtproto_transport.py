@@ -1383,7 +1383,9 @@ async def test_gateway_bot_lane_freezes_after_retry_after(monkeypatch: pytest.Mo
 
 	calls: list[str] = []
 
-	async def fake_send_text(token: str, chat_id: str, text: str, topic_id: int | None) -> int:
+	async def fake_send_text(
+		token: str, chat_id: str, text: str, topic_id: int | None, markup: object = None
+	) -> int:
 		calls.append(token)
 		if token == "flooded":
 			raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)

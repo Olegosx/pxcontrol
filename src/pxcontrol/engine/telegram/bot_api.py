@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 	from aiogram import Bot
 
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.telegram.markup import ButtonKind, PostMarkup
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
@@ -228,6 +229,68 @@ def ensure_bot_can_send_in_group(member: Any, default_permissions: Any) -> None:
 		)
 
 
+def to_reply_markup(markup: PostMarkup | None) -> Any | None:
+	"""Переводит клавиатуру поста в разметку Bot API (None — кнопок нет).
+
+	Перевод живёт здесь, а не в :mod:`markup`: тот модуль о самой
+	клавиатуре и ни к одному транспорту не привязан, а формат кнопок —
+	забота транспорта. Виды сознательно ограничены двумя (ADR-0031,
+	п. 13): ссылка и «скопировать текст».
+	"""
+	from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
+
+	if markup is None or not markup:
+		return None
+	rows = []
+	for row in markup.rows:
+		if not row:
+			continue
+		rows.append(
+			[
+				InlineKeyboardButton(text=button.text, url=button.value)
+				if button.kind is ButtonKind.LINK
+				else InlineKeyboardButton(
+					text=button.text, copy_text=CopyTextButton(text=button.value)
+				)
+				for button in row
+			]
+		)
+	return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def edit_markup(token: str, chat_id: str, message_id: int, markup: PostMarkup | None) -> None:
+	"""Ставит, меняет или снимает клавиатуру у поста (ADR-0031).
+
+	Так бот дорисовывает кнопки к посту, который опубликовал
+	публикатор: в канале это возможно, если у бота есть право изменять
+	сообщения. Пустая клавиатура снимает кнопки — снять их может только
+	бот, правка публикателя разметку не трогает (проверено опытом).
+
+	Внимание вызывающему: **любая** правка поста ботом должна нести
+	клавиатуру заново — иначе Telegram её стирает.
+
+	Raises:
+		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
+		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
+		CommunityCheckError: Telegram отклонил правку (нет права
+			изменять сообщения, пост не найден, разметка не годится).
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	bot = _make_bot(token)
+	try:
+		async with _bot_errors(
+			"У бота нет права изменять сообщения в этом сообществе.",
+			"Telegram отклонил правку клавиатуры.",
+		):
+			await bot.edit_message_reply_markup(
+				chat_id=_chat_id(chat_id),
+				message_id=message_id,
+				reply_markup=to_reply_markup(markup),
+			)
+	finally:
+		await bot.session.close()
+
+
 async def send_media(
 	token: str,
 	chat_id: str,
@@ -235,6 +298,7 @@ async def send_media(
 	path: str,
 	caption: str,
 	topic_id: int | None = None,
+	markup: PostMarkup | None = None,
 ) -> int:
 	"""Отправляет медиа через Bot API (лимит — 50 МБ на файл).
 
@@ -256,6 +320,7 @@ async def send_media(
 	file = FSInputFile(path)
 	text = to_html(caption) if caption else None
 	mode = "HTML"
+	keyboard = to_reply_markup(markup)
 	try:
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			if kind is MediaKind.PHOTO:
@@ -264,6 +329,7 @@ async def send_media(
 					file,
 					caption=text,
 					parse_mode=mode,
+					reply_markup=keyboard,
 					message_thread_id=topic_id,
 				)
 			elif kind is MediaKind.VIDEO:
@@ -272,6 +338,7 @@ async def send_media(
 					file,
 					caption=text,
 					parse_mode=mode,
+					reply_markup=keyboard,
 					supports_streaming=True,
 					message_thread_id=topic_id,
 				)
@@ -281,6 +348,7 @@ async def send_media(
 					file,
 					caption=text,
 					parse_mode=mode,
+					reply_markup=keyboard,
 					message_thread_id=topic_id,
 				)
 			else:
@@ -289,6 +357,7 @@ async def send_media(
 					file,
 					caption=text,
 					parse_mode=mode,
+					reply_markup=keyboard,
 					message_thread_id=topic_id,
 				)
 			return int(message.message_id)
@@ -296,7 +365,13 @@ async def send_media(
 		await bot.session.close()
 
 
-async def send_text(token: str, chat_id: str, text: str, topic_id: int | None = None) -> int:
+async def send_text(
+	token: str,
+	chat_id: str,
+	text: str,
+	topic_id: int | None = None,
+	markup: PostMarkup | None = None,
+) -> int:
 	"""Публикует текстовый пост через Bot API («сейчас»).
 
 	``topic_id`` — тема форума (``message_thread_id``); None — общая лента.
@@ -314,7 +389,11 @@ async def send_text(token: str, chat_id: str, text: str, topic_id: int | None = 
 	try:
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			message = await bot.send_message(
-				_chat_id(chat_id), to_html(text), parse_mode="HTML", message_thread_id=topic_id
+				_chat_id(chat_id),
+				to_html(text),
+				parse_mode="HTML",
+				message_thread_id=topic_id,
+				reply_markup=to_reply_markup(markup),
 			)
 			return int(message.message_id)
 	finally:

@@ -449,9 +449,12 @@ class PromisedMarkup(TimestampMixin, Base):
 
 	id: Mapped[int] = mapped_column(primary_key=True)
 	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
-	# номер отложенной записи на сервере; NULL — обещание без отложки
-	# (пост ушёл «сейчас», а клавиатуру применить ещё не удалось)
+	# номер отложенной записи на сервере; NULL — отложки нет
 	scheduled_message_id: Mapped[int | None] = mapped_column(Integer, default=None)
+	# номер уже вышедшего поста; NULL — он ещё не вышел. Разные колонки
+	# намеренно: отложка и вышедший пост — разные сущности с разными
+	# номерами (проверено опытом), и путать их нельзя
+	message_id: Mapped[int | None] = mapped_column(Integer, default=None)
 	# ожидаемый момент публикации (UTC) — по нему дозор берёт ближайшие
 	when: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 	# текст или подпись поста: опознание вышедшего поста требует точного

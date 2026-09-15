@@ -757,7 +757,7 @@ class MtprotoTransport:
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: Callable[[float], None] | None = None,
-	) -> None:
+	) -> int:
 		"""Публикует пост: текст или медиа с подписью, сразу или отложенно.
 
 		Единый транспорт публикации — userbot (ADR-0011): лимит Bot API
@@ -766,6 +766,11 @@ class MtprotoTransport:
 		долю загрузки файла 0.0..1.0 (большие файлы — это минуты).
 		Миниатюру Telegram принимает, только когда известны размеры
 		видео — их извлекает hachoir.
+
+		Returns:
+			Номер отправленного сообщения (у отложенного — номер записи
+			в очереди отложенных сервера): по нему бот дорисовывает
+			кнопки (ADR-0031).
 
 		Raises:
 			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
@@ -786,11 +791,11 @@ class MtprotoTransport:
 		async with _mtproto_errors():
 			# тема форума адресуется ответом на её корневое сообщение
 			if post.media_path is None:
-				await client.send_message(
+				sent = await client.send_message(
 					peer, post.text, schedule=post.when, reply_to=post.topic_id
 				)
 			else:
-				await client.send_file(
+				sent = await client.send_file(
 					peer,
 					post.media_path,
 					caption=post.text or None,
@@ -801,12 +806,15 @@ class MtprotoTransport:
 					thumb=post.thumb_path,
 					reply_to=post.topic_id,
 				)
+		message_id = int(getattr(sent, "id", 0))
 		logger.info(
-			"Пост отправлен в чат %s (%s, %s).",
+			"Пост id=%s отправлен в чат %s (%s, %s).",
+			message_id,
 			chat_id,
 			post.media_kind if post.media_path else "текст",
 			f"отложено на {post.when}" if post.when else "сразу",
 		)
+		return message_id
 
 	async def me(self) -> UserbotProfile:
 		"""Профиль владельца сессии: @имя и имя (живой запрос «кто я»).

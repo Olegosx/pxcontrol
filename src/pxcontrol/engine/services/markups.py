@@ -45,7 +45,9 @@ class PromisedMarkupDto:
 		id: номер записи обещания.
 		community_id: сообщество, где выйдет пост.
 		scheduled_message_id: номер отложенной записи на сервере
-			(None — пост уже ушёл, а кнопки применить не удалось).
+			(None — отложки нет: пост «сейчас» или уже вышел).
+		message_id: номер вышедшего поста (None — он ещё не вышел):
+			по нему повторяют неудавшуюся правку клавиатуры.
 		when: ожидаемый момент публикации (None — «сейчас»).
 		match_text: текст или подпись поста для точного опознания
 			вышедшего поста (ADR-0031, п. 9).
@@ -58,6 +60,7 @@ class PromisedMarkupDto:
 	id: int
 	community_id: int
 	scheduled_message_id: int | None
+	message_id: int | None
 	when: datetime | None
 	match_text: str
 	markup: PostMarkup
@@ -79,6 +82,7 @@ class MarkupsService:
 		match_text: str,
 		when: datetime | None = None,
 		scheduled_message_id: int | None = None,
+		message_id: int | None = None,
 	) -> int:
 		"""Запоминает, что посту обещана клавиатура.
 
@@ -92,6 +96,8 @@ class MarkupsService:
 			match_text: текст или подпись поста для опознания.
 			when: ожидаемый момент публикации (None — «сейчас»).
 			scheduled_message_id: номер отложенной записи, если она есть.
+			message_id: номер **вышедшего** поста, если пост уже
+				опубликован, а кнопки поставить не удалось.
 
 		Returns:
 			Номер записи обещания.
@@ -105,6 +111,7 @@ class MarkupsService:
 		row = PromisedMarkup(
 			community_id=community_id,
 			scheduled_message_id=scheduled_message_id,
+			message_id=message_id,
 			when=when,
 			match_text=match_text,
 			markup=markup_to_json(markup),
@@ -215,6 +222,7 @@ class MarkupsService:
 			id=row.id,
 			community_id=row.community_id,
 			scheduled_message_id=row.scheduled_message_id,
+			message_id=row.message_id,
 			when=as_utc_optional(row.when),
 			match_text=row.match_text,
 			markup=markup,

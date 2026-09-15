@@ -22,7 +22,10 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.accounts import account_display
-from pxcontrol.engine.services.posts import PublishCapabilities, publish_capabilities
+from pxcontrol.engine.services.publish_route import (
+	PublishCapabilities,
+	publish_capabilities,
+)
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import CommunityCheckError
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError

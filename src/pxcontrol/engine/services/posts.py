@@ -24,8 +24,16 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, CommunityMember
-from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.errors import EngineError, user_message
 from pxcontrol.engine.services.captions import filename_complaint
+from pxcontrol.engine.services.publish_route import (
+	PublishCapabilities,
+	PublishRoute,
+	choose_route,
+	markup_blocker,
+	publish_capabilities,
+	route_uses_userbot,
+)
 from pxcontrol.engine.services.settings import (
 	COMMUNITY_ENABLED,
 	VIDEO_PROCESSED_DIR,
@@ -35,11 +43,12 @@ from pxcontrol.engine.services.settings import (
 	SettingsService,
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
-from pxcontrol.engine.telegram.markup import PostMarkup
+from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	BotRef,
+	CommunityKind,
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
@@ -85,40 +94,6 @@ _SCHEDULED_GONE_TEXT = (
 )
 
 _T = TypeVar("_T")
-
-
-@dataclass(frozen=True)
-class PublishCapabilities:
-	"""Возможности публикации канала (из способов администрирования).
-
-	Attributes:
-		userbot: полный набор — любые типы, до 2 ГБ, «сейчас» и отложенные.
-		bot: запасной путь — текст и медиа до 50 МБ, только «сейчас».
-			Он же означает «кнопки возможны»: ставит их только бот
-			(ADR-0031), и своему посту он ставит их всегда.
-		markup_edit: бот может дорисовать кнопки к посту **публикателя**
-			(право канала ``edit_messages``, ADR-0031). Без него кнопки
-			остаются только у постов, которые бот отправляет сам, —
-			то есть недоступны крупным файлам и отложенным записям.
-	"""
-
-	userbot: bool
-	bot: bool
-	markup_edit: bool = False
-
-
-def publish_capabilities(
-	bot_assigned: bool, userbot_assigned: bool, *, markup_edit: bool = False
-) -> PublishCapabilities:
-	"""Возможности публикации по публикаторам сообщества.
-
-	Единственный источник правды для движка и интерфейса; приоритет
-	транспорта — MTProto (ADR-0011), userbot-путь доступен при
-	назначенном публикаторе по умолчанию (ADR-0022). Приостановленный
-	публикатор (ADR-0029) вызывающей стороной считается неназначенным —
-	см. :func:`community_capabilities` и ``CommunityDto.capabilities``.
-	"""
-	return PublishCapabilities(userbot=userbot_assigned, bot=bot_assigned, markup_edit=markup_edit)
 
 
 def community_capabilities(community: Community) -> PublishCapabilities:
@@ -322,7 +297,12 @@ class _PostPort(Protocol):
 	def userbot_premium(self, account_id: int | None) -> bool: ...
 
 	async def bot_send_text(
-		self, bot: BotRef, chat_id: str, text: str, topic_id: int | None = None
+		self,
+		bot: BotRef,
+		chat_id: str,
+		text: str,
+		topic_id: int | None = None,
+		markup: PostMarkup | None = None,
 	) -> int: ...
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]: ...
@@ -333,6 +313,10 @@ class _PostPort(Protocol):
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: ProgressCallback | None,
+	) -> int: ...
+
+	async def bot_edit_markup(
+		self, bot: BotRef, chat_id: str, message_id: int, markup: PostMarkup | None
 	) -> None: ...
 
 	async def bot_send_media(
@@ -343,6 +327,7 @@ class _PostPort(Protocol):
 		path: str,
 		caption: str,
 		topic_id: int | None = None,
+		markup: PostMarkup | None = None,
 	) -> int: ...
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
@@ -377,13 +362,31 @@ class PublishPlan:
 		draft: черновик (после снятия просрочки, если она была).
 		community: канал-получатель (строка БД с привязками).
 		media_path: путь файла после переименования; None — текст.
-		use_userbot: транспорт: userbot (True) или бот (False).
+		route: каким путём уходит пост (ADR-0031): публикатор, бот
+			или «публикатор отправил — бот дорисовал кнопки».
 	"""
 
 	draft: PostDraft
 	community: Community
 	media_path: str | None
-	use_userbot: bool
+	route: PublishRoute
+
+
+@dataclass(frozen=True)
+class PublishOutcome:
+	"""Чем закончилась передача поста.
+
+	Attributes:
+		message_id: номер вышедшего поста (у отложенного — номер записи
+			в очереди отложенных сервера).
+		markup_error: кнопки обещали, но поставить не удалось — текст
+			причины для человека. Пост при этом опубликован: это исход,
+			а не сбой поста (ADR-0031, п. 12), и очередь сохраняет
+			обещание, чтобы попытку можно было повторить.
+	"""
+
+	message_id: int | None = None
+	markup_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -523,7 +526,9 @@ class PostsService:
 		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер пути (настройки)
 		self._settings = settings if settings is not None else SettingsService(db)
 
-	async def publish(self, draft: PostDraft, on_progress: ProgressCallback | None = None) -> None:
+	async def publish(
+		self, draft: PostDraft, on_progress: ProgressCallback | None = None
+	) -> PublishOutcome:
 		"""Публикует черновик: userbot в приоритете, бот — запасной путь.
 
 		Единый вход для всех типов контента. Транспорт выбирается по
@@ -545,8 +550,9 @@ class PostsService:
 			UserbotUnavailableError: Userbot отвалился по дороге.
 		"""
 		plan = await self.prepare_publish(draft)
-		await self.transmit(plan, on_progress)
+		outcome = await self.transmit(plan, on_progress)
 		await self.settle_published(plan)
+		return outcome
 
 	async def publish_blocker(self, community_id: int) -> str | None:
 		"""Что мешает сообществу принять пост прямо сейчас (None — ничего).
@@ -604,17 +610,39 @@ class PostsService:
 				"обновите выбор темы или перепроверьте доступы."
 			)
 		caps = community_capabilities(community)
-		self._check_transport(caps, draft, community.default_tg_account_id)
+		over_bot_limit = self._over_bot_limit(draft)
+		if draft.markup:
+			blocker = markup_blocker(
+				caps,
+				title=community.title,
+				kind=CommunityKind(community.kind),
+				scheduled=draft.when is not None,
+				media_over_bot_limit=over_bot_limit,
+			)
+			if blocker is not None:
+				raise PostError(blocker)
+		route = choose_route(
+			caps, with_markup=bool(draft.markup), media_over_bot_limit=over_bot_limit
+		)
+		self._check_transport(route, draft, community.default_tg_account_id)
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
 			media_path = self._apply_rename(media_path, draft.rename_to)
-		return PublishPlan(
-			draft=draft, community=community, media_path=media_path, use_userbot=caps.userbot
-		)
+		return PublishPlan(draft=draft, community=community, media_path=media_path, route=route)
+
+	def _over_bot_limit(self, draft: PostDraft) -> bool:
+		"""Файл черновика не по силам боту (лимит заливки — 50 МБ).
+
+		Размер решает выбор маршрута: пост, который бот может отправить
+		сам, уходит одним вызовом и с кнопками сразу (ADR-0031, п. 2a).
+		"""
+		if draft.media_path is None:
+			return False
+		return self._file_size(draft.media_path) > BOT_MAX_FILE_BYTES
 
 	async def transmit(
 		self, plan: PublishPlan, on_progress: ProgressCallback | None = None
-	) -> None:
+	) -> PublishOutcome:
 		"""Передача подготовленного поста: только сеть, без запросов к БД.
 
 		Отменяемая фаза публикации (ADR-0020): обрыв здесь безопасен —
@@ -629,17 +657,60 @@ class PostsService:
 			UserbotUnavailableError: Userbot отвалился по дороге.
 		"""
 		draft = plan.draft
-		if plan.use_userbot:
-			await self._publish_userbot(plan.community, draft, plan.media_path, on_progress)
+		if plan.route is PublishRoute.BOT:
+			# бот отправляет сам — кнопки уходят вместе с постом
+			message_id = await self._publish_bot(plan.community, draft, plan.media_path)
+			markup_error = None
 		else:
-			await self._publish_bot(plan.community, draft, plan.media_path)
+			message_id = await self._publish_userbot(
+				plan.community, draft, plan.media_path, on_progress
+			)
+			markup_error = await self._apply_markup(plan, message_id)
 		logger.info(
 			"Пост (%s) → «%s» (%s, %s).",
 			draft.media_kind if draft.media_path else "текст",
 			plan.community.title,
-			"userbot" if plan.use_userbot else "бот",
+			plan.route,
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
+		return PublishOutcome(message_id=message_id, markup_error=markup_error)
+
+	async def _apply_markup(self, plan: PublishPlan, message_id: int | None) -> str | None:
+		"""Дорисовывает кнопки к посту публикателя (маршрут Р2, ADR-0031).
+
+		Зовётся сразу после публикации: номер поста известен из ответа,
+		поэтому опознавать его не нужно — это дешёвая половина маршрута.
+
+		Неудача кнопок **не отменяет пост**: он уже в канале, и обрывать
+		отправку ошибкой значило бы предложить человеку повтор, который
+		опубликовал бы пост второй раз. Поэтому причина возвращается
+		текстом — очередь покажет её пометкой и сохранит обещание
+		(ADR-0031, п. 12).
+
+		Returns:
+			Текст причины, по которой кнопок нет, или None при удаче.
+		"""
+		if plan.route is not PublishRoute.USERBOT_MARKUP or not plan.draft.markup:
+			return None
+		bot = plan.community.bot
+		if bot is None or message_id is None:
+			return "Кнопки не поставлены: пост ушёл, но бота для разметки не оказалось."
+		try:
+			await self._gateway.bot_edit_markup(
+				BotRef(bot.id, bot.token),
+				plan.community.tg_chat_id,
+				message_id,
+				plan.draft.markup,
+			)
+		except Exception as exc:  # noqa: BLE001 — исход кнопок, а не поста
+			logger.warning(
+				"Пост id=%s в «%s» опубликован, но кнопки не поставлены.",
+				message_id,
+				plan.community.title,
+				exc_info=True,
+			)
+			return f"Кнопки не поставлены: {user_message(exc)}"
+		return None
 
 	async def settle_published(self, plan: PublishPlan) -> None:
 		"""Раскладывает файлы после состоявшейся отправки.
@@ -658,14 +729,17 @@ class PostsService:
 			await self._move_to_published(plan.media_path)
 
 	def _check_transport(
-		self, caps: PublishCapabilities, draft: PostDraft, account_id: int | None
+		self, route: PublishRoute, draft: PostDraft, account_id: int | None
 	) -> None:
 		"""Проверки транспорта, способные отклонить черновик.
 
 		Выполняются до побочных эффектов публикации (переименование файла):
 		отклонённый черновик не должен менять ничего на диске.
 		``account_id`` — привязанный userbot-аккаунт канала (ADR-0019):
-		лимит файла зависит от Premium именно этого аккаунта.
+		лимит файла зависит от Premium именно этого аккаунта. Пределы
+		берутся по **маршруту**, а не по возможностям сообщества: пост
+		с кнопками может уйти ботом даже там, где есть публикатор,
+		и тогда действуют базовые пределы бота (ADR-0031).
 
 		Наличие публикатора здесь не проверяется: это свойство
 		сообщества, а не черновика, и живёт оно в одной точке —
@@ -678,7 +752,7 @@ class PostsService:
 		"""
 		media_path = draft.media_path
 		with_media = media_path is not None
-		if caps.userbot:
+		if route_uses_userbot(route):
 			premium = self._gateway.userbot_premium(account_id)
 			# длина — рядом с размером файла: оба предела зависят от того,
 			# чьей сессией уходит пост (Premium аккаунта канала, ADR-0019)
@@ -726,11 +800,16 @@ class PostsService:
 		draft: PostDraft,
 		media_path: str | None,
 		on_progress: ProgressCallback | None,
-	) -> None:
+	) -> int:
 		"""Полный путь через userbot: из сессии аккаунта канала (ADR-0019).
 
 		Лимит размера файла проверен раньше (:meth:`_check_transport`);
 		сюда канал приходит только с привязкой (маршрутизация ``publish``).
+
+		Returns:
+			Номер вышедшего поста (у отложенного — номер записи
+			в очереди отложенных сервера): по нему бот дорисовывает
+			кнопки (ADR-0031).
 		"""
 		if community.default_tg_account_id is None:  # publish() сюда без умолчания не приводит
 			raise PostError("У сообщества нет userbot-публикатора — проверьте доступы.")
@@ -746,35 +825,41 @@ class PostsService:
 				thumb_path=thumb,
 				topic_id=draft.topic_id,
 			)
-			await self._gateway.publish(
+			return await self._gateway.publish(
 				community.default_tg_account_id, community.tg_chat_id, post, on_progress
 			)
 
 	async def _publish_bot(
 		self, community: Community, draft: PostDraft, media_path: str | None
-	) -> None:
-		"""Запасной путь через бота: текст и медиа до 50 МБ, только «сейчас».
+	) -> int:
+		"""Путь через бота: текст и медиа до 50 МБ, только «сейчас».
 
-		Отложенность и лимит размера проверены раньше
-		(:meth:`_check_transport`).
+		Он же — путь поста с кнопками (ADR-0031): бот ставит их своему
+		посту сам, одним вызовом и с первой секунды. Отложенность
+		и лимит размера проверены раньше (:meth:`_check_transport`).
+
+		Returns:
+			Номер вышедшего поста.
 		"""
 		if community.bot is None:  # publish() сюда без бота не приводит
 			raise PostError("У сообщества не назначен бот — переподключите его.")
+		bot = BotRef(community.bot.id, community.bot.token)
 		if media_path is None:
-			await self._gateway.bot_send_text(
-				BotRef(community.bot.id, community.bot.token),
+			return await self._gateway.bot_send_text(
+				bot,
 				community.tg_chat_id,
 				draft.text,
 				draft.topic_id,
+				markup=draft.markup,
 			)
-			return
-		await self._gateway.bot_send_media(
-			BotRef(community.bot.id, community.bot.token),
+		return await self._gateway.bot_send_media(
+			bot,
 			community.tg_chat_id,
 			draft.media_kind,
 			media_path,
 			draft.text,
 			draft.topic_id,
+			markup=draft.markup,
 		)
 
 	async def list_topics(self, community_id: int) -> list[ForumTopicInfo]:
@@ -1201,6 +1286,10 @@ class PostsService:
 		"""
 		if not draft.text and draft.media_path is None:
 			raise PostError("Пост пуст — добавьте текст или файл.")
+		if draft.markup is not None:
+			# пределы клавиатуры Telegram не объявляет и молча обрезает
+			# лишнее (ADR-0031, п. 11) — проверяем до отправки
+			validate_markup(draft.markup)
 		with_media = draft.media_path is not None
 		check_text_length(draft.text, text_length_limit(True, with_media), with_media)
 		if draft.rename_to:

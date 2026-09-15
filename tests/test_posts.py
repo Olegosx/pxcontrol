@@ -24,12 +24,20 @@ from pxcontrol.engine.services.posts import (
 	ScheduledRef,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
+from pxcontrol.engine.telegram.bot_api import CommunityCheckError
+from pxcontrol.engine.telegram.markup import (
+	ButtonKind,
+	MarkupError,
+	PostButton,
+	PostMarkup,
+)
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotFloodError,
 	UserbotMessageGoneError,
 	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.types import (
+	BOT_MAX_FILE_BYTES,
 	BotRef,
 	ForumTopicInfo,
 	MediaKind,
@@ -61,15 +69,25 @@ class _FakeGateway:
 		self.scheduled_sent: list[tuple[int, str, tuple[int, ...]]] = []
 		self.scheduled_deleted: list[tuple[int, str, tuple[int, ...]]] = []
 		self.scheduled_gone = False
+		# кнопки (ADR-0031): что ушло с постом и что дорисовано правкой
+		self.sent_markups: list[object] = []
+		self.markup_edits: list[tuple[str, int, object]] = []
+		self.markup_edit_error: Exception | None = None
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return account_id in self.premium_ids
 
 	async def bot_send_text(
-		self, bot: BotRef, chat_id: str, text: str, topic_id: int | None = None
+		self,
+		bot: BotRef,
+		chat_id: str,
+		text: str,
+		topic_id: int | None = None,
+		markup: object = None,
 	) -> int:
 		self.sent.append((bot.token, chat_id, text))
 		self.sent_topics.append(topic_id)
+		self.sent_markups.append(markup)
 		return 42
 
 	async def bot_send_media(
@@ -80,22 +98,32 @@ class _FakeGateway:
 		path: str,
 		caption: str,
 		topic_id: int | None = None,
+		markup: object = None,
 	) -> int:
 		self.media.append((bot.token, chat_id, kind, path, caption))
+		self.sent_markups.append(markup)
 		return 43
+
+	async def bot_edit_markup(
+		self, bot: BotRef, chat_id: str, message_id: int, markup: object
+	) -> None:
+		if self.markup_edit_error is not None:
+			raise self.markup_edit_error
+		self.markup_edits.append((chat_id, message_id, markup))
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
 		return list(self.topics)
 
 	async def publish(
 		self, account_id: int, chat_id: str, post: OutgoingPost, on_progress: object
-	) -> None:
+	) -> int:
 		if not self.userbot_ok:
 			raise UserbotUnavailableError("Userbot не подключён — войдите в аккаунт.")
 		if post.media_path is not None and callable(on_progress):
 			on_progress(0.5)
 			on_progress(1.0)
 		self.published.append((account_id, chat_id, post))
+		return 100 + len(self.published)
 
 	def sent_posts(self) -> list[tuple[str, OutgoingPost]]:
 		"""Публикации без id аккаунта (для тестов, где адресация не важна)."""
@@ -167,6 +195,7 @@ async def _add_community(
 	userbot_assigned: bool = True,
 	forum: bool = False,
 	tg_chat_id: str = "-1001",
+	bot_can_edit: bool = False,
 ) -> int:
 	"""Создаёт сообщество (при нужде — бота и userbot-аккаунт), возвращает id."""
 	async with db.session_factory() as session:
@@ -188,6 +217,7 @@ async def _add_community(
 			kind="group" if forum else "channel",
 			forum=forum,
 			bot_id=bot_id,
+			bot_can_edit=bot_can_edit,
 			default_tg_account_id=account_id,
 		)
 		session.add(community)
@@ -1304,3 +1334,139 @@ async def test_list_scheduled_skips_paused_readers(db: Database) -> None:
 	assert len((await service.list_scheduled()).items) == 1
 	await _set_paused(db, community_id, account=True, bot=False)
 	assert await service.list_scheduled() == ScheduledList(items=[], unread=())
+
+
+# --- кнопки под постом (ADR-0031, этап 2) --------------------------------
+
+
+def _markup(text: str = "Смотреть") -> PostMarkup:
+	"""Клавиатура из одной кнопки-ссылки."""
+	return PostMarkup(((PostButton(ButtonKind.LINK, text, "https://telegram.org"),),))
+
+
+async def test_buttons_now_go_by_bot_even_with_publisher(db: Database) -> None:
+	"""Пост «сейчас» с кнопками отправляет бот — простейшим маршрутом.
+
+	Публикатор у сообщества есть, но дорисовка поверх его поста — это
+	лишний вызов и окно без кнопок там, где хватает одного вызова
+	(ADR-0031, п. 2a).
+	"""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	markup = _markup()
+	outcome = await service.publish(PostDraft(community_id, text="с кнопками", markup=markup))
+	assert gateway.sent == [("123:AAA", "-1001", "с кнопками")]
+	assert gateway.sent_markups == [markup]
+	assert gateway.published == []  # публикатор не задействован
+	assert gateway.markup_edits == []  # дорисовывать нечего
+	assert outcome.message_id == 42 and outcome.markup_error is None
+
+
+async def test_big_file_with_buttons_publishes_then_bot_draws(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Файл не по силам боту: публикатор отправил — бот дорисовал кнопки."""
+	monkeypatch.setattr(PostsService, "_file_size", lambda self, path: BOT_MAX_FILE_BYTES + 1)
+	video = tmp_path / "большое.mp4"
+	video.write_bytes(b"video")
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, bot_can_edit=True)
+	markup = _markup()
+	outcome = await service.publish(
+		PostDraft(
+			community_id,
+			text="подпись",
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+			markup=markup,
+		)
+	)
+	assert len(gateway.published) == 1  # ушло публикателем
+	assert gateway.media == []  # бот файл не заливал
+	assert gateway.markup_edits == [("-1001", outcome.message_id, markup)]
+	assert outcome.markup_error is None
+
+
+async def test_markup_failure_keeps_post_and_reports(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Кнопки не поставились — пост всё равно опубликован, причина названа.
+
+	Обратное было бы опаснее: ошибка отправки предложила бы повтор,
+	а повтор опубликовал бы пост второй раз (ADR-0031, п. 12).
+	"""
+	monkeypatch.setattr(PostsService, "_file_size", lambda self, path: BOT_MAX_FILE_BYTES + 1)
+	video = tmp_path / "большое.mp4"
+	video.write_bytes(b"video")
+	gateway = _FakeGateway()
+	gateway.markup_edit_error = CommunityCheckError(
+		"У бота нет права изменять сообщения в этом сообществе."
+	)
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, bot_can_edit=True)
+	outcome = await service.publish(
+		PostDraft(
+			community_id,
+			text="подпись",
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+			markup=_markup(),
+		)
+	)
+	assert len(gateway.published) == 1  # пост в канале
+	assert outcome.markup_error is not None
+	assert "Кнопки не поставлены" in outcome.markup_error
+	assert "права изменять сообщения" in outcome.markup_error
+
+
+async def test_scheduled_post_with_buttons_refused(db: Database) -> None:
+	"""Кнопки у отложенных постов пока недоступны — отказ честный и заранее."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	when = datetime.now(UTC) + timedelta(hours=1)
+	with pytest.raises(PostError, match="отложенных постов пока"):
+		await service.publish(PostDraft(community_id, text="позже", when=when, markup=_markup()))
+	assert gateway.published == [] and gateway.sent == []
+
+
+async def test_buttons_without_bot_refused(db: Database) -> None:
+	"""Кнопки ставит только бот: сообщество без бота получает отказ с причиной."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, with_bot=False)
+	with pytest.raises(PostError, match="Кнопки ставит только бот"):
+		await service.publish(PostDraft(community_id, text="текст", markup=_markup()))
+
+
+async def test_bad_markup_rejected_before_send(db: Database) -> None:
+	"""Клавиатура сверх пределов Telegram не уходит: он обрезал бы её молча."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	wide = PostMarkup(
+		(tuple(PostButton(ButtonKind.LINK, f"к{i}", "https://telegram.org") for i in range(9)),)
+	)
+	with pytest.raises(MarkupError, match="предел Telegram"):
+		await service.publish(PostDraft(community_id, text="текст", markup=wide))
+	assert gateway.sent == [] and gateway.published == []
+
+
+async def test_bot_route_uses_base_text_limits(db: Database) -> None:
+	"""Пост с кнопками уходит ботом — значит и пределы текста бота.
+
+	У публикатора Premium, но пост идёт не им: подписки у ботов
+	не бывает, и предел подписи остаётся базовым.
+	"""
+	gateway = _FakeGateway()
+	gateway.premium_ids = {1}
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	long_text = "я" * 5000  # больше базовых 4096, но меньше Premium-8192
+	with pytest.raises(PostError, match="длиннее"):
+		await service.publish(PostDraft(community_id, text=long_text, markup=_markup()))
+	# без кнопок тот же текст уходит публикателем с Premium-пределом
+	await service.publish(PostDraft(community_id, text=long_text))
+	assert len(gateway.published) == 1

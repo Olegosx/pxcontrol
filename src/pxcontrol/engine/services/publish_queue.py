@@ -32,12 +32,14 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import PublishQueueItem
 from pxcontrol.engine.db.types import as_utc_optional
 from pxcontrol.engine.jobs import Job, JobCancelled, JobDeferred, JobQueue, JobStatus
+from pxcontrol.engine.services.markups import MarkupsService
 from pxcontrol.engine.services.posts import (
 	MIN_SCHEDULE_AHEAD,
 	PostDraft,
 	PostError,
 	PostNotReadyError,
 	PostsService,
+	PublishOutcome,
 	TextLimits,
 	check_text_length,
 	refresh_draft_media,
@@ -207,13 +209,21 @@ class PublishQueue:
 	"""
 
 	def __init__(
-		self, posts: PostsService, db: Database, settings: SettingsService | None = None
+		self,
+		posts: PostsService,
+		db: Database,
+		settings: SettingsService | None = None,
+		markups: MarkupsService | None = None,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
-		экземпляр поверх той же БД (для тестов это эквивалентно)."""
+		экземпляр поверх той же БД (для тестов это эквивалентно).
+		``markups`` — хранилище обещанных клавиатур (ADR-0031): нужно,
+		когда пост вышел, а кнопки поставить не удалось; None — обещание
+		не сохраняется (тесты, где кнопок нет)."""
 		self._posts = posts
 		self._db = db
 		self._settings = settings if settings is not None else SettingsService(db)
+		self._markups = markups
 		self._jobs: JobQueue[_PublishJob] = JobQueue(
 			self._send,
 			name="Отправка",
@@ -236,7 +246,7 @@ class PublishQueue:
 		# элементы, ушедшие догоном: им положена пауза перед следующим
 		# задача передачи активного элемента — единственное, что можно
 		# рвать отменой: подготовка ходит в БД и обрываться не должна
-		self._transmit: asyncio.Task[None] | None = None
+		self._transmit: asyncio.Task[PublishOutcome] | None = None
 		self._watcher: asyncio.Task[None] | None = None
 		self._slot_check: asyncio.Task[None] | None = None
 
@@ -839,6 +849,31 @@ class PublishQueue:
 			)
 			await session.commit()
 
+	async def _keep_markup_promise(self, item: _PublishJob, outcome: PublishOutcome) -> None:
+		"""Сохраняет обещание кнопок у вышедшего поста и метит карточку.
+
+		Пост опубликован, а клавиатуру Telegram не принял (у бота отняли
+		право, его приостановили, пропала связь). Обещание остаётся
+		в базе вместе с номером вышедшего поста — по нему попытку можно
+		будет повторить; человек видит причину пометкой на карточке.
+		"""
+		item.note = outcome.markup_error
+		markup = item.draft.markup
+		if self._markups is None or markup is None:
+			return
+		try:
+			await self._markups.promise(
+				item.draft.community_id,
+				markup,
+				match_text=item.draft.text,
+				message_id=outcome.message_id,
+			)
+		except Exception:  # noqa: BLE001 — пост уже вышел, хоронить его нельзя
+			logger.exception(
+				"Пост id=%s вышел без кнопок, и обещание не сохранилось — повтор невозможен.",
+				outcome.message_id,
+			)
+
 	async def _delete_row(self, item_id: int) -> None:
 		"""Удаляет строку элемента (отправлен или покинул очередь)."""
 		async with self._db.session_factory() as session:
@@ -933,9 +968,15 @@ class PublishQueue:
 			task = asyncio.create_task(self._posts.transmit(plan, on_progress=_on_progress))
 			self._transmit = task
 			try:
-				await task
+				outcome = await task
 			finally:
 				self._transmit = None
+			# кнопки обещали, но поставить не удалось: пост уже в канале,
+			# поэтому это пометка на карточке и сохранённое обещание,
+			# а не ошибка элемента — иначе повтор опубликовал бы пост
+			# второй раз (ADR-0031, п. 12)
+			if outcome.markup_error is not None:
+				await self._keep_markup_promise(item, outcome)
 			# отправка состоялась — дальше отменять нечего: пост уже
 			# в канале. Раскладка файлов идёт после того, как задача
 			# передачи отцеплена, поэтому запрос отмены её не застанет

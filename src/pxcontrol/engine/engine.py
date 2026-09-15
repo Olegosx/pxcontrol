@@ -67,7 +67,9 @@ class Engine:
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
 		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)
-		self.publish_queue = PublishQueue(self.posts, self.db, self.settings)
+		# очереди нужно хранилище обещаний: пост может выйти, а кнопки
+		# не поставиться — тогда обещание ждёт повтора (ADR-0031)
+		self.publish_queue = PublishQueue(self.posts, self.db, self.settings, self.markups)
 		self.video = VideoService(
 			self.db,
 			self._ffmpeg_path,

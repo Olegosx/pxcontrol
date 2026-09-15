@@ -30,6 +30,7 @@ from datetime import datetime
 from pxcontrol.engine.telegram.bot_api import (
 	check_community,
 	check_token,
+	edit_markup,
 	get_bot_events,
 	get_community_stats,
 	send_media,
@@ -45,6 +46,7 @@ from pxcontrol.engine.telegram.lane import (
 	OwnerKind,
 	TelegramPriority,
 )
+from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.mtproto import (
 	MtprotoLoginManager,
 	MtprotoTransport,
@@ -338,14 +340,19 @@ class TelegramGateway:
 			return await get_bot_events(token)
 
 	async def bot_send_text(
-		self, bot: BotRef, chat_id: str, text: str, topic_id: int | None = None
+		self,
+		bot: BotRef,
+		chat_id: str,
+		text: str,
+		topic_id: int | None = None,
+		markup: PostMarkup | None = None,
 	) -> int:
-		"""Публикует текстовый пост «сейчас» через бота.
+		"""Публикует текстовый пост «сейчас» через бота (с кнопками, если есть).
 
 		Raises: см. :func:`bot_api.send_text`.
 		"""
 		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
-			return await send_text(token, chat_id, text, topic_id)
+			return await send_text(token, chat_id, text, topic_id, markup)
 
 	async def bot_send_media(
 		self,
@@ -355,13 +362,28 @@ class TelegramGateway:
 		path: str,
 		caption: str,
 		topic_id: int | None = None,
+		markup: PostMarkup | None = None,
 	) -> int:
-		"""Отправляет медиа ботом (запасной транспорт, лимит 50 МБ).
+		"""Отправляет медиа ботом (лимит 50 МБ; с кнопками, если есть).
 
 		Raises: см. :func:`bot_api.send_media`.
 		"""
 		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
-			return await send_media(token, chat_id, kind, path, caption, topic_id)
+			return await send_media(token, chat_id, kind, path, caption, topic_id, markup)
+
+	async def bot_edit_markup(
+		self, bot: BotRef, chat_id: str, message_id: int, markup: PostMarkup | None
+	) -> None:
+		"""Ставит, меняет или снимает клавиатуру у поста (ADR-0031).
+
+		Приоритет публикации: правка идёт следом за отправкой поста
+		и не должна ждать фоновых чтений — иначе окно без кнопок
+		растянулось бы на минуты.
+
+		Raises: см. :func:`bot_api.edit_markup`.
+		"""
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+			await edit_markup(token, chat_id, message_id, markup)
 
 	async def bot_community_stats(self, bot: BotRef, chat_id: str) -> CommunityStatsInfo:
 		"""Участники и связанный чат через бота — дешёвый частый опрос.
@@ -407,11 +429,16 @@ class TelegramGateway:
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: Callable[[float], None] | None = None,
-	) -> None:
+	) -> int:
 		"""Публикует пост из сессии привязанного к каналу аккаунта (ADR-0019).
 
 		Текст или медиа с подписью; сразу (when=None) или отложенно —
 		отложенные хранит и публикует сервер Telegram (ADR-0010).
+
+		Returns:
+			Номер отправленного поста (у отложенного — номер записи
+			в очереди отложенных сервера). Нужен кнопкам: бот
+			дорисовывает их правкой по этому номеру (ADR-0031).
 
 		Raises:
 			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
@@ -424,7 +451,7 @@ class TelegramGateway:
 			UserbotUnavailableError: Прочие отказы Telegram (лимиты и т.п.).
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.PUBLISH) as transport:
-			await transport.publish(chat_id, post, on_progress)
+			return await transport.publish(chat_id, post, on_progress)
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
 		"""Читает темы форума аккаунтом сообщества (только userbot, ADR-0021).

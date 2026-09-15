@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, PublishQueueItem, TgAccount
 from pxcontrol.engine.jobs import JobStatus
+from pxcontrol.engine.services.markups import MarkupsService
 from pxcontrol.engine.services.posts import (
 	PostDraft,
 	PostError,
@@ -47,6 +48,9 @@ class _SlowGateway:
 		self.release = asyncio.Event()
 		self.published: list[OutgoingPost] = []
 		self.fail_texts: set[str] = set()
+		# кнопки (ADR-0031): дорисовка бота и её сбой
+		self.markup_edits: list[tuple[str, int, object]] = []
+		self.markup_edit_error: Exception | None = None
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return False
@@ -57,13 +61,21 @@ class _SlowGateway:
 		chat_id: str,
 		post: OutgoingPost,
 		on_progress: ProgressCallback | None = None,
-	) -> None:
+	) -> int:
 		if on_progress is not None:
 			on_progress(0.5)
 		await self.release.wait()
 		if post.text in self.fail_texts:
 			raise PostError("Telegram отклонил отправку.")
 		self.published.append(post)
+		return 500 + len(self.published)
+
+	async def bot_edit_markup(
+		self, bot: object, chat_id: str, message_id: int, markup: object
+	) -> None:
+		if self.markup_edit_error is not None:
+			raise self.markup_edit_error
+		self.markup_edits.append((chat_id, message_id, markup))
 
 
 async def _add_community(db: Database, tg_chat_id: str = "-1001", title: str = "Канал") -> int:
@@ -94,7 +106,7 @@ async def make_queue(db: Database) -> AsyncIterator[QueueFactory]:
 	created: list[PublishQueue] = []
 
 	def factory(gateway: _SlowGateway) -> PublishQueue:
-		queue = PublishQueue(PostsService(db, gateway), db)
+		queue = PublishQueue(PostsService(db, gateway), db, markups=MarkupsService(db))
 		created.append(queue)
 		return queue
 
@@ -1491,3 +1503,60 @@ async def test_markup_persisted_restored_and_edited(db: Database, make_queue: Qu
 		row = await session.get(PublishQueueItem, item)
 		assert row is not None and row.markup is None
 	await restarted.shutdown()
+
+
+async def test_markup_failure_notes_card_and_keeps_promise(
+	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Пост вышел, кнопки не поставились: пометка на карточке и обещание.
+
+	Ошибкой элемента это быть не может: пост уже в канале, а повтор
+	опубликовал бы его второй раз (ADR-0031, п. 12). Обещание с номером
+	вышедшего поста остаётся в базе — по нему попытку можно повторить.
+	"""
+	from pxcontrol.engine.db.models import Bot as BotRow
+	from pxcontrol.engine.services.posts import PostsService
+	from pxcontrol.engine.telegram.bot_api import CommunityCheckError
+	from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
+	from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES
+
+	monkeypatch.setattr(PostsService, "_file_size", lambda self, path: BOT_MAX_FILE_BYTES + 1)
+	video = tmp_path / "большое.mp4"
+	video.write_bytes(b"video")
+	markup = PostMarkup(((PostButton(ButtonKind.LINK, "Смотреть", "https://telegram.org"),),))
+
+	gateway = _SlowGateway()
+	gateway.release.set()
+	gateway.markup_edit_error = CommunityCheckError("У бота нет права изменять сообщения.")
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	async with db.session_factory() as session:
+		bot = BotRow(label="Паблишер", token="123:AAA", username="pub_bot")
+		session.add(bot)
+		await session.flush()
+		community = await session.get(Community, community_id)
+		assert community is not None
+		community.bot_id = bot.id
+		community.bot_can_edit = True  # право есть, но Telegram откажет
+		await session.commit()
+
+	item = await queue.enqueue(
+		PostDraft(
+			community_id,
+			text="подпись",
+			media_path=str(video),
+			media_kind=MediaKind.VIDEO,
+			markup=markup,
+		)
+	)
+	await _wait_status(queue, item, JobStatus.DONE)
+	card = next(i for i in await queue.state() if i.id == item)
+	assert card.status is JobStatus.DONE  # пост опубликован
+	assert card.note is not None and "Кнопки не поставлены" in card.note
+	assert len(gateway.published) == 1
+
+	promises = await MarkupsService(db).pending(community_id)
+	assert len(promises) == 1
+	assert promises[0].markup == markup
+	assert promises[0].match_text == "подпись"
+	assert promises[0].message_id == 501  # номер вышедшего поста от транспорта

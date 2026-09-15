@@ -41,13 +41,13 @@ from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.posts import (
 	PostDraft,
-	PublishCapabilities,
 	TextLimits,
 )
 from pxcontrol.engine.services.publish_queue import (
 	EDITABLE_STATUSES,
 	QueueItemDto,
 )
+from pxcontrol.engine.services.publish_route import PublishCapabilities
 from pxcontrol.engine.services.settings import (
 	PUBLISH_LAST_COMMUNITY_ID,
 	PUBLISH_TIMES,
