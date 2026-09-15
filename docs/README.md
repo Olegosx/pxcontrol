@@ -33,6 +33,8 @@
 | [communities.md](03-modules/communities.md) | Сообщества: каналы и группы | 🟢 |
 | [telegram-gateway.md](03-modules/telegram-gateway.md) | Шлюз Telegram (Bot API + MTProto) | 🟢 |
 | [telegram-filenames.md](03-modules/telegram-filenames.md) | Правила Telegram для имён файлов (опыт) | 🟢 |
+| [telegram-buttons.md](03-modules/telegram-buttons.md) | Кнопки под постом: документация и опыт | 🟢 |
+| [publishing-routes.md](03-modules/publishing-routes.md) | Маршруты публикации и правки: комплектации и выбор | 🟢 |
 | [scheduler.md](03-modules/scheduler.md) | Расписание: отложенные записи Telegram (правка, «сейчас», удаление) и вся очередь отправки | 🟢 |
 | [video-processing.md](03-modules/video-processing.md) | Подготовка видео | 🟢 |
 | [captions.md](03-modules/captions.md) | Подписи к постам (шаблоны) | 🟢 |
