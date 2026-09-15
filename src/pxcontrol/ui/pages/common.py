@@ -1397,10 +1397,18 @@ class TitleEditor(QWidget):
 
 	submitted = Signal(str)
 
-	def __init__(self, label: QLabel, parent: QWidget) -> None:
+	#: Ширина «без предела» Qt (QWIDGETSIZE_MAX): снимает ограничение на время правки.
+	_UNLIMITED = 16777215
+
+	def __init__(self, label: QLabel, parent: QWidget, *, fit_text: bool = False) -> None:
+		"""``fit_text`` — в покое не шире собственного текста подписи (плюс запас):
+		так соседи в строке (плашка, карандаш) встают сразу за заголовком,
+		а не у правого края; на время правки предел снимается."""
 		super().__init__(parent)
 		self._label = label
 		self._active = False
+		self._fit_text = fit_text
+		self._text = ""
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(0)
@@ -1416,9 +1424,20 @@ class TitleEditor(QWidget):
 		# бы свою ширину и распирало строку
 		self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
+	def set_text(self, text: str) -> None:
+		"""Текст подписи (с сокращением) и, при ``fit_text``, предел ширины по нему."""
+		self._text = text
+		elide_text(self._label, text)
+		self._fit()
+
+	def _fit(self) -> None:
+		if self._fit_text:
+			self.setMaximumWidth(self._label.fontMetrics().horizontalAdvance(self._text) + 8)
+
 	def begin(self, initial: str, placeholder: str) -> None:
 		"""Показывает поле ввода вместо подписи."""
 		self._active = True
+		self.setMaximumWidth(self._UNLIMITED)
 		self._edit.setPlaceholderText(placeholder)
 		self._edit.setText(initial)
 		self._label.hide()
@@ -1435,6 +1454,7 @@ class TitleEditor(QWidget):
 		self._active = False
 		self._edit.hide()
 		self._label.show()
+		self._fit()
 
 	def _finish(self) -> None:
 		"""Enter или уход фокуса: один сигнал на одну правку."""
@@ -1444,6 +1464,7 @@ class TitleEditor(QWidget):
 		text = str(self._edit.text()).strip()
 		self._edit.hide()
 		self._label.show()
+		self._fit()
 		self.submitted.emit(text)
 
 

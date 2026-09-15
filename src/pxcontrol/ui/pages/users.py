@@ -135,6 +135,9 @@ _PAUSED_CARD_OPACITY = 0.62
 #: Ширина поля поиска в шапке.
 _SEARCH_WIDTH = 200
 
+#: Карандаш правки заголовка — компактный, вровень со строкой текста.
+_RENAME_BUTTON_PX = 24
+
 #: Период опроса активности, пока страница видна (ADR-0030): живая
 #: пометка меняется каждую секунду, числа за сутки — редко; пять
 #: секунд — компромисс между живостью и лишними запросами к БД.
@@ -243,24 +246,29 @@ class _Card(CardWidget):
 		column = QVBoxLayout()
 		column.setSpacing(2)
 		title_label = StrongBodyLabel(box)
-		# «занимай, что дадут»: длинное имя не должно распирать карточку
+		# «занимай, что дадут», но не шире своего текста: карандаш встаёт
+		# сразу за заголовком, а длинное имя сокращается, не распирая карточку
 		title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		elide_text(title_label, title)
-		# правка на месте: карандаш в шапке сменяет подпись полем ввода
-		self._title_editor = TitleEditor(title_label, box)
+		self._title_editor = TitleEditor(title_label, box, fit_text=True)
+		self._title_editor.set_text(title)
 		self._title_editor.submitted.connect(self._on_rename)
-		column.addWidget(self._title_editor)
+		title_row = QHBoxLayout()
+		title_row.setSpacing(4)
+		title_row.addWidget(self._title_editor, stretch=1)
+		rename = TransparentToolButton(FluentIcon.EDIT, box)
+		rename.setFixedSize(_RENAME_BUTTON_PX, _RENAME_BUTTON_PX)
+		rename.setToolTip("Переименовать (Enter — сохранить, Esc — отмена)")
+		rename.clicked.connect(
+			lambda: self._title_editor.begin(self._rename_initial, self._rename_placeholder)
+		)
+		title_row.addWidget(rename)
+		title_row.addStretch()
+		column.addLayout(title_row)
 		details = CaptionLabel(box)
 		details.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 		elide_text(details, subtitle)
 		column.addWidget(details)
 		layout.addLayout(column, stretch=1)
-		rename = TransparentToolButton(FluentIcon.EDIT, box)
-		rename.setToolTip("Переименовать (Enter — сохранить, Esc — отмена)")
-		rename.clicked.connect(
-			lambda: self._title_editor.begin(self._rename_initial, self._rename_placeholder)
-		)
-		layout.addWidget(rename, alignment=Qt.AlignmentFlag.AlignTop)
 		delete = TransparentToolButton(FluentIcon.DELETE, box)
 		delete.setToolTip("Удалить")
 		delete.clicked.connect(on_delete)

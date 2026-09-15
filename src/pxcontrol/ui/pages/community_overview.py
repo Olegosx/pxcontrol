@@ -618,20 +618,25 @@ class OverviewCards(QWidget):
 	"""
 
 	def _tile_card(self, tile: Tile) -> QWidget:
+		return self._tile_widgets(tile).card
+
+	def _tile_widgets(self, tile: Tile) -> TileWidgets:
+		"""Плитка с надписями наружу — для обновления чисел на месте."""
 		card, layout = card_box(self, (14, 11, 14, 11))
 		layout.setSpacing(2)
 		layout.addWidget(text_label(card, tile.title, 12))
 		values_row = QHBoxLayout()
 		values_row.setSpacing(8)
+		values: list[QLabel] = []
 		for text, size, color in tile.values:
-			values_row.addWidget(
-				text_label(card, text, size, color, bold=True),
-				alignment=Qt.AlignmentFlag.AlignBottom,
-			)
+			value = text_label(card, text, size, color, bold=True)
+			values_row.addWidget(value, alignment=Qt.AlignmentFlag.AlignBottom)
+			values.append(value)
 		values_row.addStretch()
 		layout.addLayout(values_row)
-		layout.addWidget(text_label(card, tile.caption, 12, tile.caption_color))
-		return card
+		caption = text_label(card, tile.caption, 12, tile.caption_color)
+		layout.addWidget(caption)
+		return TileWidgets(card, values, caption)
 
 	def _chart_card(self, title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
 		"""Карточка графика: заголовок слева, подзаголовок приглушённо справа."""
@@ -675,6 +680,15 @@ class OverviewCards(QWidget):
 
 	def _reference_grid(self, rows: list[tuple[str, str]]) -> QWidget:
 		"""Справка: сетка 2 × N «подпись / значение» с хайрлайнами."""
+		return self._reference_widgets(rows)[0]
+
+	def _reference_widgets(self, rows: list[tuple[str, str]]) -> tuple[QWidget, list[QLabel]]:
+		"""Справка с надписями значений наружу — для обновления на месте.
+
+		Значения обновляются через :func:`elide_text` — так же, как
+		при сборке, иначе длинное значение перестало бы сокращаться.
+		"""
+		values: list[QLabel] = []
 		box = QWidget(self)
 		grid = QGridLayout(box)
 		grid.setContentsMargins(0, 0, 0, 0)
@@ -699,6 +713,7 @@ class OverviewCards(QWidget):
 				value = text_label(cell, "", 14)  # BodyLabel штатно, кегль не задаётся
 				value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 				elide_text(value, value_text)
+				values.append(value)
 				line.addWidget(value, stretch=1)
 				line_box = QWidget(cell)
 				line_box.setLayout(line)
@@ -708,7 +723,7 @@ class OverviewCards(QWidget):
 					cell_layout.addWidget(HorizontalSeparator(cell))
 				grid.addWidget(cell, position, column)
 			grid.setColumnStretch(column, 1)
-		return box
+		return box, values
 
 
 class OverviewTab(OverviewCards):
@@ -1061,6 +1076,15 @@ def _swatch(parent: QWidget, *, error: bool = False, info: bool = False) -> QWid
 	else:
 		badge = DotInfoBadge.attension(parent)
 	return badge
+
+
+@dataclass(frozen=True)
+class TileWidgets:
+	"""Собранная плитка: карточка и её надписи (значения, подпись)."""
+
+	card: QWidget
+	values: list[QLabel]
+	caption: QLabel
 
 
 @dataclass(frozen=True)

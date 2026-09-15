@@ -26,14 +26,13 @@ from functools import partial
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QHideEvent, QShowEvent
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
 	CaptionLabel,
 	CardWidget,
 	FluentIcon,
 	PrimaryPushButton,
-	PushButton,
 	RoundMenu,
 	ScrollArea,
 	StrongBodyLabel,
@@ -68,6 +67,7 @@ from pxcontrol.ui.pages.common import (
 from pxcontrol.ui.pages.community_overview import (
 	OverviewCards,
 	Tile,
+	TileWidgets,
 	days_chart,
 	hours_chart,
 	period_caption,
@@ -100,7 +100,6 @@ from pxcontrol.ui.pages.user_state import (
 	live_shown,
 	live_text,
 	membership_caption,
-	primary_user_action,
 	state_badge,
 	user_actions,
 	user_reference_rows,
@@ -141,47 +140,85 @@ def subject_title(subject: Subject) -> str:
 	return subject.display if isinstance(subject, TgAccountDto) else subject.label
 
 
+#: Окна плиток в порядке показа: подпись и поле снимка.
+_WINDOWS: tuple[tuple[str, str], ...] = (
+	("За час", "last_hour"),
+	("За сутки", "last_day"),
+	("За неделю", "last_week"),
+)
+
+
 class _ActivityOverview(OverviewCards):
-	"""Тело страницы: справка, плитки, графики, виды операций — без кнопок."""
+	"""Тело страницы: справка, плитки, графики, виды операций — без кнопок.
+
+	Справка и плитки собираются один раз, а раз в пять секунд у них
+	меняются только тексты: пересборка мигала бы карточками на каждом
+	тике. Графики строятся при показе — они не «живые».
+	"""
 
 	def __init__(self, parent: QWidget) -> None:
 		super().__init__(parent)
 		self._layout = QVBoxLayout(self)
 		self._layout.setContentsMargins(0, 0, 0, 0)
 		self._layout.setSpacing(density.spacing().block_spacing)
-		self._tiles_box = QVBoxLayout()
 		self._reference_box = QVBoxLayout()
+		self._tiles_box = QVBoxLayout()
 		self._charts_box = QVBoxLayout()
 		self._layout.addLayout(self._reference_box)
 		self._layout.addLayout(self._tiles_box)
 		self._layout.addLayout(self._charts_box)
+		self._reference_values: list[QLabel] = []
+		self._reference_keys: list[str] = []
+		self._tiles: list[TileWidgets] = []
+		self._tiles_empty: QWidget | None = None
 
 	def render_reference(self, rows: list[tuple[str, str]]) -> None:
-		clear_layout(self._reference_box)
-		self._reference_box.addWidget(self._reference_grid(rows))
+		"""Справка: собирается по составу строк, дальше меняются только значения."""
+		keys = [key for key, _value in rows]
+		if keys != self._reference_keys:
+			clear_layout(self._reference_box)
+			box, self._reference_values = self._reference_widgets(rows)
+			self._reference_keys = keys
+			self._reference_box.addWidget(box)
+			return
+		for label, (_key, value) in zip(self._reference_values, rows, strict=True):
+			elide_text(label, value)
 
 	def render_tiles(self, activity: OwnerActivityDto | None) -> None:
-		"""Плитки окон — обновляются раз в пять секунд, отдельно от графиков."""
-		clear_layout(self._tiles_box)
+		"""Плитки окон: строятся один раз, дальше обновляются числа и подписи."""
 		if activity is None:
-			self._tiles_box.addWidget(CaptionLabel("Операций ещё не было.", self))
+			if self._tiles_empty is None:
+				clear_layout(self._tiles_box)
+				self._tiles = []
+				self._tiles_empty = CaptionLabel("Операций ещё не было.", self)
+				self._tiles_box.addWidget(self._tiles_empty)
 			return
-		windows = (
-			("За час", activity.last_hour),
-			("За сутки", activity.last_day),
-			("За неделю", activity.last_week),
-		)
-		tiles = [self._window_tile(title, stats) for title, stats in windows]
-		self._tiles_box.addWidget(
-			FlowGrid(tiles, self, min_width=_TILE_MIN_WIDTH, spacing=_CARD_SPACING)
-		)
+		if not self._tiles:
+			clear_layout(self._tiles_box)
+			self._tiles_empty = None
+			self._tiles = [
+				self._tile_widgets(self._window_tile(title, getattr(activity, field)))
+				for title, field in _WINDOWS
+			]
+			self._tiles_box.addWidget(
+				FlowGrid(
+					[tile.card for tile in self._tiles],
+					self,
+					min_width=_TILE_MIN_WIDTH,
+					spacing=_CARD_SPACING,
+				)
+			)
+			return
+		for widgets, (title, field) in zip(self._tiles, _WINDOWS, strict=True):
+			tile = self._window_tile(title, getattr(activity, field))
+			widgets.values[0].setText(tile.values[0][0])
+			widgets.caption.setText(tile.caption)
+			tinted(widgets.caption, tile.caption_color)
 
-	def _window_tile(self, title: str, stats: WindowStats) -> QWidget:
-		count = stats.operations
+	@staticmethod
+	def _window_tile(title: str, stats: WindowStats) -> Tile:
 		color = ACCENT_TEXT if stats.floods or stats.errors else DIM_TEXT
-		return self._tile_card(
-			Tile(title, [(str(count), 24, None)], window_tile_caption(stats), color)
-		)
+		return Tile(title, [(str(stats.operations), 24, None)], window_tile_caption(stats), color)
 
 	def render_history(self, history: ActivityHistoryDto) -> None:
 		"""Графики и виды операций — при показе страницы."""
@@ -290,15 +327,18 @@ class UserPage(ScrollArea):
 		title_row = QHBoxLayout()
 		title_row.setSpacing(10)
 		title = TitleLabel(box)
-		# «занимай, что дадут», но не шире своего текста: плашка встаёт
-		# сразу за именем (тот же приём, что у страницы сообщества)
+		# «занимай, что дадут», но не шире своего текста: карандаш и плашка
+		# встают сразу за именем (тот же приём, что у страницы сообщества);
+		# предел снимает сама правка на месте
 		title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-		title.setMaximumWidth(title.fontMetrics().horizontalAdvance(title_text) + 8)
-		elide_text(title, title_text)
-		# правка на месте: карандаш справа сменяет заголовок полем ввода
-		self._title_editor = TitleEditor(title, box)
+		self._title_editor = TitleEditor(title, box, fit_text=True)
+		self._title_editor.set_text(title_text)
 		self._title_editor.submitted.connect(self._on_renamed)
 		title_row.addWidget(self._title_editor, stretch=1)
+		rename = TransparentToolButton(FluentIcon.EDIT, box)
+		rename.setToolTip("Переименовать (Enter — сохранить, Esc — отмена)")
+		rename.clicked.connect(self._begin_rename)
+		title_row.addWidget(rename)
 		state = user_state(subject) if isinstance(subject, TgAccountDto) else bot_state(subject)
 		title_row.addWidget(state_badge(box, state))
 		self._live = tinted(CaptionLabel(box), ACCENT_TEXT)
@@ -316,12 +356,8 @@ class UserPage(ScrollArea):
 		main = self._main_action(box)
 		if main is not None:
 			row.addWidget(main, alignment=Qt.AlignmentFlag.AlignTop)
-		rename = TransparentToolButton(FluentIcon.EDIT, box)
-		rename.setToolTip("Переименовать (Enter — сохранить, Esc — отмена)")
-		rename.clicked.connect(self._begin_rename)
-		row.addWidget(rename, alignment=Qt.AlignmentFlag.AlignTop)
 		more = TransparentToolButton(FluentIcon.MORE, box)
-		more.setToolTip("Диагностика, удаление")
+		more.setToolTip("Пауза, диагностика, удаление")
 		more.clicked.connect(partial(self._show_menu, more))
 		row.addWidget(more, alignment=Qt.AlignmentFlag.AlignTop)
 		self._header_box.addWidget(box)
@@ -343,45 +379,35 @@ class UserPage(ScrollArea):
 			save_bot_label(self._worker, self, subject, text, self._after_change)
 
 	def _main_action(self, parent: QWidget) -> QPushButton | None:
-		"""Главное действие шапки — первое из набора по состоянию."""
+		"""Кнопка шапки — только вход: единственное действие, которое ищут
+		глазами. Пауза, возобновление, диагностика и удаление — в меню «…»,
+		как редкие и весомые действия."""
 		subject = self._subject
-		button: QPushButton
-		if isinstance(subject, TgAccountDto):
-			actions = user_actions(subject)
-			if not actions:
-				return None
-			action = actions[0]
-			label = USER_ACTION_LABELS[action]
-			button = (
-				PrimaryPushButton(label, parent)
-				if primary_user_action(action)
-				else PushButton(label, parent)
-			)
-			button.clicked.connect(partial(self._run_user_action, action, subject))
-			return button
-		bot_action = next((a for a in bot_actions(subject) if a is not BotAction.WHEREABOUTS), None)
-		if bot_action is None:
+		if not isinstance(subject, TgAccountDto) or UserAction.LOGIN not in user_actions(subject):
 			return None
-		label = BOT_ACTION_LABELS[bot_action]
-		button = (
-			PrimaryPushButton(label, parent)
-			if bot_action is BotAction.RESUME
-			else PushButton(label, parent)
-		)
-		button.clicked.connect(partial(self._run_bot_action, bot_action, subject))
+		button: QPushButton = PrimaryPushButton(USER_ACTION_LABELS[UserAction.LOGIN], parent)
+		button.clicked.connect(partial(self._run_user_action, UserAction.LOGIN, subject))
 		return button
 
 	def _show_menu(self, anchor: QWidget) -> None:
-		"""Меню «…»: диагностика бота, удаление."""
+		"""Меню «…»: пауза или возобновление, диагностика бота, удаление."""
 		menu = RoundMenu(parent=self)
 		subject = self._subject
-		if isinstance(subject, BotDto):
-			whereabouts = Action(FluentIcon.SEARCH, "Где состоит?", menu)
-			whereabouts.triggered.connect(
-				partial(self._run_bot_action, BotAction.WHEREABOUTS, subject)
-			)
-			menu.addAction(whereabouts)
-			menu.addSeparator()
+		if isinstance(subject, TgAccountDto):
+			for action in user_actions(subject):
+				if action is UserAction.LOGIN:
+					continue
+				item = Action(USER_ACTION_LABELS[action], menu)
+				item.triggered.connect(partial(self._run_user_action, action, subject))
+				menu.addAction(item)
+		else:
+			for bot_action in bot_actions(subject):
+				item = Action(BOT_ACTION_LABELS[bot_action], menu)
+				if bot_action is BotAction.WHEREABOUTS:
+					item.setIcon(FluentIcon.SEARCH.icon())
+				item.triggered.connect(partial(self._run_bot_action, bot_action, subject))
+				menu.addAction(item)
+		menu.addSeparator()
 		delete = Action(FluentIcon.DELETE, "Удалить из приложения…", menu)
 		delete.triggered.connect(self._on_delete)
 		menu.addAction(delete)
