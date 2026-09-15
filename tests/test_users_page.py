@@ -220,3 +220,91 @@ def test_live_text_and_visibility() -> None:
 	assert live_shown(BotState.ACTIVE)
 	assert not live_shown(UserState.PAUSED) and not live_shown(UserState.NOT_LOGGED_IN)
 	assert not live_shown(BotState.PAUSED)
+
+
+# --- страница аккаунта (ADR-0030) --------------------------------------------------------
+
+
+def test_reference_rows_and_route_key() -> None:
+	from datetime import UTC, datetime
+
+	from pxcontrol.engine.services.activity import LiveDto, OwnerActivityDto, WindowStats
+	from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
+	from pxcontrol.ui.pages.user_state import (
+		bot_reference_rows,
+		user_reference_rows,
+		user_route_key,
+	)
+
+	assert user_route_key(LaneOwner(OwnerKind.USER, 3)) == "user_3"
+	assert user_route_key(LaneOwner(OwnerKind.BOT, 3)) == "bot_3"
+	rows = dict(user_reference_rows(_account(memberships=2, publisher_of=1), None))
+	assert rows["Состояние"] == "подключён"
+	assert rows["@имя"] == "@lara" and rows["Телефон"] == "+7900"
+	assert rows["Premium"] == "нет" and rows["Сообщества"] == "в 2 сообществах · публикатор в 1"
+	assert rows["Последняя операция"] == "ещё не было"
+	last = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
+	activity = OwnerActivityDto(
+		LaneOwner(OwnerKind.USER, 1),
+		LiveDto(None, None, 0, 0.0),
+		WindowStats(),
+		WindowStats(),
+		WindowStats(),
+		last,
+	)
+	assert dict(user_reference_rows(_account(premium=True), activity))["Premium"] == (
+		"да · файлы до 4 ГБ"
+	)
+	assert dict(user_reference_rows(_account(), activity))["Последняя операция"] != "ещё не было"
+	bot_rows = dict(bot_reference_rows(_bot(paused=True, publisher_of=1), None))
+	assert bot_rows["Состояние"] == "приостановлен"
+	assert bot_rows["Сообщества"] == "публикатор в 1 сообществе"
+
+
+def test_kind_rows_captions_and_memberships() -> None:
+	from datetime import date
+
+	from pxcontrol.engine.services.activity import WindowStats
+	from pxcontrol.engine.services.communities import AccountMembershipDto, CommunityDto
+	from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, Share, UserbotRole
+	from pxcontrol.ui.pages.user_state import (
+		bot_community_caption,
+		busy_days_caption,
+		hours_caption,
+		kind_rows,
+		membership_caption,
+		window_tile_caption,
+	)
+
+	assert kind_rows(()) == []
+	assert kind_rows((Share("background", 3), Share("publish", 1))) == [
+		("фоновое чтение", 75),
+		("публикация", 25),
+	]
+	assert window_tile_caption(WindowStats(busy_s=36, window_s=3600)) == "занят 1 %"
+	assert window_tile_caption(WindowStats(errors=1, floods=2, window_s=10)) == (
+		"занят 0 % · 1 ошибка · 2 флуд-лимита"
+	)
+	assert hours_caption((0,) * 24) == ""
+	hours = [0] * 24
+	hours[21] = 48
+	assert hours_caption(tuple(hours)) == "за 7 дней · пик 21:00 — 48 операций"
+	assert busy_days_caption(()) == ""
+	points = (DayPoint(date(2026, 9, 14), 3600), DayPoint(date(2026, 9, 15), 720))
+	assert busy_days_caption(points) == "30 дней · всего 1 ч 12 мин"
+	community = CommunityDto(
+		id=1,
+		title="Чат",
+		username=None,
+		tg_chat_id="-1001",
+		bot_id=7,
+		bot_label="бот",
+		enabled=False,
+		default_account_id=3,
+		kind=CommunityKind.GROUP,
+	)
+	membership = AccountMembershipDto(community, UserbotRole.ADMIN, True)
+	assert membership_caption(membership) == (
+		"Группа · админ · публикатор по умолчанию · выключено"
+	)
+	assert bot_community_caption(community) == "Группа · бот-публикатор · выключено"

@@ -631,3 +631,21 @@ async def test_recheck_skips_paused_members(db: Database) -> None:
 	assert access.userbot_ok is None, "не проверяли — не утверждаем"
 	assert access.community.default_account_id == account_id
 	assert access.community.members_count == 1
+
+
+async def test_communities_of_account_and_bot(db: Database) -> None:
+	"""Обратная сторона членств: сообщества аккаунта с ролью и умолчанием; сообщества бота."""
+	gateway = _FakeGateway()
+	account_id = await _make_account(db)
+	gateway.userbot_admins.add(account_id)
+	service = CommunitiesService(db, gateway)
+	first = await service.add_community_via_userbot(account_id, "@testchan")
+	bot_id = await _make_bot(db)
+	memberships = await service.communities_of_account(account_id)
+	assert [(m.community.id, m.role, m.is_default) for m in memberships] == [
+		(first.id, UserbotRole.ADMIN, True)
+	]
+	assert await service.communities_of_account(999_999) == []
+	dto = await service.assign_bot(first.id, bot_id)
+	assert [c.id for c in await service.communities_of_bot(bot_id)] == [dto.id]
+	assert await service.communities_of_bot(999_999) == []

@@ -9,8 +9,10 @@ from PySide6.QtGui import QCloseEvent
 from qfluentwidgets import FluentIcon, FluentWindow, MessageBox, NavigationItemPosition
 
 from pxcontrol.engine import EngineWorker
+from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.settings import WINDOW_GEOMETRY
+from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.types import CommunityKind, MediaKind
 from pxcontrol.ui.pages.common import exec_dialog
 from pxcontrol.ui.pages.communities import CommunitiesPage
@@ -19,6 +21,7 @@ from pxcontrol.ui.pages.publish import PublishPage
 from pxcontrol.ui.pages.publish_queue_view import QueueFilter
 from pxcontrol.ui.pages.schedule import SchedulePage
 from pxcontrol.ui.pages.settings import SettingsPage
+from pxcontrol.ui.pages.user_page import UserPage, subject_owner
 from pxcontrol.ui.pages.users import UsersPage
 from pxcontrol.ui.pages.video import VideoPage
 
@@ -66,11 +69,18 @@ class MainWindow(FluentWindow):
 		# подключать сообщества нечем, порядок разделов — порядок настройки
 		self._users_page = UsersPage(self._worker, self)
 		self.addSubInterface(self._users_page, FluentIcon.PEOPLE, "Пользователи и боты")
+		# подменю аккаунтов — живое, как у сообществ (ADR-0030)
+		self._user_pages: dict[LaneOwner, UserPage] = {}
+		self._users_page.users_changed.connect(self._sync_user_nav)
+		self._users_page.open_user.connect(self._open_user)
 		self._communities_page = CommunitiesPage(self._worker, self)
 		self.addSubInterface(self._communities_page, FluentIcon.HOME, "Каналы и группы")
 		# подменю сообществ — живое: дашборд после каждой загрузки шлёт
 		# свежий список, окно приводит пункты и страницы в соответствие
 		self._community_pages: dict[int, CommunityPage] = {}
+		# переход на сообщество, чьей страницы ещё нет (дашборд не показывали):
+		# дашборд загрузится, подменю соберётся — и переход довершится
+		self._pending_community: int | None = None
 		self._communities_page.communities_changed.connect(self._sync_community_nav)
 		self._communities_page.open_community.connect(self._open_community)
 		self._communities_page.publish_requested.connect(self._open_publish_for)
@@ -132,12 +142,64 @@ class MainWindow(FluentWindow):
 				item = self.navigationInterface.widget(existing.objectName())
 				if item is not None:
 					item.setText(community.title)
+		pending = self._pending_community
+		if pending is not None and pending in self._community_pages:
+			self._pending_community = None
+			self.switchTo(self._community_pages[pending])
+
+	def _sync_user_nav(self, accounts: list[TgAccountDto], bots: list[BotDto]) -> None:
+		"""Приводит подменю пользователей и ботов к свежим спискам дашборда.
+
+		Удалённые снимаются вместе со страницами (активная — с возвратом
+		на дашборд), новые добавляются, у существующих обновляется снимок
+		и подпись пункта (имя могло смениться пометкой или из Telegram).
+		"""
+		subjects: list[TgAccountDto | BotDto] = [*accounts, *bots]
+		fresh = {subject_owner(subject): subject for subject in subjects}
+		for owner in list(self._user_pages):
+			if owner in fresh:
+				continue
+			page = self._user_pages.pop(owner)
+			if self.stackedWidget.currentWidget() is page:
+				self.switchTo(self._users_page)
+			self.navigationInterface.removeWidget(page.objectName())
+			self.stackedWidget.removeWidget(page)
+			page.deleteLater()
+		for owner, subject in fresh.items():
+			title = subject.display if isinstance(subject, TgAccountDto) else subject.label
+			existing = self._user_pages.get(owner)
+			if existing is None:
+				page = UserPage(self._worker, subject, self)
+				page.changed.connect(self._users_page.reload)
+				page.open_community.connect(self._open_community)
+				self._user_pages[owner] = page
+				icon = FluentIcon.PEOPLE if owner.kind is OwnerKind.USER else FluentIcon.ROBOT
+				self.addSubInterface(page, icon, title, parent=self._users_page)
+			else:
+				existing.update_subject(subject)
+				item = self.navigationInterface.widget(existing.objectName())
+				if item is not None:
+					item.setText(title)
+
+	def _open_user(self, owner: LaneOwner) -> None:
+		"""Клик по карточке дашборда — переход на страницу аккаунта."""
+		page = self._user_pages.get(owner)
+		if page is not None:
+			self.switchTo(page)
 
 	def _open_community(self, community_id: int) -> None:
-		"""Клик по карточке дашборда — переход на страницу сообщества."""
+		"""Клик по карточке дашборда или строке на странице аккаунта — на сообщество.
+
+		Страницы сообществ рождаются загрузкой дашборда; если её ещё
+		не было (со страницы аккаунта пришли раньше), показывается дашборд,
+		а переход довершается после сборки подменю.
+		"""
 		page = self._community_pages.get(community_id)
 		if page is not None:
 			self.switchTo(page)
+			return
+		self._pending_community = community_id
+		self.switchTo(self._communities_page)
 
 	def _open_publish_for(self, community_id: int) -> None:
 		"""«Опубликовать» на карточке дашборда — «Публикация» с этим сообществом."""

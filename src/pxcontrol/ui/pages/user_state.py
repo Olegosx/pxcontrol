@@ -20,10 +20,16 @@ from PySide6.QtWidgets import QWidget
 from qfluentwidgets import InfoBadge, InfoLevel
 
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
-from pxcontrol.engine.services.activity import LiveDto, WindowStats
-from pxcontrol.engine.telegram.lane import TelegramPriority
-from pxcontrol.engine.telegram.types import USERBOT_PREMIUM_MAX_FILE_BYTES, limit_gb
-from pxcontrol.ui.pages.common import plural
+from pxcontrol.engine.services.activity import LiveDto, OwnerActivityDto, WindowStats
+from pxcontrol.engine.services.communities import AccountMembershipDto, CommunityDto
+from pxcontrol.engine.telegram.lane import LaneOwner, TelegramPriority
+from pxcontrol.engine.telegram.types import (
+	USERBOT_PREMIUM_MAX_FILE_BYTES,
+	DayPoint,
+	Share,
+	limit_gb,
+)
+from pxcontrol.ui.pages.common import community_kind_caption, format_local, plural, role_caption
 
 
 class UserState(StrEnum):
@@ -360,3 +366,99 @@ def live_shown(state: UserState | BotState) -> bool:
 	у них операций не бывает по определению.
 	"""
 	return state in (UserState.ACTIVE, UserState.OFFLINE, BotState.ACTIVE)
+
+
+# --- страница аккаунта (ADR-0030) --------------------------------------------------------
+
+
+def user_route_key(owner: LaneOwner) -> str:
+	"""Ключ маршрута страницы аккаунта в навигации (objectName)."""
+	return f"{owner.kind}_{owner.id}"
+
+
+def kind_rows(kinds: tuple[Share, ...]) -> list[tuple[str, int]]:
+	"""Строки «вид операции — %» по убыванию; имена видов — по-русски."""
+	total = sum(share.value for share in kinds)
+	if total <= 0:
+		return []
+	words = {priority.name.lower(): word for priority, word in KIND_WORDS.items()}
+	ordered = sorted(kinds, key=lambda s: s.value, reverse=True)
+	return [
+		(words.get(share.name, share.name), round(share.value * 100 / total)) for share in ordered
+	]
+
+
+def user_reference_rows(
+	account: TgAccountDto, activity: OwnerActivityDto | None
+) -> list[tuple[str, str]]:
+	"""Справка страницы пользователя: «подпись — значение» в порядке показа."""
+	last = activity.last_operation_at if activity is not None else None
+	return [
+		("Состояние", USER_STATE_TEXT[user_state(account)]),
+		("@имя", f"@{account.username}" if account.username else "не задано"),
+		("Телефон", account.phone or "не указан"),
+		("Premium", "да · файлы до 4 ГБ" if account.premium else "нет"),
+		("Сообщества", participation_text(account)),
+		("Последняя операция", format_local(last) if last is not None else "ещё не было"),
+	]
+
+
+def bot_reference_rows(bot: BotDto, activity: OwnerActivityDto | None) -> list[tuple[str, str]]:
+	"""Справка страницы бота."""
+	last = activity.last_operation_at if activity is not None else None
+	return [
+		("Состояние", BOT_STATE_TEXT[bot_state(bot)]),
+		("@имя", f"@{bot.username}" if bot.username else "не задано"),
+		("Токен", bot.token_masked),
+		("Сообщества", bot_participation_text(bot)),
+		("Последняя операция", format_local(last) if last is not None else "ещё не было"),
+	]
+
+
+def window_tile_caption(stats: WindowStats) -> str:
+	"""Подпись плитки окна: «занят 12 % · 1 ошибка · 2 флуд-лимита»."""
+	parts = [f"занят {busy_percent(stats)}"]
+	if stats.errors:
+		parts.append(f"{stats.errors} {plural(stats.errors, 'ошибка', 'ошибки', 'ошибок')}")
+	if stats.floods:
+		parts.append(
+			f"{stats.floods} {plural(stats.floods, 'флуд-лимит', 'флуд-лимита', 'флуд-лимитов')}"
+		)
+	return " · ".join(parts)
+
+
+def hours_caption(hours: tuple[int, ...]) -> str:
+	"""«за 7 дней · пик 21:00 — 48 операций»; без операций — пусто."""
+	if not hours or sum(hours) == 0:
+		return ""
+	peak = max(range(24), key=lambda h: hours[h])
+	count = hours[peak]
+	word = plural(count, "операция", "операции", "операций")
+	return f"за 7 дней · пик {peak:02d}:00 — {count} {word}"
+
+
+def busy_days_caption(points: tuple[DayPoint, ...]) -> str:
+	"""«30 дней · всего 3 ч 12 мин»; без занятости — пусто."""
+	total = sum(point.value for point in points)
+	if total <= 0:
+		return ""
+	return f"30 дней · всего {short_duration(total)}"
+
+
+def membership_caption(membership: AccountMembershipDto) -> str:
+	"""Подстрочник строки сообщества на странице пользователя."""
+	community = membership.community
+	parts = [community_kind_caption(community), role_caption(membership.role)]
+	if membership.is_default:
+		parts.append("публикатор по умолчанию")
+	if not community.enabled:
+		parts.append("выключено")
+	return " · ".join(parts)
+
+
+def bot_community_caption(community: CommunityDto) -> str:
+	"""Подстрочник строки сообщества на странице бота."""
+	parts = [community_kind_caption(community), "бот-публикатор"]
+	if not community.enabled:
+		parts.append("выключено")
+	return " · ".join(parts)

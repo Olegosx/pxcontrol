@@ -44,6 +44,15 @@ _REF_LOADERS = (
 
 
 @dataclass(frozen=True)
+class AccountMembershipDto:
+	"""Сообщество глазами аккаунта: снимок, роль в нём и признак умолчания (ADR-0029)."""
+
+	community: CommunityDto
+	role: UserbotRole
+	is_default: bool
+
+
+@dataclass(frozen=True)
 class MemberDto:
 	"""Участник сообщества — userbot-аккаунт с ролью (ADR-0022)."""
 
@@ -505,6 +514,55 @@ class CommunitiesService:
 					is_default=member.tg_account_id == community.default_tg_account_id,
 				)
 				for member in sorted(community.members, key=lambda m: m.tg_account_id)
+			]
+
+	async def communities_of_account(self, account_id: int) -> list[AccountMembershipDto]:
+		"""Сообщества, где аккаунт состоит, с его ролью и признаком умолчания.
+
+		Обратная сторона членств (ADR-0022) для страницы аккаунта:
+		порядок — по id сообщества.
+		"""
+		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
+		async with self._db.session_factory() as session:
+			rows = (
+				(
+					await session.execute(
+						select(CommunityMember)
+						.where(CommunityMember.tg_account_id == account_id)
+						.options(selectinload(CommunityMember.community).options(*_REF_LOADERS))
+						.order_by(CommunityMember.community_id)
+					)
+				)
+				.scalars()
+				.all()
+			)
+			return [
+				AccountMembershipDto(
+					community=self._dto(
+						row.community,
+						enabled=enabled.get(row.community_id, COMMUNITY_ENABLED.default),
+					),
+					role=UserbotRole(row.role),
+					is_default=row.community.default_tg_account_id == account_id,
+				)
+				for row in rows
+			]
+
+	async def communities_of_bot(self, bot_id: int) -> list[CommunityDto]:
+		"""Сообщества, где бот назначен публикатором (порядок — по id)."""
+		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
+		async with self._db.session_factory() as session:
+			rows = (
+				await session.execute(
+					select(Community)
+					.where(Community.bot_id == bot_id)
+					.options(*_REF_LOADERS)
+					.order_by(Community.id)
+				)
+			).scalars()
+			return [
+				self._dto(row, enabled=enabled.get(row.id, COMMUNITY_ENABLED.default))
+				for row in rows
 			]
 
 	async def add_member(self, community_id: int, account_id: int) -> list[MemberDto]:

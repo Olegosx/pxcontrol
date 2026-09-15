@@ -25,7 +25,7 @@ import contextlib
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Protocol
 
 from sqlalchemy import delete, select
@@ -40,6 +40,7 @@ from pxcontrol.engine.telegram.lane import (
 	OwnerKind,
 	TelegramPriority,
 )
+from pxcontrol.engine.telegram.types import DayPoint, Share
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,11 @@ PRUNE_EVERY_S = 3600
 WINDOW_HOUR_S = 3600
 WINDOW_DAY_S = 24 * 3600
 WINDOW_WEEK_S = 7 * 24 * 3600
+
+#: Окна истории страницы аккаунта (ADR-0030): профиль по часам суток —
+#: за неделю, занятость и флуд-лимиты по дням — за месяц.
+HOURS_DAYS = 7
+HISTORY_DAYS = 30
 
 #: Сколько ждать периодическую задачу при остановке движка (ADR-0020).
 _SHUTDOWN_TIMEOUT_S = 10.0
@@ -126,6 +132,27 @@ class OwnerActivityDto:
 
 
 @dataclass(frozen=True)
+class ActivityHistoryDto:
+	"""История активности владельца для графиков страницы аккаунта.
+
+	Attributes:
+		hours: операций по часам суток (24 значения, местное время)
+			за последние ``HOURS_DAYS`` дней.
+		busy_days: занятость по дням за ``HISTORY_DAYS`` дней — секунды,
+			пересечение операций с каждым местным днём.
+		flood_days: флуд-лимитов по дням за тот же срок.
+		kinds: операции по видам за тот же срок — доли для строк с полосой.
+		operations: сколько операций за тот же срок.
+	"""
+
+	hours: tuple[int, ...]
+	busy_days: tuple[DayPoint, ...]
+	flood_days: tuple[DayPoint, ...]
+	kinds: tuple[Share, ...]
+	operations: int
+
+
+@dataclass(frozen=True)
 class _Interval:
 	"""Операция в чистом виде для расчётов: без владельца."""
 
@@ -185,6 +212,53 @@ def window_stats(
 	)
 
 
+def _local_day_start(day: date, tz: tzinfo) -> datetime:
+	"""Начало местного дня в UTC."""
+	return datetime(day.year, day.month, day.day, tzinfo=tz).astimezone(UTC)
+
+
+def history_stats(intervals: Iterable[_Interval], now: datetime, tz: tzinfo) -> ActivityHistoryDto:
+	"""Считает историю для графиков по операциям владельца (чистая функция).
+
+	Часы суток — по местному моменту конца операции за ``HOURS_DAYS``
+	дней; занятость по дням — пересечение каждой операции с каждым
+	местным днём, поэтому загрузка через полночь честно делится между
+	днями; флуд-лимиты и виды — по концу операции за ``HISTORY_DAYS``.
+	"""
+	items = list(intervals)
+	today = now.astimezone(tz).date()
+	hours = [0] * 24
+	hours_from = now - timedelta(days=HOURS_DAYS)
+	for item in items:
+		if hours_from <= item.finished_at <= now:
+			hours[item.finished_at.astimezone(tz).hour] += 1
+	days = [today - timedelta(days=offset) for offset in range(HISTORY_DAYS - 1, -1, -1)]
+	busy_days: list[DayPoint] = []
+	flood_days: list[DayPoint] = []
+	for day in days:
+		start = _local_day_start(day, tz)
+		end = min(start + timedelta(days=1), now)
+		busy = 0.0
+		floods = 0
+		for item in items:
+			overlap = (min(item.finished_at, end) - max(item.started_at, start)).total_seconds()
+			if overlap > 0:
+				busy += overlap
+			if item.outcome == Outcome.FLOOD and start <= item.finished_at < end:
+				floods += 1
+		busy_days.append(DayPoint(day, int(round(busy))))
+		flood_days.append(DayPoint(day, floods))
+	history_from = _local_day_start(days[0], tz)
+	by_kind: dict[str, int] = {}
+	operations = 0
+	for item in items:
+		if history_from <= item.finished_at <= now:
+			operations += 1
+			by_kind[item.kind] = by_kind.get(item.kind, 0) + 1
+	kinds = tuple(Share(name, count) for name, count in by_kind.items())
+	return ActivityHistoryDto(tuple(hours), tuple(busy_days), tuple(flood_days), kinds, operations)
+
+
 def _row(record: OperationRecord) -> AccountOperation:
 	"""Строка таблицы из записи дорожки."""
 	return AccountOperation(
@@ -210,9 +284,11 @@ def _owner_of(row: AccountOperation) -> LaneOwner | None:
 class ActivityService:
 	"""Сброс операций в БД, уборка, снимки активности для интерфейса."""
 
-	def __init__(self, db: Database, gateway: _ActivitySource) -> None:
+	def __init__(self, db: Database, gateway: _ActivitySource, tz: tzinfo | None = None) -> None:
+		"""``tz`` — местный пояс для дней и часов суток истории; None — пояс машины."""
 		self._db = db
 		self._gateway = gateway
+		self._tz: tzinfo = tz if tz is not None else (datetime.now(UTC).astimezone().tzinfo or UTC)
 		self._task: asyncio.Task[None] | None = None
 		self._stop = asyncio.Event()
 		self._last_prune: datetime | None = None
@@ -370,3 +446,38 @@ class ActivityService:
 				last_operation_at=max((i.finished_at for i in intervals), default=None),
 			)
 		return result
+
+	async def history(self, owner: LaneOwner, now: datetime | None = None) -> ActivityHistoryDto:
+		"""История одного владельца для графиков страницы аккаунта.
+
+		Читаются операции, пересекающие месячное окно (по концу — после
+		начала первого дня), буфер сбрасывается перед чтением.
+		"""
+		now = now or datetime.now(UTC)
+		await self.flush()
+		first_day = now.astimezone(self._tz).date() - timedelta(days=HISTORY_DAYS - 1)
+		since = _local_day_start(first_day, self._tz)
+		column = (
+			AccountOperation.tg_account_id
+			if owner.kind is OwnerKind.USER
+			else AccountOperation.bot_id
+		)
+		async with self._db.session_factory() as session:
+			rows = (
+				(
+					await session.execute(
+						select(AccountOperation).where(
+							column == owner.id, AccountOperation.finished_at >= since
+						)
+					)
+				)
+				.scalars()
+				.all()
+			)
+		intervals = [
+			_Interval(
+				row.kind, _as_utc(row.started_at), _as_utc(row.finished_at), row.outcome, row.wait_s
+			)
+			for row in rows
+		]
+		return history_stats(intervals, now, self._tz)

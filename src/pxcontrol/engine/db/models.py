@@ -269,6 +269,9 @@ class CommunityMember(TimestampMixin, Base):
 	role: Mapped[str] = mapped_column(String(16))
 
 	tg_account: Mapped[TgAccount] = relationship()
+	# обратная сторона членства (страница аккаунта, ADR-0029): без
+	# back_populates — сообщество грузит участников своим каскадом
+	community: Mapped[Community] = relationship(viewonly=True)
 
 
 class AccountOperation(Base):

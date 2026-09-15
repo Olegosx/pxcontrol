@@ -9,8 +9,9 @@
 строка сводки, разделы «Пользователи» и «Боты» плиткой карточек
 (пустой раздел не рисуется). Карточка — информация и действия:
 добавление, удаление, приостановка и возобновление, вход, пометка,
-диагностика бота. Страницы пользователя пока нет — карточка
-не кликается.
+диагностика бота. Клик по карточке открывает страницу аккаунта —
+пункт живого подменю, которое главное окно приводит в соответствие
+по сигналу ``users_changed`` (как у сообществ).
 
 Правила показа (состояние, набор действий, подписи, сводка, поиск) —
 чистые функции :mod:`user_state`, они тестируются без Qt.
@@ -22,7 +23,7 @@ import logging
 from collections.abc import Callable
 from functools import partial
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QHideEvent, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -34,7 +35,6 @@ from qfluentwidgets import (
 	FluentIcon,
 	HorizontalSeparator,
 	InfoBadge,
-	MessageBox,
 	PrimaryDropDownPushButton,
 	PrimaryPushButton,
 	PushButton,
@@ -51,7 +51,6 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto, TgApiDto
 from pxcontrol.engine.services.activity import OwnerActivityDto
-from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -61,7 +60,6 @@ from pxcontrol.ui.pages.common import (
 	FormDialog,
 	WarningLabel,
 	clear_layout,
-	confirm_delete,
 	dim_widget,
 	elide_text,
 	error_reporter,
@@ -77,19 +75,25 @@ from pxcontrol.ui.pages.common import (
 	tinted,
 )
 from pxcontrol.ui.pages.communities import bold_numbers
+from pxcontrol.ui.pages.user_actions import (
+	delete_bot,
+	delete_user,
+	diagnose_bot,
+	rename_user,
+	set_bot_paused,
+	set_user_paused,
+	start_login,
+)
 from pxcontrol.ui.pages.user_state import (
 	BOT_ACTION_LABELS,
 	USER_ACTION_LABELS,
 	BotAction,
 	UserAction,
-	UserState,
 	activity_text,
 	bot_actions,
 	bot_participation_text,
 	bot_state,
 	bot_subtitle,
-	delete_bot_text,
-	delete_user_text,
 	live_shown,
 	live_text,
 	matches_bot_search,
@@ -142,10 +146,12 @@ _NO_API_KEY_HINT = (
 )
 
 
-def _letter_avatar(parent: QWidget, seed: int, text: str) -> AvatarWidget:
+def letter_avatar(
+	parent: QWidget, seed: int, text: str, size: int = _CARD_LOGO_SIZE
+) -> AvatarWidget:
 	"""Аватар-буква на подложке: цвет по id, у одной записи всегда один."""
 	logo = AvatarWidget(parent)
-	logo.setRadius(_CARD_LOGO_SIZE // 2)
+	logo.setRadius(size // 2)
 	logo.setText(text[:1].upper() or "?")
 	color = QColor(_AVATAR_COLORS[seed % len(_AVATAR_COLORS)])
 	logo.setBackgroundColor(color, color)
@@ -164,8 +170,8 @@ class _Card(CardWidget):
 	"""Общий каркас карточки: шапка с удалением, разделитель, строка сведений, кнопки.
 
 	Только штатные элементы библиотеки (ADR-0023, п. 5). Ширины у карточки
-	нет — её даёт колонка сетки; карточка не кликается: своей страницы
-	у пользователя и бота пока нет.
+	нет — её даёт колонка сетки; клик по карточке открывает страницу
+	аккаунта.
 	"""
 
 	def __init__(
@@ -180,6 +186,9 @@ class _Card(CardWidget):
 	) -> None:
 		super().__init__(parent)
 		self.setMinimumHeight(_CARD_MIN_HEIGHT)
+		# клик мимо кнопок открывает страницу аккаунта (ADR-0030);
+		# кнопки перехватывают свои нажатия сами
+		self.setCursor(Qt.CursorShape.PointingHandCursor)
 		if paused:
 			dim_widget(self, _PAUSED_CARD_OPACITY)
 		layout = QVBoxLayout(self)
@@ -217,7 +226,7 @@ class _Card(CardWidget):
 		layout = QHBoxLayout(box)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(12)
-		layout.addWidget(_letter_avatar(box, seed, title))
+		layout.addWidget(letter_avatar(box, seed, title))
 		column = QVBoxLayout()
 		column.setSpacing(2)
 		title_label = StrongBodyLabel(box)
@@ -336,7 +345,15 @@ class BotCard(_Card):
 
 
 class UsersPage(ScrollArea):
-	"""Дашборд пользователей и ботов: шапка, сводка, два раздела карточек."""
+	"""Дашборд пользователей и ботов: шапка, сводка, два раздела карточек.
+
+	Сигналы для главного окна: ``users_changed`` — свежие списки
+	пользователей и ботов (синхронизация подменю), ``open_user`` —
+	клик по карточке (переход на страницу аккаунта).
+	"""
+
+	users_changed = Signal(list, list)
+	open_user = Signal(object)  # LaneOwner
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
@@ -444,6 +461,7 @@ class UsersPage(ScrollArea):
 		"""Снимок активности получен — рисуем страницу целиком."""
 		self._activity = activity
 		self._render()
+		self.users_changed.emit(list(self._accounts), list(self._bots))
 
 	def _poll_activity(self) -> None:
 		"""Тик таймера: только снимок активности, карточки обновляются на месте."""
@@ -539,6 +557,9 @@ class UsersPage(ScrollArea):
 			for account in accounts:
 				card = UserCard(account, self._run_user_action, self._delete_user, self)
 				card.set_activity(self._activity.get(LaneOwner(OwnerKind.USER, account.id)))
+				card.clicked.connect(
+					partial(self.open_user.emit, LaneOwner(OwnerKind.USER, account.id))
+				)
 				self._user_cards[account.id] = card
 				cards.append(card)
 			self._sections.addWidget(
@@ -550,6 +571,9 @@ class UsersPage(ScrollArea):
 			for bot in bots:
 				bot_card = BotCard(bot, self._run_bot_action, self._delete_bot, self)
 				bot_card.set_activity(self._activity.get(LaneOwner(OwnerKind.BOT, bot.id)))
+				bot_card.clicked.connect(
+					partial(self.open_user.emit, LaneOwner(OwnerKind.BOT, bot.id))
+				)
 				self._bot_cards[bot.id] = bot_card
 				bot_cards.append(bot_card)
 			self._sections.addWidget(
@@ -579,81 +603,20 @@ class UsersPage(ScrollArea):
 		layout.addWidget(hint)
 		return box
 
-	# --- действия пользователя -----------------------------------------------------
+	# --- действия пользователя (общие с страницей аккаунта — user_actions) ------------
 
 	def _run_user_action(self, action: UserAction, account: TgAccountDto) -> None:
 		if action is UserAction.LOGIN:
-			self._start_login(account)
+			start_login(self._worker, self, account, self.reload)
 		elif action is UserAction.PAUSE:
-			self._set_user_paused(account, True)
+			set_user_paused(self._worker, self, account, True, self.reload)
 		elif action is UserAction.RESUME:
-			self._set_user_paused(account, False)
+			set_user_paused(self._worker, self, account, False, self.reload)
 		elif action is UserAction.LABEL:
-			self._rename_user(account)
-
-	def _set_user_paused(self, account: TgAccountDto, paused: bool) -> None:
-		"""Пауза или возобновление (ADR-0029); подтверждения нет — обратимо."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.set_tg_account_paused(account.id, paused),
-			self,
-			partial(self._on_user_paused, paused),
-			self._show_error,
-		)
-
-	def _on_user_paused(self, paused: bool, account: TgAccountDto) -> None:
-		if paused:
-			show_info(
-				self,
-				"Приостановлен",
-				f"{account.display}: посты его сообществ ждут возобновления.",
-			)
-		elif user_state(account) is UserState.OFFLINE:
-			show_info(self, "Возобновлён", f"{account.display}: соединение появится при связи.")
-		else:
-			show_success(self, "Возобновлён", account.display)
-		self.reload()
-
-	def _rename_user(self, account: TgAccountDto) -> None:
-		"""Переназначение ручной пометки (пусто — снять)."""
-		dialog = FormDialog(
-			"Пометка пользователя",
-			[("label", "Пометка (пусто — имя из Telegram)")],
-			self.window(),
-			accept_text="Сохранить",
-			initial={"label": account.label or ""},
-		)
-		if not exec_dialog(dialog):
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.set_account_label(account.id, dialog.value("label")),
-			self,
-			lambda *_a: self.reload(),
-			self._show_error,
-		)
+			rename_user(self._worker, self, account, self.reload)
 
 	def _delete_user(self, account: TgAccountDto) -> None:
-		"""Удаление: сначала — какие сообщества останутся без публикатора."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.list_communities(),
-			self,
-			partial(self._confirm_delete_user, account),
-			self._show_error,
-		)
-
-	def _confirm_delete_user(self, account: TgAccountDto, communities: list[CommunityDto]) -> None:
-		bound = [c.title for c in communities if c.default_account_id == account.id]
-		if not confirm_delete(self, delete_user_text(account, bound)):
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.delete_tg_account(account.id),
-			self,
-			self.reload,
-			self._show_error,
-		)
+		delete_user(self._worker, self, account, self.reload)
 
 	def _on_add_user(self) -> None:
 		"""Новый пользователь: телефон и необязательная пометка.
@@ -687,149 +650,18 @@ class UsersPage(ScrollArea):
 		show_success(self, "Пользователь добавлен", f"{account.display} — теперь войдите.")
 		self.reload()
 
-	# --- вход: телефон → код → (пароль 2FA) ---------------------------------------
-
-	def _start_login(self, account: TgAccountDto) -> None:
-		"""Шаг 1: просим Telegram отправить код на телефон."""
-		show_info(self, "Вход", f"Отправляю код на {account.phone or 'номер аккаунта'}…")
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.start_login(account.id),
-			self,
-			lambda *_a: self._ask_code(account),
-			self._show_error,
-		)
-
-	def _ask_code(self, account: TgAccountDto) -> None:
-		"""Шаг 2: код, присланный Telegram."""
-		dialog = FormDialog(
-			f"Код отправлен ({account.phone})",
-			[("code", "Код из Telegram")],
-			self.window(),
-			accept_text="Подтвердить",
-		)
-		if not exec_dialog(dialog):
-			self._cancel_login(account)
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.confirm_login_code(account.id, dialog.value("code")),
-			self,
-			partial(self._after_code, account),
-			self._show_error,
-		)
-
-	def _after_code(self, account: TgAccountDto, done: bool) -> None:
-		"""После кода: вход завершён или нужен пароль 2FA."""
-		if done:
-			self._on_logged_in(account)
-			return
-		self._ask_password(account)
-
-	def _ask_password(self, account: TgAccountDto) -> None:
-		"""Шаг 3 (если включён): пароль двухфакторной защиты."""
-		dialog = FormDialog(
-			"Двухфакторная защита",
-			[("password", "Пароль 2FA")],
-			self.window(),
-			accept_text="Войти",
-			password_fields=("password",),
-		)
-		if not exec_dialog(dialog):
-			self._cancel_login(account)
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.confirm_login_password(
-				account.id, dialog.value("password")
-			),
-			self,
-			lambda *_a: self._on_logged_in(account),
-			self._show_error,
-		)
-
-	def _on_logged_in(self, account: TgAccountDto) -> None:
-		show_success(self, "Вход выполнен", account.display)
-		self.reload()
-
-	def _cancel_login(self, account: TgAccountDto) -> None:
-		"""Диалог закрыт — прерываем незавершённый вход."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.cancel_login(account.id),
-			self,
-			noop,
-			self._show_error,
-		)
-
 	# --- действия бота -----------------------------------------------------------------
 
 	def _run_bot_action(self, action: BotAction, bot: BotDto) -> None:
 		if action is BotAction.WHEREABOUTS:
-			self._diagnose_bot(bot)
+			diagnose_bot(self._worker, self, bot)
 		elif action is BotAction.PAUSE:
-			self._set_bot_paused(bot, True)
+			set_bot_paused(self._worker, self, bot, True, self.reload)
 		elif action is BotAction.RESUME:
-			self._set_bot_paused(bot, False)
-
-	def _set_bot_paused(self, bot: BotDto, paused: bool) -> None:
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.set_bot_paused(bot.id, paused),
-			self,
-			partial(self._on_bot_paused, paused),
-			self._show_error,
-		)
-
-	def _on_bot_paused(self, paused: bool, bot: BotDto) -> None:
-		if paused:
-			show_info(self, "Приостановлен", f"Бот «{bot.label}» больше не используется.")
-		else:
-			show_success(self, "Возобновлён", f"Бот «{bot.label}»")
-		self.reload()
-
-	def _diagnose_bot(self, bot: BotDto) -> None:
-		"""Диагностика «где состоит бот» по событиям Telegram за сутки."""
-		show_info(self, "Диагностика", "Читаю события бота…")
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.bot_whereabouts(bot.id),
-			self,
-			partial(self._show_diagnosis, bot),
-			self._show_error,
-		)
-
-	def _show_diagnosis(self, bot: BotDto, lines: list[str]) -> None:
-		text = "\n".join(lines) or (
-			"Событий за последние 24 часа нет — Telegram хранит их сутки.\n"
-			"Добавьте бота администратором сообщества и проверьте снова."
-		)
-		box = MessageBox(f"Где состоит @{bot.username or bot.label}", text, self.window())
-		box.yesButton.setText("Понятно")
-		box.cancelButton.hide()
-		exec_dialog(box)
+			set_bot_paused(self._worker, self, bot, False, self.reload)
 
 	def _delete_bot(self, bot: BotDto) -> None:
-		"""Удаление: сначала — какие сообщества останутся без бота."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.list_communities(),
-			self,
-			partial(self._confirm_delete_bot, bot),
-			self._show_error,
-		)
-
-	def _confirm_delete_bot(self, bot: BotDto, communities: list[CommunityDto]) -> None:
-		bound = [c.title for c in communities if c.bot_id == bot.id]
-		if not confirm_delete(self, delete_bot_text(bot, bound)):
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.delete_bot(bot.id),
-			self,
-			self.reload,
-			self._show_error,
-		)
+		delete_bot(self._worker, self, bot, self.reload)
 
 	def _on_add_bot(self) -> None:
 		dialog = FormDialog(

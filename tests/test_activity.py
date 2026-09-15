@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -24,6 +24,7 @@ from pxcontrol.engine.telegram.lane import (
 	OwnerKind,
 	TelegramPriority,
 )
+from pxcontrol.engine.telegram.types import Share
 
 _NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 
@@ -220,3 +221,58 @@ async def test_deleting_owner_cascades_operations(db: Database) -> None:
 		await session.commit()
 	async with db.session_factory() as session:
 		assert (await session.execute(select(AccountOperation))).scalars().all() == []
+
+
+# --- история для графиков ----------------------------------------------------------------
+
+
+def test_history_stats_hours_days_and_kinds() -> None:
+	"""Часы — по местному концу; занятость делится между днями через полночь."""
+	from datetime import timezone
+
+	from pxcontrol.engine.services.activity import HISTORY_DAYS, history_stats
+
+	tz = timezone(timedelta(hours=3))  # местный пояс отличается от UTC
+	now = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)  # 15:00 местного
+	intervals = [
+		# кончилась в 15:00 местного сегодня
+		_Interval("publish", _at(-60), now, "ok", 0),
+		# загрузка через местную полночь: 23:30 → 00:30 (местного) — по 30 минут двум дням
+		_Interval(
+			"publish",
+			datetime(2026, 9, 14, 20, 30, tzinfo=UTC),
+			datetime(2026, 9, 14, 21, 30, tzinfo=UTC),
+			"flood",
+			10,
+		),
+		# старше недели — в часы не попадает, в дни (30) — да
+		_Interval(
+			"background", now - timedelta(days=10), now - timedelta(days=10, seconds=-5), "ok", 0
+		),
+		# старше месяца — никуда
+		_Interval(
+			"background", now - timedelta(days=40), now - timedelta(days=40, seconds=-5), "ok", 0
+		),
+	]
+	history = history_stats(intervals, now, tz)
+	assert len(history.hours) == 24 and sum(history.hours) == 2
+	assert history.hours[15] == 1 and history.hours[0] == 1, "00:30 местного — час 0"
+	assert len(history.busy_days) == HISTORY_DAYS
+	by_day = {point.day: point.value for point in history.busy_days}
+	assert by_day[date(2026, 9, 14)] == 1800 and by_day[date(2026, 9, 15)] == 1800 + 60
+	assert by_day[date(2026, 9, 5)] == 5
+	floods = {point.day: point.value for point in history.flood_days}
+	assert floods[date(2026, 9, 15)] == 1 and floods[date(2026, 9, 14)] == 0
+	assert history.operations == 3
+	assert {s.name: s.value for s in history.kinds} == {"publish": 2, "background": 1}
+
+
+async def test_history_reads_only_owner_rows(db: Database) -> None:
+	user, bot = await _owners(db)
+	gateway = _FakeGateway()
+	service = ActivityService(db, gateway, tz=UTC)
+	gateway.buffer = [_record(user, -100, -90, TelegramPriority.PUBLISH), _record(bot, -50, -40)]
+	history = await service.history(user, _NOW)
+	assert history.operations == 1 and sum(history.hours) == 1
+	assert history.busy_days[-1].value == 10
+	assert (await service.history(bot, _NOW)).kinds == (Share("background", 1),)
