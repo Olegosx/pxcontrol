@@ -23,7 +23,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.refs import ChatRefError, normalize_chat_ref
-from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind, UserbotRole
+from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind, UserbotRole
 
 
 class _FakeGateway:
@@ -47,7 +47,7 @@ class _FakeGateway:
 	async def bot_check_token(self, token: str) -> str:
 		return "test_bot"
 
-	async def bot_check_community(self, token: str, chat_ref: str) -> CommunityInfo:
+	async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo:
 		if chat_ref == "@notfound":
 			raise CommunityCheckError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_is_admin:
@@ -575,7 +575,7 @@ async def test_bot_probe_separates_refusal_from_no_connection(db: Database) -> N
 			super().__init__()
 			self.failure = failure
 
-		async def bot_check_community(self, token: str, chat_ref: str) -> CommunityInfo:
+		async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo:
 			raise self.failure
 
 	bot_id = await _make_bot(db)

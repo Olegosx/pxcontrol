@@ -28,7 +28,9 @@ import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from enum import IntEnum
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import IntEnum, StrEnum
 
 from pxcontrol.engine.telegram.types import TelegramFloodError
 
@@ -41,6 +43,82 @@ logger = logging.getLogger(__name__)
 #: зазор незаметен — он срабатывает только на запросах подряд, то есть
 #: там, где и нужен: в массовых проходах по истории и участникам.
 DEFAULT_MIN_INTERVAL_S = 0.3
+
+#: Зазор дорожки бота (ADR-0030): у Bot API лимиты пер-бот и щедрые
+#: (десятки сообщений в секунду), темп держать незачем — дорожка нужна
+#: боту ради очереди, приоритета и заморозки после «подождите N секунд».
+BOT_MIN_INTERVAL_S = 0.0
+
+
+class OwnerKind(StrEnum):
+	"""Чья дорожка: пользователя (userbot-аккаунт) или бота (ADR-0030)."""
+
+	USER = "user"
+	BOT = "bot"
+
+
+@dataclass(frozen=True)
+class LaneOwner:
+	"""Владелец дорожки — исполнитель в Telegram: вид и id в нашей БД.
+
+	Ключ пула дорожек в шлюзе и владелец записей активности:
+	у пользователя и бота свои таблицы, и id могут совпадать.
+	"""
+
+	kind: OwnerKind
+	id: int
+
+
+class Outcome(StrEnum):
+	"""Исход операции на дорожке (ADR-0030).
+
+	Флуд-лимит и отмена — не ошибки: первый — состояние аккаунта,
+	названное сервером, вторая — решение человека (обрыв загрузки).
+	"""
+
+	OK = "ok"
+	ERROR = "error"
+	FLOOD = "flood"
+	CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class OperationRecord:
+	"""Одна завершённая операция на дорожке — единица учёта активности.
+
+	Attributes:
+		owner: чья дорожка.
+		kind: вид операции — приоритет, с которым шлюз занял дорожку
+			(публикация, действие человека, обслуживание, фон).
+		started_at: момент начала обращения (после очереди и зазора).
+		finished_at: момент конца — по нему считается занятость.
+		outcome: исход.
+		wait_s: срок, названный Telegram при флуд-лимите (0 — не было).
+	"""
+
+	owner: LaneOwner
+	kind: TelegramPriority
+	started_at: datetime
+	finished_at: datetime
+	outcome: Outcome
+	wait_s: int = 0
+
+
+@dataclass(frozen=True)
+class LaneLiveState:
+	"""Живое состояние дорожки — снимок для показа (ADR-0030).
+
+	Attributes:
+		busy_kind: вид идущей операции; None — дорожка свободна.
+		busy_since: когда идущая операция началась.
+		waiting: сколько операций ждут своей очереди.
+		frozen_for_s: остаток заморозки после флуд-лимита (0 — нет).
+	"""
+
+	busy_kind: TelegramPriority | None
+	busy_since: datetime | None
+	waiting: int
+	frozen_for_s: float
 
 
 class TelegramPriority(IntEnum):
@@ -75,22 +153,31 @@ class AccountLane:
 
 	def __init__(
 		self,
-		account_id: int,
+		owner: LaneOwner,
 		min_interval_s: float = DEFAULT_MIN_INTERVAL_S,
 		*,
 		clock: Callable[[], float] = time.monotonic,
 		sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+		wall_clock: Callable[[], datetime] | None = None,
+		record: Callable[[OperationRecord], None] | None = None,
 	) -> None:
 		"""Args:
-		account_id: id аккаунта — только для сообщений в логе.
+		owner: владелец дорожки — для записей активности и сообщений в логе.
 		min_interval_s: минимальный зазор между запросами (0 — без зазора).
-		clock: источник монотонного времени (подменяется в тестах).
+		clock: источник монотонного времени — зазор и заморозка
+			(подменяется в тестах).
 		sleep: способ подождать (подменяется в тестах).
+		wall_clock: настенное время для записей активности (ADR-0030);
+			None — текущее UTC.
+		record: куда отдавать запись о каждой завершённой операции;
+			None — учёт не ведётся.
 		"""
-		self._account_id = account_id
+		self._owner = owner
 		self._min_interval_s = min_interval_s
 		self._clock = clock
 		self._sleep = sleep
+		self._wall_clock = wall_clock or (lambda: datetime.now(UTC))
+		self._record = record
 		self._busy = False
 		# ожидающие: (приоритет, номер по порядку, обещание разбудить).
 		# Номер — и разрешение ничьих внутри приоритета (кто раньше встал,
@@ -99,6 +186,24 @@ class AccountLane:
 		self._counter = itertools.count()
 		self._last_at: float | None = None
 		self._frozen_until: float | None = None
+		# идущая операция: вид и момент начала (None — дорожка свободна
+		# или занята, но ещё не дошла до обращения: очередь, зазор)
+		self._busy_kind: TelegramPriority | None = None
+		self._busy_since: datetime | None = None
+
+	@property
+	def owner(self) -> LaneOwner:
+		"""Владелец дорожки."""
+		return self._owner
+
+	def live_state(self) -> LaneLiveState:
+		"""Снимок живого состояния: чем занята, сколько ждут, заморозка."""
+		return LaneLiveState(
+			busy_kind=self._busy_kind,
+			busy_since=self._busy_since,
+			waiting=sum(1 for _p, _o, waiter in self._waiters if not waiter.done()),
+			frozen_for_s=self.frozen_for(),
+		)
 
 	def frozen_for(self) -> float:
 		"""Сколько секунд дорожка ещё заморожена (0.0 — свободна).
@@ -125,8 +230,9 @@ class AccountLane:
 			return
 		self._frozen_until = until
 		logger.warning(
-			"Аккаунт id=%s под флуд-лимитом: запросы к нему приостановлены на %.0f с.",
-			self._account_id,
+			"%s id=%s под флуд-лимитом: запросы приостановлены на %.0f с.",
+			"Бот" if self._owner.kind is OwnerKind.BOT else "Аккаунт",
+			self._owner.id,
 			seconds,
 		)
 
@@ -137,6 +243,9 @@ class AccountLane:
 		Тело блока выполняется, когда дорожка свободна и зазор выдержан.
 		Флуд-лимит, вылетевший из тела, замораживает дорожку — остальные
 		операции аккаунта узнают об этом, не обращаясь к Telegram.
+		Каждое выполненное тело — одна запись активности (ADR-0030):
+		время от входа в тело до выхода и исход; отказ до тела (заморозка)
+		не записывается — обращения к Telegram не было.
 
 		Args:
 			priority: место в очереди ожидания (:class:`TelegramPriority`).
@@ -154,16 +263,33 @@ class AccountLane:
 		except BaseException:
 			self._pass_on()  # слот не пригодился — отдаём следующему
 			raise
+		started = self._wall_clock()
+		self._busy_kind, self._busy_since = priority, started
+		outcome, wait_s = Outcome.OK, 0
 		try:
 			yield
 		except TelegramFloodError as exc:
 			self.freeze(exc.retry_after_s)
+			outcome, wait_s = Outcome.FLOOD, exc.retry_after_s
+			raise
+		except asyncio.CancelledError:
+			outcome = Outcome.CANCELLED  # обрыв загрузки человеком (ADR-0020)
+			raise
+		except BaseException:
+			outcome = Outcome.ERROR
 			raise
 		finally:
 			# отсчёт зазора — от конца обращения: длинная загрузка это
 			# поток запросов, и её завершение тоже обращение к серверу,
 			# поэтому залпа сразу после неё быть не должно
 			self._last_at = self._clock()
+			self._busy_kind, self._busy_since = None, None
+			if self._record is not None:
+				self._record(
+					OperationRecord(
+						self._owner, priority, started, self._wall_clock(), outcome, wait_s
+					)
+				)
 			self._pass_on()
 
 	def _require_free(self) -> None:

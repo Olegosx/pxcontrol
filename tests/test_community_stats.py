@@ -24,6 +24,7 @@ from pxcontrol.engine.services.community_stats import (
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.mtproto import UserbotFloodError, UserbotNotConnectedError
 from pxcontrol.engine.telegram.types import (
+	BotRef,
 	CommunityAnalytics,
 	CommunityStatsInfo,
 	DayPoint,
@@ -116,8 +117,8 @@ class _FakeStatsGateway:
 			recent_post_views=(100, 200, 300),
 		)
 
-	async def bot_community_stats(self, token: str, chat_id: str) -> CommunityStatsInfo:
-		self.bot_calls.append(token)
+	async def bot_community_stats(self, bot: BotRef, chat_id: str) -> CommunityStatsInfo:
+		self.bot_calls.append(bot.token)
 		return CommunityStatsInfo(participants=77, online=None, linked_chat_id="-1009")
 
 

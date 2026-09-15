@@ -38,6 +38,7 @@ from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
+	BotRef,
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
@@ -304,7 +305,7 @@ class _PostPort(Protocol):
 	def userbot_premium(self, account_id: int | None) -> bool: ...
 
 	async def bot_send_text(
-		self, token: str, chat_id: str, text: str, topic_id: int | None = None
+		self, bot: BotRef, chat_id: str, text: str, topic_id: int | None = None
 	) -> int: ...
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]: ...
@@ -319,7 +320,7 @@ class _PostPort(Protocol):
 
 	async def bot_send_media(
 		self,
-		token: str,
+		bot: BotRef,
 		chat_id: str,
 		kind: MediaKind,
 		path: str,
@@ -744,11 +745,14 @@ class PostsService:
 			raise PostError("У сообщества не назначен бот — переподключите его.")
 		if media_path is None:
 			await self._gateway.bot_send_text(
-				community.bot.token, community.tg_chat_id, draft.text, draft.topic_id
+				BotRef(community.bot.id, community.bot.token),
+				community.tg_chat_id,
+				draft.text,
+				draft.topic_id,
 			)
 			return
 		await self._gateway.bot_send_media(
-			community.bot.token,
+			BotRef(community.bot.id, community.bot.token),
 			community.tg_chat_id,
 			draft.media_kind,
 			media_path,

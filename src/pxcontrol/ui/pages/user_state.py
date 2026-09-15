@@ -20,6 +20,8 @@ from PySide6.QtWidgets import QWidget
 from qfluentwidgets import InfoBadge, InfoLevel
 
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
+from pxcontrol.engine.services.activity import LiveDto, WindowStats
+from pxcontrol.engine.telegram.lane import TelegramPriority
 from pxcontrol.engine.telegram.types import USERBOT_PREMIUM_MAX_FILE_BYTES, limit_gb
 from pxcontrol.ui.pages.common import plural
 
@@ -282,3 +284,79 @@ def delete_bot_text(bot: BotDto, bound_titles: list[str]) -> str:
 		names = ", ".join(f"«{title}»" for title in bound_titles)
 		text += f"\n\nБез бота останутся сообщества: {names}."
 	return text
+
+
+# --- активность (ADR-0030) ------------------------------------------------------------
+
+#: Вид операции словом — по приоритету дорожки, с которым её занял шлюз.
+KIND_WORDS: dict[TelegramPriority, str] = {
+	TelegramPriority.PUBLISH: "публикация",
+	TelegramPriority.INTERACTIVE: "проверка",
+	TelegramPriority.MAINTENANCE: "обслуживание",
+	TelegramPriority.BACKGROUND: "фоновое чтение",
+}
+
+
+def short_duration(seconds: float) -> str:
+	"""«45 с», «2 мин», «1 ч 05 мин» — для остатка заморозки и длительностей."""
+	total = max(0, int(round(seconds)))
+	if total < 60:
+		return f"{total} с"
+	minutes, _sec = divmod(total, 60)
+	if minutes < 60:
+		return f"{minutes} мин"
+	hours, minutes = divmod(minutes, 60)
+	return f"{hours} ч {minutes:02d} мин"
+
+
+def busy_percent(stats: WindowStats) -> str:
+	"""Доля занятости окна процентами: «12 %», «<1 %», «0 %»."""
+	share = stats.busy_share * 100
+	if 0 < share < 1:
+		return "<1 %"
+	return f"{round(share)} %"
+
+
+def activity_text(stats: WindowStats, window_label: str = "за 24 ч") -> str:
+	"""Строка активности карточки: «за 24 ч: 128 операций · занят 12 % · 1 флуд-лимит».
+
+	Без операций и занятости — «операций не было»; ошибки и флуд-лимиты
+	добавляются только при ненулевом числе.
+	"""
+	if stats.operations == 0 and stats.busy_s <= 0:
+		return f"{window_label}: операций не было"
+	count = stats.operations
+	parts = [
+		f"{window_label}: {count} {plural(count, 'операция', 'операции', 'операций')}",
+		f"занят {busy_percent(stats)}",
+	]
+	if stats.errors:
+		parts.append(f"{stats.errors} {plural(stats.errors, 'ошибка', 'ошибки', 'ошибок')}")
+	if stats.floods:
+		parts.append(
+			f"{stats.floods} {plural(stats.floods, 'флуд-лимит', 'флуд-лимита', 'флуд-лимитов')}"
+		)
+	return " · ".join(parts)
+
+
+def live_text(live: LiveDto) -> str:
+	"""Живая пометка: «заморожен ещё 2 мин», «сейчас: публикация · ждут 3», «свободен»."""
+	if live.frozen_for_s > 0:
+		return f"заморожен ещё {short_duration(live.frozen_for_s)}"
+	if live.busy_kind is not None:
+		text = f"сейчас: {KIND_WORDS.get(live.busy_kind, str(live.busy_kind))}"
+		if live.waiting:
+			text += f" · ждут {live.waiting}"
+		return text
+	if live.waiting:
+		return f"ждут {live.waiting}"
+	return "свободен"
+
+
+def live_shown(state: UserState | BotState) -> bool:
+	"""Показывать ли живую пометку: только тем, кто вообще может работать.
+
+	Приостановленному и не вошедшему «свободен» ничего не сказало бы —
+	у них операций не бывает по определению.
+	"""
+	return state in (UserState.ACTIVE, UserState.OFFLINE, BotState.ACTIVE)

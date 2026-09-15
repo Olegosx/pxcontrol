@@ -8,6 +8,7 @@ from pxcontrol.config import Settings
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.accounts import AccountsService
+from pxcontrol.engine.services.activity import ActivityService
 from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.communities import CommunitiesService
 from pxcontrol.engine.services.community_stats import CommunityStatsService
@@ -40,6 +41,9 @@ class Engine:
 		self.db = Database(settings.database_url)
 		self.settings = SettingsService(self.db)
 		self.gateway = TelegramGateway()
+		# учёт активности (ADR-0030): забирает записи операций из буфера
+		# шлюза и пишет в БД пачкой; живое состояние читает из дорожек
+		self.activity = ActivityService(self.db, self.gateway)
 		self.accounts = AccountsService(self.db, self.gateway)
 		# зонды прав попутно актуализируют профиль аккаунта (имя, @имя):
 		# связка через крючок — сервис сообществ не зависит от сервиса
@@ -144,6 +148,8 @@ class Engine:
 		# периодический опрос статистики (ADR-0027) — последним: его
 		# первый проход пойдёт по дорожкам, где уже стоит очередь отправки
 		self.community_stats.start_polling()
+		# сброс активности — периодическая задача; буфер шлюза уже полнится
+		self.activity.start()
 		logger.info("Движок запущен.")
 
 	async def stop(self) -> None:
@@ -162,6 +168,9 @@ class Engine:
 			self.publish_queue.shutdown,
 			self.video_queue.shutdown,
 			self.video.shutdown,
+			# после очередей (их последние операции уже в буфере) и до шлюза
+			# и БД: последний сброс активности пишет в ещё открытую базу
+			self.activity.shutdown,
 			self.gateway.stop,
 			self.db.close,
 		)

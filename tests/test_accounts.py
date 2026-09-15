@@ -14,7 +14,7 @@ from pxcontrol.engine.services.accounts import (
 )
 from pxcontrol.engine.telegram.bot_api import InvalidBotTokenError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotNotConnectedError
-from pxcontrol.engine.telegram.types import UserbotProfile
+from pxcontrol.engine.telegram.types import BotRef, UserbotProfile
 
 
 class _FakeLogin:
@@ -90,7 +90,7 @@ class _FakeGateway:
 			raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).")
 		return "test_bot"
 
-	async def bot_events(self, token: str) -> list[str]:
+	async def bot_events(self, bot: BotRef) -> list[str]:
 		return ["01.07 12:00 — «Канал» (community, id=-1001): статус бота «administrator»"]
 
 

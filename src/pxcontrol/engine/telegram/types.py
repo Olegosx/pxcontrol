@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
 
 from pxcontrol.engine.errors import EngineError
+
+
+@dataclass(frozen=True)
+class BotRef:
+	"""Ссылка на бота для операций бот-пути: id в нашей БД и токен.
+
+	Id нужен шлюзу для дорожки и учёта активности бота (ADR-0030),
+	токен — для самого запроса. Токен исключён из ``repr``: ссылка
+	попадает в журнал, а секрет — нет.
+	"""
+
+	id: int
+	token: str = field(repr=False)
 
 
 class TelegramFloodError(EngineError):

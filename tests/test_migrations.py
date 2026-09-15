@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
 	"caption_template_fields",
 	"community_stats_history",
 	"community_analytics",
+	"account_operations",
 }
 
 

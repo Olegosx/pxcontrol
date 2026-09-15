@@ -30,6 +30,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.types import (
+	BotRef,
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
@@ -65,22 +66,22 @@ class _FakeGateway:
 		return account_id in self.premium_ids
 
 	async def bot_send_text(
-		self, token: str, chat_id: str, text: str, topic_id: int | None = None
+		self, bot: BotRef, chat_id: str, text: str, topic_id: int | None = None
 	) -> int:
-		self.sent.append((token, chat_id, text))
+		self.sent.append((bot.token, chat_id, text))
 		self.sent_topics.append(topic_id)
 		return 42
 
 	async def bot_send_media(
 		self,
-		token: str,
+		bot: BotRef,
 		chat_id: str,
 		kind: str,
 		path: str,
 		caption: str,
 		topic_id: int | None = None,
 	) -> int:
-		self.media.append((token, chat_id, kind, path, caption))
+		self.media.append((bot.token, chat_id, kind, path, caption))
 		return 43
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:

@@ -28,6 +28,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | --- | --- | --- |
 | `BotDto`, `TgAccountDto`, `TgApiDto`, `AiKeyDto` | `accounts.py` | аккаунты: боты (`paused`, `publisher_of`), userbot (`connected`, `paused`, `memberships`, `publisher_of` — ADR-0029), ключ API приложения (ADR-0018), ключи ИИ |
 | `CommunityDto`, `CommunityAccess` | `communities.py` | канал и итог перепроверки доступов; `default_account_paused`/`bot_paused` и вычисляемое `publisher_paused` (ADR-0029) |
+| `OwnerActivityDto`, `WindowStats`, `LiveDto` | `activity.py` | активность владельца (ADR-0030): живое состояние дорожки и окна час / сутки / неделя — операции по видам, занятость, ошибки, флуд-лимиты |
 | `PostDraft` | `posts.py` | черновик публикации — единый вход для всех типов контента |
 | `PublishCapabilities`, `ScheduledPostDto` | `posts.py` | возможности канала; отложенная запись из Telegram (с адресом `ScheduledRef`: сообщество, аккаунт-читатель, id записи в очереди отложенных) |
 | `ScheduledRef`, `ScheduledDraft` | `posts.py` | адрес отложенной записи для действий над ней; запись целиком для формы правки (текст, время, вид вложения, тема, предел текста по аккаунту) |
@@ -49,6 +50,8 @@ Pydantic не нужна, а неизменяемость защищает от 
 
 | Тип | Роль |
 | --- | --- |
+| `BotRef` | адрес бота для бот-операций: id и токен (токен вне `repr`); по id — дорожка и учёт (ADR-0030) |
+| `LaneOwner`, `OperationRecord`, `LaneLiveState` (`lane.py`) | владелец дорожки (пользователь или бот), запись операции с исходом, живое состояние дорожки (ADR-0030) |
 | `MediaKind` | тип вложения поста (текст/фото/видео/аудио/файл; `OTHER` — вложение, которого приложение не создаёт, а только читает в отложенных: опрос, геопозиция — признак `creatable`) |
 | `CommunityInfo` | канал, проверенный любым транспортом (бот или userbot) |
 | `OutgoingPost` | исходящий пост для транспорта |

@@ -271,6 +271,41 @@ class CommunityMember(TimestampMixin, Base):
 	tg_account: Mapped[TgAccount] = relationship()
 
 
+class AccountOperation(Base):
+	"""Выполненная операция пользователя или бота в Telegram (ADR-0030).
+
+	Запись на каждое обращение через дорожку шлюза: кто, какого вида,
+	когда началось и кончилось, чем кончилось. Из строк считаются число
+	операций, занятость (сумма пересечений интервалов с окном показа),
+	ошибки и флуд-лимиты за окно. Владелец — ровно одна из двух ссылок:
+	у пользователей и ботов свои таблицы. Живёт и умирает с владельцем
+	(CASCADE); строки старше года убирает сервис активности.
+	"""
+
+	__tablename__ = "account_operations"
+	__table_args__ = (
+		Index("ix_account_operations_account_finished", "tg_account_id", "finished_at"),
+		Index("ix_account_operations_bot_finished", "bot_id", "finished_at"),
+		Index("ix_account_operations_finished", "finished_at"),
+	)
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	tg_account_id: Mapped[int | None] = mapped_column(
+		ForeignKey("tg_accounts.id", ondelete="CASCADE"), default=None
+	)
+	bot_id: Mapped[int | None] = mapped_column(
+		ForeignKey("bots.id", ondelete="CASCADE"), default=None
+	)
+	# вид операции — значения TelegramPriority по имени (publish, interactive…)
+	kind: Mapped[str] = mapped_column(String(16))
+	started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+	finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+	# исход — значения Outcome (ok, error, flood, cancelled)
+	outcome: Mapped[str] = mapped_column(String(16))
+	# срок, названный Telegram при флуд-лимите, секунд (0 — не было)
+	wait_s: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+
+
 class CommunityStats(Base):
 	"""Кэш статистики сообщества: дашборд и вкладка «Обзор» (ADR-0027).
 

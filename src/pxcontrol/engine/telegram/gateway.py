@@ -23,7 +23,7 @@ Telegram (флуд, Premium) — пер-аккаунтные, транспорт
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -35,7 +35,16 @@ from pxcontrol.engine.telegram.bot_api import (
 	send_media,
 	send_text,
 )
-from pxcontrol.engine.telegram.lane import AccountLane, TelegramPriority
+from pxcontrol.engine.telegram.lane import (
+	BOT_MIN_INTERVAL_S,
+	DEFAULT_MIN_INTERVAL_S,
+	AccountLane,
+	LaneLiveState,
+	LaneOwner,
+	OperationRecord,
+	OwnerKind,
+	TelegramPriority,
+)
 from pxcontrol.engine.telegram.mtproto import (
 	MtprotoLoginManager,
 	MtprotoTransport,
@@ -44,6 +53,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotPausedError,
 )
 from pxcontrol.engine.telegram.types import (
+	BotRef,
 	CommunityAnalytics,
 	CommunityInfo,
 	CommunityStatsInfo,
@@ -72,8 +82,12 @@ class TelegramGateway:
 		self._userbots: dict[int, MtprotoTransport] = {}
 		# дорожки (ADR-0024) живут отдельно от транспортов и переживают
 		# их замену: флуд-лимит Telegram назначает аккаунту, а не сессии,
-		# и повторный вход не должен стирать знание о нём
-		self._lanes: dict[int, AccountLane] = {}
+		# и повторный вход не должен стирать знание о нём. Ключ — владелец:
+		# у ботов свои дорожки (ADR-0030), без зазора, с той же заморозкой
+		self._lanes: dict[LaneOwner, AccountLane] = {}
+		# записи о выполненных операциях (ADR-0030): дорожки складывают
+		# их сюда, сервис активности забирает пачкой (drain_operations)
+		self._operations: list[OperationRecord] = []
 		# приостановленные человеком аккаунты (ADR-0029): транспорта у них
 		# нет, а любая операция получает отказ с причиной «приостановлен»,
 		# а не «войдите» — иначе человек шёл бы входить в аккаунт, который
@@ -161,13 +175,50 @@ class TelegramGateway:
 		transport = self._userbots.get(account_id)
 		return transport is not None and transport.connected
 
-	def _lane(self, account_id: int) -> AccountLane:
-		"""Дорожка аккаунта (заводится при первом обращении)."""
-		lane = self._lanes.get(account_id)
+	def _lane(self, owner: LaneOwner) -> AccountLane:
+		"""Дорожка владельца (заводится при первом обращении).
+
+		Пользователю — зазор ADR-0024, боту — без зазора (ADR-0030);
+		записи операций обеих уходят в общий буфер активности.
+		"""
+		lane = self._lanes.get(owner)
 		if lane is None:
-			lane = AccountLane(account_id)
-			self._lanes[account_id] = lane
+			interval = BOT_MIN_INTERVAL_S if owner.kind is OwnerKind.BOT else DEFAULT_MIN_INTERVAL_S
+			lane = AccountLane(owner, interval, record=self._operations.append)
+			self._lanes[owner] = lane
 		return lane
+
+	def drain_operations(self) -> list[OperationRecord]:
+		"""Забирает накопленные записи операций (буфер очищается).
+
+		Единственный читатель — сервис активности (ADR-0030): пишет их
+		в БД пачкой; шлюз о хранилище не знает.
+		"""
+		records, self._operations = self._operations, []
+		return records
+
+	def restore_operations(self, records: Sequence[OperationRecord]) -> None:
+		"""Возвращает записи в буфер (сброс в БД не удался) — вперёд свежих."""
+		self._operations[:0] = list(records)
+
+	def live_states(self) -> dict[LaneOwner, LaneLiveState]:
+		"""Живое состояние всех дорожек — снимок для показа (ADR-0030)."""
+		return {owner: lane.live_state() for owner, lane in self._lanes.items()}
+
+	@asynccontextmanager
+	async def _bot_slot(self, bot: BotRef, priority: TelegramPriority) -> AsyncIterator[str]:
+		"""Дорожка бота под одну операцию; отдаёт токен для запроса.
+
+		Заморозка после «подождите N секунд» у бота такая же, как
+		у пользователя (ADR-0030): следующая операция получает отказ
+		сразу, не тревожа Telegram.
+
+		Raises:
+			TelegramFloodError: Дорожка бота заморожена — остаток срока
+				в ``retry_after_s``.
+		"""
+		async with self._lane(LaneOwner(OwnerKind.BOT, bot.id)).slot(priority):
+			yield bot.token
 
 	@asynccontextmanager
 	async def _userbot_slot(
@@ -193,7 +244,7 @@ class TelegramGateway:
 		"""
 		transport = self._userbot(account_id)
 		try:
-			async with self._lane(account_id).slot(priority):
+			async with self._lane(LaneOwner(OwnerKind.USER, account_id)).slot(priority):
 				yield transport
 		except UserbotFloodError:
 			raise  # флуд от самого Telegram — уже в нужном классе
@@ -248,6 +299,7 @@ class TelegramGateway:
 	# Исходы бот-методов — таксономия бот-пути, единая для всех пяти
 	# (см. Raises одноимённых функций bot_api): InvalidBotTokenError /
 	# TelegramFloodError / CommunityCheckError / ConnectionError.
+	# Плюс отказ дорожки бота (ADR-0030) — тот же TelegramFloodError.
 
 	# --- запасной путь: Bot API ------------------------------------------------
 	#
@@ -256,40 +308,48 @@ class TelegramGateway:
 	# звалась без пометки (``send_text``, ``check_community``), и по
 	# вызову в сервисе нельзя было понять, основной это путь или
 	# запасной — при том что у них разные лимиты и разные возможности.
+	# Адрес операции — BotRef (id + токен): по id ведутся дорожка
+	# и учёт активности бота (ADR-0030).
 
 	async def bot_check_token(self, token: str) -> str:
 		"""Проверяет токен бота через getMe и возвращает его @имя.
+
+		Единственная бот-операция без дорожки: бота в приложении ещё нет,
+		учитывать её не за кем.
 
 		Raises: см. :func:`bot_api.check_token`.
 		"""
 		return await check_token(token)
 
-	async def bot_check_community(self, token: str, chat_ref: str) -> CommunityInfo:
+	async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo:
 		"""Проверяет канал и права бота в нём (getChat + getChatMember).
 
 		Raises: см. :func:`bot_api.check_community` (+ ``ChatRefError``).
 		"""
-		return await check_community(token, chat_ref)
+		async with self._bot_slot(bot, TelegramPriority.INTERACTIVE) as token:
+			return await check_community(token, chat_ref)
 
-	async def bot_events(self, token: str) -> list[str]:
+	async def bot_events(self, bot: BotRef) -> list[str]:
 		"""Диагностика: события бота за 24 ч (getUpdates, без удаления).
 
 		Raises: см. :func:`bot_api.get_bot_events`.
 		"""
-		return await get_bot_events(token)
+		async with self._bot_slot(bot, TelegramPriority.INTERACTIVE) as token:
+			return await get_bot_events(token)
 
 	async def bot_send_text(
-		self, token: str, chat_id: str, text: str, topic_id: int | None = None
+		self, bot: BotRef, chat_id: str, text: str, topic_id: int | None = None
 	) -> int:
 		"""Публикует текстовый пост «сейчас» через бота.
 
 		Raises: см. :func:`bot_api.send_text`.
 		"""
-		return await send_text(token, chat_id, text, topic_id)
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+			return await send_text(token, chat_id, text, topic_id)
 
 	async def bot_send_media(
 		self,
-		token: str,
+		bot: BotRef,
 		chat_id: str,
 		kind: MediaKind,
 		path: str,
@@ -300,18 +360,20 @@ class TelegramGateway:
 
 		Raises: см. :func:`bot_api.send_media`.
 		"""
-		return await send_media(token, chat_id, kind, path, caption, topic_id)
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+			return await send_media(token, chat_id, kind, path, caption, topic_id)
 
-	async def bot_community_stats(self, token: str, chat_id: str) -> CommunityStatsInfo:
+	async def bot_community_stats(self, bot: BotRef, chat_id: str) -> CommunityStatsInfo:
 		"""Участники и связанный чат через бота — дешёвый частый опрос.
 
-		Бот-путь дорожкой не регулируется (лимиты Bot API — на бота),
-		поэтому загрузки userbot на него не влияют: этим и ценен.
+		Дорожка у бота своя (ADR-0030): загрузки userbot на него
+		не влияют — этим бот-путь и ценен для частого опроса.
 
 		Raises: см. :func:`bot_api.get_community_stats`.
 		"""
-		info: CommunityStatsInfo = await get_community_stats(token, chat_id)
-		return info
+		async with self._bot_slot(bot, TelegramPriority.BACKGROUND) as token:
+			info: CommunityStatsInfo = await get_community_stats(token, chat_id)
+			return info
 
 	# --- MTProto (userbot) -------------------------------------------------------
 

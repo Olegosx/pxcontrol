@@ -177,3 +177,46 @@ def test_delete_texts_name_consequences() -> None:
 	assert "«Кино», «Чат»" in bound and "будут ждать" in bound
 	assert delete_bot_text(_bot(), []) == "Удалить бота «Публикатор»?"
 	assert "«Кино»" in delete_bot_text(_bot(), ["Кино"])
+
+
+# --- активность (ADR-0030) --------------------------------------------------------------
+
+
+def test_activity_text_words_and_optional_parts() -> None:
+	from pxcontrol.engine.services.activity import WindowStats
+	from pxcontrol.ui.pages.user_state import activity_text, busy_percent, short_duration
+
+	assert activity_text(WindowStats()) == "за 24 ч: операций не было"
+	stats = WindowStats(operations=128, busy_s=0.12 * 86400, window_s=86400, errors=0, floods=1)
+	assert activity_text(stats) == "за 24 ч: 128 операций · занят 12 % · 1 флуд-лимит"
+	stats = WindowStats(operations=1, busy_s=3, window_s=3600, errors=2, floods=5)
+	assert activity_text(stats, "за час") == (
+		"за час: 1 операция · занят <1 % · 2 ошибки · 5 флуд-лимитов"
+	)
+	assert busy_percent(WindowStats(busy_s=0, window_s=100)) == "0 %"
+	assert busy_percent(WindowStats(busy_s=100, window_s=100)) == "100 %"
+	assert short_duration(45) == "45 с"
+	assert short_duration(125) == "2 мин"
+	assert short_duration(3900) == "1 ч 05 мин"
+
+
+def test_live_text_and_visibility() -> None:
+	from datetime import UTC, datetime
+
+	from pxcontrol.engine.services.activity import LiveDto
+	from pxcontrol.engine.telegram.lane import TelegramPriority
+	from pxcontrol.ui.pages.user_state import live_shown, live_text
+
+	now = datetime(2026, 9, 15, tzinfo=UTC)
+	assert live_text(LiveDto(None, None, 0, 0.0)) == "свободен"
+	assert live_text(LiveDto(TelegramPriority.PUBLISH, now, 0, 0.0)) == "сейчас: публикация"
+	assert live_text(LiveDto(TelegramPriority.BACKGROUND, now, 3, 0.0)) == (
+		"сейчас: фоновое чтение · ждут 3"
+	)
+	assert live_text(LiveDto(None, None, 2, 0.0)) == "ждут 2"
+	# заморозка главнее всего: пока она действует, работы нет
+	assert live_text(LiveDto(TelegramPriority.PUBLISH, now, 1, 90.0)) == "заморожен ещё 1 мин"
+	assert live_shown(UserState.ACTIVE) and live_shown(UserState.OFFLINE)
+	assert live_shown(BotState.ACTIVE)
+	assert not live_shown(UserState.PAUSED) and not live_shown(UserState.NOT_LOGGED_IN)
+	assert not live_shown(BotState.PAUSED)

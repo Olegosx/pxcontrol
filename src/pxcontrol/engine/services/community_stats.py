@@ -59,6 +59,7 @@ from pxcontrol.engine.telegram.types import (
 	ANALYTICS_DAILY,
 	ANALYTICS_PAIRS,
 	ANALYTICS_SHARES,
+	BotRef,
 	CommunityAnalytics,
 	CommunityStatsInfo,
 	DayPoint,
@@ -124,7 +125,7 @@ class _StatsGateway(Protocol):
 		self, account_id: int, chat_id: str
 	) -> CommunityAnalytics: ...
 
-	async def bot_community_stats(self, token: str, chat_id: str) -> CommunityStatsInfo: ...
+	async def bot_community_stats(self, bot: BotRef, chat_id: str) -> CommunityStatsInfo: ...
 
 
 @dataclass(frozen=True)
@@ -462,8 +463,10 @@ class CommunityStatsService:
 			# приостановленные публикаторы (ADR-0029) не опрашиваются:
 			# бот — просто пропуск, userbot получил бы отказ шлюза
 			# на каждом тике и засорял бы журнал
-			bot_tokens = {
-				c.id: c.bot.token for c in communities if c.bot is not None and not c.bot.paused
+			bot_refs = {
+				c.id: BotRef(c.bot.id, c.bot.token)
+				for c in communities
+				if c.bot is not None and not c.bot.paused
 			}
 			account_ids = {
 				c.id: c.default_account.id
@@ -477,11 +480,11 @@ class CommunityStatsService:
 			row = rows.get(community.id)
 			if self._stop.is_set():
 				break
-			token = bot_tokens.get(community.id)
-			if token is not None and due(
+			bot = bot_refs.get(community.id)
+			if bot is not None and due(
 				row.bot_fetched_at if row else None, bot_every_s, now, self._tz
 			):
-				update = await self._bot_pass(community, token)
+				update = await self._bot_pass(community, bot)
 				if update is not None:
 					await self._store(community.id, update, now, stamp="bot_fetched_at")
 					changed = True
@@ -521,10 +524,10 @@ class CommunityStatsService:
 
 	# --- сбор данных -------------------------------------------------------------
 
-	async def _bot_pass(self, community: Community, token: str) -> dict[str, object] | None:
+	async def _bot_pass(self, community: Community, bot: BotRef) -> dict[str, object] | None:
 		"""Частый дешёвый проход ботом: участники и связанный чат."""
 		try:
-			info = await self._gateway.bot_community_stats(token, community.tg_chat_id)
+			info = await self._gateway.bot_community_stats(bot, community.tg_chat_id)
 		except Exception as exc:  # noqa: BLE001 — фоновая сводка, кэш не затираем
 			logger.info(
 				"Участники «%s» через бота не обновлены (%s: %s).",

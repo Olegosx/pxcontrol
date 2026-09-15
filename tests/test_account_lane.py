@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from pxcontrol.engine.telegram.lane import AccountLane, TelegramPriority
+from pxcontrol.engine.telegram.lane import AccountLane, LaneOwner, OwnerKind, TelegramPriority
 from pxcontrol.engine.telegram.types import TelegramFloodError
 
 
@@ -32,7 +32,7 @@ class _Clock:
 def _lane(interval: float = 0.0, clock: _Clock | None = None) -> AccountLane:
 	"""Дорожка на управляемых часах (без них зазор считать нечем)."""
 	ticker = clock or _Clock()
-	return AccountLane(1, interval, clock=ticker, sleep=ticker.sleep)
+	return AccountLane(LaneOwner(OwnerKind.USER, 1), interval, clock=ticker, sleep=ticker.sleep)
 
 
 async def test_operations_do_not_overlap() -> None:
@@ -244,3 +244,97 @@ async def test_failed_operation_releases_lane() -> None:
 			raise RuntimeError("сеть отвалилась")
 	async with lane.slot(TelegramPriority.BACKGROUND):
 		pass  # дорожка свободна
+
+
+# --- учёт активности (ADR-0030) --------------------------------------------------
+
+
+async def test_lane_records_operations_with_outcome_and_live_state() -> None:
+	"""Каждое выполненное тело — запись: вид, интервал, исход; живое состояние честное."""
+	from datetime import UTC, datetime, timedelta
+
+	from pxcontrol.engine.telegram.lane import OperationRecord, Outcome
+
+	clock = _Clock()
+	first = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
+	moments = [first + timedelta(seconds=i) for i in range(10)]
+	records: list[OperationRecord] = []
+	lane = AccountLane(
+		LaneOwner(OwnerKind.BOT, 7),
+		0.0,
+		clock=clock,
+		sleep=clock.sleep,
+		wall_clock=lambda: moments.pop(0),
+		record=records.append,
+	)
+	assert lane.live_state().busy_kind is None
+	async with lane.slot(TelegramPriority.PUBLISH):
+		live = lane.live_state()
+		assert live.busy_kind is TelegramPriority.PUBLISH and live.busy_since == first
+	with pytest.raises(RuntimeError):
+		async with lane.slot(TelegramPriority.BACKGROUND):
+			raise RuntimeError("сбой")
+	with pytest.raises(TelegramFloodError):
+		async with lane.slot(TelegramPriority.MAINTENANCE):
+			raise TelegramFloodError("подождите", retry_after_s=40)
+	assert [(r.kind, r.outcome, r.wait_s) for r in records] == [
+		(TelegramPriority.PUBLISH, Outcome.OK, 0),
+		(TelegramPriority.BACKGROUND, Outcome.ERROR, 0),
+		(TelegramPriority.MAINTENANCE, Outcome.FLOOD, 40),
+	]
+	assert all(r.owner == LaneOwner(OwnerKind.BOT, 7) for r in records)
+	assert records[0].finished_at - records[0].started_at == timedelta(seconds=1)
+	# заморозка: отказ до тела записи не даёт — Telegram не тревожили
+	with pytest.raises(TelegramFloodError):
+		async with lane.slot(TelegramPriority.PUBLISH):
+			pass
+	assert len(records) == 3
+	assert lane.live_state().frozen_for_s == pytest.approx(40.0)
+	assert lane.live_state().busy_kind is None
+
+
+async def test_lane_records_cancelled_operation() -> None:
+	"""Обрыв загрузки человеком — исход «отменено», не ошибка."""
+	from pxcontrol.engine.telegram.lane import OperationRecord, Outcome
+
+	records: list[OperationRecord] = []
+	lane = AccountLane(LaneOwner(OwnerKind.USER, 1), 0.0, record=records.append)
+	started = asyncio.Event()
+
+	async def upload() -> None:
+		async with lane.slot(TelegramPriority.PUBLISH):
+			started.set()
+			await asyncio.sleep(3600)
+
+	task = asyncio.create_task(upload())
+	await started.wait()
+	assert lane.live_state().busy_kind is TelegramPriority.PUBLISH
+	task.cancel()
+	with pytest.raises(asyncio.CancelledError):
+		await task
+	assert [r.outcome for r in records] == [Outcome.CANCELLED]
+	assert lane.live_state().busy_kind is None
+
+
+async def test_live_state_counts_waiting() -> None:
+	"""Живое состояние знает, сколько операций ждут очереди."""
+	lane = _lane()
+	release = asyncio.Event()
+
+	async def hold() -> None:
+		async with lane.slot(TelegramPriority.PUBLISH):
+			await release.wait()
+
+	async def wait_turn() -> None:
+		async with lane.slot(TelegramPriority.BACKGROUND):
+			pass
+
+	holder = asyncio.create_task(hold())
+	await asyncio.sleep(0)
+	waiters = [asyncio.create_task(wait_turn()) for _ in range(2)]
+	for _ in range(4):
+		await asyncio.sleep(0)
+	assert lane.live_state().waiting == 2
+	release.set()
+	await asyncio.gather(holder, *waiters)
+	assert lane.live_state().waiting == 0

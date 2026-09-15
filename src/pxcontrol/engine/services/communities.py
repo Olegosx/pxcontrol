@@ -26,7 +26,7 @@ from pxcontrol.engine.services.posts import PublishCapabilities, publish_capabil
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import CommunityCheckError
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
-from pxcontrol.engine.telegram.types import CommunityInfo, CommunityKind, UserbotRole
+from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind, UserbotRole
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class _ProbeResult:
 class _CommunityChecker(Protocol):
 	"""Часть шлюза Telegram, нужная сервису (для подмены в тестах)."""
 
-	async def bot_check_community(self, token: str, chat_ref: str) -> CommunityInfo: ...
+	async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo: ...
 
 	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo: ...
 
@@ -224,7 +224,7 @@ class CommunitiesService:
 			bot.username,
 			bot.id,
 		)
-		info = await self._gateway.bot_check_community(bot.token, chat_ref)
+		info = await self._gateway.bot_check_community(BotRef(bot.id, bot.token), chat_ref)
 		# «не удалось проверить» при подключении равносильно «публикатора
 		# нет»: участника добавит перепроверка, когда аккаунт появится
 		found = await self._find_userbot_publisher(info.chat_id)
@@ -391,7 +391,7 @@ class CommunitiesService:
 				member.tg_account_id for member in community.members if member.tg_account.paused
 			}
 			bot = community.bot
-			bot_token = bot.token if bot is not None and not bot.paused else None
+			bot_ref = BotRef(bot.id, bot.token) if bot is not None and not bot.paused else None
 		userbot_ok: bool | None = None
 		fresh_info: CommunityInfo | None = None
 		for account_id in member_ids:
@@ -414,8 +414,8 @@ class CommunitiesService:
 				await self._adopt_member(community_id, found, make_default=True)
 			userbot_ok = True if found is not None else None
 		bot_ok: bool | None = None
-		if bot_token is not None:
-			bot_probe = await self._probe_bot(bot_token, tg_chat_id)
+		if bot_ref is not None:
+			bot_probe = await self._probe_bot(bot_ref, tg_chat_id)
 			bot_ok = bot_probe.ok
 			fresh_info = fresh_info or bot_probe.info
 		if fresh_info is not None:
@@ -587,7 +587,7 @@ class CommunitiesService:
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			chat_id = community.tg_chat_id
-		info = await self._gateway.bot_check_community(bot.token, chat_id)
+		info = await self._gateway.bot_check_community(BotRef(bot.id, bot.token), chat_id)
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			community.bot_id = bot.id
@@ -611,7 +611,7 @@ class CommunitiesService:
 		logger.info("От канала «%s» отвязан бот.", dto.title)
 		return dto
 
-	async def _probe_bot(self, token: str, chat_id: str) -> _ProbeResult:
+	async def _probe_bot(self, bot: BotRef, chat_id: str) -> _ProbeResult:
 		"""Проверяет права бота, не роняя перепроверку.
 
 		Различает то же, что и зонд userbot: подтверждённый отказ
@@ -621,7 +621,7 @@ class CommunitiesService:
 		правам из-за пропавшей сети.
 		"""
 		try:
-			info = await self._gateway.bot_check_community(token, chat_id)
+			info = await self._gateway.bot_check_community(bot, chat_id)
 		except CommunityCheckError as exc:
 			logger.info("Бот не может публиковать в сообществе %s: %s", chat_id, exc)
 			return _ProbeResult(ok=False)

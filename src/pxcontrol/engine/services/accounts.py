@@ -27,7 +27,7 @@ from pxcontrol.engine.db.models import (
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.security.secrets import SecretDecryptionError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
-from pxcontrol.engine.telegram.types import UserbotProfile
+from pxcontrol.engine.telegram.types import BotRef, UserbotProfile
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class _TelegramPort(Protocol):
 
 	async def bot_check_token(self, token: str) -> str: ...
 
-	async def bot_events(self, token: str) -> list[str]: ...
+	async def bot_events(self, bot: BotRef) -> list[str]: ...
 
 	async def activate_userbot(
 		self, account_id: int, api_id: int, api_hash: str, session: str
@@ -286,7 +286,7 @@ class AccountsService:
 			AccountsError: Бот не найден.
 		"""
 		bot = await self._require_bot(bot_id)
-		lines = await self._gateway.bot_events(bot.token)
+		lines = await self._gateway.bot_events(BotRef(bot.id, bot.token))
 		logger.info("Диагностика бота @%s: событий за 24 ч — %d.", bot.username, len(lines))
 		for line in lines:
 			logger.info("  %s", line)

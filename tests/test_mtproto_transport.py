@@ -1368,3 +1368,46 @@ async def test_gateway_paused_account_refuses_without_network() -> None:
 	await gateway.deactivate_userbot(10)
 	assert not gateway.userbot_paused(10)
 	await gateway.stop()
+
+
+async def test_gateway_bot_lane_freezes_after_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+	"""Бот на дорожке (ADR-0030): «подождите N секунд» замораживает бота, операции учитываются.
+
+	Второй вызов тому же боту отказывает, не дойдя до Bot API; другой бот
+	работает. Записи операций складываются в буфер шлюза с владельцем-ботом.
+	"""
+	from pxcontrol.engine.telegram import gateway as gateway_module
+	from pxcontrol.engine.telegram.gateway import TelegramGateway
+	from pxcontrol.engine.telegram.lane import LaneOwner, Outcome, OwnerKind
+	from pxcontrol.engine.telegram.types import BotRef, TelegramFloodError
+
+	calls: list[str] = []
+
+	async def fake_send_text(token: str, chat_id: str, text: str, topic_id: int | None) -> int:
+		calls.append(token)
+		if token == "flooded":
+			raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+		return 1
+
+	monkeypatch.setattr(gateway_module, "send_text", fake_send_text)
+	gateway = TelegramGateway()
+	flooded, calm = BotRef(1, "flooded"), BotRef(2, "calm")
+	with pytest.raises(TelegramFloodError):
+		await gateway.bot_send_text(flooded, "-1001", "раз")
+	with pytest.raises(TelegramFloodError) as refused:
+		await gateway.bot_send_text(flooded, "-1001", "два")
+	assert refused.value.retry_after_s <= 30
+	assert calls == ["flooded"], "второй раз Bot API не тревожили"
+	assert await gateway.bot_send_text(calm, "-1002", "три") == 1
+	records = gateway.drain_operations()
+	assert [(r.owner, r.outcome, r.wait_s) for r in records] == [
+		(LaneOwner(OwnerKind.BOT, 1), Outcome.FLOOD, 30),
+		(LaneOwner(OwnerKind.BOT, 2), Outcome.OK, 0),
+	]
+	assert gateway.drain_operations() == [], "буфер очищен"
+	live = gateway.live_states()
+	assert live[LaneOwner(OwnerKind.BOT, 1)].frozen_for_s > 0
+	assert live[LaneOwner(OwnerKind.BOT, 2)].busy_kind is None
+	gateway.restore_operations(records[:1])
+	assert len(gateway.drain_operations()) == 1
+	await gateway.stop()
