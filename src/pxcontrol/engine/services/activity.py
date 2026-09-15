@@ -32,6 +32,7 @@ from sqlalchemy import delete, select
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AccountOperation, Bot, TgAccount
+from pxcontrol.engine.db.types import as_utc
 from pxcontrol.engine.telegram.lane import (
 	LaneLiveState,
 	LaneOwner,
@@ -161,11 +162,6 @@ class _Interval:
 	finished_at: datetime
 	outcome: str
 	wait_s: int
-
-
-def _as_utc(moment: datetime) -> datetime:
-	"""Момент из БД → aware-UTC (SQLite возвращает наивные значения)."""
-	return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
 def window_stats(
@@ -421,8 +417,8 @@ class ActivityService:
 			by_owner.setdefault(owner, []).append(
 				_Interval(
 					row.kind,
-					_as_utc(row.started_at),
-					_as_utc(row.finished_at),
+					as_utc(row.started_at),
+					as_utc(row.finished_at),
 					row.outcome,
 					row.wait_s,
 				)
@@ -476,7 +472,7 @@ class ActivityService:
 			)
 		intervals = [
 			_Interval(
-				row.kind, _as_utc(row.started_at), _as_utc(row.finished_at), row.outcome, row.wait_s
+				row.kind, as_utc(row.started_at), as_utc(row.finished_at), row.outcome, row.wait_s
 			)
 			for row in rows
 		]

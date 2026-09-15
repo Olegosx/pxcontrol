@@ -1,7 +1,8 @@
-"""Специальные типы колонок SQLAlchemy."""
+"""Специальные типы и помощники на границе БД."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import String
@@ -37,3 +38,21 @@ class EncryptedStr(TypeDecorator[str]):
 		if value is None:
 			return None
 		return get_secret_store().decrypt(str(value))
+
+
+def as_utc(moment: datetime) -> datetime:
+	"""Момент из БД → со зоной UTC.
+
+	SQLite хранит время без зоны и возвращает наивные значения, а весь
+	движок считает во «взрослом» (aware) UTC: без приведения сравнение
+	с ``datetime.now(UTC)`` падает с «can't compare offset-naive and
+	offset-aware». Помощник живёт здесь, потому что причина — в границе
+	с базой, а не в предметной логике; прежде он существовал тремя
+	копиями в сервисах.
+	"""
+	return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+def as_utc_optional(moment: datetime | None) -> datetime | None:
+	"""То же для необязательного значения (None остаётся None)."""
+	return None if moment is None else as_utc(moment)

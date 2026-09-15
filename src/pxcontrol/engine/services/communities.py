@@ -108,6 +108,9 @@ class CommunityDto:
 	# сохранено, но приложение их не использует
 	default_account_paused: bool = False
 	bot_paused: bool = False
+	# бот может править чужие посты (ADR-0031): от этого зависит, можно
+	# ли дорисовать кнопки к посту публикателя
+	bot_can_edit: bool = False
 
 	@property
 	def userbot_assigned(self) -> bool:
@@ -129,9 +132,11 @@ class CommunityDto:
 		в каждом. Приостановленный публикатор (ADR-0029) не считается —
 		то же правило, что у движка (``community_capabilities``).
 		"""
+		bot_ready = self.bot_id is not None and not self.bot_paused
 		return publish_capabilities(
-			self.bot_id is not None and not self.bot_paused,
+			bot_ready,
 			self.userbot_assigned and not self.default_account_paused,
+			markup_edit=bot_ready and self.bot_can_edit,
 		)
 
 	@property
@@ -358,6 +363,7 @@ class CommunitiesService:
 				kind=info.kind,
 				forum=info.forum,
 				bot_id=bot_id,
+				bot_can_edit=info.can_edit,
 				default_tg_account_id=member[0] if member else None,
 			)
 			session.add(community)
@@ -423,11 +429,16 @@ class CommunitiesService:
 				await self._adopt_member(community_id, found, make_default=True)
 			userbot_ok = True if found is not None else None
 		bot_ok: bool | None = None
+		bot_info: CommunityInfo | None = None
 		if bot_ref is not None:
 			bot_probe = await self._probe_bot(bot_ref, tg_chat_id)
 			bot_ok = bot_probe.ok
-			fresh_info = fresh_info or bot_probe.info
-		if fresh_info is not None:
+			bot_info = bot_probe.info
+		# свежие данные предпочитаем от бота: изменчивые свойства у обоих
+		# зондов одинаковы, но право правки (ADR-0031) приносит только он
+		if bot_info is not None:
+			await self._refresh_mutable(community_id, bot_info, from_bot=True)
+		elif fresh_info is not None:
 			await self._refresh_mutable(community_id, fresh_info)
 		dto = await self._fresh_dto(community_id)
 		logger.info(
@@ -650,7 +661,7 @@ class CommunitiesService:
 			community = await self._community_in_session(session, community_id)
 			community.bot_id = bot.id
 			await session.commit()
-		await self._refresh_mutable(community_id, info)
+		await self._refresh_mutable(community_id, info, from_bot=True)
 		dto = await self._fresh_dto(community_id)
 		logger.info("Каналу «%s» назначен бот «%s».", dto.title, bot.label)
 		return dto
@@ -664,6 +675,10 @@ class CommunitiesService:
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
 			community.bot_id = None
+			# право правки принадлежало паре «сообщество + этот бот»
+			# (ADR-0031): у следующего бота оно своё, и до его зонда
+			# считать право подтверждённым нельзя
+			community.bot_can_edit = False
 			await session.commit()
 		dto = await self._fresh_dto(community_id)
 		logger.info("От канала «%s» отвязан бот.", dto.title)
@@ -693,7 +708,9 @@ class CommunitiesService:
 			return _ProbeResult(ok=None)
 		return _ProbeResult(ok=True, info=info)
 
-	async def _refresh_mutable(self, community_id: int, info: CommunityInfo) -> None:
+	async def _refresh_mutable(
+		self, community_id: int, info: CommunityInfo, *, from_bot: bool = False
+	) -> None:
 		"""Обновляет изменчивые свойства по свежей проверке (ADR-0021).
 
 		Изменчивы признак форума, название и @имя (username; None —
@@ -702,6 +719,12 @@ class CommunitiesService:
 		подключения. Вид не трогается: он определяется подключением;
 		расхождение с Telegram — предупреждение в лог (запись остаётся
 		прежней, владелец переподключит).
+
+		Право правки у бота (``can_edit``, ADR-0031) — тоже изменчивое,
+		но приходит **только** с бот-зонда: userbot его не вычисляет
+		и всегда сообщает False (см. ``CommunityInfo``). Поэтому оно
+		обновляется лишь тогда, когда свежие данные принёс бот, — иначе
+		userbot-зонд затирал бы подтверждённое право.
 		"""
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id)
@@ -729,6 +752,14 @@ class CommunitiesService:
 					info.username or "— (стало приватным)",
 				)
 				community.username = info.username
+				changed = True
+			if from_bot and community.bot_can_edit != info.can_edit:
+				logger.info(
+					"Сообщество «%s»: право бота править сообщения → %s.",
+					info.title,
+					info.can_edit,
+				)
+				community.bot_can_edit = info.can_edit
 				changed = True
 			if changed:
 				await session.commit()
@@ -835,4 +866,5 @@ class CommunitiesService:
 			forum=community.forum,
 			default_account_paused=default is not None and default.paused,
 			bot_paused=community.bot is not None and community.bot.paused,
+			bot_can_edit=community.bot_can_edit,
 		)

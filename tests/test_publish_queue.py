@@ -1453,3 +1453,41 @@ async def test_disabled_community_holds_posts_instead_of_failing(
 	await queue._release_slots()  # noqa: SLF001 — следующий тик дозора
 	await _wait_status(queue, item_id, JobStatus.DONE)
 	assert [post.text for post in gateway.published] == ["подождёт"]
+
+
+async def test_markup_persisted_restored_and_edited(db: Database, make_queue: QueueFactory) -> None:
+	"""Обещанная клавиатура переживает перезапуск и правку (ADR-0031).
+
+	У элемента очереди есть своя строка, поэтому кнопки едут рядом с ним
+	колонкой — отдельная запись обещания нужна только отложкам на сервере.
+	"""
+	from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
+
+	markup = PostMarkup(((PostButton(ButtonKind.LINK, "Смотреть", "https://telegram.org"),),))
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(
+		PostDraft(community_id, text="с кнопками", when=_future(120), markup=markup)
+	)
+	await _wait_status(queue, item, JobStatus.WAITING)
+	async with db.session_factory() as session:
+		row = await session.get(PublishQueueItem, item)
+		assert row is not None and row.markup == [
+			[{"kind": "link", "text": "Смотреть", "value": "https://telegram.org"}]
+		]
+	await queue.shutdown()
+
+	restarted = make_queue(gateway)  # «перезапуск приложения»
+	await restarted.load()
+	drafts = {i.id: i.draft for i in restarted._jobs.all()}  # noqa: SLF001 — восстановленный черновик
+	assert drafts[item].markup == markup
+
+	# правка снимает кнопки: колонка обнуляется, а не остаётся прежней
+	await restarted.edit(item, PostDraft(community_id, text="без кнопок", when=_future(300)))
+	async with db.session_factory() as session:
+		row = await session.get(PublishQueueItem, item)
+		assert row is not None and row.markup is None
+	await restarted.shutdown()

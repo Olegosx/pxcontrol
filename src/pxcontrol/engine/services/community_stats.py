@@ -48,6 +48,7 @@ from pxcontrol.engine.db.models import (
 	CommunityStats,
 	CommunityStatsHistory,
 )
+from pxcontrol.engine.db.types import as_utc_optional
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.community_overview import (
 	CommunityOverviewDto,
@@ -144,13 +145,6 @@ class CommunityStatsDto:
 	fetched_at: datetime | None
 
 
-def _aware(moment: datetime | None) -> datetime | None:
-	"""Момент из БД → aware-UTC (SQLite возвращает наивные значения)."""
-	if moment is None or moment.tzinfo is not None:
-		return moment
-	return moment.replace(tzinfo=UTC)
-
-
 def _as_int(value: object) -> int | None:
 	"""Целое из собранного значения (None — не число)."""
 	return value if isinstance(value, int) else None
@@ -177,7 +171,7 @@ def due(last: datetime | None, every_s: int, now: datetime, tz: tzinfo = UTC) ->
 	"""
 	if every_s <= 0:
 		return True
-	last = _aware(last)
+	last = as_utc_optional(last)
 	return last is None or last < window_start(now, every_s, tz)
 
 
@@ -312,7 +306,7 @@ class CommunityStatsService:
 					online=row.online,
 					scheduled_count=row.scheduled_count,
 					avatar_path=row.avatar_path,
-					fetched_at=_aware(row.fetched_at),
+					fetched_at=as_utc_optional(row.fetched_at),
 				)
 				for row in rows
 			]
@@ -356,7 +350,9 @@ class CommunityStatsService:
 				).scalar_one_or_none()
 				linked_title = linked
 		samples = [
-			HistorySample(_aware(item.at) or datetime.now(UTC), item.participants, item.online)
+			HistorySample(
+				as_utc_optional(item.at) or datetime.now(UTC), item.participants, item.online
+			)
 			for item in history
 		]
 		# статистика Telegram годится, только пока сервер подтверждает
@@ -378,11 +374,11 @@ class CommunityStatsService:
 			can_view_stats=bool(row.can_view_stats) if row is not None else False,
 			linked_chat_id=row.linked_chat_id if row is not None else None,
 			linked_title=linked_title,
-			tg_created_at=_aware(row.tg_created_at) if row is not None else None,
-			last_post_at=_aware(row.last_post_at) if row is not None else None,
-			fetched_at=_aware(row.fetched_at) if row is not None else None,
+			tg_created_at=as_utc_optional(row.tg_created_at) if row is not None else None,
+			last_post_at=as_utc_optional(row.last_post_at) if row is not None else None,
+			fetched_at=as_utc_optional(row.fetched_at) if row is not None else None,
 			deleted=(
-				(row.deleted_found, row.deleted_removed, _aware(row.deleted_checked_at))
+				(row.deleted_found, row.deleted_removed, as_utc_optional(row.deleted_checked_at))
 				if row is not None
 				else (None, None, None)
 			),

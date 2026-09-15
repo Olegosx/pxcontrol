@@ -13,6 +13,7 @@ from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.communities import CommunitiesService
 from pxcontrol.engine.services.community_stats import CommunityStatsService
 from pxcontrol.engine.services.maintenance import MaintenanceService
+from pxcontrol.engine.services.markups import MarkupsService
 from pxcontrol.engine.services.posts import PostsService
 from pxcontrol.engine.services.publish_queue import PublishQueue
 from pxcontrol.engine.services.settings import (
@@ -60,6 +61,9 @@ class Engine:
 			self.communities,
 			on_members_report=self.community_stats.record_members_report,
 		)
+		# обещанные клавиатуры (ADR-0031): хранилище кнопок, которые ещё
+		# нельзя применить — их ставит бот и только после публикации
+		self.markups = MarkupsService(self.db)
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
 		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)

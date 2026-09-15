@@ -35,6 +35,7 @@ from pxcontrol.engine.services.settings import (
 	SettingsService,
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
+from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
@@ -93,13 +94,22 @@ class PublishCapabilities:
 	Attributes:
 		userbot: полный набор — любые типы, до 2 ГБ, «сейчас» и отложенные.
 		bot: запасной путь — текст и медиа до 50 МБ, только «сейчас».
+			Он же означает «кнопки возможны»: ставит их только бот
+			(ADR-0031), и своему посту он ставит их всегда.
+		markup_edit: бот может дорисовать кнопки к посту **публикателя**
+			(право канала ``edit_messages``, ADR-0031). Без него кнопки
+			остаются только у постов, которые бот отправляет сам, —
+			то есть недоступны крупным файлам и отложенным записям.
 	"""
 
 	userbot: bool
 	bot: bool
+	markup_edit: bool = False
 
 
-def publish_capabilities(bot_assigned: bool, userbot_assigned: bool) -> PublishCapabilities:
+def publish_capabilities(
+	bot_assigned: bool, userbot_assigned: bool, *, markup_edit: bool = False
+) -> PublishCapabilities:
 	"""Возможности публикации по публикаторам сообщества.
 
 	Единственный источник правды для движка и интерфейса; приоритет
@@ -108,7 +118,7 @@ def publish_capabilities(bot_assigned: bool, userbot_assigned: bool) -> PublishC
 	публикатор (ADR-0029) вызывающей стороной считается неназначенным —
 	см. :func:`community_capabilities` и ``CommunityDto.capabilities``.
 	"""
-	return PublishCapabilities(userbot=userbot_assigned, bot=bot_assigned)
+	return PublishCapabilities(userbot=userbot_assigned, bot=bot_assigned, markup_edit=markup_edit)
 
 
 def community_capabilities(community: Community) -> PublishCapabilities:
@@ -121,8 +131,11 @@ def community_capabilities(community: Community) -> PublishCapabilities:
 	"""
 	bot = community.bot
 	account = community.default_account
+	bot_ready = bot is not None and not bot.paused
 	return publish_capabilities(
-		bot is not None and not bot.paused, account is not None and not account.paused
+		bot_ready,
+		account is not None and not account.paused,
+		markup_edit=bot_ready and community.bot_can_edit,
 	)
 
 
@@ -256,6 +269,9 @@ class PostDraft:
 			с файлом переименовывается его кадр-превью (сосед ``.png``).
 		topic_id: тема форума (id корневого сообщения; None — общая
 			лента; допустима только у сообществ с включёнными темами).
+		markup: клавиатура под постом (None — кнопок нет). Ставит её
+			только бот (ADR-0031), поэтому её наличие влияет на выбор
+			маршрута отправки; у альбома кнопок не бывает вовсе.
 	"""
 
 	community_id: int
@@ -265,6 +281,7 @@ class PostDraft:
 	when: datetime | None = None
 	rename_to: str | None = None
 	topic_id: int | None = None
+	markup: PostMarkup | None = None
 
 
 def _free_name(target: Path) -> Path:

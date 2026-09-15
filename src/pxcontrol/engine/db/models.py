@@ -237,6 +237,11 @@ class Community(TimestampMixin, Base):
 	bot_id: Mapped[int | None] = mapped_column(
 		ForeignKey("bots.id", ondelete="SET NULL"), default=None
 	)
+	# может ли бот править ЧУЖИЕ сообщения (право канала edit_messages):
+	# от него зависят кнопки поверх поста публикателя (ADR-0031).
+	# Свойство изменчивое — владелец канала может отобрать право,
+	# поэтому обновляется зондами, как название и признак форума
+	bot_can_edit: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
 
 	bot: Mapped[Bot | None] = relationship()
 	default_account: Mapped[TgAccount | None] = relationship()
@@ -415,6 +420,46 @@ class PublishQueueItem(TimestampMixin, Base):
 	# pending — готов к отправке; waiting — ждёт слота отложек; error
 	status: Mapped[str] = mapped_column(String(16))
 	error: Mapped[str | None] = mapped_column(Text)
+	# обещанная клавиатура (ADR-0031), формат — markup_to_json;
+	# NULL — кнопок у поста нет
+	markup: Mapped[Any | None] = mapped_column(JSON, default=None)
+
+
+class PromisedMarkup(TimestampMixin, Base):
+	"""Обещанная клавиатура для поста, у которого нет своей строки (ADR-0031).
+
+	Кнопки ставит бот и только после публикации, а отложенные записи живут
+	на сервере Telegram (ADR-0010) — своей строки у такого поста у нас нет.
+	Значит обещание нужно где-то держать: сообщество, номер отложенной
+	записи, время публикации, текст для опознания вышедшего поста и сама
+	клавиатура. Применённое обещание удаляется — в базе остаётся только
+	то, чего в Telegram ещё нет.
+
+	Текст хранится целиком, а не хешем (решение владельца): постов
+	в ожидании единицы, а по строке должно быть видно, о каком посте речь.
+
+	Живёт и умирает вместе с сообществом (CASCADE). Имя класса отличается
+	от имени типа клавиатуры (:class:`~pxcontrol.engine.telegram.markup.PostMarkup`)
+	намеренно: это строка об обещании, а не сама клавиатура.
+	"""
+
+	__tablename__ = "post_markups"
+	# читают обещания по сообществу и в порядке времени публикации
+	__table_args__ = (Index("ix_post_markups_community_when", "community_id", "when"),)
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
+	# номер отложенной записи на сервере; NULL — обещание без отложки
+	# (пост ушёл «сейчас», а клавиатуру применить ещё не удалось)
+	scheduled_message_id: Mapped[int | None] = mapped_column(Integer, default=None)
+	# ожидаемый момент публикации (UTC) — по нему дозор берёт ближайшие
+	when: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	# текст или подпись поста: опознание вышедшего поста требует точного
+	# совпадения (ADR-0031, п. 9) — промах приклеил бы кнопки к чужому
+	match_text: Mapped[str] = mapped_column(Text)
+	markup: Mapped[Any] = mapped_column(JSON)
+	attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+	error: Mapped[str | None] = mapped_column(Text, default=None)
 
 
 class CaptionField(TimestampMixin, Base):

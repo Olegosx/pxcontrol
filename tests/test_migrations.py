@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
 	"community_stats_history",
 	"community_analytics",
 	"account_operations",
+	"post_markups",
 }
 
 

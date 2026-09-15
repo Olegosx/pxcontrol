@@ -43,6 +43,7 @@ class _FakeGateway:
 		self.role = UserbotRole.ADMIN  # роль аккаунта в userbot-зонде
 		self.title = "Тестовый канал"  # название в ответе проверки
 		self.username: str | None = "testchan"  # @имя (None — приватное)
+		self.bot_can_edit = False  # право бота править чужие посты (ADR-0031)
 
 	async def bot_check_token(self, token: str) -> str:
 		return "test_bot"
@@ -52,7 +53,14 @@ class _FakeGateway:
 			raise CommunityCheckError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_is_admin:
 			raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
-		return CommunityInfo("-1001234", self.title, self.username, self.kind, self.forum)
+		return CommunityInfo(
+			"-1001234",
+			self.title,
+			self.username,
+			self.kind,
+			self.forum,
+			can_edit=self.bot_can_edit,
+		)
 
 	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		if account_id not in self.userbot_admins:
@@ -649,3 +657,88 @@ async def test_communities_of_account_and_bot(db: Database) -> None:
 	dto = await service.assign_bot(first.id, bot_id)
 	assert [c.id for c in await service.communities_of_bot(bot_id)] == [dto.id]
 	assert await service.communities_of_bot(999_999) == []
+
+
+async def test_bot_edit_right_stored_on_connect(db: Database) -> None:
+	"""Право бота править чужие посты сохраняется при подключении (ADR-0031).
+
+	Без него кнопки возможны только у постов, которые бот отправляет сам,
+	поэтому признак нужен уже на подключении — форма спрашивает его,
+	а не Telegram.
+	"""
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()
+	gateway.bot_can_edit = True
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
+	assert dto.bot_can_edit is True
+	assert dto.capabilities.markup_edit is True
+
+
+async def test_bot_edit_right_absent_does_not_block_connect(db: Database) -> None:
+	"""Отсутствие права не мешает подключению — только гасит маршрут кнопок."""
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()  # право по умолчанию не выдано
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
+	assert dto.bot_can_edit is False
+	assert dto.capabilities.bot is True  # публиковать ботом можно
+	assert dto.capabilities.markup_edit is False  # дорисовать кнопки — нельзя
+
+
+async def test_recheck_updates_bot_edit_right_both_ways(db: Database) -> None:
+	"""Право изменчиво: владелец канала выдаёт и отбирает его в любой момент."""
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
+	assert dto.bot_can_edit is False
+	gateway.bot_can_edit = True
+	access = await service.recheck_community(dto.id)
+	assert access.community.bot_can_edit is True
+	gateway.bot_can_edit = False
+	access = await service.recheck_community(dto.id)
+	assert access.community.bot_can_edit is False
+
+
+async def test_userbot_probe_does_not_clobber_bot_edit_right(db: Database) -> None:
+	"""Userbot-зонд права бота не знает и не должен его затирать.
+
+	В ``CommunityInfo`` от userbot-пути ``can_edit`` всегда False —
+	если бы перепроверка брала свежие данные у него, подтверждённое
+	право бота пропадало бы при каждом опросе, и кнопки «терялись» бы
+	без причины.
+	"""
+
+	class _BotUnreachable(_FakeGateway):
+		async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo:
+			raise UserbotNotConnectedError("Нет связи с Telegram — проверьте сеть.")
+
+	bot_id = await _make_bot(db)
+	account_id = await _make_account(db)
+	gateway = _FakeGateway()
+	gateway.bot_can_edit = True
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
+	assert dto.bot_can_edit is True
+	# бот недоступен, права принёс только userbot-зонд
+	offline = _BotUnreachable()
+	offline.userbot_admins = {account_id}
+	offline.bot_can_edit = True
+	service = CommunitiesService(db, offline)
+	access = await service.recheck_community(dto.id)
+	assert access.bot_ok is None  # знания о боте нет
+	assert access.community.bot_can_edit is True  # право не затёрто
+
+
+async def test_unassign_bot_resets_edit_right(db: Database) -> None:
+	"""Право принадлежит паре «сообщество + этот бот», а не сообществу."""
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()
+	gateway.bot_can_edit = True
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
+	assert dto.bot_can_edit is True
+	dto = await service.unassign_bot(dto.id)
+	assert dto.bot_can_edit is False
+	assert dto.capabilities.markup_edit is False

@@ -30,6 +30,7 @@ from sqlalchemy import delete, select, update
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import PublishQueueItem
+from pxcontrol.engine.db.types import as_utc_optional
 from pxcontrol.engine.jobs import Job, JobCancelled, JobDeferred, JobQueue, JobStatus
 from pxcontrol.engine.services.posts import (
 	MIN_SCHEDULE_AHEAD,
@@ -43,6 +44,7 @@ from pxcontrol.engine.services.posts import (
 	text_preview,
 )
 from pxcontrol.engine.services.settings import QUEUE_SLOT_POLL_MINUTES, SettingsService
+from pxcontrol.engine.telegram.markup import markup_from_json, markup_to_json
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotScheduleFullError,
@@ -157,13 +159,6 @@ def _draft_title(draft: PostDraft) -> str:
 	return text_preview(draft.text.strip(), _TITLE_PREVIEW_CHARS)
 
 
-def _as_utc(moment: datetime | None) -> datetime | None:
-	"""Момент из БД → aware-UTC (SQLite возвращает наивные значения)."""
-	if moment is None or moment.tzinfo is not None:
-		return moment
-	return moment.replace(tzinfo=UTC)
-
-
 def _expired(when: datetime | None, now: datetime) -> bool:
 	"""Желаемый момент прошёл (или ближе минимального запаса)."""
 	return when is not None and when <= now + MIN_SCHEDULE_AHEAD
@@ -269,9 +264,10 @@ class PublishQueue:
 					text=row.text,
 					media_path=row.media_path,
 					media_kind=MediaKind(row.media_kind),
-					when=_as_utc(row.when),
+					when=as_utc_optional(row.when),
 					rename_to=row.rename_to,
 					topic_id=row.topic_id,
+					markup=markup_from_json(row.markup),
 				)
 			)
 			item = _PublishJob(row.id, draft, titles[row.community_id])
@@ -338,6 +334,7 @@ class PublishQueue:
 					when=draft.when,
 					rename_to=draft.rename_to,
 					topic_id=draft.topic_id,
+					markup=markup_to_json(draft.markup),
 					status=self._initial_status(draft).value,
 				)
 				for draft in stashed
@@ -835,6 +832,7 @@ class PublishQueue:
 					when=draft.when,
 					rename_to=draft.rename_to,
 					topic_id=draft.topic_id,
+					markup=markup_to_json(draft.markup),
 					status=status.value,
 					error=None,
 				)

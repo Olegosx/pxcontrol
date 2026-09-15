@@ -179,6 +179,24 @@ def ensure_bot_can_post(member: Any) -> None:
 		raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
 
 
+def bot_can_edit_messages(member: Any) -> bool:
+	"""Может ли бот править чужие сообщения в канале (ADR-0031).
+
+	Право ``can_edit_messages`` существует только у каналов; у владельца
+	оно есть всегда, у группы его не бывает вовсе (там каждый правит
+	только своё — проверено опытом). Отсутствие права не мешает
+	подключению сообщества: без него просто недоступен маршрут, в котором
+	бот дорисовывает кнопки к посту публикателя.
+
+	Args:
+		member: ответ ``getChatMember`` для самого бота.
+	"""
+	status = getattr(member, "status", "")
+	if status == "creator":
+		return True
+	return status == "administrator" and getattr(member, "can_edit_messages", None) is True
+
+
 def ensure_bot_can_send_in_group(member: Any, default_permissions: Any) -> None:
 	"""Проверяет, что бот может писать в группе (ADR-0021).
 
@@ -404,6 +422,9 @@ async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 				chat.username,
 				kind=kind,
 				forum=bool(chat.is_forum),
+				# право правки не требуется для подключения — оно решает
+				# только, доступны ли кнопки поверх поста публикателя
+				can_edit=bot_can_edit_messages(member),
 			)
 	finally:
 		await bot.session.close()
