@@ -101,6 +101,8 @@ _SHARE_PERCENT_WIDTH = 44
 _SHARE_ROWS = 8
 #: Сколько недавних постов и активных участников показывать в таблицах.
 _TABLE_ROWS = 10
+#: Колонка подписей справки: не уже макета (104), шире — по самой длинной подписи.
+_REFERENCE_LABEL_WIDTH = 104
 
 #: Имена рядов и долей Telegram — по-русски; незнакомое остаётся как есть.
 _SERIES_RU = {
@@ -690,6 +692,12 @@ class OverviewCards(QWidget):
 		"""
 		values: list[QLabel] = []
 		box = QWidget(self)
+		# ширина колонки подписей — по самой длинной подписи этих строк:
+		# у справки аккаунта подписи длиннее, чем у сообщества
+		metrics = self.fontMetrics()
+		label_width = max(
+			_REFERENCE_LABEL_WIDTH, *(metrics.horizontalAdvance(key) + 6 for key, _v in rows)
+		)
 		grid = QGridLayout(box)
 		grid.setContentsMargins(0, 0, 0, 0)
 		grid.setHorizontalSpacing(28)
@@ -708,7 +716,7 @@ class OverviewCards(QWidget):
 				line.setContentsMargins(0, 0, 0, 0)
 				line.setSpacing(8)
 				label = text_label(cell, label_text, 12)
-				label.setFixedWidth(104)
+				label.setFixedWidth(label_width)
 				line.addWidget(label)
 				value = text_label(cell, "", 14)  # BodyLabel штатно, кегль не задаётся
 				value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
