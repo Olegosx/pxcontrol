@@ -29,12 +29,14 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import PostDraft, TextLimits
+from pxcontrol.engine.services.publish_route import choose_route, markup_blocker
 from pxcontrol.engine.services.video import VideoDirs
-from pxcontrol.engine.telegram.types import ForumTopicInfo, MediaKind
+from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES, ForumTopicInfo, MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DIM_TEXT,
 	CharCounter,
+	CollapsibleCard,
 	ErrorLabel,
 	WhenRow,
 	caption_placeholder,
@@ -44,12 +46,14 @@ from pxcontrol.ui.pages.common import (
 	kind_label,
 	kind_segments,
 	pick_file,
+	plural,
 	rename_row,
 	tinted,
 	topic_label,
 	topic_row,
 	visible_topics,
 )
+from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
 
 #: Подсказка под временем, когда канал публикует только ботом: у бота
 #: нет отложенных (ADR-0010/0011), остаётся «сейчас».
@@ -130,14 +134,70 @@ class QueueItemEditor(QWidget):
 		self._text.setFixedHeight(_TEXT_HEIGHT)
 		layout.addWidget(self._text)
 		self._counter = CharCounter(self, layout, self._text)
+		self._build_markup_block(layout)
 		# по макету кнопки формы стоят в ряду времени, справа
-		self._when_row = WhenRow(self, layout, compact=True, trailing=self._build_buttons())
+		self._when_row = WhenRow(
+			self,
+			layout,
+			compact=True,
+			trailing=self._build_buttons(),
+			on_now_changed=lambda _now: self._refresh_markup(),
+		)
 		self._when_row.set_schedule_allowed(self._caps.userbot, _BOT_ONLY_HINT)
 		self._when_row.set_when(self._draft.when)
 		self._error = ErrorLabel(self)
 		layout.addWidget(self._error)
 		layout.addWidget(tinted(CaptionLabel(_RECIPIENT_NOTE, self), DIM_TEXT))
 		self._apply_kind()
+
+	def _build_markup_block(self, layout: QVBoxLayout) -> None:
+		"""Блок кнопок под постом — тот же, что на «Публикации» (ADR-0031).
+
+		Правила кнопок обеим формам нужны одни, поэтому редактор общий:
+		разойтись им нельзя.
+		"""
+		self._markup_card = CollapsibleCard("Кнопки под постом", self)
+		self._markup = MarkupEditor(self._markup_card)
+		self._markup.set_markup(self._draft.markup)
+		self._markup.changed.connect(self._refresh_markup)
+		self._markup_card.body.addWidget(self._markup)
+		layout.addWidget(self._markup_card)
+
+	def _media_over_bot_limit(self) -> bool:
+		"""Файл элемента не по силам боту (от этого зависят кнопки)."""
+		path = self._file_edit.text().strip()
+		if self._kind is MediaKind.NONE or not path:
+			return False
+		try:
+			return Path(path).stat().st_size > BOT_MAX_FILE_BYTES
+		except OSError:
+			return False
+
+	def _refresh_markup(self) -> None:
+		"""Приводит блок кнопок и предел текста к состоянию формы."""
+		over = self._media_over_bot_limit()
+		reason = markup_blocker(
+			self._caps,
+			title=self._community.title,
+			kind=self._community.kind,
+			scheduled=not self._when_row.is_now(),
+			media_over_bot_limit=over,
+		)
+		self._markup.set_blocked(reason)
+		markup = self._markup.markup()
+		route = choose_route(self._caps, with_markup=markup is not None, media_over_bot_limit=over)
+		self._markup.set_notice(
+			"" if reason is not None else markup_notice(route, self._community.bot_label)
+		)
+		count = len(markup.buttons) if markup is not None else 0
+		self._markup_card.set_summary(
+			f"{count} {plural(count, 'кнопка', 'кнопки', 'кнопок')}" if count else "нет"
+		)
+		limits = limits_for_route(self._limits, route)
+		is_text = self._kind is MediaKind.NONE
+		# предел зависит от маршрута: пост с кнопками отправит бот,
+		# а у него пределы базовые (ADR-0031)
+		self._counter.set_limit(limits.text if is_text else limits.caption)
 
 	def _build_topic_row(
 		self, layout: QVBoxLayout, topics: list[ForumTopicInfo], topics_error: str
@@ -231,8 +291,9 @@ class QueueItemEditor(QWidget):
 		self._file_box.setVisible(not is_text)
 		self._rename_box.setVisible(not is_text)
 		self._text.setPlaceholderText(caption_placeholder(is_text))
-		# подпись к файлу вчетверо короче поста без вложения
-		self._counter.set_limit(self._limits.text if is_text else self._limits.caption)
+		# подпись к файлу вчетверо короче поста без вложения; предел
+		# и доступность кнопок считает общий проход
+		self._refresh_markup()
 
 	def _drop_file(self) -> None:
 		"""Убирает вложение: пост становится текстовым."""
@@ -319,6 +380,7 @@ class QueueItemEditor(QWidget):
 			when=self._when_row.when(),
 			rename_to=self._rename_to(),
 			topic_id=self._selected_topic_id(),
+			markup=self._markup.markup(),
 		)
 
 	def _rename_to(self) -> str | None:

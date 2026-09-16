@@ -47,7 +47,12 @@ from pxcontrol.engine.services.publish_queue import (
 	EDITABLE_STATUSES,
 	QueueItemDto,
 )
-from pxcontrol.engine.services.publish_route import PublishCapabilities
+from pxcontrol.engine.services.publish_route import (
+	PublishCapabilities,
+	PublishRoute,
+	choose_route,
+	markup_blocker,
+)
 from pxcontrol.engine.services.settings import (
 	PUBLISH_LAST_COMMUNITY_ID,
 	PUBLISH_TIMES,
@@ -68,6 +73,7 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
 	CharCounter,
+	CollapsibleCard,
 	DtoComboBox,
 	WhenRow,
 	caption_placeholder,
@@ -82,6 +88,7 @@ from pxcontrol.ui.pages.common import (
 	page_layout,
 	pick_dir,
 	pick_file,
+	plural,
 	rename_row,
 	show_info,
 	show_success,
@@ -90,6 +97,7 @@ from pxcontrol.ui.pages.common import (
 	topic_row,
 	visible_topics,
 )
+from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
 from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
@@ -181,7 +189,8 @@ class PublishPage(ScrollArea):
 		self._counter = CharCounter(self, layout, self._text)
 		self._build_caption_tools(layout)
 		self._build_file_row(layout)
-		self._when_row = WhenRow(self, layout)
+		self._build_markup_block(layout)
+		self._when_row = WhenRow(self, layout, on_now_changed=self._on_when_changed)
 		self._build_send_row(layout)
 		layout.addStretch()
 		# после сборки всех полей — сегмент по умолчанию (сигнал трогает форму)
@@ -232,6 +241,78 @@ class PublishPage(ScrollArea):
 		layout.addWidget(self._file_box)
 		self._build_rename_row(layout)
 
+	def _build_markup_block(self, layout: QVBoxLayout) -> None:
+		"""Блок кнопок под постом (свёрнут: кнопки нужны не каждому посту).
+
+		Правила кнопок приходят из движка (ADR-0031): что мешает их
+		поставить и что меняется в посте, когда они есть, — интерфейс
+		только показывает, а не решает сам.
+		"""
+		self._markup_card = CollapsibleCard("Кнопки под постом", self)
+		self._markup = MarkupEditor(self._markup_card)
+		self._markup.changed.connect(self._refresh_markup)
+		self._markup_card.body.addWidget(self._markup)
+		layout.addWidget(self._markup_card)
+
+	def _on_when_changed(self, _now: bool) -> None:
+		"""Смена «сейчас ↔ отложенно»: у отложенных кнопки пока недоступны."""
+		self._refresh_markup()
+
+	def _media_over_bot_limit(self) -> bool:
+		"""Файл не по силам боту (от этого зависит маршрут и кнопки).
+
+		Недоступный файл считается маленьким: его судьбу решит проверка
+		при отправке, а не подсказка формы.
+		"""
+		path = str(self._file_edit.text()).strip()
+		if self._kind is MediaKind.NONE or not path:
+			return False
+		try:
+			return Path(path).stat().st_size > BOT_MAX_FILE_BYTES
+		except OSError:
+			return False
+
+	def _current_route(self) -> PublishRoute:
+		"""Каким путём уйдёт нынешний черновик (для пределов и подсказок)."""
+		community = self._community_or_none()
+		if community is None:
+			return PublishRoute.USERBOT
+		return choose_route(
+			community.capabilities,
+			with_markup=self._markup.markup() is not None,
+			media_over_bot_limit=self._media_over_bot_limit(),
+		)
+
+	def _refresh_markup(self) -> None:
+		"""Приводит блок кнопок к текущему состоянию формы.
+
+		Одним заходом: можно ли кнопки (причина — из движка), что
+		изменится в посте из-за них и какой предел текста показывать
+		счётчику (у бота он базовый — подписки у ботов не бывает).
+		"""
+		community = self._community_or_none()
+		if community is None:
+			self._markup.set_blocked("Сначала выберите сообщество — от него зависят кнопки.")
+			self._markup.set_notice("")
+			return
+		reason = markup_blocker(
+			community.capabilities,
+			title=community.title,
+			kind=community.kind,
+			scheduled=not self._when_row.is_now(),
+			media_over_bot_limit=self._media_over_bot_limit(),
+		)
+		self._markup.set_blocked(reason)
+		markup = self._markup.markup()
+		self._markup.set_notice(
+			"" if reason is not None else markup_notice(self._current_route(), community.bot_label)
+		)
+		count = len(markup.buttons) if markup is not None else 0
+		self._markup_card.set_summary(
+			f"{count} {plural(count, 'кнопка', 'кнопки', 'кнопок')}" if count else "нет"
+		)
+		self._apply_text_limit()
+
 	def _build_rename_row(self, layout: QVBoxLayout) -> None:
 		"""Строка переименования файла при отправке (появляется из подписи)."""
 		row = rename_row(self, layout)
@@ -242,6 +323,8 @@ class PublishPage(ScrollArea):
 		"""Сбрасывает переименование (файл сменился — имя устарело)."""
 		self._rename_edit.clear()
 		self._rename_box.hide()
+		# размер нового файла может сменить маршрут и доступность кнопок
+		self._refresh_markup()
 
 	def _build_send_row(self, layout: QVBoxLayout) -> None:
 		"""Кнопки отправки (одиночной и пакетной) и панель очереди под ними."""
@@ -448,6 +531,8 @@ class PublishPage(ScrollArea):
 				"⚠ Нет способа публикации — проверьте доступы на странице сообщества."
 			)
 			self._when_row.set_schedule_allowed(False, "Нет способа публикации")
+		# сообщество сменилось — сменились и правила кнопок
+		self._refresh_markup()
 
 	def _apply_limits(self, community_id: int, limits: TextLimits) -> None:
 		"""Запоминает пределы длины канала, если он всё ещё выбран."""
@@ -466,7 +551,9 @@ class PublishPage(ScrollArea):
 		if self._limits is None:
 			self._counter.set_limit(text_length_limit(premium=False, with_media=with_media))
 			return
-		self._counter.set_limit(self._limits.caption if with_media else self._limits.text)
+		# пост с кнопками уходит ботом — у него пределы базовые (ADR-0031)
+		limits = limits_for_route(self._limits, self._current_route())
+		self._counter.set_limit(limits.caption if with_media else limits.text)
 
 	def _update_topic_row(self, community: CommunityDto, caps: PublishCapabilities) -> None:
 		"""Показывает и наполняет выбор темы форума (ADR-0021).
@@ -553,8 +640,9 @@ class PublishPage(ScrollArea):
 		is_text = self._kind is MediaKind.NONE
 		self._file_box.setVisible(not is_text)
 		self._text.setPlaceholderText(caption_placeholder(is_text))
-		# подпись к файлу вчетверо короче поста без вложения
-		self._apply_text_limit()
+		# подпись к файлу вчетверо короче поста без вложения; маршрут
+		# и доступность кнопок тоже зависят от типа и файла
+		self._refresh_markup()
 
 	def _pick_file(self) -> None:
 		"""Диалог выбора вложения с фильтром по текущему типу контента.
@@ -971,6 +1059,7 @@ class PublishPage(ScrollArea):
 			when=self._when_row.when(),
 			rename_to=self._rename_to(),
 			topic_id=self._selected_topic_id(),
+			markup=self._markup.markup(),
 		)
 
 	def _rename_to(self) -> str | None:

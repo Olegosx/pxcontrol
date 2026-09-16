@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import pytest
 
+from pxcontrol.engine.services.posts import TextLimits
+from pxcontrol.engine.services.publish_route import PublishRoute
 from pxcontrol.engine.telegram.types import (
+	CAPTION_LENGTH_LIMIT,
 	GENERAL_TOPIC_ID,
+	TEXT_LENGTH_LIMIT,
 	ForumTopicInfo,
 	MediaKind,
 	UserbotRole,
@@ -23,6 +27,7 @@ from pxcontrol.ui.pages.common import (
 	topic_label,
 	visible_topics,
 )
+from pxcontrol.ui.pages.markup_editor import limits_for_route, markup_notice
 
 _TOPICS = [
 	ForumTopicInfo(GENERAL_TOPIC_ID, "General"),
@@ -116,3 +121,32 @@ def test_checked_or_single_treats_lonely_item_as_chosen() -> None:
 	assert checked_or_single(["a", "b"], []) is None  # выбор не сделан
 	assert checked_or_single(["a", "b"], ["b"]) == ["b"]
 	assert checked_or_single([], []) is None  # пустой список — выбора нет
+
+
+# --- блок кнопок под постом (ADR-0031, этап 2б) ---------------------------
+
+
+def test_limits_follow_route_in_the_form() -> None:
+	"""Счётчик символов показывает предел того, кто реально отправит пост.
+
+	Пост с кнопками уходит ботом даже там, где у публикателя Premium, —
+	и обещать 4096 знаков подписи было бы обманом: у ботов подписки
+	не бывает.
+	"""
+	premium = TextLimits(text=8192, caption=4096)
+	assert limits_for_route(premium, PublishRoute.USERBOT) == premium
+	assert limits_for_route(premium, PublishRoute.USERBOT_MARKUP) == premium
+	by_bot = limits_for_route(premium, PublishRoute.BOT)
+	assert (by_bot.text, by_bot.caption) == (TEXT_LENGTH_LIMIT, CAPTION_LENGTH_LIMIT)
+
+
+def test_markup_notice_warns_about_sender_and_delay() -> None:
+	"""Форма предупреждает о смене лица поста и о задержке кнопок заранее."""
+	by_bot = markup_notice(PublishRoute.BOT, "Паблишер")
+	assert "Паблишер" in by_bot and str(CAPTION_LENGTH_LIMIT) in by_bot
+	drawn = markup_notice(PublishRoute.USERBOT_MARKUP, "Паблишер")
+	assert "публикатор" in drawn and "без них" in drawn
+	# пост без кнопок ничего не меняет — и молчит
+	assert markup_notice(PublishRoute.USERBOT, "Паблишер") == ""
+	# бот без названия — всё равно понятная фраза
+	assert "бот" in markup_notice(PublishRoute.BOT, None)

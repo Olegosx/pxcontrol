@@ -1593,14 +1593,19 @@ class WhenRow:
 		*,
 		compact: bool = False,
 		trailing: Sequence[QWidget] = (),
+		on_now_changed: Callable[[bool], None] | None = None,
 	) -> None:
-		"""``compact`` — ряд по макету карточки очереди: переключатель без
+		"""``on_now_changed`` — крючок переключения «сейчас ↔ отложенно»:
+		от времени зависят кнопки под постом (ADR-0031), и форма должна
+		узнать о смене сразу, а не при отправке.
+		``compact`` — ряд по макету карточки очереди: переключатель без
 		подписей On/Off, дата «дд.мм.гггг» шириной 126, время 92, дата
 		и время сразу за переключателем; ``trailing`` — виджеты в правом
 		краю ряда (кнопки формы)."""
 		row = QHBoxLayout()
 		row.setSpacing(10 if compact else row.spacing())
 		row.addWidget(BodyLabel("Опубликовать сейчас", dialog))
+		self._on_now_changed = on_now_changed
 		self._now_switch = SwitchButton(dialog)
 		self._now_switch.setChecked(False)
 		self._now_switch.checkedChanged.connect(self._on_now_toggled)
@@ -1630,6 +1635,17 @@ class WhenRow:
 	def _on_now_toggled(self, now: bool) -> None:
 		self._date.setVisible(not now)
 		self._time.setVisible(not now)
+		if self._on_now_changed is not None:
+			self._on_now_changed(now)
+
+	def is_now(self) -> bool:
+		"""Выбрана ли публикация «сейчас» (не разбирая время).
+
+		Отдельно от :meth:`when`: та бросает ошибку на негодном времени,
+		а спросить «отложенный ли это пост» нужно и при недописанном
+		«ЧЧ:ММ» — например, чтобы решить, доступны ли кнопки.
+		"""
+		return bool(self._now_switch.isChecked())
 
 	def set_schedule_allowed(self, allowed: bool, hint: str = "") -> None:
 		"""Разрешает/запрещает отложенную публикацию (иначе — только «сейчас»)."""
