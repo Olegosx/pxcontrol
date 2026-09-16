@@ -511,6 +511,20 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
 			return await transport.download_avatar(chat_id, target)
 
+	async def userbot_find_published(
+		self, account_id: int, chat_id: str, text: str, after: datetime, limit: int
+	) -> int | None:
+		"""Ищет вышедший пост по тексту (для кнопок отложенного, ADR-0031).
+
+		Фоновый приоритет: дозор кнопок не должен обгонять публикацию
+		и не должен заставлять человека ждать на экране — кнопки появятся
+		секундой позже, и это не беда.
+
+		Raises: см. :meth:`MtprotoTransport.find_published`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
+			return await transport.find_published(chat_id, text, after, limit)
+
 	async def service_messages_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
 	) -> ServiceMessagesPage:

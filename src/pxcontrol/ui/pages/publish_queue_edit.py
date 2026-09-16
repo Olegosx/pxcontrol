@@ -185,7 +185,12 @@ class QueueItemEditor(QWidget):
 		)
 		self._markup.set_blocked(reason)
 		markup = self._markup.markup()
-		route = choose_route(self._caps, with_markup=markup is not None, media_over_bot_limit=over)
+		route = choose_route(
+			self._caps,
+			with_markup=markup is not None,
+			media_over_bot_limit=over,
+			scheduled=not self._when_row.is_now(),
+		)
 		self._markup.set_notice(
 			"" if reason is not None else markup_notice(route, self._community.bot_label)
 		)

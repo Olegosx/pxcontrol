@@ -1421,15 +1421,35 @@ async def test_markup_failure_keeps_post_and_reports(
 	assert "права изменять сообщения" in outcome.markup_error
 
 
-async def test_scheduled_post_with_buttons_refused(db: Database) -> None:
-	"""Кнопки у отложенных постов пока недоступны — отказ честный и заранее."""
+async def test_scheduled_post_with_buttons_waits_for_publication(db: Database) -> None:
+	"""Отложенный пост с кнопками уходит публикателем, кнопки — потом.
+
+	Применить их сейчас невозможно: поста в канале ещё нет, его
+	опубликует сервер Telegram. Исход так и говорит — «кнопки обещаны»,
+	и очередь сохраняет обещание (ADR-0031, п. 9).
+	"""
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
-	community_id = await _add_community(db)
+	community_id = await _add_community(db, bot_can_edit=True)
 	when = datetime.now(UTC) + timedelta(hours=1)
-	with pytest.raises(PostError, match="отложенных постов пока"):
+	outcome = await service.publish(
+		PostDraft(community_id, text="позже", when=when, markup=_markup())
+	)
+	assert len(gateway.published) == 1  # отложка создана публикателем
+	assert gateway.markup_edits == []  # дорисовывать пока нечего
+	assert outcome.markup_pending is True
+	assert outcome.markup_error is None
+
+
+async def test_scheduled_buttons_need_edit_right(db: Database) -> None:
+	"""Без права изменять сообщения отложенный пост с кнопками отклоняется."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)  # право не выдано
+	when = datetime.now(UTC) + timedelta(hours=1)
+	with pytest.raises(PostError, match="нет права изменять"):
 		await service.publish(PostDraft(community_id, text="позже", when=when, markup=_markup()))
-	assert gateway.published == [] and gateway.sent == []
+	assert gateway.published == []
 
 
 async def test_buttons_without_bot_refused(db: Database) -> None:

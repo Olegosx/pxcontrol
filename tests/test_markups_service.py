@@ -1,9 +1,10 @@
-"""Тесты хранилища обещанных клавиатур (ADR-0031, этап 1).
+"""Тесты обещанных клавиатур: хранение и дозор, который их применяет.
 
 Обещание — это клавиатура, которую нельзя применить прямо сейчас: кнопки
 ставит бот и только после публикации, а отложенную запись держит сервер
-Telegram. Проверяем именно хранение и переходы обещания; применение
-появится следующим этапом.
+Telegram (ADR-0031). Проверяются и хранение с переходами обещания,
+и осторожность дозора: двусмысленность — не повод угадывать, флуд
+прекращает проход, приостановленный бот не стоит попытки.
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ import pytest
 from sqlalchemy import select, update
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Community, PromisedMarkup
-from pxcontrol.engine.services.markups import MarkupsService
+from pxcontrol.engine.db.models import Bot, Community, PromisedMarkup, TgAccount
+from pxcontrol.engine.services.markups import MAX_APPLY_ATTEMPTS, MarkupsService
 from pxcontrol.engine.telegram.markup import (
 	BUTTON_TEXT_LIMIT,
 	ButtonKind,
@@ -23,6 +24,7 @@ from pxcontrol.engine.telegram.markup import (
 	PostButton,
 	PostMarkup,
 )
+from pxcontrol.engine.telegram.types import BotRef, TelegramFloodError
 
 
 def markup(text: str = "Смотреть") -> PostMarkup:
@@ -172,3 +174,217 @@ async def test_broken_row_is_skipped(db: Database) -> None:
 	async with db.session_factory() as session:
 		rows = (await session.execute(select(PromisedMarkup.id))).scalars().all()
 	assert set(rows) == {good, broken}
+
+
+# --- дозор: применение обещаний (ADR-0031, этап 3) -------------------------
+
+
+class _FakeGateway:
+	"""Подмена шлюза для дозора: поиск поста и правка разметки без сети."""
+
+	def __init__(self) -> None:
+		#: какой номер «найдётся» по тексту (None — не опознан)
+		self.found: int | None = 777
+		self.lookups: list[tuple[int, str, str]] = []
+		self.edits: list[tuple[str, int, object]] = []
+		self.edit_error: Exception | None = None
+		self.lookup_error: Exception | None = None
+
+	async def userbot_find_published(
+		self, account_id: int, chat_id: str, text: str, after: datetime, limit: int
+	) -> int | None:
+		if self.lookup_error is not None:
+			raise self.lookup_error
+		self.lookups.append((account_id, chat_id, text))
+		return self.found
+
+	async def bot_edit_markup(
+		self, bot: BotRef, chat_id: str, message_id: int, markup: object
+	) -> None:
+		if self.edit_error is not None:
+			raise self.edit_error
+		self.edits.append((chat_id, message_id, markup))
+
+
+async def make_ready_community(db: Database, *, bot_can_edit: bool = True) -> int:
+	"""Сообщество, готовое принять кнопки: бот с правом правки и публикатор."""
+	async with db.session_factory() as session:
+		bot = Bot(label="Паблишер", token="123:AAA", username="pub_bot")
+		account = TgAccount(label="@ub", phone="+7900", session="s")
+		session.add_all([bot, account])
+		await session.flush()
+		community = Community(
+			title="Канал",
+			tg_chat_id="-1001",
+			bot_id=bot.id,
+			bot_can_edit=bot_can_edit,
+			default_tg_account_id=account.id,
+		)
+		session.add(community)
+		await session.commit()
+		await session.refresh(community)
+		return community.id
+
+
+async def test_watcher_finds_post_and_sets_buttons(db: Database) -> None:
+	"""Отложка вышла — дозор опознал пост, поставил кнопки, снял обещание."""
+	gateway = _FakeGateway()
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	when = datetime.now(UTC) - timedelta(minutes=1)  # время публикации прошло
+	await service.promise(
+		community_id, markup(), match_text="текст поста", when=when, scheduled_message_id=5
+	)
+	assert await service.apply_due() == 1
+	assert gateway.lookups == [(1, "-1001", "текст поста")]
+	assert gateway.edits == [("-1001", 777, markup())]
+	assert await service.pending() == []  # применённое не хранится
+
+
+async def test_watcher_waits_until_publication_time(db: Database) -> None:
+	"""До назначенного времени поста в канале нет — дозор не тревожит Telegram."""
+	gateway = _FakeGateway()
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	when = datetime.now(UTC) + timedelta(hours=1)
+	await service.promise(community_id, markup(), match_text="текст", when=when)
+	assert await service.apply_due() == 0
+	assert gateway.lookups == [] and gateway.edits == []
+	assert len(await service.pending()) == 1
+
+
+async def test_watcher_skips_unidentified_post(db: Database) -> None:
+	"""Пост не опознан — кнопки не ставятся, попытка записана.
+
+	Промах хуже отсутствия кнопок: клавиатура приклеилась бы к чужому
+	посту, поэтому двусмысленность трактуется как «не нашлось».
+	"""
+	gateway = _FakeGateway()
+	gateway.found = None
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	await service.promise(
+		community_id, markup(), match_text="текст", when=datetime.now(UTC) - timedelta(minutes=1)
+	)
+	assert await service.apply_due() == 0
+	assert gateway.edits == []
+	promises = await service.pending()
+	assert len(promises) == 1 and promises[0].attempts == 1
+	assert promises[0].error is not None and "не опознан" in promises[0].error
+
+
+async def test_watcher_waits_for_bot_without_spending_attempt(db: Database) -> None:
+	"""Нет права у бота — обещание ждёт, а не тратит попытки.
+
+	Право вернёт человек; наказывать обещание за это нельзя — иначе
+	оно исчерпало бы попытки, пока владелец разбирается с правами.
+	"""
+	gateway = _FakeGateway()
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db, bot_can_edit=False)
+	await service.promise(
+		community_id, markup(), match_text="текст", when=datetime.now(UTC) - timedelta(minutes=1)
+	)
+	assert await service.apply_due() == 0
+	assert gateway.lookups == [] and gateway.edits == []
+	promises = await service.pending()
+	assert len(promises) == 1 and promises[0].attempts == 0
+
+
+async def test_watcher_releases_promise_after_attempts(db: Database) -> None:
+	"""Исчерпав попытки, дозор перестаёт ходить за обещанием."""
+	gateway = _FakeGateway()
+	gateway.found = None
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	await service.promise(
+		community_id, markup(), match_text="текст", when=datetime.now(UTC) - timedelta(minutes=1)
+	)
+	for _ in range(MAX_APPLY_ATTEMPTS):
+		await service.apply_due()
+	lookups_before = len(gateway.lookups)
+	assert lookups_before == MAX_APPLY_ATTEMPTS
+	await service.apply_due()  # обещание отпущено — Telegram больше не тревожим
+	assert len(gateway.lookups) == lookups_before
+	promises = await service.pending()
+	assert len(promises) == 1 and promises[0].attempts == MAX_APPLY_ATTEMPTS
+
+
+async def test_watcher_uses_known_message_id(db: Database) -> None:
+	"""У поста, который уже вышел, номер известен — искать нечего."""
+	gateway = _FakeGateway()
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	await service.promise(community_id, markup(), match_text="текст", message_id=42)
+	assert await service.apply_due() == 1
+	assert gateway.lookups == []  # опознавать не нужно
+	assert gateway.edits == [("-1001", 42, markup())]
+
+
+async def test_flood_stops_the_pass(db: Database) -> None:
+	"""Флуд-лимит прекращает проход: остальные обещания дождутся следующего."""
+	gateway = _FakeGateway()
+	gateway.edit_error = TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	for number in range(3):
+		await service.promise(
+			community_id, markup(), match_text=f"текст {number}", message_id=number + 1
+		)
+	assert await service.apply_due() == 0
+	# попытка была одна: дальше дозор не пошёл
+	assert len(gateway.edits) == 0
+	attempts = [p.attempts for p in await service.pending()]
+	assert sorted(attempts) == [0, 0, 0]
+
+
+async def test_retarget_follows_scheduled_edit(db: Database) -> None:
+	"""Правка отложки уводит обещание за собой: время и текст обновляются.
+
+	Без этого дозор искал бы вчерашний текст на вчерашнее время — пост
+	вышел бы без кнопок, хотя всё было в порядке.
+	"""
+	service = MarkupsService(db)
+	community_id = await make_community(db)
+	when = datetime.now(UTC) + timedelta(hours=1)
+	await service.promise(
+		community_id, markup(), match_text="было", when=when, scheduled_message_id=7
+	)
+	moved = when + timedelta(days=1)
+	assert await service.retarget(community_id, 7, when=moved, match_text="стало") is True
+	promise = (await service.pending())[0]
+	assert promise.when == moved and promise.match_text == "стало"
+	# у поста без кнопок переносить нечего — и это не ошибка
+	assert await service.retarget(community_id, 999, when=moved) is False
+
+
+async def test_retarget_ignores_empty_change(db: Database) -> None:
+	"""Пустая правка ничего не трогает (нечего переносить)."""
+	service = MarkupsService(db)
+	community_id = await make_community(db)
+	await service.promise(community_id, markup(), match_text="текст", scheduled_message_id=3)
+	assert await service.retarget(community_id, 3) is False
+	assert (await service.pending())[0].match_text == "текст"
+
+
+async def test_watcher_takes_promise_after_send_now(db: Database) -> None:
+	"""«Сейчас» у отложки делает обещание готовым к применению.
+
+	Пост выходит немедленно, его номер меняется — дозор опознаёт пост
+	по тексту и ставит кнопки уже на следующем проходе.
+	"""
+	gateway = _FakeGateway()
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	await service.promise(
+		community_id,
+		markup(),
+		match_text="текст",
+		when=datetime.now(UTC) + timedelta(hours=5),
+		scheduled_message_id=11,
+	)
+	assert await service.apply_due() == 0  # до времени публикации — не трогаем
+	# «Сейчас»: движок переносит обещание на текущий момент
+	await service.retarget(community_id, 11, when=datetime.now(UTC))
+	assert await service.apply_due() == 1
+	assert gateway.edits == [("-1001", 777, markup())]

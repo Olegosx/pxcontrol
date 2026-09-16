@@ -281,6 +281,7 @@ class PublishPage(ScrollArea):
 			community.capabilities,
 			with_markup=self._markup.markup() is not None,
 			media_over_bot_limit=self._media_over_bot_limit(),
+			scheduled=not self._when_row.is_now(),
 		)
 
 	def _refresh_markup(self) -> None:

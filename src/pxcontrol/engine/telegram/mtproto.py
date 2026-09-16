@@ -1040,6 +1040,55 @@ class MtprotoTransport:
 			path = await client.download_profile_photo(entity, file=target)
 		return str(path) if path else None
 
+	async def find_published(
+		self, chat_id: str, text: str, after: datetime, limit: int
+	) -> int | None:
+		"""Ищет вышедший пост по тексту среди свежих записей (ADR-0031, п. 9).
+
+		Отложенную запись публикует сервер Telegram, и у вышедшего поста
+		**новый** номер — поэтому его приходится опознавать. Совпадение
+		считается доказанным только при точном равенстве текста (или
+		подписи) и дате не раньше названной. Двусмысленность — не повод
+		угадывать: два одинаковых поста дают None, и кнопки не ставятся
+		вовсе. Промах здесь хуже отсутствия кнопок — клавиатура
+		приклеилась бы к чужому посту.
+
+		Args:
+			chat_id: сообщество.
+			text: текст или подпись поста, каким мы его отправляли.
+			after: раньше этого момента пост появиться не мог.
+			limit: сколько свежих записей просмотреть.
+
+		Returns:
+			Номер поста или None (не нашёлся либо нашёлся не один).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Флуд-лимит — дозор отступает и повторит.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			history = await client.get_messages(entity, limit=limit)
+		found: list[int] = []
+		for message in history:
+			date = getattr(message, "date", None)
+			if date is None or date < after:
+				continue
+			if (getattr(message, "message", None) or "") != text:
+				continue
+			found.append(int(message.id))
+		if len(found) == 1:
+			return found[0]
+		if found:
+			logger.warning(
+				"В чате %s нашлось %d постов с одинаковым текстом — кнопки не ставлю.",
+				chat_id,
+				len(found),
+			)
+		return None
+
 	async def service_messages_page(
 		self, chat_id: str, offset_id: int, limit: int
 	) -> ServiceMessagesPage:

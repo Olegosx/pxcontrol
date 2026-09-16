@@ -13,7 +13,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -349,6 +349,14 @@ class _PostPort(Protocol):
 	) -> None: ...
 
 
+#: Крючок «обещанные кнопки едут за отложкой»: сообщество, номер записи,
+#: новое время и новый текст (None — текст не менялся).
+MarkupMoved = Callable[[int, int, datetime, str | None], Awaitable[None]]
+
+#: Крючок «отложек больше нет»: сообщество и номера исчезнувших записей.
+MarkupGone = Callable[[int, list[int]], Awaitable[None]]
+
+
 @dataclass(frozen=True)
 class PublishPlan:
 	"""Подготовленная публикация: проверки и чтения БД уже выполнены.
@@ -383,10 +391,15 @@ class PublishOutcome:
 			причины для человека. Пост при этом опубликован: это исход,
 			а не сбой поста (ADR-0031, п. 12), и очередь сохраняет
 			обещание, чтобы попытку можно было повторить.
+		markup_pending: кнопки обещаны посту, которого ещё нет в канале
+			(отложенная запись): применить их можно только после выхода,
+			поэтому очередь сохраняет обещание, а дозор применит его сам
+			(ADR-0031, п. 9).
 	"""
 
 	message_id: int | None = None
 	markup_error: str | None = None
+	markup_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -517,14 +530,24 @@ class PostsService:
 		gateway: _PostPort,
 		ffmpeg_path: FfmpegSource = "ffmpeg",
 		settings: SettingsService | None = None,
+		markup_moved: MarkupMoved | None = None,
+		markup_gone: MarkupGone | None = None,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
 		экземпляр поверх той же БД (для тестов это эквивалентно:
-		настройки каналов не кэшируются)."""
+		настройки каналов не кэшируются).
+
+		``markup_moved`` и ``markup_gone`` — крючки судьбы обещанных
+		кнопок (ADR-0031): правка отложенной записи уводит обещание
+		за собой, удаление — снимает. Связка крючками, а не ссылкой
+		на сервис: посты не должны знать про хранилище клавиатур,
+		а движок и так собирает такие связи (как у сообществ)."""
 		self._db = db
 		self._gateway = gateway
 		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер пути (настройки)
 		self._settings = settings if settings is not None else SettingsService(db)
+		self._markup_moved = markup_moved
+		self._markup_gone = markup_gone
 
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
@@ -622,7 +645,10 @@ class PostsService:
 			if blocker is not None:
 				raise PostError(blocker)
 		route = choose_route(
-			caps, with_markup=bool(draft.markup), media_over_bot_limit=over_bot_limit
+			caps,
+			with_markup=bool(draft.markup),
+			media_over_bot_limit=over_bot_limit,
+			scheduled=draft.when is not None,
 		)
 		self._check_transport(route, draft, community.default_tg_account_id)
 		media_path = draft.media_path
@@ -657,6 +683,7 @@ class PostsService:
 			UserbotUnavailableError: Userbot отвалился по дороге.
 		"""
 		draft = plan.draft
+		markup_pending = False
 		if plan.route is PublishRoute.BOT:
 			# бот отправляет сам — кнопки уходят вместе с постом
 			message_id = await self._publish_bot(plan.community, draft, plan.media_path)
@@ -665,7 +692,14 @@ class PostsService:
 			message_id = await self._publish_userbot(
 				plan.community, draft, plan.media_path, on_progress
 			)
-			markup_error = await self._apply_markup(plan, message_id)
+			markup_error = None
+			if plan.route is PublishRoute.USERBOT_MARKUP and draft.when is not None:
+				# поста ещё нет в канале: его опубликует сервер Telegram,
+				# и кнопки применит дозор после выхода (ADR-0031, п. 9)
+				markup_pending = bool(draft.markup)
+			else:
+				markup_pending = False
+				markup_error = await self._apply_markup(plan, message_id)
 		logger.info(
 			"Пост (%s) → «%s» (%s, %s).",
 			draft.media_kind if draft.media_path else "текст",
@@ -673,7 +707,9 @@ class PostsService:
 			plan.route,
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
 		)
-		return PublishOutcome(message_id=message_id, markup_error=markup_error)
+		return PublishOutcome(
+			message_id=message_id, markup_error=markup_error, markup_pending=markup_pending
+		)
 
 	async def _apply_markup(self, plan: PublishPlan, message_id: int | None) -> str | None:
 		"""Дорисовывает кнопки к посту публикателя (маршрут Р2, ADR-0031).
@@ -1533,6 +1569,10 @@ class PostsService:
 				draft.ref.account_id, community.tg_chat_id, draft.ref.message_id, text, when
 			)
 		)
+		# обещанные кнопки едут за постом: дозор опознаёт вышедший пост
+		# по тексту и времени (ADR-0031, п. 9), и старые ему не годятся
+		if self._markup_moved is not None:
+			await self._markup_moved(draft.ref.community_id, draft.ref.message_id, when, text)
 
 	async def send_scheduled_now(self, ref: ScheduledRef) -> None:
 		"""Публикует отложенную запись немедленно (она уходит в ленту).
@@ -1546,6 +1586,10 @@ class PostsService:
 		await self._scheduled_call(
 			self._gateway.send_scheduled_now(ref.account_id, community.tg_chat_id, [ref.message_id])
 		)
+		# пост выходит сейчас — обещание должно стать «пора» (у вышедшего
+		# поста будет новый номер, дозор опознает его по тексту)
+		if self._markup_moved is not None:
+			await self._markup_moved(ref.community_id, ref.message_id, datetime.now(UTC), None)
 
 	async def delete_scheduled(self, ref: ScheduledRef) -> None:
 		"""Удаляет отложенную запись, не публикуя.
@@ -1559,6 +1603,9 @@ class PostsService:
 		await self._scheduled_call(
 			self._gateway.delete_scheduled(ref.account_id, community.tg_chat_id, [ref.message_id])
 		)
+		# записи больше нет — обещанным кнопкам некуда ехать
+		if self._markup_gone is not None:
+			await self._markup_gone(ref.community_id, [ref.message_id])
 
 	@staticmethod
 	async def _scheduled_call(call: Awaitable[_T]) -> _T:

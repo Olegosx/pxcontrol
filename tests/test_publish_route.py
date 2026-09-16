@@ -82,10 +82,25 @@ def test_buttons_need_bot() -> None:
 	assert "Кнопки ставит только бот" in (_blocker(USERBOT_ONLY) or "")
 
 
-def test_scheduled_buttons_refused_for_now() -> None:
-	"""Кнопки у отложенных постов — следующий этап, и об этом сказано прямо."""
-	reason = _blocker(scheduled=True) or ""
-	assert "отложенных" in reason and "пока" in reason
+def test_scheduled_buttons_go_by_markup_edit() -> None:
+	"""Отложенный пост с кнопками: отправит публикатор, бот дорисует.
+
+	Бот отложенных записей создавать не умеет, поэтому простейшего
+	маршрута здесь нет — остаётся дорисовка после выхода поста.
+	"""
+	assert _blocker(scheduled=True) is None
+	assert (
+		choose_route(BOTH, with_markup=True, media_over_bot_limit=False, scheduled=True)
+		is PublishRoute.USERBOT_MARKUP
+	)
+	# без права изменять сообщения дорисовывать некому — отказ с причиной
+	assert "нет права изменять сообщения" in (_blocker(NO_EDIT, scheduled=True) or "")
+
+
+def test_scheduled_buttons_impossible_in_group() -> None:
+	"""В группе бот чужое не правит, а отложку создать не может."""
+	reason = _blocker(kind=CommunityKind.GROUP, scheduled=True) or ""
+	assert "В группе" in reason and "отложенные" in reason
 
 
 def test_group_with_big_file_has_no_route() -> None:

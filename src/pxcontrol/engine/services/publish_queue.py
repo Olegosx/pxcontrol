@@ -850,27 +850,35 @@ class PublishQueue:
 			await session.commit()
 
 	async def _keep_markup_promise(self, item: _PublishJob, outcome: PublishOutcome) -> None:
-		"""Сохраняет обещание кнопок у вышедшего поста и метит карточку.
+		"""Сохраняет обещание кнопок: применить их сейчас не вышло или рано.
 
-		Пост опубликован, а клавиатуру Telegram не принял (у бота отняли
-		право, его приостановили, пропала связь). Обещание остаётся
-		в базе вместе с номером вышедшего поста — по нему попытку можно
-		будет повторить; человек видит причину пометкой на карточке.
+		Два случая, и оба кончаются записью в базе (ADR-0031):
+
+		Пост **вышел**, а клавиатуру Telegram не принял (у бота отняли
+		право, его приостановили, пропала связь): обещание помнит номер
+		вышедшего поста, человек видит причину пометкой на карточке.
+
+		Пост **отложен** — его ещё нет в канале, кнопки применит дозор
+		после публикации: обещание помнит номер отложенной записи и время,
+		а пометки нет — ничего плохого не случилось.
 		"""
 		item.note = outcome.markup_error
 		markup = item.draft.markup
 		if self._markups is None or markup is None:
 			return
+		pending = outcome.markup_pending
 		try:
 			await self._markups.promise(
 				item.draft.community_id,
 				markup,
 				match_text=item.draft.text,
-				message_id=outcome.message_id,
+				when=item.draft.when if pending else None,
+				scheduled_message_id=outcome.message_id if pending else None,
+				message_id=None if pending else outcome.message_id,
 			)
-		except Exception:  # noqa: BLE001 — пост уже вышел, хоронить его нельзя
+		except Exception:  # noqa: BLE001 — пост уже ушёл, хоронить его нельзя
 			logger.exception(
-				"Пост id=%s вышел без кнопок, и обещание не сохранилось — повтор невозможен.",
+				"Пост id=%s ушёл, а обещание кнопок не сохранилось — их некому поставить.",
 				outcome.message_id,
 			)
 
@@ -971,11 +979,12 @@ class PublishQueue:
 				outcome = await task
 			finally:
 				self._transmit = None
-			# кнопки обещали, но поставить не удалось: пост уже в канале,
-			# поэтому это пометка на карточке и сохранённое обещание,
-			# а не ошибка элемента — иначе повтор опубликовал бы пост
-			# второй раз (ADR-0031, п. 12)
-			if outcome.markup_error is not None:
+			# кнопки могут остаться «на потом» в двух случаях: пост уже
+			# в канале, а правка не прошла (пометка на карточке — ошибкой
+			# это быть не может, повтор опубликовал бы пост второй раз),
+			# либо пост отложен и его ещё нет (кнопки применит дозор
+			# после выхода). Оба — обещание в базе (ADR-0031, п. 9, 12)
+			if outcome.markup_error is not None or outcome.markup_pending:
 				await self._keep_markup_promise(item, outcome)
 			# отправка состоялась — дальше отменять нечего: пост уже
 			# в канале. Раскладка файлов идёт после того, как задача

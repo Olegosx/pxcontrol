@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from pxcontrol.config import Settings
 from pxcontrol.engine.db.database import Database
@@ -62,11 +63,20 @@ class Engine:
 			on_members_report=self.community_stats.record_members_report,
 		)
 		# обещанные клавиатуры (ADR-0031): хранилище кнопок, которые ещё
-		# нельзя применить — их ставит бот и только после публикации
-		self.markups = MarkupsService(self.db)
+		# нельзя применить, и дозор, который ставит их после выхода поста
+		self.markups = MarkupsService(self.db, self.gateway)
 		# путь к ffmpeg — провайдером: настройка из БД (правится в UI),
 		# пусто — бутстрап из .env; смена подхватывается без перезапуска
-		self.posts = PostsService(self.db, self.gateway, self._ffmpeg_path, self.settings)
+		# крючки ведут обещанные кнопки за судьбой отложенной записи
+		# (ADR-0031): правка уводит обещание за собой, удаление снимает
+		self.posts = PostsService(
+			self.db,
+			self.gateway,
+			self._ffmpeg_path,
+			self.settings,
+			markup_moved=self._markup_moved,
+			markup_gone=self.markups.drop_scheduled_quiet,
+		)
 		# очереди нужно хранилище обещаний: пост может выйти, а кнопки
 		# не поставиться — тогда обещание ждёт повтора (ADR-0031)
 		self.publish_queue = PublishQueue(self.posts, self.db, self.settings, self.markups)
@@ -125,6 +135,12 @@ class Engine:
 		await self.community_stats.drop(community_id)
 		await self.communities.delete_community(community_id)
 
+	async def _markup_moved(
+		self, community_id: int, message_id: int, when: datetime, text: str | None
+	) -> None:
+		"""Ведёт обещанные кнопки за правкой отложенной записи (ADR-0031)."""
+		await self.markups.retarget(community_id, message_id, when=when, match_text=text)
+
 	def _ffmpeg_path(self) -> str:
 		"""Действующий путь к ffmpeg: настройка из БД или бутстрап .env."""
 		return self.settings.cached(FFMPEG_PATH) or self._settings.ffmpeg_path
@@ -156,6 +172,9 @@ class Engine:
 		self.community_stats.start_polling()
 		# сброс активности — периодическая задача; буфер шлюза уже полнится
 		self.activity.start()
+		# дозор кнопок (ADR-0031): ставит обещанное отложенным постам
+		# после их выхода; идёт по дорожкам с фоновым приоритетом
+		self.markups.start_polling()
 		logger.info("Движок запущен.")
 
 	async def stop(self) -> None:
@@ -170,6 +189,7 @@ class Engine:
 		first_error: BaseException | None = None
 		steps = (
 			self.community_stats.shutdown,
+			self.markups.shutdown,
 			self.maintenance.shutdown,
 			self.publish_queue.shutdown,
 			self.video_queue.shutdown,
