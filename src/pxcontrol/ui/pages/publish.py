@@ -15,10 +15,7 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -39,9 +36,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.captions import (
-	CaptionLine,
 	TemplateDto,
-	TitleParseRules,
 	title_from_filename,
 )
 from pxcontrol.engine.services.communities import CommunityDto
@@ -55,21 +50,17 @@ from pxcontrol.engine.services.publish_queue import (
 	QueueItemDto,
 )
 from pxcontrol.engine.services.publish_route import (
-	PublishCapabilities,
 	PublishRoute,
 	choose_route,
 	markup_blocker,
 )
 from pxcontrol.engine.services.settings import (
-	PUBLISH_LAST_COMMUNITY_ID,
 	PUBLISH_TIMES,
-	TITLE_PARSE_RULES,
 )
-from pxcontrol.engine.services.video import VideoDirs, VideoFile
+from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityKind,
-	ForumTopicInfo,
 	MediaKind,
 	UserbotRole,
 	limit_mb,
@@ -81,11 +72,8 @@ from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
 from pxcontrol.ui.pages.common import (
 	CharCounter,
 	CollapsibleCard,
-	DtoComboBox,
 	WhenRow,
 	caption_placeholder,
-	closed_topics_hint,
-	community_combo_label,
 	error_reporter,
 	exec_dialog,
 	kind_file_filter,
@@ -93,19 +81,12 @@ from pxcontrol.ui.pages.common import (
 	kind_segments,
 	noop,
 	page_layout,
-	pick_dir,
 	pick_file,
 	plural,
 	rename_row,
-	show_info,
-	show_success,
-	show_warning,
-	topic_label,
-	topic_row,
-	visible_topics,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
-from pxcontrol.ui.pages.publish_batch import PublishBatchDialog
+from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
 	queue_leading,
@@ -117,26 +98,6 @@ from pxcontrol.ui.pages.queue_panel import QueuePanel
 #: Сколько карточек очереди показывать на странице (хвост ждущих —
 #: в сводке числом; всё целиком — кнопка «Вся очередь…», ADR-0016).
 _QUEUE_MAX_CARDS = 20
-
-
-@dataclass
-class _BatchSetup:
-	"""Собираемые данные пакета отправки (ADR-0015).
-
-	Заполняется по шагам цепочки колбэков (папка → сканирование →
-	общий шаблон подписи → времена канала → лимит файла), чтобы
-	не таскать длинный список аргументов через каждую функцию.
-	"""
-
-	community: CommunityDto
-	root: str
-	files: list[VideoFile] = field(default_factory=list)
-	caption_lines: list[CaptionLine] | None = None
-	filename_template_id: int | None = None
-	used_values: dict[int, list[str]] = field(default_factory=dict)
-	times: list[str] = field(default_factory=list)
-	busy: list[datetime] = field(default_factory=list)  # отложки канала (UTC)
-	title_rules: TitleParseRules = field(default_factory=TitleParseRules)
 
 
 def _actor_note(community: CommunityDto) -> str:
@@ -162,7 +123,6 @@ class PublishPage(ScrollArea):
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		# канал прошлой публикации: предвыбор после загрузки списка
-		self._restore_community_id: int | None = None
 		self._kind = MediaKind.NONE
 		# пределы длины текста выбранного канала (None — канал не выбран
 		# или ответ движка ещё не пришёл: счётчик покажет базовый предел)
@@ -170,13 +130,7 @@ class PublishPage(ScrollArea):
 		# аватары сообществ из кэша статистики — для шапок карточек очереди
 		self._avatars: dict[int, str | None] = {}
 		self._build()
-		run_in_engine(
-			worker,
-			worker.engine.settings.get(PUBLISH_LAST_COMMUNITY_ID),
-			self,
-			self._on_last_community_loaded,
-			noop,
-		)
+		self._community.restore_last()
 
 	# --- сборка страницы ---------------------------------------------------------
 
@@ -187,12 +141,14 @@ class PublishPage(ScrollArea):
 		hint.setWordWrap(True)
 		layout.addWidget(hint)
 		self._build_kind_segments(layout)
-		self._community_combo: DtoComboBox[CommunityDto] = DtoComboBox(self)
-		self._community_combo.currentIndexChanged.connect(self._on_community_changed)
-		layout.addWidget(self._community_combo)
+		self._community = CommunityChoice(self, self._worker)
+		self._community.chosen.connect(self._on_community_changed)
+		layout.addWidget(self._community)
 		self._caps_hint = CaptionLabel("", self)
 		layout.addWidget(self._caps_hint)
-		self._build_topic_row(layout)
+		self._topics = TopicChoice(
+			self, layout, self._worker, self._community, on_failed=self._on_topics_failed
+		)
 		self._text = TextEdit(self)
 		self._text.setPlaceholderText(caption_placeholder(True))
 		self._text.setMinimumHeight(120)
@@ -206,19 +162,6 @@ class PublishPage(ScrollArea):
 		layout.addStretch()
 		# после сборки всех полей — сегмент по умолчанию (сигнал трогает форму)
 		self._segments.setCurrentItem(MediaKind.NONE.value)
-
-	def _build_topic_row(self, layout: QVBoxLayout) -> None:
-		"""Ряд выбора темы форума (виден только форумам с userbot)."""
-		row = topic_row(
-			self,
-			layout,
-			tooltip=(
-				"Тема, в которую уйдёт пост; «Общая лента» — General. "
-				"Список читается из Telegram при выборе сообщества."
-			),
-		)
-		self._topic_box, self._topic_combo, self._topic_hint = row.box, row.combo, row.hint
-		self._topic_box.setVisible(False)
 
 	def _build_kind_segments(self, layout: QVBoxLayout) -> None:
 		"""Сегментный переключатель типа контента."""
@@ -351,13 +294,6 @@ class PublishPage(ScrollArea):
 		self._send_button = PrimaryPushButton(FluentIcon.SEND, "Отправить", self)
 		self._send_button.clicked.connect(self._on_send)
 		row.addWidget(self._send_button)
-		batch_button = PushButton(FluentIcon.FOLDER, "Пакет из папки…", self)
-		batch_button.setToolTip(
-			"Собрать черновики постов из всех видео готовой папки: подписи "
-			"по общему шаблону, раскладка времени, правка построчно (ADR-0015)"
-		)
-		batch_button.clicked.connect(self._on_batch)
-		row.addWidget(batch_button)
 		view_button = PushButton("Вся очередь…", self)
 		view_button.setToolTip(
 			"Экран «Очередь»: все элементы очереди отправки с сортировкой "
@@ -429,14 +365,8 @@ class PublishPage(ScrollArea):
 		self._queue.refresh_leading()
 
 	def _reload_communities(self) -> None:
-		"""Просит свежий список каналов и аватары для шапок очереди."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.list_communities(),
-			self,
-			self._show_communities,
-			self._show_error,
-		)
+		"""Просит свежий список сообществ и аватары для шапок очереди."""
+		self._community.reload(self._show_error)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.community_stats.snapshot(),
@@ -446,62 +376,15 @@ class PublishPage(ScrollArea):
 			noop,
 		)
 
-	def _show_communities(self, communities: list[CommunityDto]) -> None:
-		"""Обновляет список каналов, сохраняя выбор по id канала.
-
-		Выключенные каналы (настройка ``enabled``) в списке не показываются —
-		фильтр презентационный, само правило держит движок (PostsService
-		откажет выключенному каналу).
-		"""
-		self._community_combo.set_items(
-			[community for community in communities if community.enabled],
-			label=community_combo_label,
-			key=lambda community: community.id,
-		)
-		# успешное восстановление само запускает обработчик смены (сигнал
-		# select); явный вызов нужен только когда восстанавливать нечего.
-		# Неудача на свежем списке означает устаревший id (канал выключен
-		# или удалён) — забываем его, иначе предвыбор «выстрелил» бы позже,
-		# при следующей загрузке списка, внезапной сменой канала
-		if not self._apply_community_restore():
-			self._restore_community_id = None
-			self._on_community_changed()
-
 	def select_community(self, community_id: int | None) -> None:
-		"""Предвыбирает сообщество (переход с дашборда, канал прошлой публикации).
-
-		Применяется сразу, если список каналов уже загружен, иначе —
-		при его загрузке (тот же механизм, что у канала прошлой
-		публикации). Выключенного или удалённого сообщества в списке нет —
-		предвыбор тогда молча снимается.
-		"""
-		self._restore_community_id = community_id
-		self._apply_community_restore()
-
-	def _on_last_community_loaded(self, community_id: int | None) -> None:
-		"""Пришёл канал прошлой публикации — применяем, если список готов."""
-		self.select_community(community_id)
-
-	def _apply_community_restore(self) -> bool:
-		"""Предвыбирает канал прошлой публикации (один раз).
-
-		Returns:
-			True — выбор применён; обработчик смены уже запущен сигналом
-			``select`` (см. контракт DtoComboBox.select), звать его не нужно.
-		"""
-		wanted = self._restore_community_id
-		if wanted is None:
-			return False
-		if self._community_combo.select(lambda community: community.id == wanted):
-			self._restore_community_id = None
-			return True
-		return False
+		"""Предвыбирает сообщество (переход с дашборда, прошлая публикация)."""
+		self._community.want(community_id)
 
 	def _community_or_none(self) -> CommunityDto | None:
-		"""Выбранный канал без показа ошибок (для адаптации формы)."""
-		return self._community_combo.selected()
+		"""Выбранное сообщество без показа ошибок (для адаптации формы)."""
+		return self._community.current()
 
-	def _on_community_changed(self, _index: int = 0) -> None:
+	def _on_community_changed(self) -> None:
 		"""Адаптирует форму под возможности и времена выбранного канала."""
 		community = self._community_or_none()
 		if community is None:
@@ -526,7 +409,7 @@ class PublishPage(ScrollArea):
 			noop,
 		)
 		caps = community.capabilities
-		self._update_topic_row(community, caps)
+		self._topics.update_for(community)
 		if caps.userbot:
 			# лимит зависит от Premium userbot — узнаём у движка
 			self._caps_hint.setText(
@@ -576,67 +459,16 @@ class PublishPage(ScrollArea):
 		limits = limits_for_route(self._limits, self._current_route())
 		self._counter.set_limit(limits.caption if with_media else limits.text)
 
-	def _update_topic_row(self, community: CommunityDto, caps: PublishCapabilities) -> None:
-		"""Показывает и наполняет выбор темы форума (ADR-0021).
-
-		Темы читает только userbot (у Bot API метода нет): форум лишь
-		с ботом публикует в общую ленту — ряд темы скрыт, о причине
-		скажет подсказка возможностей.
-		"""
-		if not community.forum or not caps.userbot:
-			self._topic_box.setVisible(False)
-			self._topic_combo.set_items([], label=lambda topic: topic.title)
-			return
-		self._topic_box.setVisible(True)
-		self._topic_hint.setText("")
-		self._topic_combo.set_items([], label=lambda topic: topic.title)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.posts.list_topics(community.id),
-			self,
-			partial(self._show_topics, community),
-			partial(self._on_topics_failed, community.id),
-		)
-
-	def _show_topics(self, community: CommunityDto, topics: list[ForumTopicInfo]) -> None:
-		"""Наполняет список тем с учётом роли публикатора (ADR-0022).
-
-		General не дублируем — он «Общая лента». В закрытую тему пишет
-		только админ: участнику такие темы недоступны для выбора
-		(скрываются, причина — в подписи ряда), админу — помечаются.
-		"""
-		if self._is_stale(community.id):
-			return
-		shown, closed = visible_topics(topics, community.default_role)
-		if closed:
-			self._topic_hint.setText(closed_topics_hint(closed))
-		self._topic_combo.set_items(shown, label=topic_label, key=lambda topic: topic.id)
-
-	def _on_topics_failed(self, community_id: int, message: str) -> None:
-		"""Темы не прочитались — публикуем в общую ленту, честно предупредив."""
-		if self._is_stale(community_id):
-			return
-		self._topic_box.setVisible(False)
+	def _on_topics_failed(self, message: str) -> None:
+		"""Темы не прочитались — пост уйдёт в общую ленту, честно предупредив."""
 		self._caps_hint.setText(
 			f"{self._caps_hint.text()} Темы форума не загрузились ({message}) — "
 			"пост уйдёт в общую ленту."
 		)
 
-	def _selected_topic_id(self) -> int | None:
-		"""Тема из видимого ряда; скрыт или «Общая лента» — None."""
-		if not self._topic_box.isVisibleTo(self):
-			return None
-		topic = self._topic_combo.selected()
-		return topic.id if topic is not None else None
-
 	def _is_stale(self, community_id: int) -> bool:
-		"""Пришёл ли ответ движка для уже переключённого канала.
-
-		Пока движок занят (очередь отправки в том же цикле, ADR-0016),
-		ответы задерживаются: без проверки подсказка и времена канала A
-		перезаписали бы уже показанные данные канала B.
-		"""
-		return not self._community_combo.is_current_id(community_id)
+		"""Пришёл ли ответ движка для уже переключённого сообщества."""
+		return self._community.is_stale(community_id)
 
 	def _apply_times(self, community_id: int, times: list[str]) -> None:
 		"""Подставляет времена канала, если он всё ещё выбран."""
@@ -787,250 +619,6 @@ class PublishPage(ScrollArea):
 		self._rename_check.setChecked(True)
 		self._rename_box.show()
 
-	# --- пакет из папки (ADR-0015) --------------------------------------------------
-
-	def _on_batch(self) -> None:
-		"""Пакетная отправка: канал → папка → сканирование → черновики."""
-		community = self._current_community()
-		if community is None:
-			return
-		caps = community.capabilities
-		if not (caps.userbot or caps.bot):
-			self._show_error("Нет способа публикации — проверьте доступы на странице сообщества.")
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.video.processed_dir_for_community(community.id),
-			self,
-			partial(self._pick_batch_dir, community),
-			self._show_error,
-		)
-
-	def _pick_batch_dir(self, community: CommunityDto, start_dir: str) -> None:
-		"""Выбор готовой папки (по умолчанию — папка результатов канала)."""
-		root = pick_dir(self, "Готовая папка с видео", start_dir=start_dir)
-		if root:
-			self._scan_batch_root(community, root)
-
-	def _scan_batch_root(self, community: CommunityDto, root: str) -> None:
-		"""Сканирует готовую папку и продолжает цепочку пакета."""
-		setup = _BatchSetup(community, root)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.video.scan_ready(root),
-			self,
-			partial(self._on_batch_scanned, setup),
-			self._show_error,
-		)
-
-	def start_batch_with_folder(self, root: str, community_id: int) -> None:
-		"""Пакет из папки, выбранной на другой странице («Видео»).
-
-		Вход с чужой страницы: канал приходит её id (0 — не выбран)
-		и предвыбирается в списке каналов этой страницы.
-		"""
-		community = self._batch_community(community_id)
-		if community is not None:
-			self._scan_batch_root(community, root)
-
-	def start_batch_with_files(self, paths: list[str], community_id: int) -> None:
-		"""Пакет из готового списка файлов (выбор на странице «Видео»).
-
-		Сборку списка (размеры, пропуск исчезнувших, порядок) делает
-		движок — источник пакета держит он (ADR-0015), страница только
-		показывает результат.
-		"""
-		community = self._batch_community(community_id)
-		if community is None:
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.video.ready_from_paths(paths),
-			self,
-			partial(self._on_batch_files_ready, community),
-			self._show_error,
-		)
-
-	def _on_batch_files_ready(self, community: CommunityDto, files: list[VideoFile]) -> None:
-		"""Список собран движком — дальше обычная цепочка пакета."""
-		if not files:
-			self._show_error("Файлы не найдены на диске — публиковать нечего.")
-			return
-		# файлы с «Видео» могут лежать в разных подпапках результатов:
-		# подписью идёт общий корень, а не папка первого файла
-		root = os.path.commonpath([str(Path(f.path).parent) for f in files])
-		self._on_batch_scanned(_BatchSetup(community, root), files)
-
-	def _batch_community(self, community_id: int) -> CommunityDto | None:
-		"""Канал пакета по id с другой страницы (с предвыбором в списке).
-
-		Страница «Видео» показывает все каналы, а этот список — только
-		включённые: неудачный предвыбор означает, что канал недоступен
-		для публикации, и пакет отменяется. Иначе выбор молча остался бы
-		на прежнем канале и пакет ушёл бы не туда.
-		"""
-		if community_id and not self._community_combo.select(
-			lambda community: community.id == community_id
-		):
-			self._show_error(
-				"Канал недоступен для публикации (выключен или список каналов "
-				"ещё загружается) — проверьте настройки канала и повторите."
-			)
-			return None
-		community = self._community_or_none()
-		if community is None:
-			self._show_error(
-				"Канал не выбран (или список каналов ещё загружается) — выберите канал и повторите."
-			)
-		return community
-
-	def _on_batch_scanned(self, setup: _BatchSetup, files: list[VideoFile]) -> None:
-		"""Файлы найдены — общий шаблон подписи (если шаблоны настроены)."""
-		if not files:
-			show_info(
-				self,
-				"Видео не найдено",
-				f"В папке нет видеофайлов (включая вложенные): {setup.root}",
-			)
-			return
-		setup.files = files
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.list_templates(setup.community.id),
-			self,
-			partial(self._batch_caption_pass, setup),
-			self._show_error,
-		)
-
-	def _batch_caption_pass(self, setup: _BatchSetup, templates: list[TemplateDto]) -> None:
-		"""Один проход диалога подписи: шаблон и общие значения на весь пакет.
-
-		Название у каждой строки будет своё (из имени файла), поэтому поле
-		названия в диалоге пустое. Отмена диалога — пакет без подписей,
-		а не отмена пакета: подписи правятся построчно дальше.
-		"""
-		usable = [template for template in templates if template.fields]
-		if usable:
-			dialog = CaptionDialog(usable, "", self.window())
-			if exec_dialog(dialog):
-				setup.caption_lines = dialog.lines()
-				setup.used_values = dialog.used_values()
-				template = next(t for t in usable if t.id == dialog.template_id())
-				if template.filename_pattern:
-					setup.filename_template_id = template.id
-				self._record_template_usage(template.id, setup.used_values)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get_for(PUBLISH_TIMES, setup.community.id),
-			self,
-			partial(self._batch_times_loaded, setup),
-			self._show_error,
-		)
-
-	def _batch_times_loaded(self, setup: _BatchSetup, times: list[str]) -> None:
-		"""Времена канала получены — читаем существующие отложки.
-
-		Раскладка пропускает занятые слоты, поэтому диалогу нужны
-		времена уже созданных в Telegram отложенных записей канала.
-		"""
-		setup.times = times
-		run_in_engine(
-			self._worker,
-			self._worker.engine.posts.scheduled_times(setup.community.id),
-			self,
-			partial(self._batch_scheduled_loaded, setup),
-			partial(self._batch_scheduled_failed, setup),
-		)
-
-	def _batch_scheduled_failed(self, setup: _BatchSetup, message: str) -> None:
-		"""Отложки не прочитались — пакет продолжается без их учёта.
-
-		Проверка занятых слотов вспомогательная: отказ userbot не должен
-		блокировать пакет, но о слепой раскладке честно предупреждаем.
-		"""
-		show_warning(
-			self,
-			"Отложки не прочитаны",
-			f"Раскладка не учтёт существующие отложки: {message}",
-		)
-		self._batch_scheduled_loaded(setup, [])
-
-	def _batch_scheduled_loaded(self, setup: _BatchSetup, scheduled: list[datetime]) -> None:
-		"""Отложки получены — заготовка правил разбора имени файла."""
-		setup.busy = scheduled
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get_for(TITLE_PARSE_RULES, setup.community.id),
-			self,
-			partial(self._batch_rules_loaded, setup),
-			self._show_error,
-		)
-
-	def _batch_rules_loaded(self, setup: _BatchSetup, tokens: list[str]) -> None:
-		"""Правила разбора получены — осталась граница размера файла."""
-		setup.title_rules = TitleParseRules.from_tokens(tokens)
-		caps = setup.community.capabilities
-		if caps.userbot:
-			run_in_engine(
-				self._worker,
-				self._worker.engine.posts.userbot_limit_bytes(setup.community.id),
-				self,
-				partial(self._open_batch_dialog, setup, True),
-				self._show_error,
-			)
-		else:
-			# запасной бот-путь: лимит 50 МБ и только «сейчас» (ADR-0011)
-			self._open_batch_dialog(setup, False, BOT_MAX_FILE_BYTES)
-
-	def _open_batch_dialog(
-		self, setup: _BatchSetup, schedule_allowed: bool, limit_bytes: int
-	) -> None:
-		"""Показывает черновики пакета; принятые ставит в очередь отправки."""
-		dialog = PublishBatchDialog(
-			self._worker,
-			setup.community,
-			setup.root,
-			setup.files,
-			self.window(),
-			caption_lines=setup.caption_lines,
-			filename_template_id=setup.filename_template_id,
-			used_values=setup.used_values,
-			community_times=setup.times,
-			limit_bytes=limit_bytes,
-			# предел подписи канала: у Premium-публикатора он выше базового
-			caption_limit=(
-				self._limits.caption
-				if self._limits is not None
-				else text_length_limit(premium=False, with_media=True)
-			),
-			schedule_allowed=schedule_allowed,
-			title_rules=setup.title_rules,
-			# отложки приходят из Telegram в UTC, раскладка живёт
-			# в местном наивном времени — как ввод пользователя
-			busy=[moment.astimezone().replace(tzinfo=None) for moment in setup.busy],
-		)
-		if not exec_dialog(dialog):
-			return
-		try:
-			drafts = dialog.drafts(setup.community.id, self._selected_topic_id())
-		except ValueError as exc:  # страховка: validate диалога это уже проверил
-			self._show_error(str(exc))
-			return
-		if not drafts:
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.publish_queue.enqueue_many(drafts),
-			self,
-			partial(self._on_batch_enqueued, len(drafts)),
-			self._show_error,
-		)
-
-	def _on_batch_enqueued(self, count: int, _ids: list[int]) -> None:
-		"""Пакет принят в очередь — карточки видны сразу, не по таймеру."""
-		show_success(self, "Пакет в очереди", f"Постов: {count}")
-		self._queue.poll()
-
 	# --- отправка через очередь ---------------------------------------------------
 
 	def _on_send(self) -> None:
@@ -1050,13 +638,7 @@ class PublishPage(ScrollArea):
 			self._on_enqueued,
 			self._show_error,
 		)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.set(PUBLISH_LAST_COMMUNITY_ID, community.id),
-			self,
-			noop,
-			noop,
-		)
+		self._community.remember_last()
 
 	def _draft(self, community_id: int) -> PostDraft:
 		"""Собирает черновик публикации из полей формы.
@@ -1079,7 +661,7 @@ class PublishPage(ScrollArea):
 			media_kind=MediaKind.NONE if is_text else self._kind,
 			when=self._when_row.when(),
 			rename_to=self._rename_to(),
-			topic_id=self._selected_topic_id(),
+			topic_id=self._topics.topic_id(),
 			markup=self._markup.markup(),
 			markup_first=self._markup.markup_first(),
 		)

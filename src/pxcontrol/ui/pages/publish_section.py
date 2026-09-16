@@ -8,77 +8,29 @@
 идут в порядке самого пути.
 
 Словарь самих стадий (порядок, подписи, подсказки, значки) живёт
-рядом — в :mod:`publish_stages`, отдельным модулем без виджетов.
-Здесь — две вещи:
+рядом — в :mod:`publish_stages`, общая рамка экрана — в :mod:`stage_page`.
+Здесь — тонкие экраны над готовыми панелями показа и **раздел**
+(:class:`PublishSection`): владелец экранов и точка переходов. Дашборд
+сообществ, страница сообщества, «Видео» и форма поста просят показать
+стадию с нужным фильтром, а устройство раздела не знают.
 
-- **экран стадии** (:class:`StagePage`) — общая рамка: заголовок,
-  строка-подсказка и правило жизни «экран видно — экран работает,
-  скрыли — затих». Без этого правила пять экранов раздела опрашивали
-  бы движок и Telegram разом;
-- **раздел** (:class:`PublishSection`) — владелец экранов и точка
-  переходов: дашборд сообществ, страница сообщества и форма поста
-  просят показать стадию с нужным фильтром, а не знают устройство
-  раздела.
-
-Экраны «Пакет» (подача A2) и «Опубликовано» (A3) встанут сюда же —
-первый между формой и очередью, второй последним.
+Экран «Опубликовано» (подача A3) встанет сюда же — последним.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import QWidget
-from qfluentwidgets import CaptionLabel, ScrollArea, SubtitleLabel
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.telegram.types import MediaKind
-from pxcontrol.ui.pages.common import page_layout
 from pxcontrol.ui.pages.publish import PublishPage
+from pxcontrol.ui.pages.publish_batch_page import BatchStagePage
 from pxcontrol.ui.pages.publish_queue_view import QueueFilter, QueueView
-from pxcontrol.ui.pages.publish_stages import PublishStage, stage_hint, stage_title
+from pxcontrol.ui.pages.publish_stages import PublishStage
 from pxcontrol.ui.pages.scheduled_view import ScheduledView
-
-
-class StagePage(ScrollArea):
-	"""Экран стадии: заголовок, подсказка и правило «виден — работает».
-
-	Тело ставится наследником (:meth:`mount`), работа включается
-	и гасится по видимости (:meth:`set_active`). Правило общее, потому
-	что цена у него одна на всех: невидимый экран не должен опрашивать
-	ни движок, ни Telegram — обход отложенных на скрытом экране ловил бы
-	флуд-лимит, а он замораживает дорожку аккаунта вместе с публикацией
-	(ADR-0024).
-	"""
-
-	def __init__(self, stage: PublishStage, parent: QWidget | None = None) -> None:
-		super().__init__(parent)
-		self.setObjectName(stage.value)
-		self.stage = stage
-		self._layout = page_layout(self)
-		self._layout.addWidget(SubtitleLabel(stage_title(stage), self))
-		hint = CaptionLabel(stage_hint(stage), self)
-		hint.setWordWrap(True)
-		self._layout.addWidget(hint)
-
-	def mount(self, body: QWidget) -> None:
-		"""Ставит тело экрана под шапку (наследник зовёт это один раз)."""
-		self._layout.addWidget(body, stretch=1)
-		self._layout.addStretch()
-
-	def set_active(self, active: bool) -> None:
-		"""Экран показан или скрыт — наследник включает и гасит свою работу."""
-
-	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
-		"""Экран показан: работа включается."""
-		super().showEvent(event)
-		self.set_active(True)
-
-	def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 — API Qt
-		"""Экран скрыт: работа гаснет."""
-		super().hideEvent(event)
-		self.set_active(False)
+from pxcontrol.ui.pages.stage_page import StagePage
 
 
 class QueueStagePage(StagePage):
@@ -139,10 +91,12 @@ class PublishSection:
 		"""
 		self._switch = switch
 		self.new_post = PublishPage(worker, parent)
+		self.batch = BatchStagePage(worker, parent)
 		self.queue = QueueStagePage(worker, parent)
 		self.scheduled = ScheduledStagePage(worker, parent)
 		self._pages: dict[PublishStage, QWidget] = {
 			PublishStage.NEW_POST: self.new_post,
+			PublishStage.BATCH: self.batch,
 			PublishStage.QUEUE: self.queue,
 			PublishStage.SCHEDULED: self.scheduled,
 		}
@@ -186,10 +140,10 @@ class PublishSection:
 
 	def show_batch_files(self, paths: list[str], community_id: int) -> None:
 		"""Пакет из выбранных на «Видео» файлов (ADR-0015)."""
-		self._switch(self.new_post)
-		self.new_post.start_batch_with_files(list(paths), community_id)
+		self._switch(self.batch)
+		self.batch.start_with_files(list(paths), community_id)
 
 	def show_batch_folder(self, root: str, community_id: int) -> None:
 		"""Пакет из папки готовых видео, выбранной на «Видео» (ADR-0015)."""
-		self._switch(self.new_post)
-		self.new_post.start_batch_with_folder(root, community_id)
+		self._switch(self.batch)
+		self.batch.start_with_folder(root, community_id)

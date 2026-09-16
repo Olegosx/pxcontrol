@@ -24,6 +24,7 @@ class PublishStage(StrEnum):
 	"""
 
 	NEW_POST = "publish"
+	BATCH = "publish_batch"
 	QUEUE = "publish_queue"
 	SCHEDULED = "publish_scheduled"
 
@@ -43,6 +44,7 @@ def stage_title(stage: PublishStage) -> str:
 	"""Подпись стадии: пункт навигации и заголовок её экрана."""
 	return {
 		PublishStage.NEW_POST: "Новый пост",
+		PublishStage.BATCH: "Пакет",
 		PublishStage.QUEUE: "Очередь",
 		PublishStage.SCHEDULED: "Отложено",
 	}[stage]
@@ -62,6 +64,11 @@ def stage_hint(stage: PublishStage) -> str:
 			"Пост уходит в очередь отправки: форма освобождается сразу, "
 			"а очередь показана ниже и целиком — на экране «Очередь»."
 		),
+		PublishStage.BATCH: (
+			"Черновики постов из всех видео готовой папки: подписи по общему "
+			"шаблону, раскладка времени стратегиями, правка построчно. "
+			"Отмеченные уходят в очередь отправки одним пакетом."
+		),
 		PublishStage.QUEUE: (
 			"Посты ждут отправки в приложении — своей очереди или свободного "
 			"слота отложек. Выключите приложение — они не уйдут."
@@ -77,6 +84,7 @@ def stage_icon(stage: PublishStage) -> FluentIcon:
 	"""Значок пункта навигации для стадии."""
 	return {
 		PublishStage.NEW_POST: FluentIcon.EDIT,
+		PublishStage.BATCH: FluentIcon.FOLDER,
 		PublishStage.QUEUE: FluentIcon.ALIGNMENT,
 		PublishStage.SCHEDULED: FluentIcon.CALENDAR,
 	}[stage]

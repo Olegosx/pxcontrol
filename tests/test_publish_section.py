@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from pxcontrol.ui.pages.publish_batch_page import source_text
 from pxcontrol.ui.pages.publish_stages import (
 	SECTION_ROUTE_KEY,
 	PublishStage,
@@ -17,9 +18,14 @@ from pxcontrol.ui.pages.publish_stages import (
 
 
 def test_stage_order_is_post_path() -> None:
-	"""Порядок пунктов — порядок пути: создание → наша очередь → сервер."""
+	"""Порядок пунктов — порядок пути: создание → наша очередь → сервер.
+
+	«Пакет» — то же создание, только пачкой, поэтому он стоит сразу
+	за формой поста, а не между двумя ожиданиями.
+	"""
 	assert list(PublishStage) == [
 		PublishStage.NEW_POST,
+		PublishStage.BATCH,
 		PublishStage.QUEUE,
 		PublishStage.SCHEDULED,
 	]
@@ -55,3 +61,11 @@ def test_hints_tell_the_lists_apart() -> None:
 	assert "приложени" in stage_hint(PublishStage.QUEUE)
 	assert "Telegram" in stage_hint(PublishStage.SCHEDULED)
 	assert stage_hint(PublishStage.QUEUE) != stage_hint(PublishStage.SCHEDULED)
+
+
+def test_source_text() -> None:
+	"""Подпись источника пакета: папка и число файлов с нужным окончанием."""
+	assert source_text("", 0) == "Источник не выбран."
+	assert source_text("/videos/ready", 1) == "Папка: /videos/ready · 1 файл"
+	assert source_text("/videos/ready", 3) == "Папка: /videos/ready · 3 файла"
+	assert source_text("/videos/ready", 12) == "Папка: /videos/ready · 12 файлов"

@@ -1,12 +1,18 @@
-"""Диалог пакетной отправки: черновики постов из готовой папки (ADR-0015).
+"""Редактор пакета отправки: черновики постов из готовой папки (ADR-0015).
 
-Строка на файл: галочка, подпись (собрана по общему шаблону, правится),
-переименование (по шаблону имени, правится) и время публикации (заполнено
-раскладкой по выбранной стратегии, правится). Разворачивающийся блок
-«Правила разбора имени файла» (чистая ``parse_title`` движка) по явной
-кнопке пересобирает подписи и подсказки имён из разобранных названий.
-«В очередь» отдаёт список черновиков ``PostDraft`` — дальше работает
-обычная очередь отправки.
+Тело экрана «Пакет» раздела «Публикация» (ADR-0032). Строка на файл:
+галочка, подпись (собрана по общему шаблону, правится), переименование
+(по шаблону имени, правится) и время публикации (заполнено раскладкой
+по выбранной стратегии, правится). Разворачивающийся блок «Правила
+разбора имени файла» (чистая ``parse_title`` движка) по явной кнопке
+пересобирает подписи и подсказки имён из разобранных названий.
+:meth:`BatchEditor.drafts` отдаёт список черновиков ``PostDraft`` —
+дальше работает обычная очередь отправки.
+
+До 17.09.2026 редактор был рабочим окном поверх формы поста; экран
+и окно отличаются только рамкой, поэтому переезд ничего в правилах
+не менял — кроме того, что адресат пакета (сообщество, тема) и кнопки
+под постом теперь живут на самом экране (:mod:`publish_batch_page`).
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, Signal
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
@@ -58,6 +64,7 @@ from pxcontrol.engine.services.schedule_plan import (
 )
 from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import VideoFile
+from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT, MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -67,13 +74,11 @@ from pxcontrol.ui.pages.common import (
 	CollapsibleCard,
 	ErrorLabel,
 	SelectionRow,
-	WorkDialog,
 	bind,
 	clear_layout,
 	elide_text,
 	file_action_buttons,
 	human_size,
-	list_area,
 	noop,
 	show_error,
 )
@@ -138,14 +143,14 @@ class _BatchRow:
 
 	def __init__(
 		self,
-		dialog: PublishBatchDialog,
+		editor: BatchEditor,
 		video: VideoFile,
 		caption: str,
 		oversized: bool,
 		caption_limit: int = CAPTION_LENGTH_LIMIT,
 	) -> None:
 		self.video = video
-		self.card = CardWidget(dialog)
+		self.card = CardWidget(editor)
 		box = QVBoxLayout(self.card)
 		# отступы — из механизма плотности: «Компактные отступы»
 		# действуют и на карточки строк пакета
@@ -168,7 +173,7 @@ class _BatchRow:
 			file_action_buttons(
 				self.card,
 				video.path,
-				lambda: dialog._remove_row(self),  # noqa: SLF001 — класс диалога
+				lambda: editor.remove_row(self),
 				remove_tip="Убрать из пакета (файл на диске не трогается)",
 			)
 		)
@@ -193,8 +198,22 @@ class _BatchRow:
 		box.addLayout(bottom)
 
 
-class PublishBatchDialog(WorkDialog):
-	"""Черновики пакета отправки с раскладкой времени и правкой строк."""
+class BatchEditor(QWidget):
+	"""Черновики пакета отправки с раскладкой времени и правкой строк.
+
+	Тело экрана «Пакет»: экран собирает редактор заново на каждый новый
+	источник (папку или список файлов) и спрашивает у него
+	:meth:`validate` и :meth:`drafts`. Адресат пакета (сообщество, тема
+	форума) и кнопки под постом живут на экране, а не здесь: они общие
+	на весь пакет и не зависят от строк.
+
+	Правки состава и времени экран слушает сигналом :attr:`changed`:
+	от них зависят и правила кнопок (отложенный пост и крупный файл
+	уходят другим маршрутом, ADR-0031), и доступность постановки.
+	"""
+
+	#: Состав отмеченных строк или их время изменились.
+	changed = Signal()
 
 	def __init__(
 		self,
@@ -224,7 +243,10 @@ class PublishBatchDialog(WorkDialog):
 		наивное время) — раскладка их пропускает; ``title_rules`` —
 		заготовка правил разбора имени файла (наполняет блок правил,
 		применяется только явной кнопкой)."""
-		super().__init__(f"Пакет в «{community.title}»", parent, size=(980, 720))
+		super().__init__(parent)
+		self.content = QVBoxLayout(self)
+		self.content.setContentsMargins(0, 0, 0, 0)
+		self.content.setSpacing(density.spacing().row_spacing)
 		self._worker = worker
 		self._community = community
 		self._community_times = list(community_times or [])
@@ -244,20 +266,33 @@ class PublishBatchDialog(WorkDialog):
 		self._build_selection_row()
 		self._error = ErrorLabel(self)
 		self.content.addWidget(self._error)
-		self.add_accept_buttons("В очередь")
 		self._update_summary()
 		self._request_renames()
 		self._apply_initial_plan()
 
-	def drafts(self, community_id: int, topic_id: int | None = None) -> list[PostDraft]:
-		"""Черновики отмеченных строк (время — в UTC, как у формы).
+	def drafts(
+		self,
+		community_id: int,
+		topic_id: int | None = None,
+		markup: PostMarkup | None = None,
+		markup_first: bool = False,
+	) -> list[PostDraft]:
+		"""Черновики отмеченных строк (время — в UTC, как у формы поста).
 
-		``topic_id`` — тема форума для всего пакета (пакет идёт в одно
-		сообщество; выбор темы живёт на «Публикации», ADR-0021).
+		Адресат и кнопки — общие на весь пакет (ADR-0032, п. 4): пакет
+		идёт в одно сообщество и одну тему, клавиатура у всех постов
+		одна. Проверит её движок при постановке — атомарно на весь
+		пакет (ADR-0015, ADR-0031).
+
+		Args:
+			community_id: сообщество пакета.
+			topic_id: тема форума (None — общая лента).
+			markup: клавиатура под каждым постом (None — кнопок нет).
+			markup_first: режим «кнопки важнее» (ADR-0031, п. 4).
 
 		Raises:
 			ValueError: Время какой-то строки не разобралось (сначала
-				зовите ``validate`` — крючок диалога это гарантирует).
+				зовите :meth:`validate` — экран это гарантирует).
 		"""
 		result: list[PostDraft] = []
 		for row in self._checked():
@@ -271,12 +306,31 @@ class PublishBatchDialog(WorkDialog):
 					when=when_local.astimezone(UTC) if when_local else None,
 					rename_to=str(row.rename.text()).strip() or None,
 					topic_id=topic_id,
+					markup=markup,
+					markup_first=markup_first,
 				)
 			)
 		return result
 
+	def any_scheduled(self) -> bool:
+		"""Есть ли среди отмеченных строк отложенные (для правил кнопок).
+
+		Неразобранное время считается отложенным: пока человек печатает
+		дату, обещать ему «кнопки будут сразу» нельзя — проверку времени
+		делает :meth:`validate` при постановке.
+		"""
+		return any(str(row.when.text()).strip() for row in self._checked())
+
+	def any_over(self, limit_bytes: int) -> bool:
+		"""Есть ли среди отмеченных файл больше предела (для правил кнопок)."""
+		return any(row.video.size_bytes > limit_bytes for row in self._checked())
+
+	def checked_count(self) -> int:
+		"""Сколько строк отмечено к отправке."""
+		return len(self._checked())
+
 	def validate(self) -> bool:
-		"""Крючок рабочего окна: False не даёт ему закрыться."""
+		"""Готов ли пакет к постановке (False — причина показана строкой)."""
 		checked = self._checked()
 		if not checked:
 			return self._error.fail("Отметьте хотя бы один файл.")
@@ -543,8 +597,15 @@ class PublishBatchDialog(WorkDialog):
 		limit_bytes: int | None,
 		caption_limit: int,
 	) -> None:
-		"""Строки черновиков в прокручиваемом списке."""
-		area, box = list_area(self, spacing=density.spacing().list_spacing)
+		"""Строки черновиков списком карточек.
+
+		Своей полосы прокрутки у списка нет: редактор живёт на экране,
+		а экран прокручивается сам (ADR-0032). Вложенная прокрутка внутри
+		прокрутки — две полосы на одно движение колеса и вечный спор
+		о высоте; в рабочем окне она была нужна, на экране — нет.
+		"""
+		box = QVBoxLayout()
+		box.setSpacing(density.spacing().list_spacing)
 		for video in files:
 			caption = (
 				build_caption(title_from_filename(video.path), caption_lines)
@@ -554,10 +615,12 @@ class PublishBatchDialog(WorkDialog):
 			oversized = limit_bytes is not None and video.size_bytes > limit_bytes
 			row = _BatchRow(self, video, caption, oversized, caption_limit)
 			row.check.stateChanged.connect(self._update_summary)
+			# время строки меняет маршрут пакета (отложенный пост уходит
+			# иначе) — экрану нужно знать о правке сразу
+			row.when.textChanged.connect(self.changed)
 			box.addWidget(row.card)
 			self._rows.append(row)
-		box.addStretch()
-		self.content.addWidget(area, stretch=1)
+		self.content.addLayout(box)
 
 	def _build_selection_row(self) -> None:
 		"""Кнопки выбора и итог по отмеченному."""
@@ -685,7 +748,7 @@ class PublishBatchDialog(WorkDialog):
 
 	# --- выбор -----------------------------------------------------------------
 
-	def _remove_row(self, row: _BatchRow) -> None:
+	def remove_row(self, row: _BatchRow) -> None:
 		"""Убирает строку из пакета (сам файл на диске не трогается)."""
 		if row in self._rows:
 			self._rows.remove(row)
@@ -700,7 +763,19 @@ class PublishBatchDialog(WorkDialog):
 		for row in self._rows:
 			row.check.setChecked(checked)
 
+	def set_caption_limit(self, limit: int) -> None:
+		"""Меняет предел длины подписи у всех строк (сменился маршрут).
+
+		У поста, который отправляет бот, пределы всегда базовые —
+		подписки у ботов не бывает (ADR-0031). Кнопки пакета меняют
+		маршрут, а значит и предел, поэтому счётчики строк пересчитывают
+		его по той же общей точке, что и форма поста.
+		"""
+		for row in self._rows:
+			row.counter.set_limit(limit)
+
 	def _update_summary(self, *_args: object) -> None:
 		picked = self._checked()
 		total = sum(row.video.size_bytes for row in picked)
 		self._selection.set_summary(len(picked), len(self._rows), total)
+		self.changed.emit()
