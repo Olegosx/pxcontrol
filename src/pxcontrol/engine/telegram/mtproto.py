@@ -42,6 +42,8 @@ from pxcontrol.engine.telegram.types import (
 	NamedSeries,
 	OutgoingPost,
 	ParticipantsPage,
+	PublishedMessage,
+	PublishedPage,
 	RecentPost,
 	ScheduledMessage,
 	ServiceMessageInfo,
@@ -476,6 +478,18 @@ def media_kind_of(media: Any) -> MediaKind:
 				return MediaKind.AUDIO
 		return MediaKind.DOCUMENT
 	return MediaKind.OTHER
+
+
+def markup_button_count(markup: Any) -> int:
+	"""Сколько кнопок стоит под постом (0 — клавиатуры нет).
+
+	Чистая функция (тестируется без сети). Считаются кнопки всех рядов:
+	человеку на карточке важно, стоят кнопки или нет, а не как они
+	разложены. Чужие виды клавиатур (у своих постов их не бывает,
+	но лента общая) считаются так же — по числу кнопок в рядах.
+	"""
+	rows = getattr(markup, "rows", None) or ()
+	return sum(len(getattr(row, "buttons", None) or ()) for row in rows)
 
 
 def _topic_of(message: Any) -> int | None:
@@ -1088,6 +1102,65 @@ class MtprotoTransport:
 				len(found),
 			)
 		return None
+
+	async def history_page(self, chat_id: str, offset_id: int, limit: int) -> PublishedPage:
+		"""Читает страницу ленты сообщества: вышедшие посты от новых к старым.
+
+		Своей таблицы постов у приложения нет (ADR-0010) — истина живёт
+		в самом сообществе, поэтому «Опубликовано» читает ленту. Механика
+		та же, что у обслуживания (ADR-0026): одна страница — один
+		запрос, дорожка аккаунта держит темп и между страницами
+		пропускает вперёд публикацию.
+
+		Служебные записи (вступил, закрепил, сменил фото) постами
+		не считаются и отбрасываются: их показывает и чистит
+		обслуживание.
+
+		Args:
+			chat_id: сообщество.
+			offset_id: читать записи старше этого id (0 — с самых новых).
+			limit: сколько сообщений прочитать (Telegram отдаёт до 100).
+
+		Returns:
+			Страницу ленты и id, с которого продолжать (None — лента
+			кончилась).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Флуд-лимит — чтение прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.types import MessageService
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			history = await client.get_messages(entity, limit=limit, offset_id=offset_id)
+		messages = [
+			PublishedMessage(
+				id=int(message.id),
+				text=getattr(message, "message", "") or "",
+				date=message.date,
+				media_kind=media_kind_of(getattr(message, "media", None)),
+				topic_id=_topic_of(message),
+				buttons=markup_button_count(getattr(message, "reply_markup", None)),
+				views=_opt_int(getattr(message, "views", None)),
+			)
+			for message in history
+			if not isinstance(message, MessageService)
+			and getattr(message, "date", None) is not None
+		]
+		# конец ленты — как у обслуживания: короткая страница концом
+		# не считается (Telegram отдаёт меньше запрошенного и в середине
+		# истории), честный признак — пустая страница или пост с номером 1
+		oldest = next(
+			(item for item in reversed(history) if getattr(item, "date", None) is not None),
+			None,
+		)
+		return PublishedPage(
+			messages=messages,
+			next_offset_id=oldest.id if oldest is not None and oldest.id > 1 else None,
+		)
 
 	async def service_messages_page(
 		self, chat_id: str, offset_id: int, limit: int

@@ -1413,3 +1413,95 @@ async def test_gateway_bot_lane_freezes_after_retry_after(monkeypatch: pytest.Mo
 	gateway.restore_operations(records[:1])
 	assert len(gateway.drain_operations()) == 1
 	await gateway.stop()
+
+
+def _post_message(
+	message_id: int,
+	*,
+	text: str = "пост",
+	media: Any = None,
+	markup: Any = None,
+	views: int | None = None,
+) -> Any:
+	"""Обычный пост ленты с датой (её проверяет чтение «Опубликовано»)."""
+	from telethon.tl import types
+
+	return types.Message(
+		id=message_id,
+		peer_id=types.PeerChannel(1),
+		message=text,
+		date=datetime(2026, 9, 17, 12, 0, tzinfo=UTC),
+		media=media,
+		reply_markup=markup,
+		views=views,
+	)
+
+
+def _inline_markup(*labels: str) -> Any:
+	"""Клавиатура с кнопками-ссылками в одном ряду."""
+	from telethon.tl import types
+
+	return types.ReplyInlineMarkup(
+		rows=[
+			types.KeyboardButtonRow(
+				buttons=[types.KeyboardButtonUrl(text=label, url="https://x") for label in labels]
+			)
+		]
+	)
+
+
+def test_markup_button_count() -> None:
+	"""Счёт кнопок под постом: по всем рядам; без клавиатуры — ноль."""
+	from telethon.tl import types
+
+	from pxcontrol.engine.telegram.mtproto import markup_button_count
+
+	assert markup_button_count(None) == 0
+	assert markup_button_count(_inline_markup("Открыть")) == 1
+	two_rows = types.ReplyInlineMarkup(
+		rows=[
+			types.KeyboardButtonRow(buttons=[types.KeyboardButtonUrl(text="a", url="https://x")]),
+			types.KeyboardButtonRow(
+				buttons=[
+					types.KeyboardButtonUrl(text="b", url="https://x"),
+					types.KeyboardButtonUrl(text="c", url="https://x"),
+				]
+			),
+		]
+	)
+	assert markup_button_count(two_rows) == 3
+
+
+async def test_history_page_reads_posts_without_service_records() -> None:
+	"""Страница ленты: посты с кнопками и просмотрами, служебные отброшены."""
+	from telethon.tl import types
+
+	fake = _MaintenanceClient()
+	fake.history_pages = [
+		[
+			_post_message(40, text="с кнопками", markup=_inline_markup("Открыть"), views=120),
+			_service_message(39, types.MessageActionPinMessage()),
+			_post_message(38, text="обычный"),
+		]
+	]
+	transport = _transport(fake)
+	page = await transport.history_page("-1001", offset_id=0, limit=50)
+	assert [message.id for message in page.messages] == [40, 38]
+	assert page.messages[0].buttons == 1
+	assert page.messages[0].views == 120
+	assert page.messages[0].text == "с кнопками"
+	assert page.messages[1].buttons == 0
+	# служебная запись задаёт продолжение: читаем от самой старой записи
+	assert page.next_offset_id == 38
+	assert fake.history_calls == [(50, 0)]
+
+
+async def test_history_page_marks_end_of_feed() -> None:
+	"""Конец ленты: пустая страница и пост с номером 1 — дальше нечего читать."""
+	fake = _MaintenanceClient()
+	fake.history_pages = [[], [_post_message(1, text="первый")]]
+	transport = _transport(fake)
+	assert (await transport.history_page("-1001", 0, 50)).next_offset_id is None
+	last = await transport.history_page("-1001", 0, 50)
+	assert [message.id for message in last.messages] == [1]
+	assert last.next_offset_id is None

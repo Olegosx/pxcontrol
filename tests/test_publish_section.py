@@ -7,6 +7,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
+from pxcontrol.engine.services.posts import PublishedPostDto
+from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.pages.publish_batch_page import source_text
 from pxcontrol.ui.pages.publish_stages import (
 	SECTION_ROUTE_KEY,
@@ -15,6 +19,7 @@ from pxcontrol.ui.pages.publish_stages import (
 	stage_icon,
 	stage_title,
 )
+from pxcontrol.ui.pages.published_view import feed_summary, markup_note, published_subtitle
 
 
 def test_stage_order_is_post_path() -> None:
@@ -28,6 +33,7 @@ def test_stage_order_is_post_path() -> None:
 		PublishStage.BATCH,
 		PublishStage.QUEUE,
 		PublishStage.SCHEDULED,
+		PublishStage.PUBLISHED,
 	]
 
 
@@ -69,3 +75,57 @@ def test_source_text() -> None:
 	assert source_text("/videos/ready", 1) == "Папка: /videos/ready · 1 файл"
 	assert source_text("/videos/ready", 3) == "Папка: /videos/ready · 3 файла"
 	assert source_text("/videos/ready", 12) == "Папка: /videos/ready · 12 файлов"
+
+
+def _post(
+	message_id: int = 7,
+	*,
+	buttons: int = 0,
+	views: int | None = None,
+	markup_error: str | None = None,
+	media_kind: MediaKind = MediaKind.NONE,
+) -> PublishedPostDto:
+	return PublishedPostDto(
+		community_id=1,
+		community_title="Канал",
+		message_id=message_id,
+		text_preview="Вышедший пост",
+		published_at=datetime(2026, 9, 17, 9, 0, tzinfo=UTC),
+		media_kind=media_kind,
+		buttons=buttons,
+		views=views,
+		markup_error=markup_error,
+	)
+
+
+def test_markup_note_states() -> None:
+	"""Три честных состояния кнопок вышедшего поста (ADR-0031).
+
+	Обещание живёт, только пока кнопок нет: как только они встали,
+	пометка обязана исчезнуть — иначе она врёт человеку.
+	"""
+	assert markup_note(_post()) == ""
+	assert markup_note(_post(buttons=2)) == "кнопки: 2"
+	assert markup_note(_post(markup_error="")) == "кнопки обещаны, ждут бота"
+	assert markup_note(_post(markup_error="бот потерял право")) == (
+		"кнопки обещаны, не поставлены (бот потерял право)"
+	)
+	# кнопки стоят — про обещание молчим
+	assert markup_note(_post(buttons=1, markup_error="старое")) == "кнопки: 1"
+
+
+def test_published_subtitle() -> None:
+	"""Подпись карточки: когда вышел, что внутри, просмотры и кнопки."""
+	subtitle = published_subtitle(_post(views=340, buttons=1, media_kind=MediaKind.VIDEO))
+	assert subtitle.startswith("вышел: ")
+	assert " · видео · " in subtitle
+	assert "340 просмотров" in subtitle
+	assert subtitle.endswith("кнопки: 1")
+	assert published_subtitle(_post(views=1)).count("1 просмотр") == 1
+
+
+def test_feed_summary() -> None:
+	"""Итог ленты считает прочитанное, а не выдумывает общее число."""
+	assert feed_summary(0, False) == "Постов не прочитано."
+	assert feed_summary(1, True) == "Прочитано 1 пост · дальше есть"
+	assert feed_summary(50, False) == "Прочитано 50 постов · это вся лента"

@@ -65,6 +65,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ParticipantsPage,
+	PublishedPage,
 	ScheduledMessage,
 	ServiceMessagesPage,
 	TelegramFloodError,
@@ -524,6 +525,19 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
 			return await transport.find_published(chat_id, text, after, limit)
+
+	async def userbot_history_page(
+		self, account_id: int, chat_id: str, offset_id: int, limit: int
+	) -> PublishedPage:
+		"""Читает страницу ленты сообщества (экран «Опубликовано», ADR-0032).
+
+		Приоритет интерактивный: человек ждёт ответа на экране. Ниже
+		публикации — лента подождёт, пока уходит пост.
+
+		Raises: см. :meth:`MtprotoTransport.history_page`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.history_page(chat_id, offset_id, limit)
 
 	async def service_messages_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int

@@ -230,6 +230,25 @@ class MarkupsService:
 			).scalars()
 		return {int(value) for value in rows if value is not None}
 
+	async def post_promises(self, community_id: int) -> dict[int, str]:
+		"""Вышедшие посты сообщества, которым кнопки обещаны, но не стоят.
+
+		Номер поста → текст последней неудачи (пустая строка — попыток
+		ещё не было). Нужно экрану «Опубликовано» (ADR-0032): пост вышел,
+		а клавиатуры под ним нет — человек должен видеть, что она обещана,
+		и чем кончилась последняя попытка, а не гадать, куда делись кнопки.
+		"""
+		async with self._db.session_factory() as session:
+			rows = (
+				await session.execute(
+					select(PromisedMarkup.message_id, PromisedMarkup.error).where(
+						PromisedMarkup.community_id == community_id,
+						PromisedMarkup.message_id.is_not(None),
+					)
+				)
+			).all()
+		return {int(message_id): error or "" for message_id, error in rows if message_id}
+
 	async def retarget(
 		self,
 		community_id: int,

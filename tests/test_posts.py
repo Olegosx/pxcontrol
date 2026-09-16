@@ -13,10 +13,12 @@ from sqlalchemy.orm import selectinload
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
 from pxcontrol.engine.services.posts import (
+	PUBLISHED_PAGE_SIZE,
 	PostDraft,
 	PostError,
 	PostNotReadyError,
 	PostsService,
+	PublishedPostDto,
 	ScheduledDraft,
 	ScheduledGoneError,
 	ScheduledList,
@@ -42,6 +44,8 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
+	PublishedMessage,
+	PublishedPage,
 	ScheduledMessage,
 	TelegramFloodError,
 )
@@ -56,6 +60,9 @@ class _FakeGateway:
 
 	def __init__(self) -> None:
 		self.sent: list[tuple[str, str, str]] = []
+		#: обращения к ленте и её страница (экран «Опубликовано»)
+		self.history_calls: list[tuple[int, str, int, int]] = []
+		self.history_page = PublishedPage(messages=[], next_offset_id=None)
 		self.sent_topics: list[int | None] = []
 		self.topics: list[ForumTopicInfo] = []
 		self.media: list[tuple[str, str, str, str, str]] = []
@@ -132,6 +139,12 @@ class _FakeGateway:
 	def thumbs(self) -> list[str | None]:
 		"""Миниатюры отправленных постов (в порядке отправки)."""
 		return [post.thumb_path for _acc, _chat, post in self.published]
+
+	async def userbot_history_page(
+		self, account_id: int, chat_id: str, offset_id: int, limit: int
+	) -> PublishedPage:
+		self.history_calls.append((account_id, chat_id, offset_id, limit))
+		return self.history_page
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		return [
@@ -1510,3 +1523,91 @@ async def test_list_scheduled_marks_promised_buttons(db: Database) -> None:
 	# без крючка (и без обещаний) пометки нет
 	plain = PostsService(db, _FakeGateway())
 	assert [item.markup_promised for item in (await plain.list_scheduled()).items] == [False]
+
+
+async def test_list_published_reads_feed_by_publisher(db: Database) -> None:
+	"""Ленту читает публикатор сообщества; ссылка строится по @имени."""
+	gateway = _FakeGateway()
+	gateway.history_page = PublishedPage(
+		messages=[
+			PublishedMessage(
+				id=77,
+				text="Вышедший пост",
+				date=datetime(2026, 9, 17, 10, 0, tzinfo=UTC),
+				media_kind=MediaKind.VIDEO,
+				buttons=2,
+				views=340,
+			)
+		],
+		next_offset_id=77,
+	)
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	async with db.session_factory() as session:  # @имя нужно для ссылки
+		community = await session.get(Community, community_id)
+		assert community is not None
+		community.username = "mychannel"
+		await session.commit()
+	published = await service.list_published(community_id)
+	assert published.next_offset_id == 77
+	assert published.items == [
+		PublishedPostDto(
+			community_id=community_id,
+			community_title="Канал",
+			message_id=77,
+			text_preview="Вышедший пост",
+			published_at=datetime(2026, 9, 17, 10, 0, tzinfo=UTC),
+			media_kind=MediaKind.VIDEO,
+			buttons=2,
+			views=340,
+			link="https://t.me/mychannel/77",
+		)
+	]
+	account_id = await _bound_account(db, community_id)
+	assert gateway.history_calls == [(account_id, "-1001", 0, PUBLISHED_PAGE_SIZE)]
+
+
+async def test_list_published_marks_unfulfilled_markup_promise(db: Database) -> None:
+	"""Пост без кнопок с живым обещанием помечен; у поста с кнопками пометки нет."""
+	gateway = _FakeGateway()
+	gateway.history_page = PublishedPage(
+		messages=[
+			PublishedMessage(id=10, text="без кнопок", date=datetime(2026, 9, 17, tzinfo=UTC)),
+			PublishedMessage(
+				id=11, text="с кнопками", date=datetime(2026, 9, 17, tzinfo=UTC), buttons=1
+			),
+		],
+		next_offset_id=None,
+	)
+
+	async def promises(community_id: int) -> dict[int, str]:
+		return {10: "бот потерял право править", 11: "устаревшее обещание"}
+
+	service = PostsService(db, gateway, post_promises=promises)
+	community_id = await _add_community(db)
+	items = (await service.list_published(community_id)).items
+	assert items[0].markup_error == "бот потерял право править"
+	# кнопки уже стоят — обещание выполнено, пометка солгала бы
+	assert items[1].markup_error is None
+
+
+async def test_list_published_without_publisher(db: Database) -> None:
+	"""Без публикатора лента не читается — и это не «лента пуста»."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db, userbot_assigned=False)
+	with pytest.raises(PostError, match="нет публикатора"):
+		await service.list_published(community_id)
+
+
+async def test_list_published_with_paused_publisher(db: Database) -> None:
+	"""Приостановленный публикатор (ADR-0029) ленту не читает."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db)
+	async with db.session_factory() as session:
+		account_id = await _bound_account(db, community_id)
+		account = await session.get(TgAccount, account_id or 0)
+		assert account is not None
+		account.paused = True
+		await session.commit()
+	with pytest.raises(PostError, match="приостановлен"):
+		await service.list_published(community_id)

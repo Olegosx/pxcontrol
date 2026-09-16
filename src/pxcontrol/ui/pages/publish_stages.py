@@ -27,6 +27,7 @@ class PublishStage(StrEnum):
 	BATCH = "publish_batch"
 	QUEUE = "publish_queue"
 	SCHEDULED = "publish_scheduled"
+	PUBLISHED = "publish_published"
 
 
 #: Подпись раздела в навигации — корень ветки подменю.
@@ -47,6 +48,7 @@ def stage_title(stage: PublishStage) -> str:
 		PublishStage.BATCH: "Пакет",
 		PublishStage.QUEUE: "Очередь",
 		PublishStage.SCHEDULED: "Отложено",
+		PublishStage.PUBLISHED: "Опубликовано",
 	}[stage]
 
 
@@ -77,6 +79,10 @@ def stage_hint(stage: PublishStage) -> str:
 			"Записи уже у сервера Telegram: он опубликует их сам, даже при "
 			"выключенном компьютере. Список читается обходом сообществ."
 		),
+		PublishStage.PUBLISHED: (
+			"Лента сообщества: что уже вышло. Своей таблицы постов у приложения "
+			"нет — лента читается из Telegram страницами, публикатором сообщества."
+		),
 	}[stage]
 
 
@@ -87,4 +93,5 @@ def stage_icon(stage: PublishStage) -> FluentIcon:
 		PublishStage.BATCH: FluentIcon.FOLDER,
 		PublishStage.QUEUE: FluentIcon.ALIGNMENT,
 		PublishStage.SCHEDULED: FluentIcon.CALENDAR,
+		PublishStage.PUBLISHED: FluentIcon.HISTORY,
 	}[stage]

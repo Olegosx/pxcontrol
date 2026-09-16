@@ -52,6 +52,7 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
+	PublishedPage,
 	ScheduledMessage,
 	TelegramFloodError,
 	limit_gb,
@@ -86,6 +87,11 @@ _THUMBNAIL_TIMEOUT_S = 120.0
 
 #: Длина превью текста отложенной записи на экране «Отложено».
 _SCHEDULED_PREVIEW_CHARS = 80
+
+#: Сколько постов ленты читать за один запрос (Telegram отдаёт до 100).
+#: Полсотни — страница показа списков приложения (``list_view.PAGE_SIZE``):
+#: одна страница экрана — один запрос к Telegram.
+PUBLISHED_PAGE_SIZE = 50
 
 #: Единый текст исхода «записи уже нет»: пустой ответ на чтение
 #: и отказ Telegram на действие звучат одинаково.
@@ -337,6 +343,10 @@ class _PostPort(Protocol):
 		markup: PostMarkup | None = None,
 	) -> int: ...
 
+	async def userbot_history_page(
+		self, account_id: int, chat_id: str, offset_id: int, limit: int
+	) -> PublishedPage: ...
+
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
 
 	async def get_scheduled_message(
@@ -365,6 +375,10 @@ MarkupGone = Callable[[int, list[int]], Awaitable[None]]
 
 #: Крючок «каким отложкам сообщества обещаны кнопки» (номера записей).
 PromisedMarkups = Callable[[int], Awaitable[set[int]]]
+
+#: Крючок «каким вышедшим постам кнопки обещаны, но не стоят»:
+#: номер поста → текст последней неудачи (пустая строка — не пытались).
+PostPromises = Callable[[int], Awaitable[dict[int, str]]]
 
 
 @dataclass(frozen=True)
@@ -518,6 +532,67 @@ class ScheduledDraft:
 
 
 @dataclass(frozen=True)
+class PublishedPostDto:
+	"""Вышедший пост сообщества для экрана «Опубликовано» (ADR-0032).
+
+	Своей таблицы постов нет (ADR-0010): всё, что здесь есть, прочитано
+	из самого сообщества, кроме состояния обещанных кнопок — его знает
+	только приложение.
+
+	Attributes:
+		community_id: сообщество (id в нашей БД).
+		community_title: название сообщества.
+		message_id: номер поста в ленте.
+		text_preview: начало текста для карточки.
+		published_at: когда пост вышел (UTC).
+		media_kind: вид вложения (``NONE`` — текст).
+		topic_id: тема форума (None — общая лента).
+		buttons: сколько кнопок стоит под постом (0 — их нет).
+		views: сколько раз пост просмотрели (None — Telegram не сказал).
+		markup_error: кнопки обещаны, но не стоят — текст последней
+			неудачи (пустая строка — попыток ещё не было); None —
+			обещания нет.
+		link: ссылка на пост (None — у сообщества нет @имени).
+	"""
+
+	community_id: int
+	community_title: str
+	message_id: int
+	text_preview: str
+	published_at: datetime
+	media_kind: MediaKind = MediaKind.NONE
+	topic_id: int | None = None
+	buttons: int = 0
+	views: int | None = None
+	markup_error: str | None = None
+	link: str | None = None
+
+	@property
+	def when(self) -> datetime:
+		"""Момент выхода — под тем же именем, что у элемента очереди."""
+		return self.published_at
+
+	@property
+	def title(self) -> str:
+		"""Заголовок карточки — начало текста (общее имя со списками)."""
+		return self.text_preview
+
+
+@dataclass(frozen=True)
+class PublishedList:
+	"""Страница ленты сообщества и место, с которого читать дальше.
+
+	Attributes:
+		items: посты страницы, новые сначала.
+		next_offset_id: номер, с которого продолжать чтение;
+			None — лента кончилась.
+	"""
+
+	items: list[PublishedPostDto]
+	next_offset_id: int | None
+
+
+@dataclass(frozen=True)
 class ScheduledList:
 	"""Отложенные записи и сообщества, которые прочитать не удалось.
 
@@ -544,6 +619,7 @@ class PostsService:
 		markup_moved: MarkupMoved | None = None,
 		markup_gone: MarkupGone | None = None,
 		promised_markups: PromisedMarkups | None = None,
+		post_promises: PostPromises | None = None,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
 		экземпляр поверх той же БД (для тестов это эквивалентно:
@@ -561,6 +637,7 @@ class PostsService:
 		self._markup_moved = markup_moved
 		self._markup_gone = markup_gone
 		self._promised_markups = promised_markups
+		self._post_promises = post_promises
 
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
@@ -1472,6 +1549,87 @@ class PostsService:
 		# сообщество группы опрашивают несколько участников — в списке
 		# непрочитанных оно должно встретиться один раз
 		return ScheduledList(items=items, unread=tuple(dict.fromkeys(unread)))
+
+	async def list_published(
+		self, community_id: int, offset_id: int = 0, limit: int = PUBLISHED_PAGE_SIZE
+	) -> PublishedList:
+		"""Читает страницу ленты сообщества: что уже вышло (ADR-0032).
+
+		Ленту читает **публикатор** сообщества — аккаунт по умолчанию
+		(ADR-0022): он же её и наполняет, и от его имени доступны посты
+		закрытых сообществ. Бот здесь не годится: своей истории через
+		Bot API не прочитать.
+
+		Страница — единица работы: один запрос через дорожку аккаунта
+		с интерактивным приоритетом (человек ждёт на экране), следующая
+		страница читается по требованию, а не «вся лента сразу».
+
+		Args:
+			community_id: сообщество.
+			offset_id: читать посты старше этого номера (0 — с самых новых).
+			limit: сколько постов прочитать за раз.
+
+		Returns:
+			Посты страницы (новые сначала) и номер, с которого читать
+			дальше.
+
+		Raises:
+			PostError: Сообщества нет или у него нет публикатора.
+			UserbotUnavailableError: Аккаунт не подключён, приостановлен,
+				под флуд-лимитом или Telegram отказал.
+		"""
+		community = await self._get_community(community_id)
+		account_id = self._published_reader(community)
+		page = await self._gateway.userbot_history_page(
+			account_id, community.tg_chat_id, offset_id, limit
+		)
+		promises = (
+			await self._post_promises(community_id) if self._post_promises is not None else {}
+		)
+		items = [
+			PublishedPostDto(
+				community_id=community.id,
+				community_title=community.title,
+				message_id=message.id,
+				text_preview=text_preview(message.text, _SCHEDULED_PREVIEW_CHARS),
+				published_at=message.date,
+				media_kind=message.media_kind,
+				topic_id=message.topic_id,
+				buttons=message.buttons,
+				views=message.views,
+				# обещание живёт, только пока кнопок под постом нет:
+				# поставились — обещание снято, и пометка солгала бы
+				markup_error=promises.get(message.id) if not message.buttons else None,
+				link=(
+					f"https://t.me/{community.username}/{message.id}"
+					if community.username
+					else None
+				),
+			)
+			for message in page.messages
+		]
+		return PublishedList(items=items, next_offset_id=page.next_offset_id)
+
+	@staticmethod
+	def _published_reader(community: Community) -> int:
+		"""Аккаунт, читающий ленту сообщества (публикатор по умолчанию).
+
+		Raises:
+			PostError: Публикатора нет или он приостановлен — читать
+				ленту нечем, и притвориться пустой лентой нельзя.
+		"""
+		account = community.default_account
+		if account is None:
+			raise PostError(
+				f"У «{community.title}» нет публикатора — ленту читать нечем. "
+				"Назначьте публикатора на странице сообщества."
+			)
+		if account.paused:
+			raise PostError(
+				f"Публикатор «{community.title}» приостановлен — ленту читать нечем. "
+				"Возобновите его в разделе «Пользователи и боты»."
+			)
+		return int(account.id)
 
 	@staticmethod
 	def _scheduled_readers(community: Community) -> list[int]:

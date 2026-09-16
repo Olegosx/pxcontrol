@@ -77,6 +77,9 @@ class Engine:
 			markup_moved=self._markup_moved,
 			markup_gone=self.markups.drop_scheduled_quiet,
 			promised_markups=self.markups.promised_ids,
+			# экран «Опубликовано» показывает, дождался ли вышедший пост
+			# своих кнопок: состояние обещания знает только приложение
+			post_promises=self.markups.post_promises,
 		)
 		# очереди нужно хранилище обещаний: пост может выйти, а кнопки
 		# не поставиться — тогда обещание ждёт повтора (ADR-0031)

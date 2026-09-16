@@ -14,7 +14,8 @@
 сообществ, страница сообщества, «Видео» и форма поста просят показать
 стадию с нужным фильтром, а устройство раздела не знают.
 
-Экран «Опубликовано» (подача A3) встанет сюда же — последним.
+Стадий пять: форма поста, пакет, наша очередь, отложки на сервере
+Telegram и лента вышедших постов.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from pxcontrol.ui.pages.publish import PublishPage
 from pxcontrol.ui.pages.publish_batch_page import BatchStagePage
 from pxcontrol.ui.pages.publish_queue_view import QueueFilter, QueueView
 from pxcontrol.ui.pages.publish_stages import PublishStage
+from pxcontrol.ui.pages.published_view import PublishedView
 from pxcontrol.ui.pages.scheduled_view import ScheduledView
 from pxcontrol.ui.pages.stage_page import StagePage
 
@@ -68,6 +70,20 @@ class ScheduledStagePage(StagePage):
 		self._view.show_community(community_id)
 
 
+class PublishedStagePage(StagePage):
+	"""Экран «Опубликовано»: лента вышедших постов сообщества (ADR-0032)."""
+
+	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
+		super().__init__(PublishStage.PUBLISHED, parent)
+		self._view = PublishedView(worker, self)
+		self.mount(self._view)
+
+	def set_active(self, active: bool) -> None:
+		"""Показ экрана обновляет список сообществ и несвежую ленту."""
+		if active:
+			self._view.activate()
+
+
 class PublishSection:
 	"""Раздел «Публикация»: страницы стадий и переходы между ними.
 
@@ -94,11 +110,13 @@ class PublishSection:
 		self.batch = BatchStagePage(worker, parent)
 		self.queue = QueueStagePage(worker, parent)
 		self.scheduled = ScheduledStagePage(worker, parent)
+		self.published = PublishedStagePage(worker, parent)
 		self._pages: dict[PublishStage, QWidget] = {
 			PublishStage.NEW_POST: self.new_post,
 			PublishStage.BATCH: self.batch,
 			PublishStage.QUEUE: self.queue,
 			PublishStage.SCHEDULED: self.scheduled,
+			PublishStage.PUBLISHED: self.published,
 		}
 		# «Вся очередь…» на форме поста — соседний пункт раздела
 		self.new_post.queue_requested.connect(lambda: self.show_queue(None))

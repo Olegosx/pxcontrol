@@ -678,6 +678,11 @@ def open_in_system(path: str) -> None:
 	QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
+def open_link(url: str) -> None:
+	"""Открывает ссылку системным браузером (пост в Telegram, справка)."""
+	QDesktopServices.openUrl(QUrl(url))
+
+
 def file_action_buttons(
 	parent: QWidget, path: str, on_remove: Callable[[], None], *, remove_tip: str
 ) -> QWidget:
