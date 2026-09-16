@@ -388,3 +388,16 @@ async def test_watcher_takes_promise_after_send_now(db: Database) -> None:
 	await service.retarget(community_id, 11, when=datetime.now(UTC))
 	assert await service.apply_due() == 1
 	assert gateway.edits == [("-1001", 777, markup())]
+
+
+async def test_promised_ids_lists_scheduled_records(db: Database) -> None:
+	"""Номера отложек с обещаниями — для пометки на вкладке «Отложено»."""
+	service = MarkupsService(db)
+	first = await make_community(db, "Первый", "-1001")
+	second = await make_community(db, "Второй", "-1002")
+	await service.promise(first, markup(), match_text="A", scheduled_message_id=10)
+	await service.promise(first, markup(), match_text="B", scheduled_message_id=11)
+	await service.promise(first, markup(), match_text="C", message_id=99)  # уже вышел
+	await service.promise(second, markup(), match_text="D", scheduled_message_id=12)
+	assert await service.promised_ids(first) == {10, 11}
+	assert await service.promised_ids(second) == {12}

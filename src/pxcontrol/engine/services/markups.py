@@ -213,6 +213,23 @@ class MarkupsService:
 			await session.commit()
 		logger.info("Обещание id=%s перенесено на %s.", promise_id, when or "«сейчас»")
 
+	async def promised_ids(self, community_id: int) -> set[int]:
+		"""Номера отложенных записей сообщества, которым обещаны кнопки.
+
+		Нужно вкладке «Отложено»: человек должен видеть, что у записи
+		будут кнопки, хотя сейчас их нет и быть не может (ADR-0031).
+		"""
+		async with self._db.session_factory() as session:
+			rows = (
+				await session.execute(
+					select(PromisedMarkup.scheduled_message_id).where(
+						PromisedMarkup.community_id == community_id,
+						PromisedMarkup.scheduled_message_id.is_not(None),
+					)
+				)
+			).scalars()
+		return {int(value) for value in rows if value is not None}
+
 	async def retarget(
 		self,
 		community_id: int,

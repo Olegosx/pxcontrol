@@ -247,6 +247,12 @@ class PostDraft:
 		markup: клавиатура под постом (None — кнопок нет). Ставит её
 			только бот (ADR-0031), поэтому её наличие влияет на выбор
 			маршрута отправки; у альбома кнопок не бывает вовсе.
+		markup_first: режим «кнопки важнее» у отложенного поста
+			(ADR-0031, п. 4): вместо серверной отложки пост ждёт
+			в нашей очереди и уходит ботом в назначенную минуту — кнопки
+			видны с первой секунды, но приложение в это время должно
+			работать. По умолчанию важнее публикация: отложку держит
+			сервер Telegram, а кнопки бот дорисует после выхода.
 	"""
 
 	community_id: int
@@ -257,6 +263,7 @@ class PostDraft:
 	rename_to: str | None = None
 	topic_id: int | None = None
 	markup: PostMarkup | None = None
+	markup_first: bool = False
 
 
 def _free_name(target: Path) -> Path:
@@ -356,6 +363,9 @@ MarkupMoved = Callable[[int, int, datetime, str | None], Awaitable[None]]
 #: Крючок «отложек больше нет»: сообщество и номера исчезнувших записей.
 MarkupGone = Callable[[int, list[int]], Awaitable[None]]
 
+#: Крючок «каким отложкам сообщества обещаны кнопки» (номера записей).
+PromisedMarkups = Callable[[int], Awaitable[set[int]]]
+
 
 @dataclass(frozen=True)
 class PublishPlan:
@@ -444,6 +454,7 @@ class ScheduledPostDto:
 	scheduled_at: datetime
 	media_kind: MediaKind = MediaKind.NONE
 	topic_id: int | None = None
+	markup_promised: bool = False
 
 	@property
 	def ref(self) -> ScheduledRef:
@@ -532,6 +543,7 @@ class PostsService:
 		settings: SettingsService | None = None,
 		markup_moved: MarkupMoved | None = None,
 		markup_gone: MarkupGone | None = None,
+		promised_markups: PromisedMarkups | None = None,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
 		экземпляр поверх той же БД (для тестов это эквивалентно:
@@ -548,6 +560,7 @@ class PostsService:
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._markup_moved = markup_moved
 		self._markup_gone = markup_gone
+		self._promised_markups = promised_markups
 
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
@@ -634,27 +647,53 @@ class PostsService:
 			)
 		caps = community_capabilities(community)
 		over_bot_limit = self._over_bot_limit(draft)
-		if draft.markup:
-			blocker = markup_blocker(
-				caps,
-				title=community.title,
-				kind=CommunityKind(community.kind),
-				scheduled=draft.when is not None,
-				media_over_bot_limit=over_bot_limit,
-			)
-			if blocker is not None:
-				raise PostError(blocker)
+		blocker = self._markup_blocker(community, draft, over_bot_limit)
+		if blocker is not None:
+			raise PostError(blocker)
 		route = choose_route(
 			caps,
 			with_markup=bool(draft.markup),
 			media_over_bot_limit=over_bot_limit,
 			scheduled=draft.when is not None,
+			markup_first=draft.markup_first,
 		)
 		self._check_transport(route, draft, community.default_tg_account_id)
 		media_path = draft.media_path
 		if media_path is not None and draft.rename_to:
 			media_path = self._apply_rename(media_path, draft.rename_to)
 		return PublishPlan(draft=draft, community=community, media_path=media_path, route=route)
+
+	@staticmethod
+	def _markup_blocker(community: Community, draft: PostDraft, over_bot_limit: bool) -> str | None:
+		"""Что мешает кнопкам этого черновика в этом сообществе (None — ничего)."""
+		if not draft.markup:
+			return None
+		return markup_blocker(
+			community_capabilities(community),
+			title=community.title,
+			kind=CommunityKind(community.kind),
+			scheduled=draft.when is not None,
+			media_over_bot_limit=over_bot_limit,
+			markup_first=draft.markup_first,
+		)
+
+	async def check_markup_allowed(self, draft: PostDraft) -> None:
+		"""Отклоняет черновик, если кнопки в этом сообществе невозможны.
+
+		Публичная точка для постановки в очередь: отказ должен всплыть
+		сразу, при нажатии «Отправить», а не через час, когда пост
+		дождётся своей минуты. Правило одно и то же с подготовкой
+		публикации — иначе формы и отправка разошлись бы в словах.
+
+		Raises:
+			PostError: Кнопки этому посту недоступны (с причиной).
+		"""
+		if not draft.markup:
+			return
+		community = await self._get_community(draft.community_id)
+		blocker = self._markup_blocker(community, draft, self._over_bot_limit(draft))
+		if blocker is not None:
+			raise PostError(blocker)
 
 	def _over_bot_limit(self, draft: PostDraft) -> bool:
 		"""Файл черновика не по силам боту (лимит заливки — 50 МБ).
@@ -1414,8 +1453,20 @@ class PostsService:
 					)
 					unread.append(community.title)
 					continue
+				promised = (
+					await self._promised_markups(community.id)
+					if self._promised_markups is not None
+					else set()
+				)
 				for message in messages:
-					items.append(self._dto(community, account_id, message))
+					items.append(
+						self._dto(
+							community,
+							account_id,
+							message,
+							markup_promised=message.id in promised,
+						)
+					)
 		items = _dedup_scheduled(items)
 		items.sort(key=lambda item: item.scheduled_at)
 		# сообщество группы опрашивают несколько участников — в списке
@@ -1486,7 +1537,13 @@ class PostsService:
 		return community
 
 	@staticmethod
-	def _dto(community: Community, account_id: int, message: ScheduledMessage) -> ScheduledPostDto:
+	def _dto(
+		community: Community,
+		account_id: int,
+		message: ScheduledMessage,
+		*,
+		markup_promised: bool = False,
+	) -> ScheduledPostDto:
 		"""Готовит запись для интерфейса: канал, читатель, короткий текст, время."""
 		text = message.text or "(медиа без текста)"
 		preview = text_preview(text, _SCHEDULED_PREVIEW_CHARS)
@@ -1499,6 +1556,7 @@ class PostsService:
 			scheduled_at=message.scheduled_at,
 			media_kind=message.media_kind,
 			topic_id=message.topic_id,
+			markup_promised=markup_promised,
 		)
 
 	# --- действия над отложенными (истина — сервер Telegram, ADR-0010) --------

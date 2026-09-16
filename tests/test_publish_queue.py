@@ -78,6 +78,21 @@ class _SlowGateway:
 		self.markup_edits.append((chat_id, message_id, markup))
 
 
+async def _attach_bot(db: Database, community_id: int, *, can_edit: bool = True) -> None:
+	"""Привязывает к сообществу бота с правом правки (кнопки без него нельзя)."""
+	from pxcontrol.engine.db.models import Bot as BotRow
+
+	async with db.session_factory() as session:
+		bot = BotRow(label="Паблишер", token="123:AAA", username="pub_bot")
+		session.add(bot)
+		await session.flush()
+		community = await session.get(Community, community_id)
+		assert community is not None
+		community.bot_id = bot.id
+		community.bot_can_edit = can_edit
+		await session.commit()
+
+
 async def _add_community(db: Database, tg_chat_id: str = "-1001", title: str = "Канал") -> int:
 	"""Создаёт канал с userbot-админом (свой аккаунт), возвращает id."""
 	async with db.session_factory() as session:
@@ -1481,6 +1496,7 @@ async def test_markup_persisted_restored_and_edited(db: Database, make_queue: Qu
 	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
 	queue = make_queue(gateway)
 	community_id = await _add_community(db)
+	await _attach_bot(db, community_id)  # кнопки без бота не ставятся (ADR-0031)
 	item = await queue.enqueue(
 		PostDraft(community_id, text="с кнопками", when=_future(120), markup=markup)
 	)
@@ -1514,7 +1530,6 @@ async def test_markup_failure_notes_card_and_keeps_promise(
 	опубликовал бы его второй раз (ADR-0031, п. 12). Обещание с номером
 	вышедшего поста остаётся в базе — по нему попытку можно повторить.
 	"""
-	from pxcontrol.engine.db.models import Bot as BotRow
 	from pxcontrol.engine.services.posts import PostsService
 	from pxcontrol.engine.telegram.bot_api import CommunityCheckError
 	from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
@@ -1530,15 +1545,7 @@ async def test_markup_failure_notes_card_and_keeps_promise(
 	gateway.markup_edit_error = CommunityCheckError("У бота нет права изменять сообщения.")
 	queue = make_queue(gateway)
 	community_id = await _add_community(db)
-	async with db.session_factory() as session:
-		bot = BotRow(label="Паблишер", token="123:AAA", username="pub_bot")
-		session.add(bot)
-		await session.flush()
-		community = await session.get(Community, community_id)
-		assert community is not None
-		community.bot_id = bot.id
-		community.bot_can_edit = True  # право есть, но Telegram откажет
-		await session.commit()
+	await _attach_bot(db, community_id)  # право есть, но Telegram откажет
 
 	item = await queue.enqueue(
 		PostDraft(
@@ -1560,3 +1567,46 @@ async def test_markup_failure_notes_card_and_keeps_promise(
 	assert promises[0].markup == markup
 	assert promises[0].match_text == "подпись"
 	assert promises[0].message_id == 501  # номер вышедшего поста от транспорта
+
+
+async def test_markup_first_waits_for_its_minute_not_a_slot(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Режим «кнопки важнее»: слоты отложек ему не нужны (ADR-0031, п. 4).
+
+	Все сто слотов канала заняты — обычный отложенный пост ждал бы
+	освобождения, а этот ждёт только своей минуты: он не уходит на сервер,
+	его отправляет бот из нашей очереди.
+	"""
+	from datetime import timedelta
+
+	from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
+
+	markup = PostMarkup(((PostButton(ButtonKind.LINK, "Смотреть", "https://telegram.org"),),))
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]  # слотов нет
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	await _attach_bot(db, community_id)
+	when = _future(30)
+	item = await queue.enqueue(
+		PostDraft(community_id, text="по кнопкам", when=when, markup=markup, markup_first=True)
+	)
+	await _wait_status(queue, item, JobStatus.WAITING)
+
+	# слоты заняты, но ждёт он не их: до срока — остаётся в ожидании
+	await queue._release_slots()  # noqa: SLF001 — проход дозора вручную
+	assert next(i for i in await queue.state() if i.id == item).status is JobStatus.WAITING
+
+	# срок пришёл — выпускается, хотя свободных слотов по-прежнему нет
+	released = await queue._release_markup_first(  # noqa: SLF001 — проход дозора вручную
+		community_id, when + timedelta(seconds=1)
+	)
+	assert released == 1
+	assert next(i for i in await queue.state() if i.id == item).status is not JobStatus.WAITING
+
+	# и режим переживает перезапуск: он сохранён в строке очереди
+	async with db.session_factory() as session:
+		row = await session.get(PublishQueueItem, item)
+		assert row is not None and row.markup_first is True

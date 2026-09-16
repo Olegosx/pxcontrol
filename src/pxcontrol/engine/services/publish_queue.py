@@ -166,6 +166,17 @@ def _expired(when: datetime | None, now: datetime) -> bool:
 	return when is not None and when <= now + MIN_SCHEDULE_AHEAD
 
 
+def _due(when: datetime | None, now: datetime) -> bool:
+	"""Момент наступил — строго, без запаса вперёд.
+
+	Отличается от :func:`_expired` намеренно: у поста в режиме «кнопки
+	важнее» (ADR-0031, п. 4) обещано «уйдёт в назначенную минуту»,
+	и выпускать его минутой раньше нельзя — иначе приложение само
+	нарушило бы то, о чём договорилось с человеком.
+	"""
+	return when is not None and when <= now
+
+
 def _release_order(item: _PublishJob) -> datetime:
 	"""Ключ порядка выпуска ждущих: ближайшая дата — первой (ADR-0016).
 
@@ -278,6 +289,7 @@ class PublishQueue:
 					rename_to=row.rename_to,
 					topic_id=row.topic_id,
 					markup=markup_from_json(row.markup),
+					markup_first=row.markup_first,
 				)
 			)
 			item = _PublishJob(row.id, draft, titles[row.community_id])
@@ -333,6 +345,11 @@ class PublishQueue:
 				limits[draft.community_id].for_draft(draft),
 				draft.media_path is not None,
 			)
+		for draft in drafts:
+			# кнопки проверяются при постановке, а не при отправке: отказ
+			# должен всплыть под рукой у человека, а не через час, когда
+			# пост дождётся своей минуты (ADR-0031)
+			await self._posts.check_markup_allowed(draft)
 		stashed, moved = await self._stash_all(drafts)
 		try:
 			rows = [
@@ -345,6 +362,7 @@ class PublishQueue:
 					rename_to=draft.rename_to,
 					topic_id=draft.topic_id,
 					markup=markup_to_json(draft.markup),
+					markup_first=draft.markup_first,
 					status=self._initial_status(draft).value,
 				)
 				for draft in stashed
@@ -689,11 +707,61 @@ class PublishQueue:
 			item.status is JobStatus.WAITING for item in self._jobs.all()
 		):
 			minutes = await self._settings.get(QUEUE_SLOT_POLL_MINUTES)
-			await self._wait_stop(max(1, minutes) * 60)
+			delay = float(max(1, minutes) * 60)
+			# пост режима «кнопки важнее» ждёт свою минуту, а не слот:
+			# просыпаемся к его сроку, иначе он опоздал бы на весь тик
+			nearest = self._next_markup_first_delay(datetime.now(UTC))
+			if nearest is not None:
+				delay = min(delay, nearest)
+			await self._wait_stop(delay)
 			if not self._jobs.stopping and any(
 				item.status is JobStatus.WAITING for item in self._jobs.all()
 			):
 				await self._release_slots()
+
+	async def _release_markup_first(self, community_id: int, now: datetime) -> int:
+		"""Выпускает посты режима «кнопки важнее», чей срок наступил.
+
+		Слот отложек им не нужен: такой пост не уходит на сервер, его
+		в назначенную минуту отправляет бот — вместе с кнопками
+		(ADR-0031, п. 4). Поэтому и условие своё: строго «время пришло»,
+		без запаса вперёд.
+		"""
+		released = 0
+		for item in self._jobs.all():
+			if item.status is not JobStatus.WAITING or item.editing:
+				continue
+			if item.draft.community_id != community_id or not item.draft.markup_first:
+				continue
+			if not _due(item.draft.when, now):
+				continue
+			item.status = JobStatus.PENDING
+			await self._persist(item)
+			released += 1
+			logger.info(
+				"Пост «%s» режима «кнопки важнее» дождался своей минуты (id=%s).",
+				_draft_title(item.draft),
+				item.id,
+			)
+		return released
+
+	def _next_markup_first_delay(self, now: datetime) -> float | None:
+		"""Сколько секунд до ближайшего поста режима «кнопки важнее».
+
+		Дозор спит до этого срока, а не полный тик: обещание «уйдёт
+		в назначенную минуту» иначе опоздало бы на весь период опроса.
+		None — таких постов в ожидании нет.
+		"""
+		moments = [
+			item.draft.when
+			for item in self._jobs.all()
+			if item.status is JobStatus.WAITING
+			and item.draft.markup_first
+			and item.draft.when is not None
+		]
+		if not moments:
+			return None
+		return max(1.0, (min(moments) - now).total_seconds())
 
 	async def _release_slots(self) -> None:
 		"""Выпускает ждущих, на кого хватает свободных слотов отложек.
@@ -741,6 +809,7 @@ class PublishQueue:
 			except Exception:  # noqa: BLE001 — дозор не должен умирать
 				logger.exception("Проверка слотов канала id=%s не удалась.", community_id)
 				continue
+			released_by_time = await self._release_markup_first(community_id, now)
 			in_flight = sum(
 				1
 				for item in self._jobs.all()
@@ -761,8 +830,10 @@ class PublishQueue:
 				),
 				key=_release_order,
 			)
-			released = 0
+			released = released_by_time
 			for item in waiting:
+				if item.draft.markup_first:
+					continue  # такой ждёт своей минуты, а не слота
 				if not _expired(item.draft.when, now):
 					if free <= 0:
 						break
@@ -843,6 +914,7 @@ class PublishQueue:
 					rename_to=draft.rename_to,
 					topic_id=draft.topic_id,
 					markup=markup_to_json(draft.markup),
+					markup_first=draft.markup_first,
 					status=status.value,
 					error=None,
 				)

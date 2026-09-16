@@ -282,6 +282,7 @@ class PublishPage(ScrollArea):
 			with_markup=self._markup.markup() is not None,
 			media_over_bot_limit=self._media_over_bot_limit(),
 			scheduled=not self._when_row.is_now(),
+			markup_first=self._markup.markup_first(),
 		)
 
 	def _refresh_markup(self) -> None:
@@ -296,17 +297,23 @@ class PublishPage(ScrollArea):
 			self._markup.set_blocked("Сначала выберите сообщество — от него зависят кнопки.")
 			self._markup.set_notice("")
 			return
+		scheduled = not self._when_row.is_now()
+		markup = self._markup.markup()
+		# выбор режима есть только у отложенного поста с кнопками
+		self._markup.set_mode_available(scheduled and markup is not None)
 		reason = markup_blocker(
 			community.capabilities,
 			title=community.title,
 			kind=community.kind,
-			scheduled=not self._when_row.is_now(),
+			scheduled=scheduled,
 			media_over_bot_limit=self._media_over_bot_limit(),
+			markup_first=self._markup.markup_first(),
 		)
 		self._markup.set_blocked(reason)
-		markup = self._markup.markup()
 		self._markup.set_notice(
-			"" if reason is not None else markup_notice(self._current_route(), community.bot_label)
+			""
+			if reason is not None
+			else markup_notice(self._current_route(), community.bot_label, scheduled=scheduled)
 		)
 		count = len(markup.buttons) if markup is not None else 0
 		self._markup_card.set_summary(
@@ -1061,6 +1068,7 @@ class PublishPage(ScrollArea):
 			rename_to=self._rename_to(),
 			topic_id=self._selected_topic_id(),
 			markup=self._markup.markup(),
+			markup_first=self._markup.markup_first(),
 		)
 
 	def _rename_to(self) -> str | None:

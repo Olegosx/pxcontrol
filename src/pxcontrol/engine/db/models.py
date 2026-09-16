@@ -27,6 +27,7 @@ from sqlalchemy import (
 	func,
 	text,
 )
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from pxcontrol.engine.db.types import EncryptedStr
@@ -423,6 +424,11 @@ class PublishQueueItem(TimestampMixin, Base):
 	# обещанная клавиатура (ADR-0031), формат — markup_to_json;
 	# NULL — кнопок у поста нет
 	markup: Mapped[Any | None] = mapped_column(JSON, default=None)
+	# режим «кнопки важнее» (ADR-0031, п. 4): пост ждёт своей минуты
+	# здесь, а не отложкой на сервере, и уходит ботом вместе с кнопками.
+	# Значение по умолчанию задаётся через sql_text: имя text в этом
+	# классе занято колонкой текста поста
+	markup_first: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sql_text("0"))
 
 
 class PromisedMarkup(TimestampMixin, Base):

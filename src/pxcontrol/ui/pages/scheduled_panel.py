@@ -100,6 +100,11 @@ def scheduled_subtitle(item: ScheduledPostDto, *, with_community: bool = True) -
 	"""
 	kind = "текст" if item.media_kind is MediaKind.NONE else kind_label(item.media_kind).lower()
 	subtitle = f"публикация: {format_local(item.scheduled_at)} · {kind}"
+	if item.markup_promised:
+		# кнопки у отложенной записи существовать не могут (их ставит бот
+		# и только после выхода, ADR-0031) — человек должен знать, что
+		# они обещаны, а не решить, что потерялись
+		subtitle = f"{subtitle} · кнопки появятся после выхода"
 	if with_community:
 		subtitle = f"{item.community_title} · {subtitle}"
 	return subtitle

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from pxcontrol.engine.services.posts import ScheduledDraft, ScheduledPostDto, ScheduledRef
@@ -127,3 +128,26 @@ def test_attachment_note_describes_what_is_not_editable() -> None:
 	assert attachment_note(_draft(MediaKind.OTHER), None).startswith("вложение без подписи")
 	assert attachment_note(_draft(MediaKind.NONE, 5), "Новости") == "тема форума: Новости"
 	assert attachment_note(_draft(MediaKind.VIDEO, 5), None) == "вложение: видео · тема форума: #5"
+
+
+def test_subtitle_tells_about_promised_buttons() -> None:
+	"""Пометка о кнопках: их сейчас нет и быть не может — человек должен знать.
+
+	Иначе владелец решил бы, что кнопки потерялись, и полез бы их
+	добавлять заново (ADR-0031).
+	"""
+	plain = ScheduledPostDto(
+		community_id=1,
+		community_title="Канал",
+		account_id=1,
+		message_id=5,
+		text_preview="текст",
+		scheduled_at=datetime(2026, 9, 17, 10, 0, tzinfo=UTC),
+		media_kind=MediaKind.NONE,
+	)
+	assert "кнопки" not in scheduled_subtitle(plain)
+	promised = replace(plain, markup_promised=True)
+	assert "кнопки появятся после выхода" in scheduled_subtitle(promised)
+	# на странице сообщества название не дублируется, пометка остаётся
+	short = scheduled_subtitle(promised, with_community=False)
+	assert "Канал" not in short and "кнопки появятся" in short

@@ -159,6 +159,7 @@ class QueueItemEditor(QWidget):
 		self._markup_card = CollapsibleCard("Кнопки под постом", self)
 		self._markup = MarkupEditor(self._markup_card)
 		self._markup.set_markup(self._draft.markup)
+		self._markup.set_markup_first(self._draft.markup_first)
 		self._markup.changed.connect(self._refresh_markup)
 		self._markup_card.body.addWidget(self._markup)
 		layout.addWidget(self._markup_card)
@@ -176,23 +177,29 @@ class QueueItemEditor(QWidget):
 	def _refresh_markup(self) -> None:
 		"""Приводит блок кнопок и предел текста к состоянию формы."""
 		over = self._media_over_bot_limit()
+		scheduled = not self._when_row.is_now()
+		markup = self._markup.markup()
+		self._markup.set_mode_available(scheduled and markup is not None)
 		reason = markup_blocker(
 			self._caps,
 			title=self._community.title,
 			kind=self._community.kind,
-			scheduled=not self._when_row.is_now(),
+			scheduled=scheduled,
 			media_over_bot_limit=over,
+			markup_first=self._markup.markup_first(),
 		)
 		self._markup.set_blocked(reason)
-		markup = self._markup.markup()
 		route = choose_route(
 			self._caps,
 			with_markup=markup is not None,
 			media_over_bot_limit=over,
-			scheduled=not self._when_row.is_now(),
+			scheduled=scheduled,
+			markup_first=self._markup.markup_first(),
 		)
 		self._markup.set_notice(
-			"" if reason is not None else markup_notice(route, self._community.bot_label)
+			""
+			if reason is not None
+			else markup_notice(route, self._community.bot_label, scheduled=scheduled)
 		)
 		count = len(markup.buttons) if markup is not None else 0
 		self._markup_card.set_summary(
@@ -386,6 +393,7 @@ class QueueItemEditor(QWidget):
 			rename_to=self._rename_to(),
 			topic_id=self._selected_topic_id(),
 			markup=self._markup.markup(),
+			markup_first=self._markup.markup_first(),
 		)
 
 	def _rename_to(self) -> str | None:

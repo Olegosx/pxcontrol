@@ -126,3 +126,37 @@ def test_big_file_needs_publisher() -> None:
 def test_small_file_allows_buttons_anywhere(kind: CommunityKind) -> None:
 	"""Пока файл по силам боту, вид сообщества кнопкам не мешает."""
 	assert _blocker(kind=kind) is None
+
+
+def test_markup_first_sends_by_bot_at_the_minute() -> None:
+	"""Режим «кнопки важнее»: отложку не создаём, отправляет бот.
+
+	Право «изменять сообщения» в этом режиме не нужно вовсе: бот ставит
+	кнопки своему посту сам — нужно лишь, чтобы он справился с файлом.
+	"""
+	assert (
+		choose_route(
+			BOT_ONLY,
+			with_markup=True,
+			media_over_bot_limit=False,
+			scheduled=True,
+			markup_first=True,
+		)
+		is PublishRoute.BOT
+	)
+	assert _blocker(NO_EDIT, scheduled=True, markup_first=True) is None
+	assert _blocker(BOT_ONLY, scheduled=True, markup_first=True) is None
+
+
+def test_markup_first_needs_bot_sized_file() -> None:
+	"""Крупный файл боту не по силам — режим отклоняется с подсказкой."""
+	reason = _blocker(scheduled=True, markup_first=True, media_over_bot_limit=True) or ""
+	assert "кнопки важнее" in reason and "важнее публикация" in reason
+
+
+def test_default_mode_still_uses_markup_edit() -> None:
+	"""Умолчание не изменилось: публикация важнее, кнопки — после выхода."""
+	assert (
+		choose_route(BOTH, with_markup=True, media_over_bot_limit=False, scheduled=True)
+		is PublishRoute.USERBOT_MARKUP
+	)

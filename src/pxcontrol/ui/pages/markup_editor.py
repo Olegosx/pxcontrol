@@ -74,17 +74,29 @@ def limits_for_route(limits: TextLimits, route: PublishRoute) -> TextLimits:
 	return TextLimits(text=TEXT_LENGTH_LIMIT, caption=CAPTION_LENGTH_LIMIT)
 
 
-def markup_notice(route: PublishRoute, bot_label: str | None) -> str:
+def markup_notice(route: PublishRoute, bot_label: str | None, *, scheduled: bool = False) -> str:
 	"""Что меняется в посте из-за кнопок (пустая строка — ничего).
 
 	Текст показывается рядом с блоком кнопок: человек должен узнать
-	о смене лица поста и о задержке кнопок заранее, а не из канала.
+	о смене лица поста, о задержке кнопок и о том, что в режиме «кнопки
+	важнее» пост уходит из приложения, — заранее, а не из канала.
 	"""
 	who = f"бот «{bot_label}»" if bot_label else "бот"
+	if route is PublishRoute.BOT and scheduled:
+		return (
+			f"Пост отправит {who} в назначенную минуту: кнопки будут с первой "
+			"секунды, но приложение в это время должно работать. Предел подписи — "
+			f"{CAPTION_LENGTH_LIMIT} знаков."
+		)
 	if route is PublishRoute.BOT:
 		return (
 			f"Пост с кнопками отправит {who} — предел подписи у него "
 			f"{CAPTION_LENGTH_LIMIT} знаков, Premium-пределы не действуют."
+		)
+	if route is PublishRoute.USERBOT_MARKUP and scheduled:
+		return (
+			f"Отложку держит сервер Telegram (выйдет даже при закрытом приложении), "
+			f"а {who} поставит кнопки после выхода — недолго пост будет без них."
 		)
 	if route is PublishRoute.USERBOT_MARKUP:
 		return (
@@ -246,6 +258,17 @@ class MarkupEditor(QWidget):
 		bottom.addWidget(self._add_row)
 		bottom.addStretch()
 		outer.addLayout(bottom)
+		self._mode_box = QWidget(self)
+		mode_row = QHBoxLayout(self._mode_box)
+		mode_row.setContentsMargins(0, 0, 0, 0)
+		mode_row.addWidget(CaptionLabel("Что важнее у отложенного поста:", self._mode_box))
+		self._mode = ComboBox(self._mode_box)
+		self._mode.addItem("публикация — кнопки появятся после выхода", userData=False)
+		self._mode.addItem("кнопки — пост уйдёт из приложения точно в срок", userData=True)
+		self._mode.currentIndexChanged.connect(lambda _index: self._on_changed())
+		mode_row.addWidget(self._mode, 1)
+		self._mode_box.setVisible(False)
+		outer.addWidget(self._mode_box)
 		self._hint = CaptionLabel("", self)
 		self._hint.setWordWrap(True)
 		outer.addWidget(self._hint)
@@ -301,6 +324,22 @@ class MarkupEditor(QWidget):
 		self._refresh_hint()
 
 	# --- доступность и подсказки -------------------------------------------
+
+	def markup_first(self) -> bool:
+		"""Выбран ли режим «кнопки важнее» (ADR-0031, п. 4).
+
+		У поста «сейчас» выбора нет и он не спрашивается: кнопки и так
+		уходят вместе с постом.
+		"""
+		return bool(self._mode_box.isVisibleTo(self) and self._mode.currentData())
+
+	def set_markup_first(self, value: bool) -> None:
+		"""Показывает сохранённый выбор режима (правка элемента очереди)."""
+		self._mode.setCurrentIndex(1 if value else 0)
+
+	def set_mode_available(self, available: bool) -> None:
+		"""Показывает выбор режима — он есть только у отложенного поста с кнопками."""
+		self._mode_box.setVisible(available)
 
 	def set_blocked(self, reason: str | None) -> None:
 		"""Запрещает кнопки с названной причиной (None — снова можно).

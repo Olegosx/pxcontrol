@@ -1490,3 +1490,23 @@ async def test_bot_route_uses_base_text_limits(db: Database) -> None:
 	# без кнопок тот же текст уходит публикателем с Premium-пределом
 	await service.publish(PostDraft(community_id, text=long_text))
 	assert len(gateway.published) == 1
+
+
+async def test_list_scheduled_marks_promised_buttons(db: Database) -> None:
+	"""Запись с обещанными кнопками помечена: их нет, но они будут.
+
+	Крючок к хранилищу клавиатур собирает движок; сервис постов о нём
+	знает только как о функции «какие записи обещаны».
+	"""
+
+	async def promised(community_id: int) -> set[int]:
+		return {501}
+
+	service = PostsService(db, _FakeGateway(), promised_markups=promised)
+	await _add_community(db)
+	scheduled = await service.list_scheduled()
+	assert [item.markup_promised for item in scheduled.items] == [True]
+
+	# без крючка (и без обещаний) пометки нет
+	plain = PostsService(db, _FakeGateway())
+	assert [item.markup_promised for item in (await plain.list_scheduled()).items] == [False]
