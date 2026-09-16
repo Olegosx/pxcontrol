@@ -16,9 +16,16 @@ ADR-0031, п. 9), дорисовать клавиатуру ботом, снят
 Дозор написан осторожным: промах опаснее отсутствия кнопок, поэтому
 двусмысленность («нашлось два поста с таким текстом») трактуется как
 «не нашлось»; приостановленный бот — повод подождать, а не считать
-попытку; флуд-лимит прекращает проход, а не молотит дальше. После
-:data:`MAX_APPLY_ATTEMPTS` неудач обещание отпускается с записью
-в журнал — иначе дозор ходил бы за ним вечно.
+попытку; флуд-лимит прекращает проход, а не молотит дальше.
+
+**Срок обещания — сутки** (:data:`APPLY_MAX_AGE`), и считается он
+временем, а не числом попыток. Прежнее правило «пять попыток подряд»
+означало пять минут: сеть, мигнувшая на десять, хоронила кнопки
+у вышедшего поста, хотя ничего непоправимого не случилось. Время —
+честная мера: за сутки поправимое (нет связи, бот на паузе, право
+вернули) успевает поправиться, а непоправимое остаётся непоправимым.
+По истечении срока обещание отпускается: запись в журнал и причина
+в самом обещании, чтобы человек увидел её на карточке поста.
 
 Здесь же живут переходы обещания из матрицы маршрутов: перенос времени
 обещание не рвёт, удаление поста его снимает, неудачная попытка остаётся
@@ -40,7 +47,7 @@ from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, PromisedMarkup
-from pxcontrol.engine.db.types import as_utc_optional
+from pxcontrol.engine.db.types import as_utc, as_utc_optional
 from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.services.posts import community_capabilities
 from pxcontrol.engine.telegram.markup import (
@@ -69,13 +76,30 @@ HISTORY_LOOKUP_LIMIT = 100
 #: но дата поста может отличаться на секунды.
 LOOKUP_MARGIN = timedelta(minutes=2)
 
-#: Сколько раз пытаться применить обещание, прежде чем отпустить его.
-#: Дозор ходит раз в минуту; пять неудач — это уже не заминка, а отказ
-#: (нет права, бота выгнали, пост удалили), и вечно ходить за ним нельзя.
-MAX_APPLY_ATTEMPTS = 5
+#: Сколько дозор ходит за обещанием, прежде чем отпустить его. Отсчёт —
+#: от ожидаемого выхода поста (у поста «сейчас» — от самого обещания).
+#: Сутки: за это время переживается всё поправимое — обрыв связи,
+#: приостановленный бот, отобранное и возвращённое право; дальше
+#: причина уже не заминка, и ходить за обещанием вечно незачем.
+APPLY_MAX_AGE = timedelta(days=1)
 
 #: Предел ожидания дозора при остановке движка (ADR-0020).
 _SHUTDOWN_TIMEOUT_S = 10.0
+
+
+def promise_deadline(promise: PromisedMarkupDto) -> datetime:
+	"""До какого момента дозор ходит за обещанием.
+
+	Отсчёт — от ожидаемого выхода поста; у поста «сейчас» такого
+	времени нет, и считаем от самого обещания. Чистая функция:
+	правило срока проверяется тестом без базы и сети.
+	"""
+	return (promise.when or promise.created_at) + APPLY_MAX_AGE
+
+
+def promise_expired(promise: PromisedMarkupDto, moment: datetime) -> bool:
+	"""Вышел ли срок обещания (дозор за ним больше не ходит)."""
+	return moment > promise_deadline(promise)
 
 
 class _MarkupPort(Protocol):
@@ -108,6 +132,8 @@ class PromisedMarkupDto:
 		attempts: сколько раз пытались применить.
 		error: текст последней неудачи (None — ещё не пытались
 			или прошлая попытка не оставила следа).
+		created_at: когда обещание записано — от него считается срок
+			у поста «сейчас», которому ожидаемого времени не назначали.
 	"""
 
 	id: int
@@ -119,6 +145,7 @@ class PromisedMarkupDto:
 	markup: PostMarkup
 	attempts: int
 	error: str | None
+	created_at: datetime
 
 
 class MarkupsService:
@@ -131,6 +158,8 @@ class MarkupsService:
 		self._gateway = gateway
 		self._poller: asyncio.Task[None] | None = None
 		self._stop = asyncio.Event()
+		#: обещания, срок которых уже отмечен в этом запуске (см. _release)
+		self._released: set[int] = set()
 
 	async def promise(
 		self,
@@ -425,6 +454,9 @@ class MarkupsService:
 		for promise in await self.pending():
 			if self._stop.is_set():
 				break
+			if promise_expired(promise, moment):
+				await self._release(promise)
+				continue
 			if not self._is_due(promise, moment):
 				continue
 			try:
@@ -445,14 +477,34 @@ class MarkupsService:
 
 	@staticmethod
 	def _is_due(promise: PromisedMarkupDto, moment: datetime) -> bool:
-		"""Пора ли браться за обещание.
-
-		Исчерпавшее попытки не берём вовсе: его уже отпустили
-		(см. :meth:`_apply_one`), и ходить за ним вечно незачем.
-		"""
-		if promise.attempts >= MAX_APPLY_ATTEMPTS:
-			return False
+		"""Пора ли браться за обещание: пост уже мог появиться в ленте."""
 		return promise.when is None or promise.when <= moment
+
+	async def _release(self, promise: PromisedMarkupDto) -> None:
+		"""Отпускает обещание, у которого вышел срок (:data:`APPLY_MAX_AGE`).
+
+		Запись остаётся в базе: человек должен увидеть на карточке поста,
+		что кнопки обещаны и почему их нет (ADR-0032). Причина
+		дописывается один раз за запуск приложения — набор отпущенных
+		живёт в памяти: перезапуск перепишет тот же текст, и это дешевле
+		колонки в базе ради одной пометки.
+		"""
+		if promise.id in self._released:
+			return
+		self._released.add(promise.id)
+		reason = promise.error or "вышедший пост не опознан"
+		text = f"срок обещания вышел (сутки), кнопки так и не встали: {reason}"
+		async with self._db.session_factory() as session:
+			await session.execute(
+				update(PromisedMarkup).where(PromisedMarkup.id == promise.id).values(error=text)
+			)
+			await session.commit()
+		logger.warning(
+			"Обещание id=%s отпущено: %s. Пост остался без кнопок — поставьте их "
+			"правкой поста на «Опубликовано».",
+			promise.id,
+			text,
+		)
 
 	async def _apply_one(self, promise: PromisedMarkupDto, moment: datetime) -> bool:
 		"""Пытается поставить кнопки одному посту.
@@ -532,16 +584,8 @@ class MarkupsService:
 			return community.tg_chat_id, account_id, BotRef(bot.id, bot.token)
 
 	async def _miss(self, promise: PromisedMarkupDto, reason: str) -> None:
-		"""Записывает неудачную попытку и отпускает исчерпавшее обещание."""
+		"""Записывает неудачную попытку; срок обещания проверит проход."""
 		await self.fail(promise.id, reason)
-		if promise.attempts + 1 >= MAX_APPLY_ATTEMPTS:
-			logger.warning(
-				"Обещание id=%s отпущено после %d попыток: %s. Пост остался без кнопок — "
-				"поставьте их правкой поста или создайте пост заново.",
-				promise.id,
-				MAX_APPLY_ATTEMPTS,
-				reason,
-			)
 
 	@staticmethod
 	def _dto(row: PromisedMarkup) -> PromisedMarkupDto | None:
@@ -564,4 +608,5 @@ class MarkupsService:
 			markup=markup,
 			attempts=row.attempts,
 			error=row.error,
+			created_at=as_utc(row.created_at),
 		)

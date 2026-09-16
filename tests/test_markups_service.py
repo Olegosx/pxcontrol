@@ -16,7 +16,12 @@ from sqlalchemy import select, update
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, PromisedMarkup, TgAccount
-from pxcontrol.engine.services.markups import MAX_APPLY_ATTEMPTS, MarkupsService
+from pxcontrol.engine.services.markups import (
+	APPLY_MAX_AGE,
+	MarkupsService,
+	PromisedMarkupDto,
+	promise_expired,
+)
 from pxcontrol.engine.telegram.markup import (
 	BUTTON_TEXT_LIMIT,
 	ButtonKind,
@@ -25,6 +30,22 @@ from pxcontrol.engine.telegram.markup import (
 	PostMarkup,
 )
 from pxcontrol.engine.telegram.types import BotRef, TelegramFloodError
+
+
+def _promise_dto(*, when: datetime | None, created_at: datetime) -> PromisedMarkupDto:
+	"""Снимок обещания для проверки чистого правила срока."""
+	return PromisedMarkupDto(
+		id=1,
+		community_id=1,
+		scheduled_message_id=None,
+		message_id=None,
+		when=when,
+		match_text="текст",
+		markup=markup(),
+		attempts=0,
+		error=None,
+		created_at=created_at,
+	)
 
 
 def markup(text: str = "Смотреть") -> PostMarkup:
@@ -291,8 +312,12 @@ async def test_watcher_waits_for_bot_without_spending_attempt(db: Database) -> N
 	assert len(promises) == 1 and promises[0].attempts == 0
 
 
-async def test_watcher_releases_promise_after_attempts(db: Database) -> None:
-	"""Исчерпав попытки, дозор перестаёт ходить за обещанием."""
+async def test_watcher_keeps_trying_within_the_deadline(db: Database) -> None:
+	"""Пока срок не вышел, дозор пробует снова: заминка — не приговор.
+
+	Прежнее правило «пять попыток» означало пять минут, и десятиминутный
+	обрыв связи хоронил кнопки у вышедшего поста. Теперь мера — время.
+	"""
 	gateway = _FakeGateway()
 	gateway.found = None
 	service = MarkupsService(db, gateway)
@@ -300,14 +325,45 @@ async def test_watcher_releases_promise_after_attempts(db: Database) -> None:
 	await service.promise(
 		community_id, markup(), match_text="текст", when=datetime.now(UTC) - timedelta(minutes=1)
 	)
-	for _ in range(MAX_APPLY_ATTEMPTS):
+	for _ in range(8):  # больше прежнего предела в пять попыток
 		await service.apply_due()
-	lookups_before = len(gateway.lookups)
-	assert lookups_before == MAX_APPLY_ATTEMPTS
-	await service.apply_due()  # обещание отпущено — Telegram больше не тревожим
-	assert len(gateway.lookups) == lookups_before
+	assert len(gateway.lookups) == 8
 	promises = await service.pending()
-	assert len(promises) == 1 and promises[0].attempts == MAX_APPLY_ATTEMPTS
+	assert len(promises) == 1 and promises[0].attempts == 8
+
+
+async def test_watcher_releases_promise_after_deadline(db: Database) -> None:
+	"""Через сутки дозор отпускает обещание и пишет причину в запись."""
+	gateway = _FakeGateway()
+	gateway.found = None
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	await service.promise(
+		community_id,
+		markup(),
+		match_text="текст",
+		when=datetime.now(UTC) - APPLY_MAX_AGE - timedelta(minutes=1),
+	)
+	await service.apply_due()
+	assert gateway.lookups == []  # просроченным Telegram не тревожим
+	promises = await service.pending()
+	assert len(promises) == 1  # запись остаётся: человек увидит причину
+	assert promises[0].error is not None and "срок обещания вышел" in promises[0].error
+	await service.apply_due()  # повторный проход молчит и не тревожит сеть
+	assert gateway.lookups == []
+
+
+def test_promise_expired_counts_from_publication_or_promise() -> None:
+	"""Срок считается от выхода поста, а у поста «сейчас» — от обещания."""
+	now = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
+	born = now - APPLY_MAX_AGE - timedelta(minutes=1)
+	scheduled = _promise_dto(when=now - timedelta(hours=1), created_at=born)
+	# пост вышел час назад: обещание молодое, хотя запись старая
+	assert not promise_expired(scheduled, now)
+	assert promise_expired(_promise_dto(when=born, created_at=born), now)
+	# пост «сейчас»: срок идёт от самой записи
+	assert promise_expired(_promise_dto(when=None, created_at=born), now)
+	assert not promise_expired(_promise_dto(when=None, created_at=now), now)
 
 
 async def test_watcher_uses_known_message_id(db: Database) -> None:
