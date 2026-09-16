@@ -1,15 +1,15 @@
-"""Полный просмотр очереди отправки: сортировка и фильтры (ADR-0016).
+"""Вид списка очереди отправки: сортировка и фильтры (ADR-0016).
 
-Страница «Публикация» показывает только ближайшие карточки очереди;
-всё целиком — вкладка «Очередь» страницы «Расписание»
-(:class:`QueueViewTab`), куда ведут кнопки «Вся очередь…» с «Публикации»
-и страницы сообщества и действия дашборда. Список живой (опрашивается
-тем же способом, что панель страницы, — через :class:`QueuePanel`),
-действия у карточек те же: «Отмена» у живых, «Повторить»/«Убрать»
-у ошибок. Правило показа — чистая :func:`apply_view` поверх общих
-правил списков (:mod:`list_view`: сортировка, фильтры по сообществу
-и слоту, страницы); от общего у очереди — фильтр по статусу и порядок
-постановки.
+Тело экрана «Очередь» раздела «Публикация» (ADR-0032) —
+:class:`QueueView`. Форма нового поста показывает только ближайшие
+карточки очереди, всё целиком живёт здесь; сюда же ведут кнопки
+«Вся очередь…» с формы и со страницы сообщества и действия дашборда.
+Список живой (опрашивается тем же способом, что панель формы, — через
+:class:`QueuePanel`), действия у карточек те же: «Отмена» у живых,
+«Повторить»/«Убрать» у ошибок. Правило показа — чистая
+:func:`apply_view` поверх общих правил списков (:mod:`list_view`:
+сортировка, фильтры по сообществу и слоту, страницы); от общего
+у очереди — фильтр по статусу и порядок постановки.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from enum import StrEnum
 
-from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import StrongBodyLabel
@@ -79,7 +78,7 @@ class QueueFilter(StrEnum):
 def queue_subtitle(item: QueueItemDto, *, with_community: bool = True) -> str:
 	"""Подпись карточки очереди: канал, момент публикации и статус.
 
-	Общая для панели на «Публикации», полного просмотра и вкладки
+	Общая для панели формы поста, экрана «Очередь» и вкладки
 	«Очередь» страницы сообщества — там название сообщества и так
 	в шапке, и ``with_community=False`` его убирает. Момент хранится
 	в UTC (как отдаётся Telegram) и показывается в местном времени —
@@ -181,19 +180,15 @@ def apply_view(
 	return sorted(items, key=lambda item: item.id)
 
 
-class QueueViewTab(QWidget):
+class QueueView(QWidget):
 	"""Вся очередь отправки: живой список с сортировкой и фильтрами.
 
-	Тело вкладки «Очередь» страницы «Расписание». Опрос очереди —
-	только пока вкладка видна (:meth:`set_polling`); правило показа
-	ставится извне (:meth:`show_filter`) — с дашборда сообществ плашкой
-	ошибок (фильтр «ошибки») и кнопкой «Очередь» карточки (фильтр
-	по сообществу). Сообщество, которого в очереди нет, фильтром
-	не становится — показывается вся очередь.
+	Опрос очереди идёт, только пока экран виден (:meth:`set_polling`);
+	правило показа ставится извне (:meth:`show_filter`) — с дашборда
+	сообществ плашкой ошибок (фильтр «ошибки») и кнопкой «Очередь»
+	карточки (фильтр по сообществу). Сообщество, которого в очереди нет,
+	фильтром не становится — показывается вся очередь.
 	"""
-
-	#: Сколько элементов в очереди всего (до фильтра) — число на вкладке.
-	count_changed = Signal(int)
 
 	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
 		super().__init__(parent)
@@ -233,7 +228,7 @@ class QueueViewTab(QWidget):
 				item, parent, self._avatars.get(item.community_id)
 			),
 		)
-		self._panel.set_polling(False)  # включит страница, когда вкладка видна
+		self._panel.set_polling(False)  # включит экран, когда станет виден
 		run_in_engine(
 			worker,
 			worker.engine.community_stats.snapshot(),
@@ -244,12 +239,8 @@ class QueueViewTab(QWidget):
 		)
 
 	def set_polling(self, active: bool) -> None:
-		"""Опрос очереди — только пока вкладка видна."""
+		"""Опрос очереди — только пока экран виден."""
 		self._panel.set_polling(active)
-
-	def total(self) -> int:
-		"""Сколько элементов в очереди всего (до фильтра)."""
-		return self._total
 
 	def show_filter(self, community_id: int | None, status: QueueFilter | None = None) -> None:
 		"""Ставит правило показа извне: сообщество и/или статус.
@@ -281,8 +272,6 @@ class QueueViewTab(QWidget):
 		в :attr:`_page` — очередь живая, и страница, на которую смотрит
 		пользователь, может исчезнуть под ним.
 		"""
-		if len(items) != self._total:
-			self.count_changed.emit(len(items))
 		self._total = len(items)
 		self._bar.refresh(items)
 		status = list(QueueFilter)[int(self._status_combo.currentIndex())]

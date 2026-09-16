@@ -105,8 +105,8 @@ class CardAction(StrEnum):
 	"""Быстрое действие с карточки дашборда (и из меню строки таблицы)."""
 
 	PUBLISH = "publish"  # «Публикация» с этим сообществом
-	SCHEDULE = "schedule"  # «Расписание» с фильтром по сообществу
-	QUEUE = "queue"  # «Расписание» → «Очередь» с фильтром по сообществу
+	SCHEDULE = "schedule"  # «Публикация» → «Отложено» с фильтром по сообществу
+	QUEUE = "queue"  # «Публикация» → «Очередь» с фильтром по сообществу
 	ASSIGN_PUBLISHER = "assign_publisher"  # диалог «Участники…»
 	ENABLE = "enable"  # включить сообщество
 	MAINTENANCE = "maintenance"  # окно обслуживания (ADR-0026)
@@ -115,7 +115,7 @@ class CardAction(StrEnum):
 #: Подписи действий (кнопка карточки и пункт меню строки — одни и те же).
 ACTION_LABELS: dict[CardAction, str] = {
 	CardAction.PUBLISH: "Опубликовать",
-	CardAction.SCHEDULE: "Расписание",
+	CardAction.SCHEDULE: "Отложено",
 	CardAction.QUEUE: "Очередь",
 	CardAction.ASSIGN_PUBLISHER: "Назначить публикатора",
 	CardAction.ENABLE: "Включить",
@@ -129,8 +129,8 @@ def card_actions(community: CommunityDto, counts: QueueCounts) -> tuple[CardActi
 	Порядок проверок — от самого ограничивающего состояния: выключенному
 	сначала нужно включиться, сообществу без публикатора — публикатор
 	(остальные действия без него бессмысленны); у группы вместо
-	«Расписания» — «Обслуживание» (уборка нужна именно группам);
-	непустая очередь заслуживает кнопки «Очередь» вместо «Расписания».
+	«Отложено» — «Обслуживание» (уборка нужна именно группам);
+	непустая очередь заслуживает кнопки «Очередь» вместо «Отложено».
 	"""
 	state = card_state(community, counts)
 	if state is CardState.DISABLED:

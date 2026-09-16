@@ -11,19 +11,26 @@ from qfluentwidgets import FluentIcon, FluentWindow, MessageBox, NavigationItemP
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.services.settings import WINDOW_GEOMETRY
 from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.types import CommunityKind, MediaKind
-from pxcontrol.ui.pages.common import exec_dialog
+from pxcontrol.ui.pages.common import exec_dialog, show_info, show_success
 from pxcontrol.ui.pages.communities import CommunitiesPage
 from pxcontrol.ui.pages.community_page import CommunityPage
-from pxcontrol.ui.pages.publish import PublishPage
-from pxcontrol.ui.pages.publish_queue_view import QueueFilter
-from pxcontrol.ui.pages.schedule import SchedulePage
+from pxcontrol.ui.pages.publish_section import PublishSection
+from pxcontrol.ui.pages.publish_stages import (
+	SECTION_ICON,
+	SECTION_ROUTE_KEY,
+	SECTION_TITLE,
+	stage_icon,
+	stage_title,
+)
 from pxcontrol.ui.pages.settings import SettingsPage
 from pxcontrol.ui.pages.user_page import UserPage, subject_owner
 from pxcontrol.ui.pages.users import UsersPage
 from pxcontrol.ui.pages.video import VideoPage
+from pxcontrol.ui.queue_watcher import QueueWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,7 @@ class MainWindow(FluentWindow):
 		self.setMinimumSize(1000, 640)
 		self._restore_geometry()
 		self._build_navigation()
+		self._watch_publish_queue()
 
 	def _restore_geometry(self) -> None:
 		"""Восстанавливает сохранённое состояние окна (движок уже готов).
@@ -83,20 +91,9 @@ class MainWindow(FluentWindow):
 		self._pending_community: int | None = None
 		self._communities_page.communities_changed.connect(self._sync_community_nav)
 		self._communities_page.open_community.connect(self._open_community)
-		self._communities_page.publish_requested.connect(self._open_publish_for)
-		self._communities_page.schedule_requested.connect(self._open_schedule_for)
-		self._communities_page.queue_requested.connect(self._open_queue_for)
-		self._communities_page.queue_errors_requested.connect(self._open_queue_errors)
 		self._video_page = VideoPage(self._worker, self)
 		self.addSubInterface(self._video_page, FluentIcon.VIDEO, "Видео")
-		self._publish_page = PublishPage(self._worker, self)
-		self.addSubInterface(self._publish_page, FluentIcon.SEND, "Публикация")
-		self._video_page.publish_requested.connect(self._open_publish_with_video)
-		self._video_page.publish_files_requested.connect(self._open_publish_batch_files)
-		self._video_page.publish_folder_requested.connect(self._open_publish_batch_folder)
-		self._schedule_page = SchedulePage(self._worker, self)
-		self.addSubInterface(self._schedule_page, FluentIcon.CALENDAR, "Расписание")
-		self._publish_page.queue_requested.connect(lambda: self._open_queue_for(None))
+		self._build_publish_section()
 		# категории настроек (Общие, Аккаунты) — внутри самой страницы
 		self.addSubInterface(
 			SettingsPage(self._worker, self),
@@ -104,6 +101,63 @@ class MainWindow(FluentWindow):
 			"Настройки",
 			NavigationItemPosition.BOTTOM,
 		)
+
+	def _build_publish_section(self) -> None:
+		"""Раздел «Публикация»: ветка подменю по стадиям жизни поста (ADR-0032).
+
+		Корень ветки — заголовок без своей страницы: стадии равноправны,
+		и прятать первую из них в корень значило бы соврать о пути поста.
+		Ветка сразу раскрыта — она и есть карта этого пути.
+		"""
+		self._publish = PublishSection(self._worker, self, self.switchTo)
+		self.navigationInterface.addItem(
+			routeKey=SECTION_ROUTE_KEY,
+			icon=SECTION_ICON,
+			text=SECTION_TITLE,
+			selectable=False,
+			tooltip=SECTION_TITLE,
+		)
+		for stage, page in self._publish.pages():
+			self.addSubInterface(
+				page, stage_icon(stage), stage_title(stage), parent=SECTION_ROUTE_KEY
+			)
+		self.navigationInterface.widget(SECTION_ROUTE_KEY).setExpanded(True)
+		# входы в раздел с других экранов: дашборд, страницы сообществ
+		# (подключаются в _sync_community_nav) и «Видео»
+		self._communities_page.publish_requested.connect(self._publish.show_new_post)
+		self._communities_page.schedule_requested.connect(self._publish.show_scheduled)
+		self._communities_page.queue_requested.connect(self._publish.show_queue)
+		self._communities_page.queue_errors_requested.connect(self._publish.show_queue_errors)
+		self._video_page.publish_requested.connect(self._open_publish_with_video)
+		self._video_page.publish_files_requested.connect(self._publish.show_batch_files)
+		self._video_page.publish_folder_requested.connect(self._publish.show_batch_folder)
+
+	def _watch_publish_queue(self) -> None:
+		"""Заводит наблюдателя очереди отправки — владельца её завершённых.
+
+		Владелец один на приложение и не зависит от того, какой экран
+		открыт (ADR-0032): экраны стадий гасят свой опрос, когда их
+		не видно, а снимать завершённые задания и показывать исход
+		надо всегда. Он же отвечает на вопрос при закрытии окна —
+		идёт ли отправка прямо сейчас.
+		"""
+		self._queue_watcher = QueueWatcher(
+			self._worker,
+			self,
+			service=lambda: self._worker.engine.publish_queue,
+			on_finished=self._on_post_finished,
+		)
+
+	def _on_post_finished(self, item: QueueItemDto, done: bool) -> None:
+		"""Итоговая плашка поста, покинувшего очередь отправки."""
+		if done:
+			show_success(
+				self,
+				"Отложенная запись создана" if item.scheduled else "Опубликовано",
+				item.title,
+			)
+		else:
+			show_info(self, "Отправка отменена", item.title)
 
 	def _sync_community_nav(self, communities: list[CommunityDto]) -> None:
 		"""Приводит подменю сообществ к свежему списку из дашборда.
@@ -128,8 +182,8 @@ class MainWindow(FluentWindow):
 			if existing is None:
 				page = CommunityPage(self._worker, community, self)
 				page.changed.connect(self._communities_page.reload)
-				page.publish_requested.connect(self._open_publish_for)
-				page.queue_requested.connect(self._open_queue_for)
+				page.publish_requested.connect(self._publish.show_new_post)
+				page.queue_requested.connect(self._publish.show_queue)
 				self._community_pages[community.id] = page
 				icon = (
 					FluentIcon.CHAT
@@ -201,43 +255,9 @@ class MainWindow(FluentWindow):
 		self._pending_community = community_id
 		self.switchTo(self._communities_page)
 
-	def _open_publish_for(self, community_id: int) -> None:
-		"""«Опубликовать» на карточке дашборда — «Публикация» с этим сообществом."""
-		self.switchTo(self._publish_page)
-		self._publish_page.select_community(community_id)
-
-	def _open_schedule_for(self, community_id: int) -> None:
-		"""«Расписание» на карточке дашборда — «Отложено» с фильтром по сообществу."""
-		self.switchTo(self._schedule_page)
-		self._schedule_page.show_scheduled(community_id)
-
-	def _open_queue_for(self, community_id: int | None) -> None:
-		"""«Очередь» / «Вся очередь…» — «Расписание», вкладка «Очередь».
-
-		``community_id`` — фильтр по сообществу (None — вся очередь).
-		"""
-		self.switchTo(self._schedule_page)
-		self._schedule_page.show_queue(community_id)
-
-	def _open_queue_errors(self) -> None:
-		"""Плашка ошибок дашборда — вкладка «Очередь» с фильтром «ошибки»."""
-		self.switchTo(self._schedule_page)
-		self._schedule_page.show_queue(None, QueueFilter.ERRORS)
-
 	def _open_publish_with_video(self, path: str, community_id: int) -> None:
-		"""Переходит на «Публикацию» с видеофайлом и каналом со страницы «Видео»."""
-		self._publish_page.prefill_media(MediaKind.VIDEO, path, community_id=community_id or None)
-		self.switchTo(self._publish_page)
-
-	def _open_publish_batch_files(self, paths: list[str], community_id: int) -> None:
-		"""Пакет из готовых видео, выбранных на «Видео» (ADR-0015)."""
-		self.switchTo(self._publish_page)
-		self._publish_page.start_batch_with_files(list(paths), community_id)
-
-	def _open_publish_batch_folder(self, root: str, community_id: int) -> None:
-		"""Пакет из папки готовых видео, выбранной на «Видео» (ADR-0015)."""
-		self.switchTo(self._publish_page)
-		self._publish_page.start_batch_with_folder(root, community_id)
+		"""«Опубликовать…» на «Видео» — форма поста с этим файлом и каналом."""
+		self._publish.show_with_media(MediaKind.VIDEO, path, community_id)
 
 	def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — API Qt
 		"""Подтверждает выход при активной отправке или непустой обработке.
@@ -250,7 +270,7 @@ class MainWindow(FluentWindow):
 		остаются на диске: результат пишется атомарно).
 		"""
 		reasons = []
-		if self._publish_page.upload_active():
+		if self._queue_watcher.active():
 			reasons.append(
 				"идёт отправка поста — загрузка оборвётся (пост уйдёт при следующем запуске)"
 			)

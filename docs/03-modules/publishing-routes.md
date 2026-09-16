@@ -459,4 +459,4 @@
 
 - [ADR-0031](../02-architecture/decisions/0031-buttons-post-then-markup.md) — решение о кнопках.
 - [ADR-0010](../02-architecture/decisions/0010-posts-fire-and-forget.md) · [ADR-0011](../02-architecture/decisions/0011-publish-via-userbot.md) · [ADR-0016](../02-architecture/decisions/0016-persistent-publish-queue.md)
-- [Кнопки под постом: документация и опыт](telegram-buttons.md) · [Шлюз Telegram](telegram-gateway.md) · [Расписание](scheduler.md)
+- [Кнопки под постом: документация и опыт](telegram-buttons.md) · [Шлюз Telegram](telegram-gateway.md) · [Ожидание публикации](scheduler.md)

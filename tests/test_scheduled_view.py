@@ -1,8 +1,8 @@
 """Тесты чистых правил показа отложенных записей (без Qt).
 
 Подпись и отпечаток карточки, ключ, слияние перечитанного сообщества,
-правило показа, тексты страницы «Расписание» и сноска формы правки —
-всё это функции без виджетов.
+правило показа, предупреждение о непрочитанных сообществах и сноска
+формы правки — всё это функции без виджетов.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 
 from pxcontrol.engine.services.posts import ScheduledDraft, ScheduledPostDto, ScheduledRef
 from pxcontrol.engine.telegram.types import MediaKind
-from pxcontrol.ui.pages.schedule import TAB_QUEUE, TAB_SCHEDULED, tab_title, unread_text
 from pxcontrol.ui.pages.scheduled_edit import attachment_note
 from pxcontrol.ui.pages.scheduled_panel import (
 	ScheduledSort,
@@ -22,6 +21,7 @@ from pxcontrol.ui.pages.scheduled_panel import (
 	scheduled_signature,
 	scheduled_subtitle,
 )
+from pxcontrol.ui.pages.scheduled_view import unread_text
 
 _BASE = datetime(2026, 9, 15, 9, 0, tzinfo=UTC)
 
@@ -102,9 +102,8 @@ def test_apply_scheduled_view_filters_and_sorts() -> None:
 	]
 
 
-def test_schedule_page_texts() -> None:
-	assert tab_title(TAB_SCHEDULED) == "Отложено"
-	assert tab_title(TAB_QUEUE) == "Очередь"
+def test_unread_text() -> None:
+	"""Прочитано всё — строки нет; иначе сообщества названы поимённо."""
 	assert unread_text(()) == ""
 	assert unread_text(("Канал", "Группа")) == "Не удалось прочитать отложенные: «Канал», «Группа»."
 

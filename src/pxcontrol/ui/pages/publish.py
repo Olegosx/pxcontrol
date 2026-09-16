@@ -1,9 +1,16 @@
-"""Страница «Публикация»: единая точка создания постов всех типов.
+"""Экран «Новый пост»: единая точка создания постов всех типов.
 
-Тип контента выбирается сегментами (текст/фото/видео/аудио/файл).
-Отправка идёт через очередь движка (ADR-0016): «Отправить» ставит пост
-в хвост и сразу освобождает форму под следующий; очередь видна на
-странице, каждый элемент можно отменить.
+Первая стадия раздела «Публикация» (ADR-0032) — форма поста. Тип
+контента выбирается сегментами (текст/фото/видео/аудио/файл). Отправка
+идёт через очередь движка (ADR-0016): «Отправить» ставит пост в хвост
+и сразу освобождает форму под следующий; ближайшие карточки очереди
+видны под формой, всё целиком — на соседнем экране «Очередь».
+
+Панель очереди здесь — **зритель**: завершённые задания снимает
+и плашку об исходе показывает наблюдатель очереди при главном окне
+(:mod:`pxcontrol.ui.queue_watcher`). Иначе владение очередью зависело
+бы от того, открыт ли этот экран, — а стадии разъехались по экранам,
+и открыт он далеко не всегда.
 """
 
 from __future__ import annotations
@@ -104,6 +111,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 	queue_leading,
 	queue_subtitle,
 )
+from pxcontrol.ui.pages.publish_stages import PublishStage, stage_hint, stage_title
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 
 #: Сколько карточек очереди показывать на странице (хвост ждущих —
@@ -145,7 +153,7 @@ def _actor_note(community: CommunityDto) -> str:
 class PublishPage(ScrollArea):
 	"""Создание публикации: тип контента, канал, текст, время, отправка."""
 
-	#: «Вся очередь…» — страница «Расписание», вкладка «Очередь».
+	#: «Вся очередь…» — соседний экран раздела «Очередь».
 	queue_requested = Signal()
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
@@ -174,7 +182,10 @@ class PublishPage(ScrollArea):
 
 	def _build(self) -> None:
 		layout = page_layout(self)
-		layout.addWidget(SubtitleLabel("Публикация", self))
+		layout.addWidget(SubtitleLabel(stage_title(PublishStage.NEW_POST), self))
+		hint = CaptionLabel(stage_hint(PublishStage.NEW_POST), self)
+		hint.setWordWrap(True)
+		layout.addWidget(hint)
 		self._build_kind_segments(layout)
 		self._community_combo: DtoComboBox[CommunityDto] = DtoComboBox(self)
 		self._community_combo.currentIndexChanged.connect(self._on_community_changed)
@@ -349,8 +360,8 @@ class PublishPage(ScrollArea):
 		row.addWidget(batch_button)
 		view_button = PushButton("Вся очередь…", self)
 		view_button.setToolTip(
-			"Все элементы очереди отправки с сортировкой и фильтрами "
-			f"(на странице — ближайшие {_QUEUE_MAX_CARDS})"
+			"Экран «Очередь»: все элементы очереди отправки с сортировкой "
+			f"и фильтрами (здесь — ближайшие {_QUEUE_MAX_CARDS})"
 		)
 		view_button.clicked.connect(self._on_queue_view)
 		row.addWidget(view_button)
@@ -368,10 +379,12 @@ class PublishPage(ScrollArea):
 			queue_box,
 			service=lambda: self._worker.engine.publish_queue,
 			subtitle=queue_subtitle,
-			on_finished=self._on_queue_finished,
 			on_refreshed=self._update_queue_summary,
-			# длинный хвост ждущих слота (ADR-0016) не раздувает страницу;
-			# всё целиком — в диалоге «Вся очередь…»
+			# зритель: завершёнными владеет наблюдатель главного окна
+			# (ADR-0032) — он же показывает плашку об исходе
+			dismiss_finished=False,
+			# длинный хвост ждущих слота (ADR-0016) не раздувает форму;
+			# всё целиком — на экране «Очередь»
 			max_cards=_QUEUE_MAX_CARDS,
 			# правка — прямо в карточке (ADR-0016, п. 7): раскрывается
 			# кликом, как параметры файла на «Видео»
@@ -383,7 +396,7 @@ class PublishPage(ScrollArea):
 		)
 
 	def _on_queue_view(self) -> None:
-		"""Полный просмотр очереди — «Расписание», вкладка «Очередь»."""
+		"""Полный просмотр очереди — соседний экран раздела."""
 		self.queue_requested.emit()
 
 	def _fill_editor(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
@@ -1084,30 +1097,6 @@ class PublishPage(ScrollArea):
 		self._queue.poll()  # панель очереди обновляется сразу, не по таймеру
 
 	# --- панель очереди -------------------------------------------------------------
-
-	def upload_active(self) -> bool:
-		"""Идёт ли отправка прямо сейчас (для подтверждения выхода).
-
-		Ждущие и готовые к отправке не в счёт: очередь персистентна
-		(ADR-0016), при выходе они сохранятся и продолжатся при
-		следующем запуске.
-		"""
-		return self._queue.active()
-
-	def _on_queue_finished(self, item: QueueItemDto, done: bool) -> None:
-		"""Итоговая плашка завершённого элемента.
-
-		Родитель — окно: опрос живёт всегда, и завершение может прийти
-		при скрытой странице — плашка на ней погасла бы незамеченной.
-		"""
-		if done:
-			show_success(
-				self.window(),
-				"Отложенная запись создана" if item.scheduled else "Опубликовано",
-				item.title,
-			)
-		else:
-			show_info(self.window(), "Отправка отменена", item.title)
 
 	def _update_queue_summary(self, items: list[QueueItemDto]) -> None:
 		"""Сводка над карточками: отправка, очередь, ждущие слота, ошибки."""
