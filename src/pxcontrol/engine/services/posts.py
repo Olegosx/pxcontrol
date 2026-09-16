@@ -31,6 +31,7 @@ from pxcontrol.engine.services.publish_route import (
 	PublishRoute,
 	choose_route,
 	markup_blocker,
+	post_markup_blocker,
 	publish_capabilities,
 	route_uses_userbot,
 )
@@ -43,6 +44,7 @@ from pxcontrol.engine.services.settings import (
 	SettingsService,
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
+from pxcontrol.engine.telegram.lane import TelegramPriority
 from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.types import (
@@ -52,6 +54,7 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
+	PublishedMessage,
 	PublishedPage,
 	ScheduledMessage,
 	TelegramFloodError,
@@ -92,6 +95,9 @@ _SCHEDULED_PREVIEW_CHARS = 80
 #: Полсотни — страница показа списков приложения (``list_view.PAGE_SIZE``):
 #: одна страница экрана — один запрос к Telegram.
 PUBLISHED_PAGE_SIZE = 50
+
+#: Единый текст исхода «поста уже нет»: чтение и действие звучат одинаково.
+_PUBLISHED_GONE_TEXT = "Этого поста в Telegram уже нет — он удалён. Обновите ленту сообщества."
 
 #: Единый текст исхода «записи уже нет»: пустой ответ на чтение
 #: и отказ Telegram на действие звучат одинаково.
@@ -160,6 +166,15 @@ class PostNotReadyError(PostError):
 	(ADR-0016): иначе одно нажатие «выключить» превращало бы всю
 	накопленную очередь канала в десятки карточек с ошибкой, которые
 	пришлось бы перебирать руками.
+	"""
+
+
+class PublishedGoneError(PostError):
+	"""Вышедшего поста в Telegram уже нет (удалён из другого клиента).
+
+	Штатная гонка с сервером-истиной (ADR-0010), как
+	:class:`ScheduledGoneError` у отложенной записи: не сбой приложения,
+	а повод перечитать ленту.
 	"""
 
 
@@ -347,6 +362,22 @@ class _PostPort(Protocol):
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
 	) -> PublishedPage: ...
 
+	async def userbot_get_post(
+		self, account_id: int, chat_id: str, message_id: int
+	) -> PublishedMessage | None: ...
+
+	async def userbot_edit_post(
+		self, account_id: int, chat_id: str, message_id: int, text: str
+	) -> None: ...
+
+	async def delete_messages(
+		self,
+		account_id: int,
+		chat_id: str,
+		message_ids: list[int],
+		priority: TelegramPriority = ...,
+	) -> int: ...
+
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
 
 	async def get_scheduled_message(
@@ -379,6 +410,11 @@ PromisedMarkups = Callable[[int], Awaitable[set[int]]]
 #: Крючок «каким вышедшим постам кнопки обещаны, но не стоят»:
 #: номер поста → текст последней неудачи (пустая строка — не пытались).
 PostPromises = Callable[[int], Awaitable[dict[int, str]]]
+
+#: Крючок «с кнопками поста разобрались сами»: сообщество и номер поста.
+#: Человек поставил или снял клавиатуру руками (или удалил пост) —
+#: обещание дозору больше не нужно.
+MarkupSettled = Callable[[int, int], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -579,6 +615,64 @@ class PublishedPostDto:
 
 
 @dataclass(frozen=True)
+class PublishedRef:
+	"""Адрес вышедшего поста для действий над ним.
+
+	Пары хватает: пост живёт в ленте сообщества, и номер в ней
+	уникален — в отличие от отложенной записи, у которой свой номер
+	в очереди отложенных и свой читатель (ADR-0022).
+	"""
+
+	community_id: int
+	message_id: int
+
+
+@dataclass(frozen=True)
+class PublishedDraft:
+	"""Вышедший пост, прочитанный с сервера для формы правки.
+
+	Attributes:
+		ref: адрес поста.
+		community_title: название сообщества.
+		text: текст поста (у поста с вложением — подпись).
+		media_kind: вид вложения (``NONE`` — текст).
+		topic_id: тема форума (None — общая лента).
+		buttons: сколько кнопок стоит под постом сейчас.
+		markup: клавиатура поста в нашем виде — ею наполняется форма.
+			None при ненулевом ``buttons`` означает «клавиатура не наших
+			видов»: её можно заменить целиком, но не показать по кнопкам.
+		text_limit: предел длины текста по Premium публикатора.
+		markup_blocker: почему кнопки этого поста изменить нельзя
+			(None — можно; текст — человеку).
+	"""
+
+	ref: PublishedRef
+	community_title: str
+	text: str
+	media_kind: MediaKind
+	topic_id: int | None
+	buttons: int
+	markup: PostMarkup | None
+	text_limit: int
+	markup_blocker: str | None
+
+	@property
+	def markup_ours(self) -> bool:
+		"""Можно ли показать клавиатуру поста кнопками в форме."""
+		return not self.buttons or self.markup is not None
+
+	@property
+	def text_editable(self) -> bool:
+		"""Есть ли у поста текст, который вообще можно править.
+
+		У опроса и геопозиции (``MediaKind.OTHER``) текста нет: Telegram
+		не даёт менять ни вопрос, ни варианты — такому посту доступны
+		только кнопки и удаление.
+		"""
+		return self.media_kind is not MediaKind.OTHER
+
+
+@dataclass(frozen=True)
 class PublishedList:
 	"""Страница ленты сообщества и место, с которого читать дальше.
 
@@ -620,6 +714,7 @@ class PostsService:
 		markup_gone: MarkupGone | None = None,
 		promised_markups: PromisedMarkups | None = None,
 		post_promises: PostPromises | None = None,
+		markup_settled: MarkupSettled | None = None,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
 		экземпляр поверх той же БД (для тестов это эквивалентно:
@@ -638,6 +733,7 @@ class PostsService:
 		self._markup_gone = markup_gone
 		self._promised_markups = promised_markups
 		self._post_promises = post_promises
+		self._markup_settled = markup_settled
 
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
@@ -1609,6 +1705,157 @@ class PostsService:
 			for message in page.messages
 		]
 		return PublishedList(items=items, next_offset_id=page.next_offset_id)
+
+	async def published_draft(self, ref: PublishedRef) -> PublishedDraft:
+		"""Читает вышедший пост с сервера для формы правки (ADR-0032, A4).
+
+		Пост берётся **с сервера целиком**, а не из снимка ленты: его
+		могли поправить из другого клиента Telegram, а истина живёт
+		в самом сообществе (ADR-0010).
+
+		Returns:
+			Пост и правила его правки: предел длины текста по Premium
+			публикатора и причина, по которой кнопки изменить нельзя.
+
+		Raises:
+			PostError: Сообщества нет или у него нет публикатора.
+			PublishedGoneError: Поста в ленте уже нет.
+			UserbotUnavailableError: Аккаунт недоступен или Telegram отказал.
+		"""
+		community = await self._get_community(ref.community_id)
+		account_id = self._published_reader(community)
+		message = await self._gateway.userbot_get_post(
+			account_id, community.tg_chat_id, ref.message_id
+		)
+		if message is None:
+			raise PublishedGoneError(_PUBLISHED_GONE_TEXT)
+		premium = self._gateway.userbot_premium(account_id)
+		with_media = message.media_kind is not MediaKind.NONE
+		return PublishedDraft(
+			ref=ref,
+			community_title=community.title,
+			text=message.text,
+			media_kind=message.media_kind,
+			topic_id=message.topic_id,
+			buttons=message.buttons,
+			markup=message.markup,
+			text_limit=text_length_limit(premium, with_media),
+			markup_blocker=post_markup_blocker(
+				community_capabilities(community),
+				title=community.title,
+				kind=CommunityKind(community.kind),
+			),
+		)
+
+	async def edit_published(self, draft: PublishedDraft, text: str) -> None:
+		"""Меняет текст вышедшего поста — публикатором (ADR-0032, A4).
+
+		Проверки те же, что у постановки поста: у поста без вложения
+		текст не может быть пустым, длина — в пределе публикатора.
+		Кнопки правка не трогает: под постом они остаются как были
+		(ADR-0031) — менять их может только бот
+		(:meth:`set_published_markup`).
+
+		Raises:
+			PostError: Пустой текст у поста без вложения, текст длиннее
+				предела или у поста нет правимого текста (опрос).
+			PublishedGoneError: Поста в ленте уже нет.
+			UserbotUnavailableError: Нет права править (в группе правит
+				только автор), аккаунт недоступен или Telegram отказал.
+		"""
+		if not draft.text_editable:
+			raise PostError(
+				"У этого поста нет правимого текста: вопрос и варианты опроса "
+				"Telegram менять не даёт."
+			)
+		with_media = draft.media_kind is not MediaKind.NONE
+		cleaned = text.strip()
+		if not cleaned and not with_media:
+			raise PostError("Текст поста пуст — у поста без вложения он обязателен.")
+		check_text_length(cleaned, draft.text_limit, with_media)
+		community = await self._get_community(draft.ref.community_id)
+		account_id = self._published_reader(community)
+		try:
+			await self._gateway.userbot_edit_post(
+				account_id, community.tg_chat_id, draft.ref.message_id, cleaned
+			)
+		except UserbotMessageGoneError as exc:
+			raise PublishedGoneError(_PUBLISHED_GONE_TEXT) from exc
+
+	async def set_published_markup(self, ref: PublishedRef, markup: PostMarkup | None) -> None:
+		"""Ставит, меняет или снимает кнопки вышедшего поста — ботом.
+
+		Клавиатуру под постом трогает только бот (ADR-0031, проверено
+		живьём): правка публикатора её не касается, а пустая разметка
+		снимает кнопки совсем. Ограничения — в
+		:func:`post_markup_blocker`: в группе такой правки не бывает,
+		в канале боту нужно право «изменять сообщения».
+
+		После удачи обещание дозору снимается (крючок ``markup_settled``):
+		с кнопками этого поста разобрались руками.
+
+		Raises:
+			PostError: Сообщества нет, кнопки этого поста изменить нельзя
+				или клавиатура не проходит пределы Telegram.
+			UserbotUnavailableError: Telegram отказал боту.
+		"""
+		community = await self._get_community(ref.community_id)
+		blocker = post_markup_blocker(
+			community_capabilities(community),
+			title=community.title,
+			kind=CommunityKind(community.kind),
+		)
+		if blocker is not None:
+			raise PostError(blocker)
+		if markup is not None:
+			validate_markup(markup)
+		bot = community.bot
+		if bot is None:  # проверка выше уже это исключила — страховка контракта
+			raise PostError(f"У «{community.title}» нет бота — кнопки ставить некому.")
+		await self._gateway.bot_edit_markup(
+			BotRef(bot.id, bot.token), community.tg_chat_id, ref.message_id, markup
+		)
+		logger.info(
+			"Кнопки поста %s в «%s»: %s.",
+			ref.message_id,
+			community.title,
+			f"{len(markup.buttons)} шт." if markup else "сняты",
+		)
+		await self._settle_markup(ref)
+
+	async def delete_published(self, ref: PublishedRef) -> None:
+		"""Удаляет вышедший пост — публикатором. Необратимо.
+
+		Бот для этого не годится: ему Telegram разрешает удалять только
+		сообщения моложе 48 часов, у публикатора-администратора такого
+		ограничения нет.
+
+		Raises:
+			PostError: Сообщества нет, нет публикатора или Telegram
+				не дал удалить пост.
+			UserbotUnavailableError: Аккаунт недоступен или Telegram отказал.
+		"""
+		community = await self._get_community(ref.community_id)
+		account_id = self._published_reader(community)
+		deleted = await self._gateway.delete_messages(
+			account_id,
+			community.tg_chat_id,
+			[ref.message_id],
+			priority=TelegramPriority.INTERACTIVE,
+		)
+		if not deleted:
+			raise PostError(
+				"Telegram не дал удалить этот пост. Обычно так отвечают "
+				"на защищённые записи и на посты, которые аккаунт удалять "
+				"не вправе."
+			)
+		logger.info("Пост %s удалён из «%s».", ref.message_id, community.title)
+		await self._settle_markup(ref)
+
+	async def _settle_markup(self, ref: PublishedRef) -> None:
+		"""Снимает обещание кнопок этого поста (крючок движка)."""
+		if self._markup_settled is not None:
+			await self._markup_settled(ref.community_id, ref.message_id)
 
 	@staticmethod
 	def _published_reader(community: Community) -> int:

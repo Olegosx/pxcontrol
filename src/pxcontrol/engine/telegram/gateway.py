@@ -65,6 +65,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingPost,
 	ParticipantsPage,
+	PublishedMessage,
 	PublishedPage,
 	ScheduledMessage,
 	ServiceMessagesPage,
@@ -539,6 +540,26 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
 			return await transport.history_page(chat_id, offset_id, limit)
 
+	async def userbot_get_post(
+		self, account_id: int, chat_id: str, message_id: int
+	) -> PublishedMessage | None:
+		"""Читает один вышедший пост (форма правки на «Опубликовано»).
+
+		Raises: см. :meth:`MtprotoTransport.get_post`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.get_post(chat_id, message_id)
+
+	async def userbot_edit_post(
+		self, account_id: int, chat_id: str, message_id: int, text: str
+	) -> None:
+		"""Меняет текст вышедшего поста публикатором (ADR-0032, подача A4).
+
+		Raises: см. :meth:`MtprotoTransport.edit_post`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			await transport.edit_post(chat_id, message_id, text)
+
 	async def service_messages_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
 	) -> ServiceMessagesPage:
@@ -557,12 +578,22 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.service_messages_page(chat_id, offset_id, limit)
 
-	async def delete_messages(self, account_id: int, chat_id: str, message_ids: list[int]) -> int:
+	async def delete_messages(
+		self,
+		account_id: int,
+		chat_id: str,
+		message_ids: list[int],
+		priority: TelegramPriority = TelegramPriority.MAINTENANCE,
+	) -> int:
 		"""Удаляет сообщения сообщества; возвращает число удалённых.
 
 		Пачка, которую Telegram отказался удалять целиком (служебные
 		записи бывают защищёнными), считается пропущенной — 0 удалённых,
 		без ошибки (ADR-0026).
+
+		``priority`` — место в очереди дорожки: обслуживание идёт своим
+		темпом (умолчание), а удаление поста человеком с экрана
+		«Опубликовано» ждать наравне с уборкой не должно.
 
 		Raises:
 			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
@@ -570,7 +601,7 @@ class TelegramGateway:
 			UserbotFloodError: Флуд-лимит — обход прекращается.
 			UserbotUnavailableError: Прочие отказы Telegram.
 		"""
-		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+		async with self._userbot_slot(account_id, priority) as transport:
 			return await transport.delete_messages(chat_id, message_ids)
 
 	async def participants_page(

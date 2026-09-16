@@ -18,13 +18,17 @@ from pxcontrol.engine.services.posts import (
 	PostError,
 	PostNotReadyError,
 	PostsService,
+	PublishedDraft,
+	PublishedGoneError,
 	PublishedPostDto,
+	PublishedRef,
 	ScheduledDraft,
 	ScheduledGoneError,
 	ScheduledList,
 	ScheduledPostDto,
 	ScheduledRef,
 )
+from pxcontrol.engine.services.publish_route import PublishCapabilities, post_markup_blocker
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import CommunityCheckError
 from pxcontrol.engine.telegram.markup import (
@@ -40,7 +44,9 @@ from pxcontrol.engine.telegram.mtproto import (
 )
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
+	CAPTION_LENGTH_LIMIT,
 	BotRef,
+	CommunityKind,
 	ForumTopicInfo,
 	MediaKind,
 	OutgoingPost,
@@ -63,6 +69,12 @@ class _FakeGateway:
 		#: обращения к ленте и её страница (экран «Опубликовано»)
 		self.history_calls: list[tuple[int, str, int, int]] = []
 		self.history_page = PublishedPage(messages=[], next_offset_id=None)
+		#: вышедший пост для формы правки (None — его уже нет)
+		self.post: PublishedMessage | None = None
+		self.post_edits: list[tuple[int, str, int, str]] = []
+		self.post_gone = False  # правка натыкается на исчезнувший пост
+		self.deleted: list[tuple[int, str, list[int]]] = []
+		self.delete_result = 1  # сколько записей Telegram согласился удалить
 		self.sent_topics: list[int | None] = []
 		self.topics: list[ForumTopicInfo] = []
 		self.media: list[tuple[str, str, str, str, str]] = []
@@ -145,6 +157,24 @@ class _FakeGateway:
 	) -> PublishedPage:
 		self.history_calls.append((account_id, chat_id, offset_id, limit))
 		return self.history_page
+
+	async def userbot_get_post(
+		self, account_id: int, chat_id: str, message_id: int
+	) -> PublishedMessage | None:
+		return self.post
+
+	async def userbot_edit_post(
+		self, account_id: int, chat_id: str, message_id: int, text: str
+	) -> None:
+		if self.post_gone:
+			raise UserbotMessageGoneError("Этого поста в Telegram уже нет.")
+		self.post_edits.append((account_id, chat_id, message_id, text))
+
+	async def delete_messages(
+		self, account_id: int, chat_id: str, message_ids: list[int], priority: object = None
+	) -> int:
+		self.deleted.append((account_id, chat_id, list(message_ids)))
+		return self.delete_result
 
 	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		return [
@@ -1611,3 +1641,161 @@ async def test_list_published_with_paused_publisher(db: Database) -> None:
 		await session.commit()
 	with pytest.raises(PostError, match="приостановлен"):
 		await service.list_published(community_id)
+
+
+def _published(text: str = "текст поста", **kwargs: Any) -> PublishedMessage:
+	"""Вышедший пост, каким его отдаёт транспорт."""
+	return PublishedMessage(
+		id=77, text=text, date=datetime(2026, 9, 17, 10, 0, tzinfo=UTC), **kwargs
+	)
+
+
+async def test_published_draft_reads_post_and_rules(db: Database) -> None:
+	"""Форма правки открывается по чтению с сервера, а не по снимку ленты."""
+	gateway = _FakeGateway()
+	gateway.post = _published(media_kind=MediaKind.VIDEO, buttons=1)
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, bot_can_edit=True)
+	draft = await service.published_draft(PublishedRef(community_id, 77))
+	assert draft.text == "текст поста"
+	assert draft.buttons == 1
+	assert draft.text_limit == CAPTION_LENGTH_LIMIT  # подпись к видео, не Premium
+	assert draft.markup_blocker is None  # канал, бот с правом правки
+	assert draft.text_editable
+
+
+async def test_published_draft_when_post_is_gone(db: Database) -> None:
+	"""Поста уже нет — штатная гонка с сервером, а не сбой приложения."""
+	service = PostsService(db, _FakeGateway())  # post = None
+	community_id = await _add_community(db)
+	with pytest.raises(PublishedGoneError, match="уже нет"):
+		await service.published_draft(PublishedRef(community_id, 77))
+
+
+async def test_edit_published_checks_text_and_sends(db: Database) -> None:
+	"""Правка текста: пустой у поста без вложения отклоняется, годный уходит."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	ref = PublishedRef(community_id, 77)
+	draft = PublishedDraft(
+		ref=ref,
+		community_title="Канал",
+		text="было",
+		media_kind=MediaKind.NONE,
+		topic_id=None,
+		buttons=0,
+		markup=None,
+		text_limit=10,
+		markup_blocker=None,
+	)
+	with pytest.raises(PostError, match="пуст"):
+		await service.edit_published(draft, "   ")
+	with pytest.raises(PostError, match="длиннее"):
+		await service.edit_published(draft, "х" * 11)
+	await service.edit_published(draft, "  стало  ")
+	assert gateway.post_edits == [(await _bound_account(db, community_id), "-1001", 77, "стало")]
+
+
+async def test_edit_published_poll_has_no_editable_text(db: Database) -> None:
+	"""У опроса Telegram текста править не даёт — говорим это прямо."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db)
+	draft = PublishedDraft(
+		ref=PublishedRef(community_id, 77),
+		community_title="Канал",
+		text="",
+		media_kind=MediaKind.OTHER,
+		topic_id=None,
+		buttons=0,
+		markup=None,
+		text_limit=1024,
+		markup_blocker=None,
+	)
+	with pytest.raises(PostError, match="опроса"):
+		await service.edit_published(draft, "новый вопрос")
+
+
+async def test_edit_published_when_post_is_gone(db: Database) -> None:
+	"""Пост удалили между чтением и правкой — исход, а не ошибка."""
+	gateway = _FakeGateway()
+	gateway.post_gone = True
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	draft = PublishedDraft(
+		ref=PublishedRef(community_id, 77),
+		community_title="Канал",
+		text="было",
+		media_kind=MediaKind.NONE,
+		topic_id=None,
+		buttons=0,
+		markup=None,
+		text_limit=4096,
+		markup_blocker=None,
+	)
+	with pytest.raises(PublishedGoneError, match="уже нет"):
+		await service.edit_published(draft, "стало")
+
+
+async def test_set_published_markup_bot_edits_and_settles_promise(db: Database) -> None:
+	"""Кнопки вышедшего поста ставит бот; обещание после этого снимается."""
+	gateway = _FakeGateway()
+	settled: list[tuple[int, int]] = []
+
+	async def on_settled(community_id: int, message_id: int) -> None:
+		settled.append((community_id, message_id))
+
+	service = PostsService(db, gateway, markup_settled=on_settled)
+	community_id = await _add_community(db, bot_can_edit=True)
+	markup = PostMarkup(((PostButton(ButtonKind.LINK, "Открыть", "https://telegram.org"),),))
+	await service.set_published_markup(PublishedRef(community_id, 77), markup)
+	assert gateway.markup_edits == [("-1001", 77, markup)]
+	assert settled == [(community_id, 77)]
+
+
+async def test_set_published_markup_refused_in_group(db: Database) -> None:
+	"""В группе кнопки вышедшего поста изменить нельзя — права не существует."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db, forum=True)  # forum=True создаёт группу
+	with pytest.raises(PostError, match="группе"):
+		await service.set_published_markup(PublishedRef(community_id, 77), None)
+
+
+async def test_delete_published_and_refusal(db: Database) -> None:
+	"""Удаляет публикатор; отказ Telegram — понятная ошибка, а не тишина."""
+	gateway = _FakeGateway()
+	settled: list[tuple[int, int]] = []
+
+	async def on_settled(community_id: int, message_id: int) -> None:
+		settled.append((community_id, message_id))
+
+	service = PostsService(db, gateway, markup_settled=on_settled)
+	community_id = await _add_community(db)
+	await service.delete_published(PublishedRef(community_id, 77))
+	assert gateway.deleted == [(await _bound_account(db, community_id), "-1001", [77])]
+	assert settled == [(community_id, 77)]
+	gateway.delete_result = 0
+	with pytest.raises(PostError, match="не дал удалить"):
+		await service.delete_published(PublishedRef(community_id, 78))
+
+
+def test_post_markup_blocker_rules() -> None:
+	"""Кто может изменить кнопки вышедшего поста (чистое правило)."""
+	channel = CommunityKind.CHANNEL
+	assert post_markup_blocker(
+		PublishCapabilities(userbot=True, bot=False), title="К", kind=channel
+	)
+	assert post_markup_blocker(
+		PublishCapabilities(userbot=True, bot=True, markup_edit=True),
+		title="Г",
+		kind=CommunityKind.GROUP,
+	)
+	assert post_markup_blocker(
+		PublishCapabilities(userbot=True, bot=True, markup_edit=False), title="К", kind=channel
+	)
+	assert (
+		post_markup_blocker(
+			PublishCapabilities(userbot=True, bot=True, markup_edit=True), title="К", kind=channel
+		)
+		is None
+	)

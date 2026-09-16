@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.stats_graph import (
 	GraphSeries,
@@ -492,6 +493,36 @@ def markup_button_count(markup: Any) -> int:
 	return sum(len(getattr(row, "buttons", None) or ()) for row in rows)
 
 
+def markup_from(markup: Any) -> PostMarkup | None:
+	"""Разбирает клавиатуру поста в наш тип (None — не наших видов).
+
+	Чистая функция (тестируется без сети). Приложение умеет два вида
+	кнопок — ссылку и «скопировать текст» (ADR-0031); всё остальное
+	(callback, переход в бота, оплата) поставили не мы, и притворяться,
+	что мы это правим, нельзя: форма правки показала бы кнопку одним
+	видом, а сохранение подменило бы её другим. Поэтому у чужой
+	клавиатуры возвращается None — человеку честно говорят, что заменить
+	её можно только целиком.
+	"""
+	from telethon.tl import types
+
+	rows_source = getattr(markup, "rows", None)
+	if rows_source is None:
+		return None
+	rows: list[tuple[PostButton, ...]] = []
+	for row in rows_source:
+		buttons: list[PostButton] = []
+		for button in getattr(row, "buttons", None) or ():
+			if isinstance(button, types.KeyboardButtonUrl):
+				buttons.append(PostButton(ButtonKind.LINK, button.text, button.url))
+			elif isinstance(button, types.KeyboardButtonCopy):
+				buttons.append(PostButton(ButtonKind.COPY, button.text, button.copy_text))
+			else:
+				return None  # кнопка не нашего вида — клавиатура чужая
+		rows.append(tuple(buttons))
+	return PostMarkup(tuple(rows))
+
+
 def _topic_of(message: Any) -> int | None:
 	"""Тема форума, в которую адресовано сообщение (None — общая лента).
 
@@ -505,6 +536,20 @@ def _topic_of(message: Any) -> int | None:
 		return None
 	top = getattr(header, "reply_to_top_id", None)
 	return int(top) if top is not None else getattr(header, "reply_to_msg_id", None)
+
+
+def _published_from(message: Any) -> PublishedMessage:
+	"""Собирает вышедший пост границы из сообщения Telethon (у него есть дата)."""
+	return PublishedMessage(
+		id=int(message.id),
+		text=getattr(message, "message", "") or "",
+		date=message.date,
+		media_kind=media_kind_of(getattr(message, "media", None)),
+		topic_id=_topic_of(message),
+		buttons=markup_button_count(getattr(message, "reply_markup", None)),
+		markup=markup_from(getattr(message, "reply_markup", None)),
+		views=_opt_int(getattr(message, "views", None)),
+	)
 
 
 def _scheduled_from(message: Any) -> ScheduledMessage:
@@ -1137,15 +1182,7 @@ class MtprotoTransport:
 		async with _mtproto_errors():
 			history = await client.get_messages(entity, limit=limit, offset_id=offset_id)
 		messages = [
-			PublishedMessage(
-				id=int(message.id),
-				text=getattr(message, "message", "") or "",
-				date=message.date,
-				media_kind=media_kind_of(getattr(message, "media", None)),
-				topic_id=_topic_of(message),
-				buttons=markup_button_count(getattr(message, "reply_markup", None)),
-				views=_opt_int(getattr(message, "views", None)),
-			)
+			_published_from(message)
 			for message in history
 			if not isinstance(message, MessageService)
 			and getattr(message, "date", None) is not None
@@ -1161,6 +1198,71 @@ class MtprotoTransport:
 			messages=messages,
 			next_offset_id=oldest.id if oldest is not None and oldest.id > 1 else None,
 		)
+
+	async def get_post(self, chat_id: str, message_id: int) -> PublishedMessage | None:
+		"""Читает один вышедший пост целиком (свежее состояние с сервера).
+
+		Форма правки открывается по этому чтению, а не по снимку ленты:
+		пост могли изменить из другого клиента Telegram, а истина живёт
+		в самом сообществе (ADR-0010).
+
+		Returns:
+			Пост или None — его в ленте больше нет (удалён).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			messages = await client.get_messages(entity, ids=[message_id])
+		for message in messages or ():
+			# удалённый пост приходит пустышкой без даты — это «его нет»
+			if message is not None and getattr(message, "date", None) is not None:
+				return _published_from(message)
+		return None
+
+	async def edit_post(self, chat_id: str, message_id: int, text: str) -> None:
+		"""Меняет текст вышедшего поста (``messages.editMessage``).
+
+		Тот же метод, что правит отложенные, но без ``schedule_date``:
+		сервер ищет сообщение в ленте, а не в очереди отложенных.
+		Клавиатуру правка публикателя не трогает — кнопки под постом
+		остаются на месте (проверено живьём 15.09.2026, ADR-0031);
+		снять или изменить их может только бот. Ответ «ничего
+		не изменилось» (``MESSAGE_NOT_MODIFIED``) — не сбой: пост уже
+		в запрошенном виде.
+
+		Args:
+			chat_id: сообщество.
+			message_id: номер поста в ленте.
+			text: новый текст (у поста с вложением — подпись; пустая
+				строка снимает подпись).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotMessageGoneError: Поста в ленте уже нет.
+			UserbotAccessError: Нет права править (в группе правит только
+				автор — подтверждённый отказ).
+			UserbotFloodError: Telegram просит подождать.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon import errors
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			try:
+				await client.edit_message(entity, message_id, text)
+			except errors.MessageNotModifiedError:
+				logger.info(
+					"Пост %s в чате %s уже в запрошенном виде — правка не нужна.",
+					message_id,
+					chat_id,
+				)
+				return
+		logger.info("Пост %s в чате %s изменён.", message_id, chat_id)
 
 	async def service_messages_page(
 		self, chat_id: str, offset_id: int, limit: int

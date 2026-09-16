@@ -5,8 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pxcontrol.engine.errors import EngineError
+
+if TYPE_CHECKING:  # разбор клавиатуры живёт в markup.py, а он опирается
+	# на этот модуль — ссылку держим только для проверки типов
+	from pxcontrol.engine.telegram.markup import PostMarkup
 
 
 @dataclass(frozen=True)
@@ -263,6 +268,9 @@ class PublishedMessage:
 		topic_id: тема форума (None — общая лента или сообщество без тем).
 		buttons: сколько кнопок стоит под постом (0 — клавиатуры нет).
 			Пост с кнопками виден сразу: обещание выполнено (ADR-0031).
+		markup: клавиатура в нашем виде — ею наполняется форма правки.
+			None означает «клавиатуры нет либо она не наших видов»
+			(различить помогает ``buttons``): чужую заменяют целиком.
 		views: сколько раз пост просмотрели (None — Telegram не сказал).
 	"""
 
@@ -272,6 +280,7 @@ class PublishedMessage:
 	media_kind: MediaKind = MediaKind.NONE
 	topic_id: int | None = None
 	buttons: int = 0
+	markup: PostMarkup | None = None
 	views: int | None = None
 
 

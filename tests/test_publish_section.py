@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pxcontrol.engine.services.posts import PublishedPostDto
+from pxcontrol.engine.services.posts import PublishedDraft, PublishedPostDto, PublishedRef
+from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.pages.publish_batch_page import source_text
 from pxcontrol.ui.pages.publish_stages import (
@@ -19,6 +20,7 @@ from pxcontrol.ui.pages.publish_stages import (
 	stage_icon,
 	stage_title,
 )
+from pxcontrol.ui.pages.published_edit import attachment_note, markup_state_note
 from pxcontrol.ui.pages.published_view import feed_summary, markup_note, published_subtitle
 
 
@@ -129,3 +131,49 @@ def test_feed_summary() -> None:
 	assert feed_summary(0, False) == "Постов не прочитано."
 	assert feed_summary(1, True) == "Прочитано 1 пост · дальше есть"
 	assert feed_summary(50, False) == "Прочитано 50 постов · это вся лента"
+
+
+def _draft(
+	*,
+	media_kind: MediaKind = MediaKind.NONE,
+	buttons: int = 0,
+	markup: PostMarkup | None = None,
+	blocker: str | None = None,
+) -> PublishedDraft:
+	return PublishedDraft(
+		ref=PublishedRef(1, 77),
+		community_title="Канал",
+		text="текст",
+		media_kind=media_kind,
+		topic_id=None,
+		buttons=buttons,
+		markup=markup,
+		text_limit=4096,
+		markup_blocker=blocker,
+	)
+
+
+def test_attachment_note_names_what_is_not_editable() -> None:
+	"""Вложение подписывается, а не прячется: иначе его ищут глазами."""
+	assert attachment_note(_draft()) == ""
+	assert attachment_note(_draft(media_kind=MediaKind.VIDEO)) == "вложение: видео"
+	assert "опрос" in attachment_note(_draft(media_kind=MediaKind.OTHER))
+
+
+def test_markup_state_note_states() -> None:
+	"""Что сказано над редактором кнопок в каждом из положений."""
+	assert "бот" in markup_state_note(_draft())
+	assert markup_state_note(_draft(buttons=2, markup=PostMarkup())) == (
+		"Пустая клавиатура снимает кнопки под постом."
+	)
+	# кнопки не нашего вида: правку «как есть» обещать нельзя
+	assert "не нашего вида" in markup_state_note(_draft(buttons=3))
+	# запрет из движка показывается как есть
+	assert markup_state_note(_draft(blocker="В группе нельзя")) == "В группе нельзя"
+
+
+def test_published_draft_markup_ours() -> None:
+	"""Клавиатуру можно показать кнопками, только если она разобрана."""
+	assert _draft().markup_ours  # кнопок нет — показывать нечего
+	assert _draft(buttons=1, markup=PostMarkup()).markup_ours
+	assert not _draft(buttons=1).markup_ours

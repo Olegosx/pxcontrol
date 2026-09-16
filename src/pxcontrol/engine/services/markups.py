@@ -326,6 +326,29 @@ class MarkupsService:
 			await session.commit()
 		logger.info("Обещание id=%s снято.", promise_id)
 
+	async def drop_post(self, community_id: int, message_id: int) -> None:
+		"""Снимает обещание кнопок вышедшего поста: с ними разобрались.
+
+		Зовётся крючком движка, когда человек поставил или снял кнопки
+		руками либо удалил сам пост (ADR-0032, подача A4): дозору
+		повторять больше нечего, а оставленное обещание он бы применил
+		поверх решения человека.
+		"""
+		async with self._db.session_factory() as session:
+			result = await session.execute(
+				delete(PromisedMarkup).where(
+					PromisedMarkup.community_id == community_id,
+					PromisedMarkup.message_id == message_id,
+				)
+			)
+			await session.commit()
+		if int(getattr(result, "rowcount", 0) or 0):
+			logger.info(
+				"Обещание кнопок поста %s в сообществе id=%s снято: с кнопками разобрались.",
+				message_id,
+				community_id,
+			)
+
 	async def drop_scheduled(self, community_id: int, message_ids: Sequence[int]) -> int:
 		"""Снимает обещания названных отложенных записей сообщества.
 

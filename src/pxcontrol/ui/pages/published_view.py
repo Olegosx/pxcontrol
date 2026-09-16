@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 from time import monotonic
 from typing import Any
@@ -24,13 +25,14 @@ from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, PushButton
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import PublishedList, PublishedPostDto
+from pxcontrol.engine.services.posts import PublishedList, PublishedPostDto, PublishedRef
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.card_list import CardList
 from pxcontrol.ui.pages.common import (
 	bind,
+	confirm_delete,
 	error_reporter,
 	format_local,
 	kind_label,
@@ -38,6 +40,7 @@ from pxcontrol.ui.pages.common import (
 	plural,
 )
 from pxcontrol.ui.pages.post_target import CommunityChoice
+from pxcontrol.ui.pages.published_edit import mount_published_editor
 
 #: Сколько лента считается свежей: повторный показ экрана в этот срок
 #: не перечитывает её заново. Минута — как у отложенных записей: ушёл
@@ -131,6 +134,10 @@ class PublishedView(QWidget):
 			signature=published_signature,
 			key=lambda item: item.message_id,
 			actions=self._actions,
+			# правка — прямо в карточке, как у очереди и отложенных:
+			# текст меняет публикатор, кнопки — бот (ADR-0032, подача A4)
+			editable=lambda _item: True,
+			fill_body=self._fill_editor,
 		)
 		self._render()
 
@@ -251,15 +258,53 @@ class PublishedView(QWidget):
 		self._summary.setText(feed_summary(len(self._items), self._next_offset is not None))
 		self._more.setEnabled(not self._loading and self._next_offset is not None)
 
+	def _fill_editor(
+		self, item: PublishedPostDto, body: QVBoxLayout, collapse: Callable[[], None]
+	) -> None:
+		"""Наполняет раскрытую карточку формой правки поста."""
+		mount_published_editor(self._worker, self, item, body, collapse, self.reload)
+
 	def _actions(self, item: PublishedPostDto, parent: QWidget) -> list[QWidget]:
-		"""Кнопки карточки: открыть пост в Telegram (если есть ссылка).
+		"""Кнопки карточки: открыть пост в Telegram и удалить его.
 
 		Ссылка строится по @имени сообщества, у приватного её нет —
 		и кнопки тогда нет: неработающая кнопка хуже её отсутствия.
 		"""
-		if not item.link:
-			return []
-		open_button = PushButton("Открыть", parent)
-		open_button.setToolTip("Открыть пост в Telegram")
-		open_button.clicked.connect(bind(open_link, item.link))
-		return [open_button]
+		widgets: list[QWidget] = []
+		if item.link:
+			open_button = PushButton("Открыть", parent)
+			open_button.setToolTip("Открыть пост в Telegram")
+			open_button.clicked.connect(bind(open_link, item.link))
+			widgets.append(open_button)
+		delete = PushButton("Удалить", parent)
+		delete.setToolTip("Удалить пост из сообщества — необратимо")
+		delete.clicked.connect(bind(self._delete, item))
+		widgets.append(delete)
+		return widgets
+
+	def _delete(self, item: PublishedPostDto) -> None:
+		"""Удаляет пост из сообщества — с подтверждением, действие необратимо."""
+		if not confirm_delete(
+			self,
+			f"Удалить пост «{item.text_preview}» из «{item.community_title}»? "
+			"Он исчезнет у всех читателей, вернуть его нельзя.",
+		):
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.posts.delete_published(
+				PublishedRef(item.community_id, item.message_id)
+			),
+			self,
+			lambda *_a: self.reload(),
+			self._on_delete_failed,
+		)
+
+	def _on_delete_failed(self, message: str) -> None:
+		"""Отказ удаления: причина на экране и перечитанная лента.
+
+		Поста могло уже не быть (удалён с телефона) — тогда карточка
+		обязана исчезнуть, а не остаться с кнопками в никуда.
+		"""
+		self._show_error(message)
+		self.reload()
