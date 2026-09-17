@@ -312,11 +312,18 @@ class TelegramGateway:
 
 	# --- запасной путь: Bot API ------------------------------------------------
 	#
-	# Правило имён: методы бот-пути начинаются с ``bot_``, методы
-	# основного пути (userbot, ADR-0011) — нет. Прежде часть бот-методов
-	# звалась без пометки (``send_text``, ``check_community``), и по
-	# вызову в сервисе нельзя было понять, основной это путь или
+	# Правило имён: методы бот-пути начинаются с ``bot_``. Прежде часть
+	# из них звалась без пометки (``send_text``, ``check_community``),
+	# и по вызову в сервисе нельзя было понять, основной это путь или
 	# запасной — при том что у них разные лимиты и разные возможности.
+	#
+	# У методов основного пути (userbot, ADR-0011) единого правила пока
+	# нет: часть носит префикс ``userbot_``, часть зовётся без пометки
+	# (``publish``, ``get_scheduled``, ``delete_messages``). Оба порядка
+	# связны — явный префикс у обоих путей или «нет ``bot_`` — значит
+	# публикатор», — и выбор между ними за владельцем; суффиксов
+	# не осталось (было ``check_community_userbot``), они не годятся
+	# ни при одном из них.
 	# Адрес операции — BotRef (id + токен): по id ведутся дорожка
 	# и учёт активности бота (ADR-0030).
 
@@ -456,7 +463,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
 			return await transport.me()
 
-	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
+	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		"""Проверяет канал и права аккаунта (админ + право публиковать).
 
 		Raises:

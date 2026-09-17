@@ -87,7 +87,7 @@ class _CommunityChecker(Protocol):
 
 	async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo: ...
 
-	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo: ...
+	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo: ...
 
 
 @dataclass(frozen=True)
@@ -271,7 +271,7 @@ class CommunitiesService:
 			self._account_display(account),
 			chat_ref,
 		)
-		info = await self._gateway.check_community_userbot(account_id, chat_ref)
+		info = await self._gateway.userbot_check_community(account_id, chat_ref)
 		await self._sync_profile(account_id)
 		role = info.role or UserbotRole.MEMBER  # userbot-зонд всегда отдаёт роль
 		community = await self._store_community(info, bot_id=None, member=(account_id, role))
@@ -283,7 +283,7 @@ class CommunitiesService:
 	async def _probe_userbot(self, account_id: int, chat_id: str) -> _ProbeResult:
 		"""Проверяет права одного аккаунта (сбой не мешает операции)."""
 		try:
-			info = await self._gateway.check_community_userbot(account_id, chat_id)
+			info = await self._gateway.userbot_check_community(account_id, chat_id)
 		except UserbotAccessError:
 			logger.info("Аккаунт id=%s не может публиковать в сообществе %s.", account_id, chat_id)
 			return _ProbeResult(ok=False)
@@ -607,7 +607,7 @@ class CommunitiesService:
 					f"«{self._account_display(account)}» уже участник этого сообщества."
 				)
 			had_members = bool(community.members)
-		info = await self._gateway.check_community_userbot(account_id, chat_id)
+		info = await self._gateway.userbot_check_community(account_id, chat_id)
 		await self._sync_profile(account_id)
 		await self._adopt_member(
 			community_id,

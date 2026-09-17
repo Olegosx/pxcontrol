@@ -59,7 +59,7 @@ class _FakeGateway:
 		#: id, которые Telegram отказывается удалять (защищённые им)
 		self.undeletable: set[int] = set()
 
-	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
+	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		return CommunityInfo(
 			chat_id=chat_ref,
 			title="Группа",

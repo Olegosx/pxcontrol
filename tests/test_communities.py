@@ -62,7 +62,7 @@ class _FakeGateway:
 			can_edit=self.bot_can_edit,
 		)
 
-	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
+	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		if account_id not in self.userbot_admins:
 			raise UserbotAccessError(
 				"Userbot не администратор канала — добавьте аккаунт "
@@ -198,7 +198,7 @@ async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> N
 	"""
 
 	class _OfflineGateway(_FakeGateway):
-		async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo:
+		async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo:
 			raise UserbotNotConnectedError("Userbot не подключён — войдите.")
 
 	bot_id = await _make_bot(db)

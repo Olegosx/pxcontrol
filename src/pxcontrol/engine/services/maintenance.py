@@ -91,7 +91,7 @@ class MaintenanceError(EngineError):
 class _MaintenancePort(Protocol):
 	"""Часть шлюза Telegram, нужная сервису (для подмены в тестах)."""
 
-	async def check_community_userbot(self, account_id: int, chat_ref: str) -> CommunityInfo: ...
+	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo: ...
 
 	async def service_messages_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
@@ -562,7 +562,7 @@ class MaintenanceService:
 		Raises:
 			UserbotUnavailableError: Проверить не удалось (нет связи).
 		"""
-		return await self._gateway.check_community_userbot(account_id, community.tg_chat_id)
+		return await self._gateway.userbot_check_community(account_id, community.tg_chat_id)
 
 	# --- выполнение -----------------------------------------------------------
 
