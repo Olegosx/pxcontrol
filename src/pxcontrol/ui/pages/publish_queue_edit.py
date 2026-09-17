@@ -27,7 +27,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import PostDraft, TextLimits
-from pxcontrol.engine.services.publish_route import choose_route, markup_blocker, poll_blocker
+from pxcontrol.engine.services.publish_route import poll_blocker
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import (
@@ -54,7 +54,7 @@ from pxcontrol.ui.pages.common import (
 	topic_row,
 	visible_topics,
 )
-from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
+from pxcontrol.ui.pages.markup_editor import MarkupEditor, markup_state
 from pxcontrol.ui.pages.media_picker import MediaPicker
 from pxcontrol.ui.pages.poll_editor import PollEditor
 from pxcontrol.ui.pages.preview_row import PreviewRow
@@ -201,45 +201,39 @@ class QueueItemEditor(QWidget):
 		return False
 
 	def _refresh_markup(self) -> None:
-		"""Приводит блок кнопок и предел текста к состоянию формы."""
-		over = self._media_over_bot_limit()
-		scheduled = not self._when_row.is_now()
+		"""Приводит блок кнопок и предел текста к состоянию формы.
+
+		Состояние считает общая :func:`markup_state` — та же, что
+		на «Новом посте» и у пакета. Пока правила писались в каждой
+		форме отдельно, они разошлись: здесь не знали, что у альбома
+		кнопок не бывает, и человек узнавал об этом только отказом
+		при сохранении.
+		"""
 		markup = self._markup.markup()
 		self._poll.set_anonymous_forced(
 			poll_blocker(False, title=self._community.title, kind=self._community.kind)
 		)
-		self._markup.set_mode_available(scheduled and markup is not None)
-		reason = markup_blocker(
-			self._caps,
-			title=self._community.title,
-			kind=self._community.kind,
-			scheduled=scheduled,
-			media_over_bot_limit=over,
+		state = markup_state(
+			self._community,
+			self._limits,
+			media=() if self._kind is MediaKind.POLL else self._media.files(),
+			scheduled=not self._when_row.is_now(),
+			has_markup=markup is not None,
 			markup_first=self._markup.markup_first(),
+			over_bot_limit=self._media_over_bot_limit(),
 			poll=self._kind is MediaKind.POLL,
 		)
-		self._markup.set_blocked(reason)
-		route = choose_route(
-			self._caps,
-			with_markup=markup is not None,
-			media_over_bot_limit=over,
-			scheduled=scheduled,
-			markup_first=self._markup.markup_first(),
-		)
-		self._markup.set_notice(
-			""
-			if reason is not None
-			else markup_notice(route, self._community.bot_label, scheduled=scheduled)
-		)
+		self._markup.set_mode_available(state.mode_available)
+		self._markup.set_blocked(state.blocked)
+		self._markup.set_notice(state.notice)
 		count = len(markup.buttons) if markup is not None else 0
 		self._markup_card.set_summary(
 			f"{count} {plural(count, 'кнопка', 'кнопки', 'кнопок')}" if count else "нет"
 		)
-		limits = limits_for_route(self._limits, route)
 		is_text = self._kind is MediaKind.NONE
 		# предел зависит от маршрута: пост с кнопками отправит бот,
 		# а у него пределы базовые (ADR-0031)
-		self._counter.set_limit(limits.text if is_text else limits.caption)
+		self._counter.set_limit(state.limits.text if is_text else state.limits.caption)
 
 	def _build_topic_row(
 		self, layout: QVBoxLayout, topics: list[ForumTopicInfo], topics_error: str

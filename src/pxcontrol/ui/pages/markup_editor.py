@@ -21,12 +21,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, ComboBox, FluentIcon, LineEdit, PushButton, ToolButton
 
-from pxcontrol.engine.services.posts import TextLimits
-from pxcontrol.engine.services.publish_route import PublishRoute
+from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.posts import MediaFile, TextLimits, album_blocker
+from pxcontrol.engine.services.publish_route import PublishRoute, choose_route, markup_blocker
 from pxcontrol.engine.telegram.markup import (
 	BUTTON_TEXT_LIMIT,
 	COPY_TEXT_LIMIT,
@@ -38,7 +42,7 @@ from pxcontrol.engine.telegram.markup import (
 	PostMarkup,
 	validate_markup,
 )
-from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT, TEXT_LENGTH_LIMIT
+from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT
 
 #: Подписи видов кнопок для человека (порядок — порядок в списке).
 KIND_LABELS: dict[ButtonKind, str] = {
@@ -60,18 +64,74 @@ VALUE_LIMITS: dict[ButtonKind, int] = {
 }
 
 
-def limits_for_route(limits: TextLimits, route: PublishRoute) -> TextLimits:
-	"""Пределы длины текста, действующие на этом маршруте.
+@dataclass(frozen=True, slots=True)
+class MarkupState:
+	"""Состояние блока кнопок и пределов для нынешнего черновика.
 
-	Пост, который отправляет бот, ограничен базовыми пределами Telegram:
-	подписки у ботов не бывает, и Premium-пределы публикателя к нему
-	не относятся. Правило то же, что у движка (он проверяет пределы
-	по маршруту), — здесь оно нужно счётчику символов, чтобы тот
-	не обещал больше, чем пройдёт.
+	Одна точка на все три формы поста (новый пост, пакет, правка
+	элемента очереди): правила у них общие, а писались трижды — и уже
+	начали расходиться. Так, форма нового поста знала про запрет кнопок
+	у альбома, а форма правки очереди — нет.
+
+	Attributes:
+		route: каким путём уйдёт пост (от него зависят пределы).
+		blocked: почему кнопки невозможны (None — возможны).
+		notice: что изменится в посте из-за кнопок (пустая — ничего).
+		mode_available: доступен ли выбор режима «кнопки важнее».
+		limits: пределы длины текста на этом маршруте.
 	"""
-	if route is not PublishRoute.BOT:
-		return limits
-	return TextLimits(text=TEXT_LENGTH_LIMIT, caption=CAPTION_LENGTH_LIMIT)
+
+	route: PublishRoute
+	blocked: str | None
+	notice: str
+	mode_available: bool
+	limits: TextLimits
+
+
+def markup_state(
+	community: CommunityDto,
+	limits: TextLimits,
+	*,
+	media: Sequence[MediaFile] = (),
+	scheduled: bool,
+	has_markup: bool,
+	markup_first: bool,
+	over_bot_limit: bool,
+	poll: bool = False,
+) -> MarkupState:
+	"""Считает состояние блока кнопок по нынешнему состоянию формы.
+
+	Правила берутся у движка (`album_blocker`, `markup_blocker`,
+	`choose_route`) — форма их не выдумывает и не повторяет своими
+	словами: разойтись в словах с отправкой значит соврать человеку.
+	"""
+	route = choose_route(
+		community.capabilities,
+		with_markup=has_markup,
+		media_over_bot_limit=over_bot_limit,
+		scheduled=scheduled,
+		markup_first=markup_first,
+	)
+	blocked = album_blocker(media, with_markup=has_markup)
+	if blocked is None:
+		blocked = markup_blocker(
+			community.capabilities,
+			title=community.title,
+			kind=community.kind,
+			scheduled=scheduled,
+			media_over_bot_limit=over_bot_limit,
+			markup_first=markup_first,
+			poll=poll,
+		)
+	return MarkupState(
+		route=route,
+		blocked=blocked,
+		notice=""
+		if blocked is not None
+		else markup_notice(route, community.bot_label, scheduled=scheduled),
+		mode_available=scheduled and has_markup,
+		limits=limits.on_route(route),
+	)
 
 
 def markup_notice(route: PublishRoute, bot_label: str | None, *, scheduled: bool = False) -> str:

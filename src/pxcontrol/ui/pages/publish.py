@@ -49,9 +49,6 @@ from pxcontrol.engine.services.publish_queue import (
 	QueueItemDto,
 )
 from pxcontrol.engine.services.publish_route import (
-	PublishRoute,
-	choose_route,
-	markup_blocker,
 	poll_blocker,
 )
 from pxcontrol.engine.services.settings import (
@@ -84,7 +81,7 @@ from pxcontrol.ui.pages.common import (
 	page_layout,
 	plural,
 )
-from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
+from pxcontrol.ui.pages.markup_editor import MarkupEditor, MarkupState, markup_state
 from pxcontrol.ui.pages.media_picker import MediaPicker
 from pxcontrol.ui.pages.poll_editor import PollEditor
 from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
@@ -97,6 +94,12 @@ from pxcontrol.ui.pages.publish_queue_view import (
 from pxcontrol.ui.pages.publish_stages import PublishStage, stage_hint, stage_title
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
+
+#: Пределы, пока сообщество не ответило: базовые — они не обещают лишнего.
+_BASE_LIMITS = TextLimits(
+	text=text_length_limit(premium=False, with_media=False),
+	caption=text_length_limit(premium=False, with_media=True),
+)
 
 #: Сколько карточек очереди показывать на странице (хвост ждущих —
 #: в сводке числом; всё целиком — кнопка «Вся очередь…», ADR-0016).
@@ -242,63 +245,51 @@ class PublishPage(ScrollArea):
 		self._refresh_markup()
 		self._refresh_preview()
 
-	def _current_route(self) -> PublishRoute:
-		"""Каким путём уйдёт нынешний черновик (для пределов и подсказок)."""
+	def _markup_state(self) -> MarkupState | None:
+		"""Состояние кнопок и пределов для нынешнего черновика.
+
+		None — сообщество ещё не выбрано: правила зависят от него,
+		и выдумывать их форме нечем.
+		"""
 		community = self._community_or_none()
 		if community is None:
-			return PublishRoute.USERBOT
-		return choose_route(
-			community.capabilities,
-			with_markup=self._markup.markup() is not None,
-			media_over_bot_limit=self._media_over_bot_limit(),
+			return None
+		return markup_state(
+			community,
+			self._limits or _BASE_LIMITS,
+			# у опроса файлов не бывает — правила альбома к нему не идут
+			media=() if self._kind is MediaKind.POLL else self._media.files(),
 			scheduled=not self._when_row.is_now(),
+			has_markup=self._markup.markup() is not None,
 			markup_first=self._markup.markup_first(),
+			over_bot_limit=self._media_over_bot_limit(),
+			poll=self._kind is MediaKind.POLL,
 		)
 
 	def _refresh_markup(self) -> None:
 		"""Приводит блок кнопок к текущему состоянию формы.
 
-		Одним заходом: можно ли кнопки (причина — из движка), что
-		изменится в посте из-за них и какой предел текста показывать
-		счётчику (у бота он базовый — подписки у ботов не бывает).
+		Одним заходом: можно ли кнопки, что изменится в посте из-за них
+		и какой предел показывать счётчику. Само состояние считает общая
+		:func:`markup_state` — правила у трёх форм поста одни, и писать
+		их здесь своими словами значит однажды с ними разойтись.
 		"""
 		community = self._community_or_none()
 		if community is None:
 			self._markup.set_blocked("Сначала выберите сообщество — от него зависят кнопки.")
 			self._markup.set_notice("")
 			return
-		scheduled = not self._when_row.is_now()
-		markup = self._markup.markup()
 		# правило опроса тоже от сообщества: в канале он только анонимный
 		self._poll.set_anonymous_forced(
 			poll_blocker(False, title=community.title, kind=community.kind)
 		)
-		# выбор режима есть только у отложенного поста с кнопками
-		self._markup.set_mode_available(scheduled and markup is not None)
-		if self._kind is not MediaKind.POLL and len(self._media.files()) > 1:
-			# альбому клавиатуру Telegram не прикрепляет вовсе (ADR-0031)
-			self._markup.set_blocked(
-				"У альбома не бывает кнопок: Telegram не прикрепляет клавиатуру "
-				"к группе файлов. Отправьте файлы по одному или снимите кнопки."
-			)
-			self._markup.set_notice("")
-			self._apply_text_limit()
+		state = self._markup_state()
+		if state is None:  # pragma: no cover — сообщество проверено выше
 			return
-		reason = markup_blocker(
-			community.capabilities,
-			title=community.title,
-			kind=community.kind,
-			scheduled=scheduled,
-			media_over_bot_limit=self._media_over_bot_limit(),
-			markup_first=self._markup.markup_first(),
-			poll=self._kind is MediaKind.POLL,
-		)
-		self._markup.set_blocked(reason)
-		self._markup.set_notice(
-			""
-			if reason is not None
-			else markup_notice(self._current_route(), community.bot_label, scheduled=scheduled)
-		)
+		self._markup.set_mode_available(state.mode_available)
+		self._markup.set_blocked(state.blocked)
+		self._markup.set_notice(state.notice)
+		markup = self._markup.markup()
 		count = len(markup.buttons) if markup is not None else 0
 		self._markup_card.set_summary(
 			f"{count} {plural(count, 'кнопка', 'кнопки', 'кнопок')}" if count else "нет"
@@ -468,12 +459,12 @@ class PublishPage(ScrollArea):
 		базовый предел Telegram: он не обещает лишнего.
 		"""
 		with_media = self._kind is not MediaKind.NONE
-		if self._limits is None:
+		state = self._markup_state()
+		if self._limits is None or state is None:
 			self._counter.set_limit(text_length_limit(premium=False, with_media=with_media))
 			return
 		# пост с кнопками уходит ботом — у него пределы базовые (ADR-0031)
-		limits = limits_for_route(self._limits, self._current_route())
-		self._counter.set_limit(limits.caption if with_media else limits.text)
+		self._counter.set_limit(state.limits.caption if with_media else state.limits.text)
 
 	def _on_topics_failed(self, message: str) -> None:
 		"""Темы не прочитались — пост уйдёт в общую ленту, честно предупредив."""

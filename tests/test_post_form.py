@@ -27,7 +27,7 @@ from pxcontrol.ui.pages.common import (
 	topic_label,
 	visible_topics,
 )
-from pxcontrol.ui.pages.markup_editor import limits_for_route, markup_notice
+from pxcontrol.ui.pages.markup_editor import markup_notice
 
 _TOPICS = [
 	ForumTopicInfo(GENERAL_TOPIC_ID, "General"),
@@ -135,10 +135,64 @@ def test_limits_follow_route_in_the_form() -> None:
 	не бывает.
 	"""
 	premium = TextLimits(text=8192, caption=4096)
-	assert limits_for_route(premium, PublishRoute.USERBOT) == premium
-	assert limits_for_route(premium, PublishRoute.USERBOT_MARKUP) == premium
-	by_bot = limits_for_route(premium, PublishRoute.BOT)
+	assert premium.on_route(PublishRoute.USERBOT) == premium
+	assert premium.on_route(PublishRoute.USERBOT_MARKUP) == premium
+	by_bot = premium.on_route(PublishRoute.BOT)
 	assert (by_bot.text, by_bot.caption) == (TEXT_LENGTH_LIMIT, CAPTION_LENGTH_LIMIT)
+
+
+def test_markup_state_is_one_rule_for_all_three_forms() -> None:
+	"""Состояние блока кнопок считается правилами движка, а не словами формы.
+
+	Пока каждая форма считала его сама, они разошлись: «Новый пост» знал,
+	что у альбома кнопок не бывает, а правка элемента очереди — нет,
+	и человек узнавал об этом только отказом при сохранении.
+	"""
+	from pxcontrol.engine.services.communities import CommunityDto
+	from pxcontrol.engine.services.posts import MediaFile
+	from pxcontrol.engine.telegram.types import CommunityKind
+	from pxcontrol.ui.pages.markup_editor import markup_state
+
+	community = CommunityDto(
+		id=1,
+		title="Канал",
+		username=None,
+		tg_chat_id="-1001",
+		bot_id=1,
+		bot_label="Бот",
+		enabled=True,
+		default_account_id=7,
+		kind=CommunityKind.CHANNEL,
+		bot_can_edit=True,
+	)
+	premium = TextLimits(text=8192, caption=4096)
+	video = MediaFile("a.mp4", MediaKind.VIDEO)
+
+	album = markup_state(
+		community,
+		premium,
+		media=(video, MediaFile("b.mp4", MediaKind.VIDEO)),
+		scheduled=False,
+		has_markup=True,
+		markup_first=False,
+		over_bot_limit=False,
+	)
+	assert album.blocked is not None and "альбом" in album.blocked.lower()
+	assert album.notice == ""  # запрет назван — объяснять нечего
+
+	single = markup_state(
+		community,
+		premium,
+		media=(video,),
+		scheduled=False,
+		has_markup=True,
+		markup_first=False,
+		over_bot_limit=False,
+	)
+	assert single.blocked is None
+	# пост с кнопками уходит ботом — предел подписи базовый, не Premium
+	assert single.limits.caption == CAPTION_LENGTH_LIMIT
+	assert single.route is PublishRoute.BOT
 
 
 def test_markup_notice_warns_about_sender_and_delay() -> None:

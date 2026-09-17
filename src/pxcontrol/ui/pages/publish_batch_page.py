@@ -40,7 +40,6 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import CaptionLine, TemplateDto, TitleParseRules
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import TextLimits
-from pxcontrol.engine.services.publish_route import PublishRoute, choose_route, markup_blocker
 from pxcontrol.engine.services.settings import PUBLISH_TIMES, TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.types import (
@@ -63,11 +62,17 @@ from pxcontrol.ui.pages.common import (
 	show_success,
 	show_warning,
 )
-from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
+from pxcontrol.ui.pages.markup_editor import MarkupEditor, MarkupState, markup_state
 from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
 from pxcontrol.ui.pages.publish_batch import BatchEditor
 from pxcontrol.ui.pages.publish_stages import PublishStage
 from pxcontrol.ui.pages.stage_page import StagePage
+
+#: Пределы, пока сообщество не ответило: базовые — они не обещают лишнего.
+_BASE_LIMITS = TextLimits(
+	text=text_length_limit(premium=False, with_media=False),
+	caption=text_length_limit(premium=False, with_media=True),
+)
 
 
 @dataclass
@@ -470,23 +475,30 @@ class BatchStagePage(StagePage):
 		"""Состав или время строк изменились: правила кнопок и пределы."""
 		self._refresh_markup()
 
-	def _route(self) -> PublishRoute:
-		"""Каким путём уйдёт самый «тяжёлый» черновик пакета.
+	def _markup_state(self) -> MarkupState | None:
+		"""Состояние кнопок и пределов по самому «тяжёлому» черновику пакета.
 
 		Пакет ставится атомарно (ADR-0015), клавиатура у всех постов одна
-		(ADR-0032, п. 4) — значит и правила показывать надо по строгому
+		(ADR-0032, п. 4) — значит и правила считать надо по строгому
 		случаю: если хоть один пост отложенный или хоть один файл боту
-		не по силам, маршрут пакета — с дорисовкой кнопок.
+		не по силам, маршрут пакета — с дорисовкой кнопок. Правила общие
+		с формой поста: считает их :func:`markup_state`.
+
+		None — сообщество ещё не выбрано.
 		"""
 		community = self._community.current()
 		if community is None:
-			return PublishRoute.USERBOT
-		return choose_route(
-			community.capabilities,
-			with_markup=self._markup.markup() is not None,
-			media_over_bot_limit=self._over_bot_limit(),
+			return None
+		limits = self._setup.limits if self._setup is not None else None
+		return markup_state(
+			community,
+			limits or _BASE_LIMITS,
+			# у пакета каждая строка — свой пост с одним файлом:
+			# альбомов здесь не бывает
 			scheduled=self._scheduled(),
+			has_markup=self._markup.markup() is not None,
 			markup_first=self._markup.markup_first(),
+			over_bot_limit=self._over_bot_limit(),
 		)
 
 	def _scheduled(self) -> bool:
@@ -500,13 +512,13 @@ class BatchStagePage(StagePage):
 	def _caption_limit(self) -> int:
 		"""Предел длины подписи строки по маршруту пакета.
 
-		Пределы сообщества ещё не приехали — показываем базовый предел
-		Telegram: он не обещает лишнего.
+		Сообщество ещё не выбрано или пределы не приехали — показываем
+		базовый предел Telegram: он не обещает лишнего.
 		"""
-		limits = self._setup.limits if self._setup is not None else None
-		if limits is None:
-			return text_length_limit(premium=False, with_media=True)
-		return limits_for_route(limits, self._route()).caption
+		state = self._markup_state()
+		if state is None:
+			return _BASE_LIMITS.caption
+		return state.limits.caption
 
 	def _refresh_markup(self) -> None:
 		"""Приводит блок кнопок и счётчики строк к состоянию пакета."""
@@ -515,23 +527,13 @@ class BatchStagePage(StagePage):
 			self._markup.set_blocked("Сначала выберите сообщество — от него зависят кнопки.")
 			self._markup.set_notice("")
 			return
-		scheduled = self._scheduled()
+		state = self._markup_state()
+		if state is None:  # pragma: no cover — сообщество проверено выше
+			return
 		markup = self._markup.markup()
-		self._markup.set_mode_available(scheduled and markup is not None)
-		reason = markup_blocker(
-			community.capabilities,
-			title=community.title,
-			kind=community.kind,
-			scheduled=scheduled,
-			media_over_bot_limit=self._over_bot_limit(),
-			markup_first=self._markup.markup_first(),
-		)
-		self._markup.set_blocked(reason)
-		self._markup.set_notice(
-			""
-			if reason is not None
-			else markup_notice(self._route(), community.bot_label, scheduled=scheduled)
-		)
+		self._markup.set_mode_available(state.mode_available)
+		self._markup.set_blocked(state.blocked)
+		self._markup.set_notice(state.notice)
 		count = len(markup.buttons) if markup is not None else 0
 		self._markup_card.set_summary(
 			f"{count} {plural(count, 'кнопка', 'кнопки', 'кнопок')}" if count else "нет"
