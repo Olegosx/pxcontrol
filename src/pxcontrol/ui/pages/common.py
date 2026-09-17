@@ -392,6 +392,11 @@ class _Elider(QObject):
 			self._apply()
 		return False
 
+	def set_text(self, text: str) -> None:
+		"""Меняет полный текст: наблюдатель у надписи всегда один."""
+		self._text = text
+		self._apply()
+
 	def _apply(self) -> None:
 		"""Ставит полный текст или сокращённый — по настоящей ширине."""
 		metrics = self._label.fontMetrics()
@@ -419,7 +424,18 @@ def elide_text(label: QLabel, text: str) -> None:
 	(``setMaximumWidth``), либо политика размера «занимай, что дадут»
 	(``QSizePolicy.Policy.Ignored``) у надписи, которой отдана колонка.
 	Считать доступную ширину арифметикой по чужим отступам не нужно.
+
+	Повторный вызов обновляет текст прежнему наблюдателю, а не заводит
+	второго: живые карточки обновляются на месте (активность аккаунта —
+	раз в пять секунд), а Qt вызывает фильтры от позже установленного
+	к раньше установленному — и при изменении ширины последнее слово
+	осталось бы за самым старым, то есть надпись вернула бы давно
+	устаревший текст.
 	"""
+	watcher = label.findChild(_Elider)
+	if watcher is not None:
+		watcher.set_text(text)
+		return
 	_Elider(label, text)
 
 
