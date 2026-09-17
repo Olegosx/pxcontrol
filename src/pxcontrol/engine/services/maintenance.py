@@ -260,7 +260,7 @@ class _MaintenanceJob(Job):
 			status=self.status,
 			progress=self.progress,
 			error=self.error,
-			note=self.note,
+			note=self.card_note(),
 			service=self.service_report,
 			members=self.members_report,
 		)

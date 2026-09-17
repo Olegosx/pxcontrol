@@ -110,7 +110,7 @@ class _VideoJob(Job):
 			status=self.status,
 			progress=self.progress,
 			error=self.error,
-			note=self.note,
+			note=self.card_note(),
 			output_path=self.output_path,
 		)
 
@@ -230,10 +230,14 @@ class ProcessingQueue:
 		Элементы в других статусах не трогаются.
 
 		Raises:
-			VideoError: Файл больше не годен — элемент остаётся в ошибке.
+			VideoError: Файл больше не годен (элемент остаётся в ошибке)
+				или движок останавливается.
 		"""
 		if self._jobs.stopping:
-			return  # движок останавливается — повтор не начнётся
+			# тот же ответ, что у постановки: одинаковая ситуация —
+			# одинаковый исход. Молчаливый возврат оставлял нажатие
+			# «Повторить» без единого следа — ни ошибки, ни записи
+			raise VideoError("Движок останавливается — повтор отклонён.")
 		job = self._jobs.get(item_id)
 		if job is None or job.status is not JobStatus.ERROR:
 			return

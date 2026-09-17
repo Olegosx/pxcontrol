@@ -131,10 +131,25 @@ class Job:
 		self.progress = 0.0
 		self.error: str | None = None
 		#: пометка состояния для карточки (автоснижение битрейта,
-		#: пауза после флуд-лимита); None — нечего сказать
+		#: пауза после флуд-лимита); None — нечего сказать. Живёт
+		#: столько же, сколько состояние: кончилось — снимается
 		self.note: str | None = None
+		#: предупреждение, которое состояние пережить обязано: исход
+		#: задания не удалось сохранить. Отдельным полем именно потому,
+		#: что у него другая жизнь — оно про задание целиком, а не про
+		#: его нынешнее состояние, и затирать его пометкой нельзя
+		self.warning: str | None = None
 		#: отмену запросил человек — отличает её от остановки движка
 		self.cancel_requested = False
+
+	def card_note(self) -> str | None:
+		"""Подпись карточки: пометка состояния вместе с предупреждением.
+
+		Одна строка на два разных факта — так человек видит и то, чего
+		задание ждёт, и то, что его исход не сохранился.
+		"""
+		parts = [text for text in (self.note, self.warning) if text]
+		return " · ".join(parts) or None
 
 
 _J = TypeVar("_J", bound=Job)
@@ -442,7 +457,7 @@ class JobQueue(Generic[_J]):
 					job.id,
 					status,
 				)
-				job.note = OUTCOME_NOT_SAVED_NOTE
+				job.warning = OUTCOME_NOT_SAVED_NOTE
 		job.status = status
 		job.error = error
 

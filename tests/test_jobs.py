@@ -419,9 +419,39 @@ async def test_storage_failure_does_not_kill_the_worker() -> None:
 
 	assert done == ["первое", "второе"]  # очередь не встала
 	assert broken.status is JobStatus.DONE  # исход применён
-	assert broken.note is not None  # и помечен как несохранённый
+	assert broken.warning is not None  # и помечен как несохранённый
+	assert broken.card_note() == broken.warning
 	assert following.status is JobStatus.DONE
-	assert following.note is None
+	assert following.card_note() is None
+
+
+async def test_warning_survives_state_note() -> None:
+	"""Предупреждение «исход не сохранён» переживает пометку состояния.
+
+	Пометка живёт столько, сколько состояние, и каркас её снимает;
+	предупреждение — про задание целиком. Пока они жили в одном поле,
+	отсрочка затирала предупреждение, и человек видел только состояние.
+	"""
+	attempts: list[str] = []
+
+	async def execute(job: _TestJob) -> None:
+		attempts.append(job.label)
+		if len(attempts) == 1:
+			raise JobDeferred(JobStatus.WAITING, note="ждёт слота")
+
+	async def record(job: _TestJob, status: JobStatus, error: str | None) -> None:
+		if status is JobStatus.WAITING:
+			raise RuntimeError("база заблокирована")
+
+	queue = _queue(execute, record=record)
+	job = _put(queue, "первое")
+	queue.ensure_worker()
+	await queue.wait_idle()
+
+	assert job.status is JobStatus.WAITING
+	assert job.note == "ждёт слота"  # чего ждёт
+	assert job.warning is not None  # и что исход не сохранился
+	assert job.note in (job.card_note() or "") and job.warning in (job.card_note() or "")
 
 
 async def test_ready_holds_a_job_without_blocking_the_rest() -> None:
