@@ -278,6 +278,9 @@ class PublishedMessage:
 			None означает «клавиатуры нет либо она не наших видов»
 			(различить помогает ``buttons``): чужую заменяют целиком.
 		views: сколько раз пост просмотрели (None — Telegram не сказал).
+		group_id: номер группы у файлов одного альбома (None — обычный
+			пост). В ленте альбом приходит несколькими записями подряд
+			с общим номером — читателю же он виден одной (ADR-0033, C4).
 	"""
 
 	id: int
@@ -285,6 +288,7 @@ class PublishedMessage:
 	date: datetime
 	entities: tuple[TextEntity, ...] = ()
 	media_kind: MediaKind = MediaKind.NONE
+	group_id: int | None = None
 	topic_id: int | None = None
 	buttons: int = 0
 	markup: PostMarkup | None = None

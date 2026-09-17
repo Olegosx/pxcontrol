@@ -64,14 +64,23 @@ _LIMITS_NOTE = (
 )
 
 
-def attachment_note(draft: PublishedDraft) -> str:
+def attachment_note(draft: PublishedDraft, album_size: int = 1) -> str:
 	"""Строка о вложении поста (пустая — обычный текстовый пост).
 
 	Чистая функция: то, что не правится, подписывается, а не прячется —
 	иначе человек искал бы, куда делось видео из его поста.
+
+	Args:
+		draft: пост, прочитанный с сервера.
+		album_size: сколько записей у поста (больше одной — альбом,
+			ADR-0033, C4). Правится у него **подпись**, и она живёт
+			у первой записи — эта форма как раз её и открыла.
 	"""
 	if draft.media_kind is MediaKind.OTHER:
 		return "вложение без подписи (опрос, геопозиция…) — правятся только кнопки"
+	if album_size > 1:
+		files = f"{album_size} {plural(album_size, 'файл', 'файла', 'файлов')}"
+		return f"альбом: {files} — правится общая подпись, сами файлы заменить нельзя"
 	if draft.media_kind is not MediaKind.NONE:
 		return f"вложение: {kind_label(draft.media_kind).lower()}"
 	return ""
@@ -109,6 +118,7 @@ class PublishedEditor(QWidget):
 		draft: PublishedDraft,
 		on_saved: Callable[[], None],
 		on_close: Callable[[], None],
+		album_size: int = 1,
 	) -> None:
 		"""Args:
 		worker: мост к движку.
@@ -116,10 +126,13 @@ class PublishedEditor(QWidget):
 		draft: пост, как его отдал сервер (``PostsService.published_draft``).
 		on_saved: вызвать после сохранения (перечитать ленту).
 		on_close: закрыть форму (свернуть карточку).
+		album_size: сколько записей у поста (больше одной — альбом).
+			Сервер об этом не спрашивают: число известно из ленты.
 		"""
 		super().__init__(parent)
 		self._worker = worker
 		self._draft = draft
+		self._album_size = album_size
 		self._on_saved = on_saved
 		self._on_close = on_close
 		self._build()
@@ -128,7 +141,7 @@ class PublishedEditor(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(_FORM_SPACING)
-		note = attachment_note(self._draft)
+		note = attachment_note(self._draft, self._album_size)
 		if note:
 			layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
 		with_media = self._draft.media_kind is not MediaKind.NONE
@@ -276,7 +289,7 @@ def mount_published_editor(
 
 	def show(draft: PublishedDraft) -> None:
 		clear_layout(body)
-		body.addWidget(PublishedEditor(worker, page, draft, on_saved, collapse))
+		body.addWidget(PublishedEditor(worker, page, draft, on_saved, collapse, item.album_size))
 
 	run_in_engine(
 		worker,

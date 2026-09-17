@@ -25,7 +25,12 @@ from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, PushButton
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import PublishedList, PublishedPostDto, PublishedRef
+from pxcontrol.engine.services.posts import (
+	PublishedList,
+	PublishedPostDto,
+	PublishedRef,
+	group_albums,
+)
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -65,14 +70,28 @@ def markup_note(item: PublishedPostDto) -> str:
 	return "кнопки обещаны, ждут бота"
 
 
+def content_note(item: PublishedPostDto) -> str:
+	"""Что внутри поста: текст, вложение или альбом из скольких файлов.
+
+	Альбом Telegram отдаёт несколькими записями, а читателю показывает
+	одной публикацией — карточка называет его альбомом и числом файлов,
+	а не видом первого вложения (ADR-0033, C4).
+	"""
+	if item.is_album:
+		size = item.album_size
+		return f"альбом: {size} {plural(size, 'файл', 'файла', 'файлов')}"
+	if item.media_kind is MediaKind.NONE:
+		return "текст"
+	return kind_label(item.media_kind).lower()
+
+
 def published_subtitle(item: PublishedPostDto) -> str:
 	"""Подпись карточки: когда вышел, что внутри, сколько просмотров.
 
 	Момент хранится в UTC (как отдаёт Telegram) и показывается
 	в местном времени — как во всех списках приложения.
 	"""
-	kind = "текст" if item.media_kind is MediaKind.NONE else kind_label(item.media_kind).lower()
-	parts = [f"вышел: {format_local(item.published_at)}", kind]
+	parts = [f"вышел: {format_local(item.published_at)}", content_note(item)]
 	if item.views is not None:
 		parts.append(f"{item.views} {plural(item.views, 'просмотр', 'просмотра', 'просмотров')}")
 	note = markup_note(item)
@@ -96,7 +115,16 @@ def feed_summary(shown: int, more: bool) -> str:
 
 def published_signature(item: PublishedPostDto) -> tuple[Any, ...]:
 	"""Отпечаток карточки: всё, что она показывает."""
-	return (item.text_preview, item.buttons, item.views, item.markup_error, item.media_kind)
+	return (
+		item.text_preview,
+		item.buttons,
+		item.views,
+		item.markup_error,
+		item.media_kind,
+		# альбом на границе страниц дорастает при дочитывании —
+		# карточка обязана пересобраться, а не остаться «3 файла»
+		item.album_size,
+	)
 
 
 class PublishedView(QWidget):
@@ -230,8 +258,11 @@ class PublishedView(QWidget):
 		self._loading = False
 		if self._community.is_stale(community_id):
 			return
-		known = {item.message_id for item in self._items}
+		# альбом может лечь на границу страниц: хвост дочитан сейчас,
+		# голова прочитана раньше — сводим их в одну карточку
+		known = {message_id for item in self._items for message_id in item.message_ids}
 		self._items.extend(item for item in page.items if item.message_id not in known)
+		self._items = group_albums(self._items)
 		self._next_offset = page.next_offset_id
 		self._loaded_at = monotonic()
 		self._status.setText("")
@@ -283,17 +314,25 @@ class PublishedView(QWidget):
 		return widgets
 
 	def _delete(self, item: PublishedPostDto) -> None:
-		"""Удаляет пост из сообщества — с подтверждением, действие необратимо."""
+		"""Удаляет пост из сообщества — с подтверждением, действие необратимо.
+
+		У альбома удаляются **все** его записи: половина альбома в ленте
+		хуже, чем его отсутствие, — и человек узнаёт об этом из вопроса,
+		а не по остатку из семи файлов.
+		"""
+		album = (
+			f" Это альбом: удалятся все {item.album_size} записи поста." if item.is_album else ""
+		)
 		if not confirm_delete(
 			self,
 			f"Удалить пост «{item.text_preview}» из «{item.community_title}»? "
-			"Он исчезнет у всех читателей, вернуть его нельзя.",
+			f"Он исчезнет у всех читателей, вернуть его нельзя.{album}",
 		):
 			return
 		run_in_engine(
 			self._worker,
 			self._worker.engine.posts.delete_published(
-				PublishedRef(item.community_id, item.message_id)
+				PublishedRef(item.community_id, item.message_id), item.message_ids
 			),
 			self,
 			lambda *_a: self.reload(),

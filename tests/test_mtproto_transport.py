@@ -1437,6 +1437,7 @@ def _post_message(
 	media: Any = None,
 	markup: Any = None,
 	views: int | None = None,
+	grouped_id: int | None = None,
 ) -> Any:
 	"""Обычный пост ленты с датой (её проверяет чтение «Опубликовано»)."""
 	from telethon.tl import types
@@ -1449,6 +1450,7 @@ def _post_message(
 		media=media,
 		reply_markup=markup,
 		views=views,
+		grouped_id=grouped_id,
 	)
 
 
@@ -1509,6 +1511,25 @@ async def test_history_page_reads_posts_without_service_records() -> None:
 	# служебная запись задаёт продолжение: читаем от самой старой записи
 	assert page.next_offset_id == 38
 	assert fake.history_calls == [(50, 0)]
+
+
+async def test_history_page_reads_album_group() -> None:
+	"""Номер группы альбома доезжает до ленты: без него альбом не собрать."""
+	fake = _MaintenanceClient()
+	fake.history_pages = [
+		[
+			_post_message(41, text="", grouped_id=1234567890123),
+			_post_message(40, text="подпись", grouped_id=1234567890123),
+			_post_message(39, text="обычный"),
+		]
+	]
+	transport = _transport(fake)
+	page = await transport.history_page("-1001", offset_id=0, limit=50)
+	assert [message.group_id for message in page.messages] == [
+		1234567890123,
+		1234567890123,
+		None,
+	]
 
 
 async def test_history_page_marks_end_of_feed() -> None:

@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pxcontrol.engine.services.posts import PublishedDraft, PublishedPostDto, PublishedRef
+from pxcontrol.engine.services.posts import (
+	PublishedDraft,
+	PublishedPostDto,
+	PublishedRef,
+	group_albums,
+)
 from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.rich_text import RichText
 from pxcontrol.engine.telegram.types import MediaKind
@@ -24,7 +29,12 @@ from pxcontrol.ui.pages.publish_stages import (
 	stage_title,
 )
 from pxcontrol.ui.pages.published_edit import attachment_note, markup_state_note
-from pxcontrol.ui.pages.published_view import feed_summary, markup_note, published_subtitle
+from pxcontrol.ui.pages.published_view import (
+	content_note,
+	feed_summary,
+	markup_note,
+	published_subtitle,
+)
 
 
 def test_stage_order_is_post_path() -> None:
@@ -89,17 +99,21 @@ def _post(
 	views: int | None = None,
 	markup_error: str | None = None,
 	media_kind: MediaKind = MediaKind.NONE,
+	group_id: int | None = None,
+	text_preview: str = "Вышедший пост",
 ) -> PublishedPostDto:
 	return PublishedPostDto(
 		community_id=1,
 		community_title="Канал",
 		message_id=message_id,
-		text_preview="Вышедший пост",
+		text_preview=text_preview,
 		published_at=datetime(2026, 9, 17, 9, 0, tzinfo=UTC),
 		media_kind=media_kind,
 		buttons=buttons,
 		views=views,
 		markup_error=markup_error,
+		group_id=group_id,
+		link=f"https://t.me/channel/{message_id}",
 	)
 
 
@@ -161,6 +175,9 @@ def test_attachment_note_names_what_is_not_editable() -> None:
 	assert attachment_note(_draft()) == ""
 	assert attachment_note(_draft(media_kind=MediaKind.VIDEO)) == "вложение: видео"
 	assert "опрос" in attachment_note(_draft(media_kind=MediaKind.OTHER))
+	# у альбома правится общая подпись — форма говорит это прямо
+	album = attachment_note(_draft(media_kind=MediaKind.PHOTO), album_size=3)
+	assert album == "альбом: 3 файла — правится общая подпись, сами файлы заменить нельзя"
 
 
 def test_markup_state_note_states() -> None:
@@ -202,3 +219,59 @@ def test_album_note_states() -> None:
 	assert "кнопок" in note
 	assert "первому файлу" in note
 	assert album_note(5).startswith("Альбом: 5 файлов")
+
+
+def test_group_albums_folds_one_card() -> None:
+	"""Альбом Telegram отдаёт записями, а лента показывает его одной картой."""
+	items = [
+		_post(20),
+		_post(12, group_id=99, text_preview="", views=40),
+		_post(11, group_id=99, text_preview="", views=41),
+		_post(10, group_id=99, text_preview="Подпись альбома", views=42),
+		_post(5),
+	]
+	grouped = group_albums(items)
+	assert [item.message_id for item in grouped] == [20, 10, 5]
+	album = grouped[1]
+	# карточкой стала запись с подписью — её же открывает форма правки
+	assert album.text_preview == "Подпись альбома"
+	assert album.message_ids == (10, 11, 12)
+	assert album.album_size == 3
+	assert album.is_album
+	# просмотры Telegram считает у каждой записи — берём наибольшие
+	assert album.views == 42
+	assert album.link == "https://t.me/channel/10"
+	# обычные посты остались собой
+	assert not grouped[0].is_album
+	assert grouped[0].message_ids == (20,)
+
+
+def test_group_albums_is_repeatable_across_pages() -> None:
+	"""Альбом на границе страниц складывается при дочитывании, а не двоится."""
+	head = group_albums([_post(12, group_id=99), _post(11, group_id=99)])
+	assert len(head) == 1
+	whole = group_albums([*head, _post(10, group_id=99, text_preview="Подпись")])
+	assert len(whole) == 1
+	assert whole[0].message_ids == (10, 11, 12)
+	assert whole[0].text_preview == "Подпись"
+	# повторный прогон ничего не меняет
+	assert group_albums(whole) == whole
+
+
+def test_group_albums_keeps_neighbours_apart() -> None:
+	"""Два альбома подряд — две карточки: общий номер группы у каждого свой."""
+	grouped = group_albums(
+		[_post(9, group_id=2), _post(8, group_id=2), _post(7, group_id=1), _post(6, group_id=1)]
+	)
+	assert [item.message_ids for item in grouped] == [(8, 9), (6, 7)]
+
+
+def test_content_note_says_album() -> None:
+	"""Карточка называет альбом альбомом, а не видом первого вложения."""
+	assert content_note(_post()) == "текст"
+	assert content_note(_post(media_kind=MediaKind.VIDEO)) == "видео"
+	album = group_albums([_post(3, group_id=7, media_kind=MediaKind.PHOTO), _post(2, group_id=7)])[
+		0
+	]
+	assert content_note(album) == "альбом: 2 файла"
+	assert "альбом: 2 файла" in published_subtitle(album)

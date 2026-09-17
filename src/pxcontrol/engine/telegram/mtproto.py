@@ -692,6 +692,8 @@ def _published_from(message: Any) -> PublishedMessage:
 		date=message.date,
 		# разметку читаем, чтобы правка её не стёрла (ADR-0033, п. 6)
 		entities=rich_from_telethon(text, getattr(message, "entities", None)).entities,
+		# альбом приходит несколькими записями с общим номером группы
+		group_id=_opt_int(getattr(message, "grouped_id", None)),
 		media_kind=media_kind_of(getattr(message, "media", None)),
 		topic_id=_topic_of(message),
 		buttons=markup_button_count(getattr(message, "reply_markup", None)),

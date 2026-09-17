@@ -782,6 +782,13 @@ class PublishedPostDto:
 			неудачи (пустая строка — попыток ещё не было); None —
 			обещания нет.
 		link: ссылка на пост (None — у сообщества нет @имени).
+		group_id: номер группы альбома, каким его дал Telegram
+			(None — обычный пост). По нему записи альбома узнают
+			друг друга (ADR-0033, C4).
+		album_ids: номера **всех** записей альбома, по возрастанию
+			(пусто — пост из одной записи). Читателю альбом виден
+			одной записью, и карточка у него тоже одна — но удалять
+			приходится все.
 	"""
 
 	community_id: int
@@ -795,6 +802,23 @@ class PublishedPostDto:
 	views: int | None = None
 	markup_error: str | None = None
 	link: str | None = None
+	group_id: int | None = None
+	album_ids: tuple[int, ...] = ()
+
+	@property
+	def message_ids(self) -> tuple[int, ...]:
+		"""Записи поста: у альбома их несколько, у обычного поста одна."""
+		return self.album_ids or (self.message_id,)
+
+	@property
+	def album_size(self) -> int:
+		"""Сколько файлов в альбоме (1 — обычный пост)."""
+		return len(self.message_ids)
+
+	@property
+	def is_album(self) -> bool:
+		"""Альбом ли это (несколько записей одной публикацией)."""
+		return self.album_size > 1
 
 	@property
 	def when(self) -> datetime:
@@ -805,6 +829,60 @@ class PublishedPostDto:
 	def title(self) -> str:
 		"""Заголовок карточки — начало текста (общее имя со списками)."""
 		return self.text_preview
+
+
+def group_albums(items: Sequence[PublishedPostDto]) -> list[PublishedPostDto]:
+	"""Схлопывает записи одного альбома в одну карточку (ADR-0033, C4).
+
+	Telegram отдаёт альбом **несколькими записями подряд** с общим
+	номером группы, а читателю показывает его одной публикацией.
+	Лента приложения обязана показывать то же: десять карточек вместо
+	одной — это не лента, а список файлов.
+
+	Карточкой становится запись, где живёт **подпись** (первая
+	по номеру с текстом; текста нет ни у одной — просто первая): её же
+	правит форма, на неё ведёт ссылка. Просмотры берутся наибольшие
+	из записей — Telegram считает их у каждой отдельно.
+
+	Функция чистая и **повторимая**: схлопнутую карточку можно подать
+	ей снова вместе с дочитанным хвостом альбома — записи сложатся,
+	а не задвоятся. Это и нужно ленте: альбом попадает на границу
+	страниц, и целым он становится только после дочитывания.
+
+	Args:
+		items: посты страницы в порядке ленты (новые сначала); записи
+			альбома идут подряд — так их отдаёт Telegram.
+
+	Returns:
+		Тот же список, где каждый альбом занимает одно место.
+	"""
+	grouped: list[PublishedPostDto] = []
+	run: list[PublishedPostDto] = []
+	for item in items:
+		if run and item.group_id is not None and item.group_id == run[0].group_id:
+			run.append(item)
+			continue
+		if run:
+			grouped.append(_merge_album(run))
+		run = [item]
+	if run:
+		grouped.append(_merge_album(run))
+	return grouped
+
+
+def _merge_album(run: Sequence[PublishedPostDto]) -> PublishedPostDto:
+	"""Собирает карточку альбома из его записей (см. :func:`group_albums`)."""
+	if len(run) == 1 and not run[0].album_ids:
+		return run[0]
+	ids = sorted({message_id for item in run for message_id in item.message_ids})
+	with_text = [item for item in run if item.text_preview]
+	base = min(with_text or list(run), key=lambda item: item.message_id)
+	views = [item.views for item in run if item.views is not None]
+	return replace(
+		base,
+		album_ids=tuple(ids),
+		views=max(views) if views else None,
+	)
 
 
 @dataclass(frozen=True)
@@ -1905,7 +1983,8 @@ class PostsService:
 
 		Returns:
 			Посты страницы (новые сначала) и номер, с которого читать
-			дальше.
+			дальше. Альбом занимает одно место (:func:`group_albums`);
+			попавший на границу страниц складывается при дочитывании.
 
 		Raises:
 			PostError: Сообщества нет или у него нет публикатора.
@@ -1939,10 +2018,11 @@ class PostsService:
 					if community.username
 					else None
 				),
+				group_id=message.group_id,
 			)
 			for message in page.messages
 		]
-		return PublishedList(items=items, next_offset_id=page.next_offset_id)
+		return PublishedList(items=group_albums(items), next_offset_id=page.next_offset_id)
 
 	async def published_draft(self, ref: PublishedRef) -> PublishedDraft:
 		"""Читает вышедший пост с сервера для формы правки (ADR-0032, A4).
@@ -2080,12 +2160,19 @@ class PostsService:
 		)
 		await self._settle_markup(ref)
 
-	async def delete_published(self, ref: PublishedRef) -> None:
+	async def delete_published(self, ref: PublishedRef, ids: Sequence[int] = ()) -> None:
 		"""Удаляет вышедший пост — публикатором. Необратимо.
 
 		Бот для этого не годится: ему Telegram разрешает удалять только
 		сообщения моложе 48 часов, у публикатора-администратора такого
 		ограничения нет.
+
+		Args:
+			ref: адрес поста (у альбома — запись с подписью).
+			ids: все записи поста одним запросом — у альбома их
+				несколько (ADR-0033, C4). Пусто — удалить одну
+				запись ``ref``. Половина удалённого альбома хуже
+				целого, поэтому записи уходят вместе, а не по одной.
 
 		Raises:
 			PostError: Сообщества нет, нет публикатора или Telegram
@@ -2094,10 +2181,11 @@ class PostsService:
 		"""
 		community = await self._get_community(ref.community_id)
 		account_id = self._published_reader(community)
+		targets = sorted(set(ids) | {ref.message_id})
 		deleted = await self._gateway.delete_messages(
 			account_id,
 			community.tg_chat_id,
-			[ref.message_id],
+			targets,
 			priority=TelegramPriority.INTERACTIVE,
 		)
 		if not deleted:
@@ -2106,7 +2194,12 @@ class PostsService:
 				"на защищённые записи и на посты, которые аккаунт удалять "
 				"не вправе."
 			)
-		logger.info("Пост %s удалён из «%s».", ref.message_id, community.title)
+		logger.info(
+			"Пост %s удалён из «%s» (записей: %s).",
+			ref.message_id,
+			community.title,
+			len(targets),
+		)
 		await self._settle_markup(ref)
 
 	async def _settle_markup(self, ref: PublishedRef) -> None:

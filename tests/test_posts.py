@@ -1635,6 +1635,32 @@ async def test_list_published_marks_unfulfilled_markup_promise(db: Database) -> 
 	assert items[1].markup_error is None
 
 
+async def test_list_published_folds_album_into_one_card(db: Database) -> None:
+	"""Альбом приходит тремя записями, а в ленте занимает одно место (ADR-0033, C4)."""
+	gateway = _FakeGateway()
+	when = datetime(2026, 9, 17, 10, 0, tzinfo=UTC)
+	gateway.history_page = PublishedPage(
+		messages=[
+			PublishedMessage(id=80, text="Обычный пост", date=when),
+			# Telegram отдаёт альбом от новых записей к старым,
+			# а подпись живёт у первой
+			PublishedMessage(id=79, text="", date=when, group_id=42, views=100),
+			PublishedMessage(id=78, text="", date=when, group_id=42, views=101),
+			PublishedMessage(id=77, text="Подпись альбома", date=when, group_id=42, views=99),
+		],
+		next_offset_id=None,
+	)
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	items = (await service.list_published(community_id)).items
+	assert [item.message_id for item in items] == [80, 77]
+	album = items[1]
+	assert album.message_ids == (77, 78, 79)
+	assert album.is_album
+	assert album.text_preview == "Подпись альбома"
+	assert album.views == 101
+
+
 async def test_list_published_without_publisher(db: Database) -> None:
 	"""Без публикатора лента не читается — и это не «лента пуста»."""
 	service = PostsService(db, _FakeGateway())
@@ -1791,6 +1817,16 @@ async def test_delete_published_and_refusal(db: Database) -> None:
 	gateway.delete_result = 0
 	with pytest.raises(PostError, match="не дал удалить"):
 		await service.delete_published(PublishedRef(community_id, 78))
+
+
+async def test_delete_published_removes_whole_album(db: Database) -> None:
+	"""У альбома удаляются все записи одним запросом: половина альбома — мусор."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	await service.delete_published(PublishedRef(community_id, 77), (79, 78, 77))
+	account_id = await _bound_account(db, community_id)
+	assert gateway.deleted == [(account_id, "-1001", [77, 78, 79])]
 
 
 def test_post_markup_blocker_rules() -> None:
