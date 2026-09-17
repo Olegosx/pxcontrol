@@ -51,6 +51,7 @@ class _FakeStatsGateway:
 		self.has_avatar = True
 		self.can_view_stats = False
 		self.fail_userbot = False  # имитация «нет связи»
+		self.fail_bot = False  # то же для бот-пути
 		self.flood_accounts: set[int] = set()
 		self.stats_calls: list[int] = []
 		self.bot_calls: list[str] = []
@@ -119,6 +120,8 @@ class _FakeStatsGateway:
 
 	async def bot_community_stats(self, bot: BotRef, chat_id: str) -> CommunityStatsInfo:
 		self.bot_calls.append(bot.token)
+		if self.fail_bot:
+			raise ConnectionError("Нет связи с Telegram.")
 		return CommunityStatsInfo(participants=77, online=None, linked_chat_id="-1009")
 
 
@@ -314,6 +317,32 @@ async def test_failure_keeps_previous_values(db: Database, tmp_path: Path) -> No
 	assert await service.refresh_due(_NOW, full_every_s=0) is False
 	row = (await service.snapshot())[0]
 	assert row.participants == 1000 and row.scheduled_count == 3
+
+
+async def test_failed_pass_waits_for_its_window(db: Database, tmp_path: Path) -> None:
+	"""Неудачный проход тоже проход: следующая попытка — в своё окно.
+
+	Без этого сообщество, которое не читается (бота исключили, сессия
+	отозвана), опрашивалось бы каждый тик — раз в минуту вместо раза
+	в 15 минут. Видимое «Обновлено» при этом не двигается: данных
+	не прибавилось.
+	"""
+	gateway = _FakeStatsGateway()
+	bot_id = await _add_bot(db)
+	await _add_community(db, "-1001", account_id=None, bot_id=bot_id)
+	service = _service(db, gateway, tmp_path)
+	gateway.fail_bot = True
+
+	assert await service.refresh_due(_NOW) is False
+	assert len(gateway.bot_calls) == 1
+	assert (await service.snapshot())[0].fetched_at is None  # данных нет — и «Обновлено» пусто
+
+	# минутой позже — не пора: проход уже был
+	assert await service.refresh_due(_NOW + timedelta(minutes=1)) is False
+	assert len(gateway.bot_calls) == 1
+	# своё окно пришло — пробуем снова
+	assert await service.refresh_due(_NOW + timedelta(minutes=15)) is False
+	assert len(gateway.bot_calls) == 2
 
 
 # --- частый проход ботом ------------------------------------------------------------

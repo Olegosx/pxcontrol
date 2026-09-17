@@ -484,6 +484,8 @@ class CommunityStatsService:
 				if update is not None:
 					await self._store(community.id, update, now, stamp="bot_fetched_at")
 					changed = True
+				else:
+					await self._mark_pass(community.id, now, "bot_fetched_at")
 			account_id = account_ids.get(community.id)
 			if account_id is not None and due(
 				row.full_fetched_at if row else None, full_every_s, now, self._tz
@@ -492,6 +494,8 @@ class CommunityStatsService:
 				if update is not None:
 					await self._store(community.id, update, now, stamp="full_fetched_at")
 					changed = True
+				else:
+					await self._mark_pass(community.id, now, "full_fetched_at")
 		await self._prune_history(now)
 		return changed
 
@@ -532,10 +536,14 @@ class CommunityStatsService:
 				exc,
 			)
 			return None
-		update: dict[str, object] = {"participants": info.participants}
+		update: dict[str, object] = {}
+		if info.participants is not None:
+			# Telegram числа не дал — прежнее в кэше вернее, чем пустота
+			# (тот же приём, что у связанного сообщества ниже)
+			update["participants"] = info.participants
 		if info.linked_chat_id is not None:
 			update["linked_chat_id"] = info.linked_chat_id
-		return update
+		return update or None
 
 	async def _full_pass(
 		self,
@@ -671,6 +679,25 @@ class CommunityStatsService:
 							online=_as_int(update.get("online")),
 						)
 					)
+			await session.commit()
+
+	async def _mark_pass(self, community_id: int, now: datetime, stamp: str) -> None:
+		"""Отмечает, что проход был, хотя данных он не принёс.
+
+		Момент прохода и момент обновления данных — разные факты. Без
+		этой отметки сообщество, которое не читается (бота исключили,
+		сессия отозвана), опрашивалось бы **каждый тик** — раз в минуту
+		вместо раза в 15 минут и 6 часов, — потому что «пора» считается
+		по моменту прохода. Видимое человеку «Обновлено» (``fetched_at``)
+		при этом не двигается: данных не прибавилось, и говорить обратное
+		нельзя.
+		"""
+		async with self._db.session_factory() as session:
+			row = await session.get(CommunityStats, community_id)
+			if row is None:
+				row = CommunityStats(community_id=community_id)
+				session.add(row)
+			setattr(row, stamp, now)
 			await session.commit()
 
 	async def _store_analytics(
