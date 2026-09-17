@@ -141,7 +141,10 @@ class PublishedView(QWidget):
 		self._show_error = error_reporter(self)
 		self._items: list[PublishedPostDto] = []
 		self._next_offset: int | None = None
-		self._loading = False
+		#: сообщество, чью страницу читаем прямо сейчас (None — не читаем).
+		#: Не просто «занято»: ответ брошенного чтения нельзя путать
+		#: с ответом нужного — см. :meth:`_read`
+		self._loading_for: int | None = None
 		self._loaded_at: float | None = None
 		self._community_id: int | None = None
 		layout = QVBoxLayout(self)
@@ -239,10 +242,17 @@ class PublishedView(QWidget):
 	# --- чтение -------------------------------------------------------------------
 
 	def _read(self, community: CommunityDto, offset_id: int) -> None:
-		"""Читает страницу ленты; второй запрос поверх первого не идёт."""
-		if self._loading:
+		"""Читает страницу ленты этого сообщества.
+
+		Второй запрос **того же** сообщества поверх первого не идёт:
+		двойное нажатие «Показать ещё» не должно удваивать обращения
+		к Telegram. А вот смена сообщества читать обязана: её ответ
+		человек ждёт на экране, и прежнее чтение ему больше не нужно —
+		его ответ отбросит проверка актуальности.
+		"""
+		if self._loading_for == community.id:
 			return
-		self._loading = True
+		self._loading_for = community.id
 		self._status.setText("Читаю ленту из Telegram…")
 		self._more.setEnabled(False)
 		run_in_engine(
@@ -255,7 +265,7 @@ class PublishedView(QWidget):
 
 	def _on_page(self, community_id: int, page: PublishedList) -> None:
 		"""Страница прочитана: дописываем её в ленту (если сообщество то же)."""
-		self._loading = False
+		self._finish_read(community_id)
 		if self._community.is_stale(community_id):
 			return
 		# альбом может лечь на границу страниц: хвост дочитан сейчас,
@@ -275,11 +285,22 @@ class PublishedView(QWidget):
 		смотрит на пустой список и должен видеть, почему он пуст,
 		даже когда плашка уже погасла.
 		"""
-		self._loading = False
+		self._finish_read(community_id)
 		if self._community.is_stale(community_id):
 			return
 		self._status.setText(f"Лента не прочитана: {message}")
 		self._render()
+
+	def _finish_read(self, community_id: int) -> None:
+		"""Снимает признак чтения — только если вернулось то самое чтение.
+
+		Ответ брошенного сообщества приходит после того, как чтение
+		нового уже началось: снять признак по нему значило бы решить,
+		что новое чтение кончилось, и оставить экран с надписью
+		«Читаю ленту…» навсегда.
+		"""
+		if self._loading_for == community_id:
+			self._loading_for = None
 
 	# --- показ ---------------------------------------------------------------------
 
@@ -287,7 +308,7 @@ class PublishedView(QWidget):
 		"""Перерисовывает карточки, итог и доступность дочитывания."""
 		self._list.sync(self._items)
 		self._summary.setText(feed_summary(len(self._items), self._next_offset is not None))
-		self._more.setEnabled(not self._loading and self._next_offset is not None)
+		self._more.setEnabled(self._loading_for is None and self._next_offset is not None)
 
 	def _fill_editor(
 		self, item: PublishedPostDto, body: QVBoxLayout, collapse: Callable[[], None]
