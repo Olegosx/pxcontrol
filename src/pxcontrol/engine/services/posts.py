@@ -588,6 +588,11 @@ class ScheduledDraft:
 	entities: tuple[TextEntity, ...] = ()
 
 	@property
+	def rich(self) -> RichText:
+		"""Текст записи вместе с разметкой — им наполняется форма."""
+		return RichText(self.text, self.entities)
+
+	@property
 	def text_editable(self) -> bool:
 		"""Есть ли у записи текст, который можно править.
 
@@ -693,6 +698,11 @@ class PublishedDraft:
 	def markup_ours(self) -> bool:
 		"""Можно ли показать клавиатуру поста кнопками в форме."""
 		return not self.buttons or self.markup is not None
+
+	@property
+	def rich(self) -> RichText:
+		"""Текст поста вместе с разметкой — им наполняется форма."""
+		return RichText(self.text, self.entities)
 
 	@property
 	def text_editable(self) -> bool:
@@ -1789,11 +1799,21 @@ class PostsService:
 			),
 		)
 
-	async def edit_published(self, draft: PublishedDraft, text: str) -> None:
-		"""Меняет текст вышедшего поста — публикатором (ADR-0032, A4).
+	async def edit_published(
+		self,
+		draft: PublishedDraft,
+		text: str,
+		entities: tuple[TextEntity, ...] | None = None,
+	) -> None:
+		"""Меняет текст и оформление вышедшего поста — публикатором.
 
 		Проверки те же, что у постановки поста: у поста без вложения
 		текст не может быть пустым, длина — в пределе публикатора.
+		``entities`` — разметка нового текста (ADR-0033); она передаётся
+		серверу заново, иначе он сотрёт оформление. None означает «форма
+		правит только буквы»: разметка берётся у черновика и снимается,
+		если текст изменили (:func:`keep_entities`).
+
 		Кнопки правка не трогает: под постом они остаются как были
 		(ADR-0031) — менять их может только бот
 		(:meth:`set_published_markup`).
@@ -1815,6 +1835,8 @@ class PostsService:
 		if not cleaned and not with_media:
 			raise PostError("Текст поста пуст — у поста без вложения он обязателен.")
 		check_text_length(cleaned, draft.text_limit, with_media)
+		if entities:
+			validate_rich_text(RichText(cleaned, entities))
 		community = await self._get_community(draft.ref.community_id)
 		account_id = self._published_reader(community)
 		try:
@@ -1823,7 +1845,9 @@ class PostsService:
 				community.tg_chat_id,
 				draft.ref.message_id,
 				cleaned,
-				keep_entities(draft.text, cleaned, draft.entities),
+				entities
+				if entities is not None
+				else keep_entities(draft.text, cleaned, draft.entities),
 			)
 		except UserbotMessageGoneError as exc:
 			raise PublishedGoneError(_PUBLISHED_GONE_TEXT) from exc
@@ -2045,14 +2069,25 @@ class PostsService:
 			entities=message.entities,
 		)
 
-	async def edit_scheduled(self, draft: ScheduledDraft, text: str, when: datetime) -> None:
-		"""Меняет текст и/или время отложенной записи на сервере.
+	async def edit_scheduled(
+		self,
+		draft: ScheduledDraft,
+		text: str,
+		when: datetime,
+		entities: tuple[TextEntity, ...] | None = None,
+	) -> None:
+		"""Меняет текст, оформление и/или время отложенной записи на сервере.
 
 		``draft`` — запись, как её показала форма (:meth:`scheduled_draft`):
 		по нему известно, есть ли у записи вложение (от этого зависит
 		предел текста и можно ли текст трогать вовсе). Проверки те же,
 		что у постановки поста: непустой текст у записи без вложения,
 		предел длины по Premium аккаунта, время не ближе минуты.
+		``entities`` — разметка нового текста (ADR-0033): передаётся
+		заново, иначе сервер сотрёт оформление. None — форма правит
+		только буквы, и разметка берётся у черновика
+		(:func:`keep_entities`).
+
 		Сообщество не меняется — это была бы другая публикация.
 
 		Raises:
@@ -2071,6 +2106,8 @@ class PostsService:
 			raise PostError("Пост пуст — добавьте текст.")
 		premium = self._gateway.userbot_premium(draft.ref.account_id)
 		check_text_length(text, text_length_limit(premium, with_media), with_media)
+		if entities:
+			validate_rich_text(RichText(text, entities))
 		if when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
 			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
 		community = await self._get_community(draft.ref.community_id)
@@ -2081,9 +2118,10 @@ class PostsService:
 				draft.ref.message_id,
 				text,
 				when,
-				# разметку передаём заново, иначе сервер сотрёт оформление;
-				# при изменённом тексте она уже не годится (ADR-0033)
-				keep_entities(draft.text, text, draft.entities),
+				# разметку передаём заново, иначе сервер сотрёт оформление
+				entities
+				if entities is not None
+				else keep_entities(draft.text, text, draft.entities),
 			)
 		)
 		# обещанные кнопки едут за постом: дозор опознаёт вышедший пост

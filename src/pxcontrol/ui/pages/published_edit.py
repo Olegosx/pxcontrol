@@ -29,11 +29,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import CaptionLabel, PrimaryPushButton, PushButton, TextEdit
+from qfluentwidgets import CaptionLabel, PrimaryPushButton, PushButton
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.posts import PublishedDraft, PublishedPostDto, PublishedRef
 from pxcontrol.engine.telegram.markup import PostMarkup
+from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -48,6 +49,7 @@ from pxcontrol.ui.pages.common import (
 	tinted,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor
+from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
 #: Высота поля текста в карточке: форма не должна занимать всю ленту.
 _TEXT_HEIGHT = 120
@@ -60,23 +62,6 @@ _LIMITS_NOTE = (
 	"Вложение и тема форума не меняются: замена файла — это загрузка "
 	"с прогрессом, то есть задание очереди, а не правка формы."
 )
-
-
-def styling_note(draft: PublishedDraft) -> str:
-	"""Оговорка об оформлении текста (пустая — оформления нет).
-
-	Разметка привязана к своему тексту: пока форма правит текст полями
-	без стилей (визуальный редактор — подача C2 ADR-0033), изменённый
-	текст оформление потеряет. Молчать об этом нельзя — человек узнал бы
-	из канала.
-	"""
-	if not draft.entities:
-		return ""
-	return (
-		"У поста есть оформление (жирный, ссылки, спойлер). Пока форма правит "
-		"только буквы: оставите текст как есть — оформление сохранится, "
-		"измените — оно снимется."
-	)
 
 
 def attachment_note(draft: PublishedDraft) -> str:
@@ -143,16 +128,18 @@ class PublishedEditor(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(_FORM_SPACING)
-		for note in (attachment_note(self._draft), styling_note(self._draft)):
-			if note:
-				layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
+		note = attachment_note(self._draft)
+		if note:
+			layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
 		with_media = self._draft.media_kind is not MediaKind.NONE
-		self._text = TextEdit(self)
-		self._text.setPlainText(self._draft.text)
+		# поле с оформлением (ADR-0033): стиль поста виден и правится,
+		# а не слетает от правки букв
+		self._post_text = RichPostEdit(self, height=_TEXT_HEIGHT)
+		self._text = self._post_text.edit
+		self._post_text.set_rich(self._draft.rich)
 		self._text.setPlaceholderText(caption_placeholder(not with_media))
-		self._text.setFixedHeight(_TEXT_HEIGHT)
-		self._text.setEnabled(self._draft.text_editable)
-		layout.addWidget(self._text)
+		self._post_text.setEnabled(self._draft.text_editable)
+		layout.addWidget(self._post_text)
 		self._counter = CharCounter(self, layout, self._text, self._draft.text_limit)
 		self._build_markup(layout)
 		self._error = ErrorLabel(self)
@@ -191,8 +178,8 @@ class PublishedEditor(QWidget):
 	# --- сохранение ------------------------------------------------------------
 
 	def _text_changed(self) -> bool:
-		"""Изменил ли человек текст поста."""
-		return self._draft.text_editable and self._text.toPlainText().strip() != self._draft.text
+		"""Изменил ли человек текст поста или его оформление."""
+		return self._draft.text_editable and trimmed(self._post_text.rich()) != self._draft.rich
 
 	def _markup_changed(self) -> bool:
 		"""Изменил ли человек клавиатуру поста.
@@ -216,11 +203,10 @@ class PublishedEditor(QWidget):
 			return
 		self._save_button.setEnabled(False)
 		if self._text_changed():
+			rich = trimmed(self._post_text.rich())
 			run_in_engine(
 				self._worker,
-				self._worker.engine.posts.edit_published(
-					self._draft, self._text.toPlainText().strip()
-				),
+				self._worker.engine.posts.edit_published(self._draft, rich.text, rich.entities),
 				self,
 				self._after_text,
 				self._failed,

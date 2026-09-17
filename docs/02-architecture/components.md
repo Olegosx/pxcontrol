@@ -29,6 +29,7 @@
   подменю по стадиям жизни поста ([ADR-0032](decisions/0032-publishing-section-post-stages.md),
   словарь стадий — `pages/publish_stages.py`, экраны и переходы —
   `pages/publish_section.py`): «Новый пост» (все типы контента +
+  поле с оформлением текста — `pages/rich_edit.py`, ADR-0033 +
   шаблоны подписей + блок кнопок под постом, общий с правкой элемента
   очереди — `pages/markup_editor.py`, ADR-0031), «Пакет» (черновики
   из готовой папки видео — `pages/publish_batch_page.py` + редактор

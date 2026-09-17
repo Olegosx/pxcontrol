@@ -156,6 +156,31 @@ def _known_scheme(url: str) -> bool:
 	return url.startswith(ALLOWED_URL_SCHEMES)
 
 
+def trimmed(rich: RichText) -> RichText:
+	"""Обрезает пробелы по краям вместе с разметкой.
+
+	Раньше форма делала это простым ``strip()`` — с разметкой так
+	нельзя: обрезка сдвигает весь текст, и куски оформления наезжают
+	на чужие буквы. Здесь смещения сдвигаются на длину срезанного
+	начала (в кодовых единицах UTF-16), а куски, оказавшиеся целиком
+	в обрезанных краях, снимаются.
+	"""
+	stripped = rich.text.strip()
+	if stripped == rich.text:
+		return rich
+	if not stripped:
+		return RichText("")
+	lead = telegram_text_length(rich.text[: len(rich.text) - len(rich.text.lstrip())])
+	limit = telegram_text_length(stripped)
+	entities: list[TextEntity] = []
+	for entity in rich.entities:
+		start = max(0, entity.offset - lead)
+		end = min(limit, entity.offset + entity.length - lead)
+		if end > start:
+			entities.append(TextEntity(entity.style, start, end - start, entity.value))
+	return RichText(stripped, tuple(entities))
+
+
 def keep_entities(
 	old_text: str, new_text: str, entities: tuple[TextEntity, ...]
 ) -> tuple[TextEntity, ...]:

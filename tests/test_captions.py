@@ -27,6 +27,7 @@ from pxcontrol.engine.services.captions import (
 	title_from_filename,
 )
 from pxcontrol.engine.services.video import PIPELINE_STAMP_FORMAT
+from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
 
 # --- чистые функции ---------------------------------------------------------
 
@@ -40,8 +41,12 @@ def test_hashtag_normalization() -> None:
 
 
 def test_build_caption_full() -> None:
-	"""Название жирным, решётки/текст по полю, пустые строки — вон."""
-	text = build_caption(
+	"""Название жирным **сущностью** (ADR-0033), поля построчно, пустые — вон.
+
+	Звёздочек в тексте больше нет: разметка живёт рядом с видимым
+	текстом, иначе она считалась бы длиной поста и мешала правке.
+	"""
+	caption = build_caption(
 		"Lara Croft",
 		[
 			CaptionLine("Year", hashtag=False, values=["2026"]),
@@ -49,18 +54,19 @@ def test_build_caption_full() -> None:
 			CaptionLine("Author", hashtag=True, values=["  "]),  # пусто — пропуск
 		],
 	)
-	assert text == ("**Lara Croft**\nYear: 2026\nGenre: #Action, #SciFi")
+	assert caption.text == "Lara Croft\nYear: 2026\nGenre: #Action, #SciFi"
+	assert caption.entities == (TextEntity(TextStyle.BOLD, 0, len("Lara Croft")),)
 
 
 def test_build_caption_without_title() -> None:
-	"""Без названия подпись начинается сразу с полей."""
-	text = build_caption("", [CaptionLine("Year", False, ["2026"])])
-	assert text == "Year: 2026"
+	"""Без названия подпись начинается сразу с полей и без разметки."""
+	caption = build_caption("", [CaptionLine("Year", False, ["2026"])])
+	assert caption == RichText("Year: 2026")
 
 
 def test_build_caption_without_field_name() -> None:
 	"""show_name=False — строка из одних значений, без префикса «Имя: »."""
-	text = build_caption(
+	caption = build_caption(
 		"Lara Croft",
 		[
 			CaptionLine("Genre", hashtag=True, values=["action", "sci-fi"], show_name=False),
@@ -68,7 +74,7 @@ def test_build_caption_without_field_name() -> None:
 			CaptionLine("Tags", hashtag=True, values=[""], show_name=False),  # пусто — пропуск
 		],
 	)
-	assert text == ("**Lara Croft**\n#Action, #SciFi\nYear: 2026")
+	assert caption.text == "Lara Croft\n#Action, #SciFi\nYear: 2026"
 
 
 def test_title_from_filename_matches_pipeline_stamp() -> None:

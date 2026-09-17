@@ -36,6 +36,7 @@
 | [telegram-buttons.md](03-modules/telegram-buttons.md) | Кнопки под постом: документация и опыт | 🟢 |
 | [publishing-routes.md](03-modules/publishing-routes.md) | Маршруты публикации и правки: комплектации и выбор | 🟢 |
 | [scheduler.md](03-modules/scheduler.md) | Ожидание публикации: очередь отправки приложения и отложенные записи Telegram (правка, «сейчас», удаление) | 🟢 |
+| [post-text.md](03-modules/post-text.md) | Оформление текста поста: разметка сущностями, поле с кнопками стилей, правила движка | 🟢 |
 | [published.md](03-modules/published.md) | Опубликовано: лента вышедших постов, чтение страницами, состояние обещанных кнопок | 🟢 |
 | [video-processing.md](03-modules/video-processing.md) | Подготовка видео | 🟢 |
 | [captions.md](03-modules/captions.md) | Подписи к постам (шаблоны) | 🟢 |

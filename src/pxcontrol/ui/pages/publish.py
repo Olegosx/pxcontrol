@@ -30,7 +30,6 @@ from qfluentwidgets import (
 	PushButton,
 	ScrollArea,
 	SubtitleLabel,
-	TextEdit,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -58,6 +57,7 @@ from pxcontrol.engine.services.settings import (
 	PUBLISH_TIMES,
 )
 from pxcontrol.engine.services.video import VideoDirs
+from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityKind,
@@ -94,6 +94,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 )
 from pxcontrol.ui.pages.publish_stages import PublishStage, stage_hint, stage_title
 from pxcontrol.ui.pages.queue_panel import QueuePanel
+from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
 #: Сколько карточек очереди показывать на странице (хвост ждущих —
 #: в сводке числом; всё целиком — кнопка «Вся очередь…», ADR-0016).
@@ -149,10 +150,13 @@ class PublishPage(ScrollArea):
 		self._topics = TopicChoice(
 			self, layout, self._worker, self._community, on_failed=self._on_topics_failed
 		)
-		self._text = TextEdit(self)
+		# поле с оформлением (ADR-0033): человек выделяет текст и жмёт
+		# стиль, разметка живёт сущностями рядом с видимым текстом
+		self._post_text = RichPostEdit(self)
+		self._text = self._post_text.edit
 		self._text.setPlaceholderText(caption_placeholder(True))
 		self._text.setMinimumHeight(120)
-		layout.addWidget(self._text)
+		layout.addWidget(self._post_text)
 		self._counter = CharCounter(self, layout, self._text)
 		self._build_caption_tools(layout)
 		self._build_file_row(layout)
@@ -575,7 +579,7 @@ class PublishPage(ScrollArea):
 		dialog = CaptionDialog(usable, title, self.window())
 		if not exec_dialog(dialog):
 			return
-		self._text.setPlainText(dialog.caption())
+		self._post_text.set_rich(dialog.caption())
 		self._record_template_usage(dialog.template_id(), dialog.used_values())
 		self._suggest_rename(templates, dialog, media)
 
@@ -649,6 +653,9 @@ class PublishPage(ScrollArea):
 		"""
 		media = str(self._file_edit.text()).strip() or None
 		is_text = self._kind is MediaKind.NONE
+		# видимый текст и его разметка — одной точкой, чтобы они
+		# не разъехались между проверкой и сборкой черновика
+		rich = trimmed(self._post_text.rich())
 		if not is_text and media is None:
 			raise ValueError(
 				f"Выбран тип «{kind_label(self._kind)}», а файл не указан — "
@@ -656,7 +663,8 @@ class PublishPage(ScrollArea):
 			)
 		return PostDraft(
 			community_id=community_id,
-			text=str(self._text.toPlainText()).strip(),
+			text=rich.text,
+			entities=rich.entities,
 			media_path=None if is_text else media,
 			media_kind=MediaKind.NONE if is_text else self._kind,
 			when=self._when_row.when(),
@@ -674,7 +682,7 @@ class PublishPage(ScrollArea):
 
 	def _on_enqueued(self, _item_id: object = None) -> None:
 		"""Черновик принят в очередь — чистим форму под следующий пост."""
-		self._text.clear()
+		self._post_text.clear()
 		self._file_edit.clear()
 		self._queue.poll()  # панель очереди обновляется сразу, не по таймеру
 

@@ -46,6 +46,7 @@ from pxcontrol.engine.services.captions import (
 	ValueDto,
 	build_caption,
 )
+from pxcontrol.engine.telegram.rich_text import RichText
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -311,8 +312,8 @@ class CaptionDialog(WorkDialog):
 		"""Название поста (первая строка подписи)."""
 		return str(self._title.text()).strip()
 
-	def caption(self) -> str:
-		"""Собранный текст подписи (только включённые поля)."""
+	def caption(self) -> RichText:
+		"""Собранная подпись: текст и его разметка (ADR-0033)."""
 		return build_caption(str(self._title.text()), self.lines())
 
 	def lines(self) -> list[CaptionLine]:

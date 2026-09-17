@@ -33,7 +33,6 @@ from qfluentwidgets import (
 	PushButton,
 	SpinBox,
 	StrongBodyLabel,
-	TextEdit,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -65,6 +64,7 @@ from pxcontrol.engine.services.schedule_plan import (
 from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.markup import PostMarkup
+from pxcontrol.engine.telegram.rich_text import RichText, trimmed
 from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT, MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -82,6 +82,7 @@ from pxcontrol.ui.pages.common import (
 	noop,
 	show_error,
 )
+from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
 #: Формат времени публикации в строке черновика (местное время).
 _WHEN_FORMAT = "%d.%m.%Y %H:%M"
@@ -145,7 +146,7 @@ class _BatchRow:
 		self,
 		editor: BatchEditor,
 		video: VideoFile,
-		caption: str,
+		caption: RichText,
 		oversized: bool,
 		caption_limit: int = CAPTION_LENGTH_LIMIT,
 	) -> None:
@@ -178,11 +179,13 @@ class _BatchRow:
 			)
 		)
 		box.addLayout(head)
-		self.caption = TextEdit(self.card)
+		# подпись с оформлением (ADR-0033): название жирное сущностью,
+		# а не звёздочками — и правится тут же, как в форме поста
+		self.rich_caption = RichPostEdit(self.card, height=_CAPTION_HEIGHT)
+		self.caption = self.rich_caption.edit
 		self.caption.setPlaceholderText("Подпись к видео (необязательно)…")
-		self.caption.setPlainText(caption)
-		self.caption.setFixedHeight(_CAPTION_HEIGHT)
-		box.addWidget(self.caption)
+		self.rich_caption.set_rich(caption)
+		box.addWidget(self.rich_caption)
 		# подписи собраны общим шаблоном: предел легко перерастает весь
 		# пакет сразу, и увидеть это лучше здесь, чем при постановке
 		self.counter = CharCounter(self.card, box, self.caption, caption_limit)
@@ -196,6 +199,10 @@ class _BatchRow:
 		self.when.setFixedWidth(220)
 		bottom.addWidget(self.when)
 		box.addLayout(bottom)
+
+	def set_caption(self, caption: RichText) -> None:
+		"""Показывает пересобранную подпись со всем её оформлением."""
+		self.rich_caption.set_rich(caption)
 
 
 class BatchEditor(QWidget):
@@ -297,10 +304,12 @@ class BatchEditor(QWidget):
 		result: list[PostDraft] = []
 		for row in self._checked():
 			when_local = _parse_when(str(row.when.text()))
+			caption = trimmed(row.rich_caption.rich())
 			result.append(
 				PostDraft(
 					community_id,
-					text=str(row.caption.toPlainText()).strip(),
+					text=caption.text,
+					entities=caption.entities,
 					media_path=row.video.path,
 					media_kind=MediaKind.VIDEO,
 					when=when_local.astimezone(UTC) if when_local else None,
@@ -508,7 +517,7 @@ class BatchEditor(QWidget):
 		"""
 		self._applied_rules = self._rules_from_form()
 		for row in self._rows:
-			row.caption.setPlainText(build_caption(self._row_title(row), self._caption_lines or []))
+			row.set_caption(build_caption(self._row_title(row), self._caption_lines or []))
 		self._request_renames()
 
 		def _save_failed(message: str) -> None:
@@ -610,7 +619,7 @@ class BatchEditor(QWidget):
 			caption = (
 				build_caption(title_from_filename(video.path), caption_lines)
 				if caption_lines is not None
-				else ""
+				else RichText("")
 			)
 			oversized = limit_bytes is not None and video.size_bytes > limit_bytes
 			row = _BatchRow(self, video, caption, oversized, caption_limit)

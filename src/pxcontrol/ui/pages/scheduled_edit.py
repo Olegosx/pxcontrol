@@ -18,10 +18,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtWidgets import QVBoxLayout, QWidget
-from qfluentwidgets import CaptionLabel, PrimaryPushButton, PushButton, TextEdit
+from qfluentwidgets import CaptionLabel, PrimaryPushButton, PushButton
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.posts import ScheduledDraft, ScheduledPostDto
+from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import ForumTopicInfo, MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -34,6 +35,7 @@ from pxcontrol.ui.pages.common import (
 	kind_label,
 	tinted,
 )
+from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
 #: Высота поля текста в карточке: форма не должна занимать весь список.
 _TEXT_HEIGHT = 120
@@ -49,22 +51,6 @@ _LIMITS_NOTE = (
 	"Сообщество, вложение и тема форума не меняются: такую запись удаляют "
 	"и создают заново на «Публикации»."
 )
-
-
-def styling_note(draft: ScheduledDraft) -> str:
-	"""Оговорка об оформлении текста записи (пустая — оформления нет).
-
-	То же правило, что у вышедшего поста (ADR-0033): разметка живёт
-	вместе со своим текстом, и до визуального редактора (подача C2)
-	изменённый текст её теряет.
-	"""
-	if not draft.entities:
-		return ""
-	return (
-		"У записи есть оформление (жирный, ссылки, спойлер). Пока форма правит "
-		"только буквы: оставите текст как есть — оформление сохранится, "
-		"измените — оно снимется."
-	)
 
 
 def attachment_note(draft: ScheduledDraft, topic_title: str | None) -> str:
@@ -114,17 +100,19 @@ class ScheduledEditor(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(_FORM_SPACING)
-		for note in (attachment_note(self._draft, topic_title), styling_note(self._draft)):
-			if note:
-				layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
+		note = attachment_note(self._draft, topic_title)
+		if note:
+			layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
 		with_media = self._draft.media_kind is not MediaKind.NONE
-		self._text = TextEdit(self)
-		self._text.setPlainText(self._draft.text)
+		# поле с оформлением (ADR-0033): разметка записи показана стилями
+		# и уезжает обратно сущностями — правка её больше не стирает
+		self._post_text = RichPostEdit(self, height=_TEXT_HEIGHT)
+		self._text = self._post_text.edit
+		self._post_text.set_rich(self._draft.rich)
 		self._text.setPlaceholderText(caption_placeholder(not with_media))
-		self._text.setFixedHeight(_TEXT_HEIGHT)
 		# у вложений не наших видов подписи нет — поле только показывает
-		self._text.setEnabled(self._draft.text_editable)
-		layout.addWidget(self._text)
+		self._post_text.setEnabled(self._draft.text_editable)
+		layout.addWidget(self._post_text)
 		self._counter = CharCounter(self, layout, self._text, self._draft.text_limit)
 		self._when_row = WhenRow(self, layout, compact=True, trailing=self._build_buttons())
 		self._when_row.set_when(self._draft.when)
@@ -153,11 +141,10 @@ class ScheduledEditor(QWidget):
 			self._error.fail(_NOW_HINT)
 			return
 		self._save_button.setEnabled(False)
+		rich = trimmed(self._post_text.rich())
 		run_in_engine(
 			self._worker,
-			self._worker.engine.posts.edit_scheduled(
-				self._draft, self._text.toPlainText().strip(), when
-			),
+			self._worker.engine.posts.edit_scheduled(self._draft, rich.text, when, rich.entities),
 			self,
 			self._on_save_done,
 			self._on_save_failed,

@@ -23,7 +23,6 @@ from qfluentwidgets import (
 	LineEdit,
 	PrimaryPushButton,
 	PushButton,
-	TextEdit,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -31,6 +30,7 @@ from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import PostDraft, TextLimits
 from pxcontrol.engine.services.publish_route import choose_route, markup_blocker
 from pxcontrol.engine.services.video import VideoDirs
+from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES, ForumTopicInfo, MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -54,6 +54,7 @@ from pxcontrol.ui.pages.common import (
 	visible_topics,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
+from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
 #: Подсказка под временем, когда канал публикует только ботом: у бота
 #: нет отложенных (ADR-0010/0011), остаётся «сейчас».
@@ -129,10 +130,12 @@ class QueueItemEditor(QWidget):
 		self._build_topic_row(layout, topics, topics_error)
 		self._build_kind_segments(layout)
 		self._build_file_row(layout)
-		self._text = TextEdit(self)
-		self._text.setPlainText(self._draft.text)
-		self._text.setFixedHeight(_TEXT_HEIGHT)
-		layout.addWidget(self._text)
+		# поле с оформлением (ADR-0033): правка не теряет разметку —
+		# она показана стилями и уезжает сущностями
+		self._post_text = RichPostEdit(self, height=_TEXT_HEIGHT)
+		self._text = self._post_text.edit
+		self._post_text.set_rich(self._draft.rich)
+		layout.addWidget(self._post_text)
 		self._counter = CharCounter(self, layout, self._text)
 		self._build_markup_block(layout)
 		# по макету кнопки формы стоят в ряду времени, справа
@@ -379,6 +382,7 @@ class QueueItemEditor(QWidget):
 		"""
 		media = self._file_edit.text().strip() or None
 		is_text = self._kind is MediaKind.NONE
+		rich = trimmed(self._post_text.rich())
 		if not is_text and media is None:
 			raise ValueError(
 				f"Выбран тип «{kind_label(self._kind)}», а файл не указан — "
@@ -386,7 +390,8 @@ class QueueItemEditor(QWidget):
 			)
 		return PostDraft(
 			community_id=self._draft.community_id,
-			text=self._text.toPlainText().strip(),
+			text=rich.text,
+			entities=rich.entities,
 			media_path=None if is_text else media,
 			media_kind=MediaKind.NONE if is_text else self._kind,
 			when=self._when_row.when(),

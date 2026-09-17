@@ -37,6 +37,8 @@ from pxcontrol.engine.db.models import (
 	Community,
 )
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
+from pxcontrol.engine.telegram.types import telegram_text_length
 from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
 from pxcontrol.engine.video.probe import ffprobe_bin_for, probe_video
 
@@ -180,21 +182,28 @@ def hashtag(value: str) -> str:
 	return "#" + "".join(w[:1].upper() + w[1:] for w in words)
 
 
-def build_caption(title: str, lines: list[CaptionLine]) -> str:
-	"""Собирает текст подписи: жирное название + строки полей.
+def build_caption(title: str, lines: list[CaptionLine]) -> RichText:
+	"""Собирает подпись: жирное название плюс строки полей.
 
 	Строки без значений пропускаются. Строка поля — «Имя: значения»;
-	при выключенном ``show_name`` — только значения. Разметка — Markdown
-	(``**название**``), Telethon применяет её по умолчанию.
+	при выключенном ``show_name`` — только значения.
+
+	Название выделяется **сущностью разметки**, а не звёздочками
+	(ADR-0033): текст подписи — то, что увидит читатель, а оформление
+	живёт рядом. Прежняя сборка отдавала ``**название**`` строкой,
+	и эти звёздочки считались длиной поста и мешали правке.
 	"""
-	rows = [f"**{title.strip()}**"] if title.strip() else []
+	name = title.strip()
+	rows = [name] if name else []
 	for line in lines:
 		values = [v for v in (raw.strip() for raw in line.values) if v]
 		if not values:
 			continue
 		rendered = ", ".join(hashtag(v) if line.hashtag else v for v in values)
 		rows.append(f"{line.name}: {rendered}" if line.show_name else rendered)
-	return "\n".join(rows)
+	text = "\n".join(rows)
+	entities = (TextEntity(TextStyle.BOLD, 0, telegram_text_length(name)),) if name else ()
+	return RichText(text, entities)
 
 
 def title_from_filename(path: str) -> str:
