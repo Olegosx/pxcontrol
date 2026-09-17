@@ -610,6 +610,13 @@ PromisedMarkups = Callable[[int], Awaitable[set[int]]]
 #: номер поста → текст последней неудачи (пустая строка — не пытались).
 PostPromises = Callable[[int], Awaitable[dict[int, str]]]
 
+#: Крючок «освежи права бота»: сообщество, чьи доступы надо перепроверить
+#: живым зондом. Снимок прав в базе стареет — право «изменять сообщения»
+#: человек выдаёт в Telegram, а приложение о том не знает (ADR-0031);
+#: отказывать по устаревшей записи нечестно, поэтому перед отказом
+#: сервис просит движок перепроверить и считает правило заново.
+RefreshRights = Callable[[int], Awaitable[None]]
+
 #: Крючок «с кнопками поста разобрались сами»: сообщество и номер поста.
 #: Человек поставил или снял клавиатуру руками (или удалил пост) —
 #: обещание дозору больше не нужно.
@@ -1014,6 +1021,7 @@ class PostsService:
 		promised_markups: PromisedMarkups | None = None,
 		post_promises: PostPromises | None = None,
 		markup_settled: MarkupSettled | None = None,
+		refresh_rights: RefreshRights | None = None,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
 		экземпляр поверх той же БД (для тестов это эквивалентно:
@@ -1033,6 +1041,7 @@ class PostsService:
 		self._promised_markups = promised_markups
 		self._post_promises = post_promises
 		self._markup_settled = markup_settled
+		self._refresh_rights = refresh_rights
 
 	async def publish(
 		self, draft: PostDraft, on_progress: ProgressCallback | None = None
@@ -1117,11 +1126,14 @@ class PostsService:
 				f"У «{community.title}» нет тем (форум выключен) — "
 				"обновите выбор темы или перепроверьте доступы."
 			)
-		caps = community_capabilities(community)
 		over_bot_limit = self._over_bot_limit(draft)
 		blocker = self._markup_blocker(community, draft, over_bot_limit)
+		if blocker is not None and self._rights_may_be_stale(community):
+			community = await self._fresh_community(community)
+			blocker = self._markup_blocker(community, draft, over_bot_limit)
 		if blocker is not None:
 			raise PostError(blocker)
+		caps = community_capabilities(community)
 		blocker = self._poll_blocker(community, draft)
 		if blocker is not None:
 			raise PostError(blocker)
@@ -1157,6 +1169,54 @@ class PostsService:
 		)
 
 	@staticmethod
+	def _rights_may_be_stale(community: Community) -> bool:
+		"""Может ли отказ по кнопкам объясняться устаревшим снимком прав.
+
+		Право «изменять сообщения» живёт в Telegram, а у нас — снимком
+		(колонка ``bot_can_edit``, ADR-0031): человек выдаёт право
+		в настройках канала, приложение об этом не узнаёт до следующей
+		перепроверки доступов. Значит отказ «у бота нет права» может
+		быть не правдой, а устаревшей записью — и прежде чем отказать,
+		её стоит освежить.
+
+		Случай узкий: канал, бот назначен и не приостановлен, а права
+		правки в снимке нет. Всё прочее (бота нет вовсе, группа) зондом
+		не лечится — там отказ окончателен.
+		"""
+		bot = community.bot
+		return (
+			CommunityKind(community.kind) is CommunityKind.CHANNEL
+			and bot is not None
+			and not bot.paused
+			and not community.bot_can_edit
+		)
+
+	async def _fresh_community(self, community: Community) -> Community:
+		"""Перепроверяет доступы сообщества и возвращает свежую запись.
+
+		Зонд — живой запрос ботом, поэтому зовётся он **только** там,
+		где отказ иначе был бы ложным (:meth:`_rights_may_be_stale`),
+		и ровно один раз на операцию: человек нажал кнопку и ждёт,
+		а не получает отказ по памяти недельной давности.
+
+		Сбой зонда не превращается в сбой операции: не удалось
+		перепроверить — остаётся прежний снимок и прежний отказ,
+		а причина уходит в журнал.
+		"""
+		if self._refresh_rights is None:
+			return community
+		try:
+			await self._refresh_rights(community.id)
+		except Exception as exc:  # noqa: BLE001 — зонд вспомогательный
+			logger.warning(
+				"Не удалось перепроверить права бота в «%s»: %s",
+				community.title,
+				user_message(exc),
+			)
+			return community
+		return await self._get_community(community.id)
+
+	@staticmethod
 	def _poll_blocker(community: Community, draft: PostDraft) -> str | None:
 		"""Что мешает опросу этого черновика в этом сообществе (None — ничего)."""
 		if draft.poll is None:
@@ -1181,7 +1241,11 @@ class PostsService:
 		if not draft.markup and draft.poll is None:
 			return
 		community = await self._get_community(draft.community_id)
-		blocker = self._markup_blocker(community, draft, self._over_bot_limit(draft))
+		over_bot_limit = self._over_bot_limit(draft)
+		blocker = self._markup_blocker(community, draft, over_bot_limit)
+		if blocker is not None and self._rights_may_be_stale(community):
+			community = await self._fresh_community(community)
+			blocker = self._markup_blocker(community, draft, over_bot_limit)
 		if blocker is None:
 			# опрос проверяется здесь же: правило у него тоже от сообщества,
 			# и отказ обязан всплыть при постановке, а не в момент выхода
@@ -2210,11 +2274,20 @@ class PostsService:
 			UserbotUnavailableError: Telegram отказал боту.
 		"""
 		community = await self._get_community(ref.community_id)
-		blocker = post_markup_blocker(
-			community_capabilities(community),
-			title=community.title,
-			kind=CommunityKind(community.kind),
-		)
+
+		def blocked(item: Community) -> str | None:
+			return post_markup_blocker(
+				community_capabilities(item),
+				title=item.title,
+				kind=CommunityKind(item.kind),
+			)
+
+		blocker = blocked(community)
+		if blocker is not None and self._rights_may_be_stale(community):
+			# право могли выдать в Telegram уже после нашей последней
+			# перепроверки — спрашиваем живьём, прежде чем отказать
+			community = await self._fresh_community(community)
+			blocker = blocked(community)
 		if blocker is not None:
 			raise PostError(blocker)
 		if markup is not None:

@@ -1807,6 +1807,62 @@ async def test_set_published_markup_bot_edits_and_settles_promise(db: Database) 
 	assert settled == [(community_id, 77)]
 
 
+async def test_stale_bot_rights_are_rechecked_before_refusing(db: Database) -> None:
+	"""Право «изменять сообщения» перепроверяется живьём, а не берётся из памяти.
+
+	Человек выдаёт право в Telegram, а у нас оно снимком (ADR-0031):
+	отказ по устаревшей записи — ложь. Перед отказом сервис просит
+	движок перепроверить доступы и считает правило заново.
+	"""
+	gateway = _FakeGateway()
+	rechecked: list[int] = []
+
+	async def refresh(community_id: int) -> None:
+		rechecked.append(community_id)
+		async with db.session_factory() as session:  # зонд нашёл право
+			community = await session.get(Community, community_id)
+			assert community is not None
+			community.bot_can_edit = True
+			await session.commit()
+
+	service = PostsService(db, gateway, refresh_rights=refresh)
+	community_id = await _add_community(db, bot_can_edit=False)
+	markup = PostMarkup(((PostButton(ButtonKind.LINK, "Открыть", "https://telegram.org"),),))
+	await service.set_published_markup(PublishedRef(community_id, 77), markup)
+	assert rechecked == [community_id]  # зонд позвали один раз
+	assert gateway.markup_edits == [("-1001", 77, markup)]  # и кнопки поставились
+
+
+async def test_recheck_does_not_rescue_a_real_refusal(db: Database) -> None:
+	"""Зонд зовётся только там, где он может помочь, и отказ остаётся отказом.
+
+	В группе права «изменять сообщения» не существует вовсе, поэтому
+	перепроверять нечего — лишний запрос к Telegram не делается.
+	"""
+	rechecked: list[int] = []
+
+	async def refresh(community_id: int) -> None:
+		rechecked.append(community_id)
+
+	service = PostsService(db, _FakeGateway(), refresh_rights=refresh)
+	group_id = await _add_community(db, forum=True)  # forum=True создаёт группу
+	with pytest.raises(PostError, match="группе"):
+		await service.set_published_markup(PublishedRef(group_id, 77), None)
+	assert rechecked == []
+
+
+async def test_failed_recheck_keeps_the_original_refusal(db: Database) -> None:
+	"""Сбой зонда не превращается в сбой операции: остаётся прежний отказ."""
+
+	async def refresh(_community_id: int) -> None:
+		raise UserbotUnavailableError("Нет связи с Telegram")
+
+	service = PostsService(db, _FakeGateway(), refresh_rights=refresh)
+	community_id = await _add_community(db, bot_can_edit=False)
+	with pytest.raises(PostError, match="нет права изменять сообщения"):
+		await service.set_published_markup(PublishedRef(community_id, 77), None)
+
+
 async def test_set_published_markup_refused_in_group(db: Database) -> None:
 	"""В группе кнопки вышедшего поста изменить нельзя — права не существует."""
 	service = PostsService(db, _FakeGateway())
