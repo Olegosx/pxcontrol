@@ -60,7 +60,11 @@ def poll_note(poll: PollDraft) -> str:
 class PollEditor(QWidget):
 	"""Поля опроса: вопрос, варианты, правила голосования."""
 
-	#: Опрос изменился (форма пересобирает подсказки и правила).
+	#: Опрос изменился **человеком** (форма пересобирает подсказки
+	#: и правила). Установка состояния извне — `set_poll`, `clear`,
+	#: `set_anonymous_forced` — сигналом не является: иначе правило,
+	#: пришедшее из движка, было бы неотличимо от правки, и форма
+	#: навязывала бы его в ответ на собственный же ответ.
 	changed = Signal()
 
 	def __init__(self, parent: QWidget) -> None:
@@ -194,6 +198,7 @@ class PollEditor(QWidget):
 		if len(self._options) >= MAX_POLL_OPTIONS:
 			return
 		self._rebuild([*self._values(), ""], self._correct.checkedId())
+		self.changed.emit()
 
 	def _drop_option(self, index: int) -> None:
 		"""Убирает вариант; ниже минимума список не опускается."""
@@ -207,6 +212,7 @@ class PollEditor(QWidget):
 		elif correct > index:
 			correct -= 1
 		self._rebuild(values, correct if correct >= 0 else None)
+		self.changed.emit()
 
 	def _values(self) -> list[str]:
 		"""Тексты вариантов как они набраны сейчас."""
@@ -258,13 +264,19 @@ class PollEditor(QWidget):
 			self._multiple.setChecked(False)
 			self._multiple.blockSignals(False)
 		self._rebuild(self._values(), self._correct.checkedId())
+		self.changed.emit()
 
 	def _on_changed(self) -> None:
-		"""Поля изменились: подсказка пересобирается, форма узнаёт."""
+		"""Поля изменил человек: подсказка пересобирается, форма узнаёт."""
 		self._render()
+		self.changed.emit()
 
 	def _render(self) -> None:
-		"""Приводит блок к своему состоянию: доступность кнопок и подсказка."""
+		"""Приводит блок к своему состоянию: доступность кнопок и подсказка.
+
+		Только внешний вид. Сигнал отсюда не излучается — его излучают
+		пути человека (см. `changed`).
+		"""
 		quiz = self._quiz.isChecked()
 		for button in self._correct.buttons():
 			button.setVisible(quiz)
@@ -272,4 +284,3 @@ class PollEditor(QWidget):
 		self._multiple.setEnabled(not quiz)
 		self._add.setEnabled(len(self._options) < MAX_POLL_OPTIONS)
 		self._note.setText(poll_note(self.poll()))
-		self.changed.emit()
