@@ -320,21 +320,19 @@ def test_ensure_bot_can_post() -> None:
 		ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=False))
 
 
-def test_bot_caption_markup_to_html() -> None:
-	"""Разметка поля текста доносится бот-путём как HTML.
+def test_bot_caption_keeps_separators_literal() -> None:
+	"""Бот-путь не разбирает разделители: текст уходит как набран.
 
-	Bot API без parse_mode показал бы подписчикам буквальную разметку;
-	спецсимволы HTML в значениях полей экранируются. Подмножество —
-	как у Telethon (основной путь): жирный, курсив, зачёркнутый, код.
+	Оформление приезжает сущностями (ADR-0033), а ``**`` и ``__``
+	в тексте — обычные символы: пост про ``__init__`` или про степень
+	не должен уходить курсивом и жирным. Спецсимволы HTML при этом
+	экранируются — иначе чужой тег сломал бы разбор у Telegram.
 	"""
-	from pxcontrol.engine.telegram.bot_api import to_html
+	from pxcontrol.engine.telegram.bot_api import post_html
 
-	assert to_html("**Название**\nГод: 2026") == "<b>Название</b>\nГод: 2026"
-	assert to_html("**Re: Zero <2 сезон> & ещё**") == "<b>Re: Zero &lt;2 сезон&gt; &amp; ещё</b>"
-	assert to_html("__курсив__ и ~~зачёркнутый~~") == "<i>курсив</i> и <s>зачёркнутый</s>"
-	assert to_html("код: `x = 1`") == "код: <code>x = 1</code>"
-	assert to_html("без разметки") == "без разметки"
-	assert to_html("непарные 2**3") == "непарные 2**3"
+	assert post_html("Метод __init__ и 2**3**4") == "Метод __init__ и 2**3**4"
+	assert post_html("Re: Zero <2 сезон> & ещё") == "Re: Zero &lt;2 сезон&gt; &amp; ещё"
+	assert post_html("без разметки") == "без разметки"
 
 
 def test_community_kind_from_chat_type() -> None:

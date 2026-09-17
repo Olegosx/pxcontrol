@@ -62,13 +62,17 @@ def test_validate_allows_nesting_of_different_styles() -> None:
 
 
 def test_json_round_trip() -> None:
-	"""Разметка переживает хранение в БД; её отсутствие пишется как NULL."""
+	"""Разметка переживает хранение в БД; её отсутствие — пустой список.
+
+	Пустой список, а не NULL: незаполненная колонка означала поколение
+	до ADR-0033 (текст с разделителями), и возвращать эту двусмысленность
+	нельзя — поколение закрыто миграцией f9e2b47c3a81.
+	"""
 	rich = RichText("текст", (TextEntity(TextStyle.LINK, 0, 5, "https://telegram.org"),))
 	raw = rich_to_json(rich)
-	assert raw is not None
 	assert rich_from_json(rich.text, raw) == rich
-	assert rich_to_json(RichText("текст")) is None
-	assert rich_from_json("текст", None) == RichText("текст")
+	assert rich_to_json(RichText("текст")) == []
+	assert rich_from_json("текст", []) == RichText("текст")
 
 
 def test_json_survives_broken_record() -> None:
@@ -157,9 +161,9 @@ def test_html_keeps_emoji_whole() -> None:
 	assert html_from_rich(rich) == "🙂<b>жирный</b>"
 
 
-def test_post_html_falls_back_to_old_markup() -> None:
-	"""Без разметки — прежний разбор разделителей: старые посты не ломаются."""
-	assert post_html("**жирный**") == "<b>жирный</b>"
+def test_post_html_never_parses_separators() -> None:
+	"""Оформление — только сущностями; разделители уходят как символы."""
+	assert post_html("**жирный**") == "**жирный**"
 	assert post_html("жирный", (_bold(0, 6),)) == "<b>жирный</b>"
 
 

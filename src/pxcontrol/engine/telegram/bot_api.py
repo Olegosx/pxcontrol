@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import html
 import logging
-import re
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
@@ -96,45 +95,17 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 		raise CommunityCheckError(f"Telegram отклонил операцию: {exc}") from exc
 
 
-#: Разметка поля текста поста (её разбирает Telethon) → HTML-теги Bot API.
-_MARKUP: list[tuple[re.Pattern[str], str]] = [
-	(re.compile(r"\*\*(.+?)\*\*", re.DOTALL), r"<b>\1</b>"),
-	(re.compile(r"__(.+?)__", re.DOTALL), r"<i>\1</i>"),
-	(re.compile(r"~~(.+?)~~", re.DOTALL), r"<s>\1</s>"),
-	(re.compile(r"`(.+?)`", re.DOTALL), r"<code>\1</code>"),
-]
-
-
 def post_html(text: str, entities: tuple[TextEntity, ...] = ()) -> str:
-	"""HTML поста для Bot API: из сущностей, а без них — из старой разметки.
+	"""HTML поста для Bot API: текст как набран, оформление — сущностями.
 
-	Одна точка на оба случая (ADR-0033). У размеченного текста истина —
-	сущности, и строка уже чистая: её переводит :func:`html_from_rich`.
-	У текста без разметки (старые элементы очереди и всё, что пока
-	пишет форма) остаётся прежний путь — разбор разделителей строки,
-	чтобы бот-канал выглядел так же, как userbot-канал.
+	Истина об оформлении — сущности (ADR-0033); сама строка чистая,
+	и разбирать в ней нечего: разделители (``**``, ``__``) — обычные
+	символы, которые уходят подписчикам как есть. Разбор разделителей
+	бот-путь вёл до перехода на визуальное поле; поколение таких текстов
+	закрыто миграцией ``f9e2b47c3a81``, и ветки под него больше нет —
+	иначе пост про ``__init__`` уходил бы курсивом.
 	"""
-	if entities:
-		return html_from_rich(RichText(text, entities))
-	return to_html(text)
-
-
-def to_html(text: str) -> str:
-	"""Переводит текст поста из старой разметки поля ввода в HTML.
-
-	Поле текста поста живёт в разметке, которую Telethon (основной путь,
-	ADR-0011) разбирает сам: ``**жирный**``, ``__курсив__``,
-	``~~зачёркнутый~~``, `` `код` ``. Bot API без ``parse_mode``
-	не разбирает ничего, а его Markdown-режимы с двойными звёздочками
-	несовместимы — единственный совместимый режим ``HTML``. Экранируем
-	служебные символы HTML и переводим пары в теги — бот-канал выглядит
-	так же, как userbot-канал. Ссылки ``[текст](url)`` намеренно
-	не переводятся (редки в подписях; кривой URL сломал бы весь пост).
-	"""
-	escaped = html.escape(text, quote=False)
-	for pattern, replacement in _MARKUP:
-		escaped = pattern.sub(replacement, escaped)
-	return escaped
+	return html_from_rich(RichText(text, entities))
 
 
 #: Наши виды разметки → пары HTML-тегов Bot API. Спойлер и цитата

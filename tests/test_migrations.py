@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -55,6 +56,17 @@ def _upgrade(db_file: Path, revision: str) -> None:
 	cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
 	cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_file}")
 	command.upgrade(cfg, revision)
+
+
+def _downgrade(db_file: Path, revision: str) -> None:
+	"""Откатывает миграции до указанной ревизии (синхронно)."""
+	from alembic import command
+	from alembic.config import Config
+
+	cfg = Config()
+	cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
+	cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_file}")
+	command.downgrade(cfg, revision)
 
 
 async def test_schema_matches_models(tmp_path: Path) -> None:
@@ -364,3 +376,75 @@ def test_preset_resolution_defaults_to_fullhd(tmp_path: Path) -> None:
 	with sqlite3.connect(db_file) as conn:
 		row = conn.execute("SELECT name, target_resolution FROM video_presets").fetchone()
 	assert row == ("Старый", 1080)
+
+
+def _queue_row(conn: sqlite3.Connection, text: str, entities: str | None = None) -> int:
+	"""Кладёт элемент очереди с заданным текстом и разметкой."""
+	cur = conn.execute(
+		"INSERT INTO publish_queue_items (community_id, text, status, markup_first,"
+		" entities, created_at, updated_at) VALUES (1, ?, 'pending', 0, ?,"
+		" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+		(text, entities),
+	)
+	return int(cur.lastrowid or 0)
+
+
+def test_queue_text_moves_to_entities(tmp_path: Path) -> None:
+	"""Миграция f9e2b47c3a81: текст с разделителями становится сущностями.
+
+	Поколение до ADR-0033 несло разметку прямо в тексте (``**жирный**``),
+	и разбирал её транспорт при отправке. Перенос раскладывает такой
+	текст на видимый текст и сущности тем же разбором — что уйдёт
+	в канал, не меняется. Строки нового поколения (колонка заполнена,
+	пусть и пустым списком) не трогаются: их разделители — обычные
+	символы.
+	"""
+	db_file = tmp_path / "entities.db"
+	_upgrade(db_file, "a1f7d24c8e93")  # состояние до переноса
+	with sqlite3.connect(db_file) as conn:
+		plain = _queue_row(conn, "обычный текст без разделителей")
+		styled = _queue_row(conn, "**жирный** и __курсив__")
+		linked = _queue_row(conn, "см. [тут](https://example.com)")
+		emoji = _queue_row(conn, "🙂**жирный**")
+		unpaired = _queue_row(conn, "незакрытая **звёздочка")
+		fresh = _queue_row(conn, "новый пост про __init__", entities="[]")
+		conn.commit()
+
+	_upgrade(db_file, "head")
+	with sqlite3.connect(db_file) as conn:
+		rows = {
+			row[0]: (row[1], json.loads(row[2]))
+			for row in conn.execute("SELECT id, text, entities FROM publish_queue_items")
+		}
+
+	assert rows[plain] == ("обычный текст без разделителей", [])
+	assert rows[styled][0] == "жирный и курсив"
+	assert [(e["style"], e["offset"], e["length"]) for e in rows[styled][1]] == [
+		("bold", 0, 6),
+		("italic", 9, 6),
+	]
+	assert rows[linked][0] == "см. тут"
+	assert rows[linked][1] == [
+		{"style": "link", "offset": 4, "length": 3, "value": "https://example.com"}
+	]
+	# смещение — в кодовых единицах UTF-16: эмодзи занимает две
+	assert rows[emoji] == ("🙂жирный", [{"style": "bold", "offset": 2, "length": 6, "value": ""}])
+	assert rows[unpaired] == ("незакрытая **звёздочка", [])
+	# новое поколение не тронуто: разделители остались символами
+	assert rows[fresh] == ("новый пост про __init__", [])
+
+
+def test_queue_text_downgrade_returns_separators(tmp_path: Path) -> None:
+	"""Обратный ход собирает разделители назад — без потерь для своих видов."""
+	db_file = tmp_path / "entities_back.db"
+	_upgrade(db_file, "a1f7d24c8e93")
+	with sqlite3.connect(db_file) as conn:
+		item = _queue_row(conn, "**жирный** и `код` и [тут](https://example.com)")
+		conn.commit()
+	_upgrade(db_file, "head")
+	_downgrade(db_file, "a1f7d24c8e93")
+	with sqlite3.connect(db_file) as conn:
+		row = conn.execute(
+			"SELECT text, entities FROM publish_queue_items WHERE id = ?", (item,)
+		).fetchone()
+	assert row == ("**жирный** и `код` и [тут](https://example.com)", None)
