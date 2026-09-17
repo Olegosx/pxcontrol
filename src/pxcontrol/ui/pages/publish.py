@@ -373,8 +373,7 @@ class PublishPage(ScrollArea):
 		self._on_kind_changed(kind.value)
 		self._media.set_files((MediaFile(path, kind),))
 		if community_id is not None:
-			self._restore_community_id = community_id
-			self._apply_community_restore()
+			self.select_community(community_id)
 
 	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
 		"""Раскладывает аватары сообществ и перерисовывает шапки карточек."""
