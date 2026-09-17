@@ -141,9 +141,12 @@ class _PublishJob(Job):
 		super().__init__(item_id)
 		self.draft = draft
 		self.community_title = community_title
-		# идёт сохранение правки: рабочий цикл и дозор слотов такой
-		# элемент не трогают, пока правка не завершится (см. edit)
-		self.editing = False
+		# элемент держит операция (правка, снятие): рабочий цикл
+		# и дозор слотов его не трогают, пока она идёт. Одного признака
+		# «занят» хватает обеим: разница только в тексте для человека,
+		# а правило у них общее — не брать в отправку то, что прямо
+		# сейчас уводят из очереди (ADR-0016, п. 7)
+		self.held_by: str | None = None
 		# канал удаляется: по исходу элемент снимается и с показа
 		self.drop_on_finish = False
 		# пост ушёл догоном (его время прошло, публикуем «сейчас»):
@@ -162,7 +165,7 @@ class _PublishJob(Job):
 			status=self.status,
 			progress=self.progress,
 			error=self.error,
-			note=self.note,
+			note=self.card_note(),
 			media_path=self.draft.media[0].path if self.draft.media else None,
 			files=len(self.draft.media),
 		)
@@ -233,6 +236,12 @@ CATCHUP_INTERVAL_S = 30
 #: потока в EngineWorker.stop — тогда поток отцепится с предупреждением.
 _SHUTDOWN_TIMEOUT_S = 10.0
 
+#: Почему элемент придержан — текст виден человеку в отказе. Признак
+#: один на все операции, уводящие элемент из очереди: правило у них
+#: общее — воркер не берёт то, что прямо сейчас правят или снимают.
+_HELD_EDIT = "правится в другом окне"
+_HELD_CANCEL = "снимается"
+
 
 class PublishQueue:
 	"""Последовательная отправка постов с прогрессом, отменой и повтором.
@@ -272,8 +281,8 @@ class PublishQueue:
 			record=self._record_outcome,
 			# щадящий догон просроченных постов (ADR-0016)
 			cooldown=self._catchup_pause,
-			# элемент, чья правка сохраняется, в отправку не берётся
-			ready=lambda item: not item.editing,
+			# элемент, который держит операция, в отправку не берётся
+			ready=lambda item: item.held_by is None,
 			# точка подмены в тестах: настоящие паузы (флуд, догон)
 			# растянули бы прогон на минуты
 			sleep=lambda seconds: self._sleep(seconds),
@@ -437,12 +446,7 @@ class PublishQueue:
 			self._request_cancel(item)
 			return
 		if item.status in (JobStatus.PENDING, JobStatus.WAITING):
-			# порядок «хранилище → память» — инвариант очереди (ADR-0016):
-			# исход, видный на экране, уже сохранён. Обратный порядок
-			# оставлял окно, в котором отменённый на экране пост уходил
-			# после перезапуска: в БД он всё ещё ждал отправки
-			await self._leave_queue(item)
-			item.status = JobStatus.CANCELLED
+			await self._withdraw(item)
 			logger.info("Элемент очереди id=%s отменён (ждал).", item_id)
 
 	async def retry(self, item_id: int) -> None:
@@ -513,23 +517,25 @@ class PublishQueue:
 				обработки отправляется не как видео; перенос не удался.
 		"""
 		item = self._editable(item_id)
-		current = refresh_draft_media(item.draft)
-		if draft.community_id != current.community_id:
-			raise PostError(
-				"Сообщество поста в очереди не меняется — отмените его "
-				"и создайте пост в нужном сообществе."
-			)
-		self._posts.validate_draft(draft)
-		# точный предел канала: validate_draft знает только потолок Premium
-		await self._posts.check_draft_limits(draft)
-		self._check_pipeline_kind(draft)
-		status = self._initial_status(draft)
-		# флаг взводится до первого ожидания: каркас выбирает задание
-		# и переводит его в RUNNING без единой точки приостановки
-		# (см. `JobQueue._next_pending`), поэтому элемент, помеченный
-		# здесь, воркер уже не подхватит
-		item.editing = True
+		# удержание — до первого ожидания, а не перед переносом файлов:
+		# каркас выбирает задание и переводит его в RUNNING без единой
+		# точки приостановки (см. `JobQueue._next_pending`), поэтому
+		# любое `await` до этой строки оставляло окно, в котором воркер
+		# успевал взять тот же элемент в отправку — и правка шла поверх
+		# идущей загрузки
+		item.held_by = _HELD_EDIT
 		try:
+			current = refresh_draft_media(item.draft)
+			if draft.community_id != current.community_id:
+				raise PostError(
+					"Сообщество поста в очереди не меняется — отмените его "
+					"и создайте пост в нужном сообществе."
+				)
+			self._posts.validate_draft(draft)
+			# точный предел канала: validate_draft знает только потолок Premium
+			await self._posts.check_draft_limits(draft)
+			self._check_pipeline_kind(draft)
+			status = self._initial_status(draft)
 			stashed_drafts, moved = await self._stash_all([draft])
 			stashed = stashed_drafts[0]
 			try:
@@ -549,11 +555,12 @@ class PublishQueue:
 			item.status = status
 			item.progress = 0.0
 			item.error = None
+			item.note = None
 			# флаг мог взвестись отменой, совпавшей с ошибкой прошлой
 			# попытки (та же причина, что в retry)
 			item.cancel_requested = False
 		finally:
-			item.editing = False
+			item.held_by = None
 		self._jobs.ensure_worker()
 		self._request_slot_check()
 		logger.info(
@@ -577,8 +584,8 @@ class PublishQueue:
 			raise PostError("Пост уже отправляется — сначала отмените отправку, потом правьте.")
 		if item.status not in EDITABLE_STATUSES:
 			raise PostError("Пост уже покинул очередь — править нечего.")
-		if item.editing:
-			raise PostError("Пост правится в другом окне — дождитесь сохранения.")
+		if item.held_by is not None:
+			raise PostError(f"Пост сейчас {item.held_by} — дождитесь конца.")
 		return item
 
 	def _check_pipeline_kind(self, draft: PostDraft) -> None:
@@ -625,8 +632,7 @@ class PublishQueue:
 				item.drop_on_finish = True
 				continue
 			if not item.status.finished():
-				item.status = JobStatus.CANCELLED
-				await self._leave_queue(item)
+				await self._withdraw(item)
 			self._jobs.remove(item)
 		logger.info("Элементы канала id=%s сняты из очереди перед удалением.", community_id)
 
@@ -759,13 +765,13 @@ class PublishQueue:
 		"""
 		released = 0
 		for item in self._jobs.all():
-			if item.status is not JobStatus.WAITING or item.editing:
+			if item.status is not JobStatus.WAITING or item.held_by is not None:
 				continue
 			if item.draft.community_id != community_id or not item.draft.markup_first:
 				continue
 			if not _due(item.draft.when, now):
 				continue
-			item.status = JobStatus.PENDING
+			self._resume(item)
 			await self._persist(item)
 			released += 1
 			logger.info(
@@ -822,6 +828,22 @@ class PublishQueue:
 					# тиком выпускал все ждущие посты навстречу отказу
 					logger.info("Слоты сообщества id=%s не проверены: %s", community_id, blocker)
 					continue
+				# посты режима «кнопки важнее» слот отложек не занимают
+				# (ADR-0031, п. 4) — их выпускает время, а не свободный
+				# слот. Поэтому они идут до чтения отложек: иначе
+				# флуд-лимит или обрыв связи отнимали бы у них назначенную
+				# минуту из-за запроса, который им не нужен
+				released_by_time = await self._release_markup_first(community_id, now)
+				if not self._needs_slot(community_id):
+					# ждущих слота нет — читать отложки незачем: это
+					# обращение к Telegram на каждое сообщество за тик
+					if released_by_time:
+						logger.info(
+							"Сообщество id=%s: выпущено по времени %d.",
+							community_id,
+							released_by_time,
+						)
+					continue
 				taken = len(await self._posts.scheduled_times(community_id))
 			except TelegramFloodError as exc:
 				# лимит держит дорожка аккаунта (ADR-0024): остальные его
@@ -839,7 +861,6 @@ class PublishQueue:
 			except Exception:  # noqa: BLE001 — дозор не должен умирать
 				logger.exception("Проверка слотов канала id=%s не удалась.", community_id)
 				continue
-			released_by_time = await self._release_markup_first(community_id, now)
 			in_flight = sum(
 				1
 				for item in self._jobs.all()
@@ -856,7 +877,7 @@ class PublishQueue:
 					if item.status is JobStatus.WAITING
 					and item.draft.community_id == community_id
 					# правка сама поставит элементу статус по новому времени
-					and not item.editing
+					and item.held_by is None
 				),
 				key=_release_order,
 			)
@@ -868,7 +889,7 @@ class PublishQueue:
 					if free <= 0:
 						break
 					free -= 1
-				item.status = JobStatus.PENDING
+				self._resume(item)
 				await self._persist(item)
 				released += 1
 			if released:
@@ -993,6 +1014,56 @@ class PublishQueue:
 		async with self._db.session_factory() as session:
 			await session.execute(delete(PublishQueueItem).where(PublishQueueItem.id == item_id))
 			await session.commit()
+
+	def _needs_slot(self, community_id: int) -> bool:
+		"""Есть ли в ожидании пост, которому нужен слот отложек.
+
+		Режим «кнопки важнее» ждёт своей минуты в нашей очереди, а не
+		слота на сервере (ADR-0031, п. 4): если других ждущих нет,
+		читать отложки сообщества не за чем.
+		"""
+		return any(
+			item.status is JobStatus.WAITING
+			and item.draft.community_id == community_id
+			and not item.draft.markup_first
+			for item in self._jobs.all()
+		)
+
+	@staticmethod
+	def _resume(item: _PublishJob) -> None:
+		"""Выпускает элемент из ожидания в работу.
+
+		Пометка состояния снимается здесь же: она жила ровно столько,
+		сколько длилось ожидание («Сообщество выключено — посты ждут»,
+		«Слоты отложек заняты»). Отсрочка без паузы её не снимает —
+		снимать нечему, пауза не заводилась, — и без этой строки пометка
+		висела бы на карточке уже отправленного поста.
+		"""
+		item.status = JobStatus.PENDING
+		item.note = None
+
+	async def _withdraw(self, item: _PublishJob) -> None:
+		"""Уводит ждущий элемент из очереди: удержание → хранилище → память.
+
+		Удержание — первым: между проверкой статуса и удалением строки
+		есть ожидание, и без него воркер успевал взять тот же элемент
+		в отправку — снятый на экране пост уходил бы в канал, а файл
+		уезжал бы из-под работающей загрузки.
+
+		Дальше порядок «хранилище → память» — инвариант очереди
+		(ADR-0016): исход, видный на экране, уже сохранён. Обратный
+		порядок оставлял окно, в котором отменённый на экране пост
+		уходил после перезапуска: в БД он всё ещё ждал отправки.
+
+		Общая точка для «Отмены» и снятия сообщества: раньше они решали
+		одну задачу двумя разными порядками, и ни один не закрывал гонку.
+		"""
+		item.held_by = _HELD_CANCEL
+		try:
+			await self._leave_queue(item)
+			item.status = JobStatus.CANCELLED
+		finally:
+			item.held_by = None
 
 	async def _leave_queue(self, item: _PublishJob) -> None:
 		"""Элемент покидает очередь без отправки: строка — долой, файл — назад."""

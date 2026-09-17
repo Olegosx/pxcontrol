@@ -1238,6 +1238,43 @@ async def test_worker_skips_item_while_edit_is_saving(
 	assert gateway.published[-1].files, "последним ушёл правленый пост с файлом"
 
 
+async def test_worker_skips_item_from_the_first_await_of_edit(
+	db: Database, make_queue: QueueFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Элемент придержан с первой строки правки, а не перед переносом файла.
+
+	Между проверкой пригодности и переносом есть обращение к базе
+	за точными пределами длины. В это окно воркер успевал взять тот же
+	элемент в отправку, и правка шла поверх идущей загрузки: файлы
+	уезжали из-под неё, а статус сбрасывался мимо активного задания.
+	"""
+	gateway = _SlowGateway()
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	held = await queue.enqueue(PostDraft(community_id, text="держит воркер"))
+	await _wait_status(queue, held, JobStatus.RUNNING)
+	item = await queue.enqueue(PostDraft(community_id, text="правится"))
+	entered = asyncio.Event()
+	proceed = asyncio.Event()
+	original = queue._posts.check_draft_limits  # noqa: SLF001 — подмена первого ожидания
+
+	async def slow_limits(draft: PostDraft) -> None:
+		entered.set()
+		await proceed.wait()
+		await original(draft)
+
+	monkeypatch.setattr(queue._posts, "check_draft_limits", slow_limits)  # noqa: SLF001
+	editing = asyncio.create_task(queue.edit(item, PostDraft(community_id, text="правлено")))
+	await entered.wait()
+	gateway.release.set()  # воркер дописывает первый и идёт за следующим
+	await _wait_status(queue, held, JobStatus.DONE)
+	assert (await _statuses(queue))[item].status is JobStatus.PENDING  # но этот не взял
+	proceed.set()
+	await editing
+	await _wait_status(queue, item, JobStatus.DONE)
+	assert gateway.published[-1].text == "правлено"
+
+
 async def test_edit_rejects_sending_item(db: Database, make_queue: QueueFactory) -> None:
 	"""Отправляющийся пост не правится — сначала отмена."""
 	gateway = _SlowGateway()
