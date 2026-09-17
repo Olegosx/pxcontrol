@@ -27,7 +27,11 @@ from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 from qfluentwidgets import PushButton
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.posts import ScheduledList, ScheduledPostDto
+from pxcontrol.engine.services.posts import (
+	ScheduledList,
+	ScheduledPostDto,
+	UnreadCommunity,
+)
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.card_list import CardList
@@ -124,6 +128,31 @@ def merge_community(
 	return kept + list(fresh)
 
 
+def merge_reread(
+	items: Sequence[ScheduledPostDto],
+	unread: Sequence[UnreadCommunity],
+	community_id: int,
+	scheduled: ScheduledList,
+) -> tuple[list[ScheduledPostDto], tuple[UnreadCommunity, ...]]:
+	"""Что показывать после перечитывания одного сообщества.
+
+	Удачное чтение заменяет его записи свежими и снимает с него пометку
+	«не прочитано». Неудачное не трогает записи вовсе: пустой список
+	с непустым ``unread`` означает «не спросили», а не «отложенных нет»
+	(ADR-0010), и подмена им записей выдала бы неполный список за полный —
+	человек решил бы, что его отложенные исчезли.
+
+	Returns:
+		Пара «записи, непрочитанные сообщества».
+	"""
+	if scheduled.unread:
+		known = {entry.id for entry in unread}
+		added = tuple(entry for entry in scheduled.unread if entry.id not in known)
+		return list(items), (*unread, *added)
+	kept = merge_community(items, community_id, scheduled.items)
+	return kept, tuple(entry for entry in unread if entry.id != community_id)
+
+
 def apply_scheduled_view(
 	items: Sequence[ScheduledPostDto],
 	sort: ScheduledSort,
@@ -189,7 +218,7 @@ class ScheduledPanel:
 		#: полный список (до правила показа) и сообщества, которые
 		#: прочитать не удалось (ADR-0010: неполный список назван неполным)
 		self.items: list[ScheduledPostDto] = []
-		self.unread: tuple[str, ...] = ()
+		self.unread: tuple[UnreadCommunity, ...] = ()
 		self._loading = False
 		self._loaded_at: float | None = None
 		self._list = CardList(
@@ -273,11 +302,18 @@ class ScheduledPanel:
 		self.refresh_view()
 
 	def _show_community(self, community_id: int, scheduled: ScheduledList) -> None:
-		self.items = merge_community(self.items, community_id, scheduled.items)
+		"""Показывает перечитанное сообщество — или честно говорит, что не вышло.
+
+		Пустой список с непустым ``unread`` означает «не спросили»,
+		а не «отложенных нет» (ADR-0010). Подменять им записи нельзя:
+		человек увидел бы, что его записи исчезли, а сообщество ушло бы
+		из постоянной строки о непрочитанном — то есть неполный список
+		выдал бы себя за полный.
+		"""
+		self.items, self.unread = merge_reread(self.items, self.unread, community_id, scheduled)
 		if scheduled.unread:
-			# сообщество не прочиталось — честно сказать, а не оставить
-			# старые записи как будто свежие
-			self._show_error(f"Не удалось перечитать отложенные: {', '.join(scheduled.unread)}.")
+			names = ", ".join(entry.title for entry in scheduled.unread)
+			self._show_error(f"Не удалось перечитать отложенные: {names}.")
 		if self._on_loaded is not None:
 			self._on_loaded(ScheduledList(items=list(self.items), unread=self.unread))
 		self.refresh_view()

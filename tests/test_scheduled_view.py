@@ -10,13 +10,20 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-from pxcontrol.engine.services.posts import ScheduledDraft, ScheduledPostDto, ScheduledRef
+from pxcontrol.engine.services.posts import (
+	ScheduledDraft,
+	ScheduledList,
+	ScheduledPostDto,
+	ScheduledRef,
+	UnreadCommunity,
+)
 from pxcontrol.engine.telegram.types import MediaKind
 from pxcontrol.ui.pages.scheduled_edit import attachment_note
 from pxcontrol.ui.pages.scheduled_panel import (
 	ScheduledSort,
 	apply_scheduled_view,
 	merge_community,
+	merge_reread,
 	scheduled_key,
 	scheduled_signature,
 	scheduled_subtitle,
@@ -79,6 +86,30 @@ def test_merge_community_replaces_only_that_community() -> None:
 	assert merge_community(items, 9, []) == items
 
 
+def test_merge_reread_keeps_records_when_community_unreadable() -> None:
+	"""Неудачное перечитывание не стирает записи и называет сообщество.
+
+	Пустой список с непустым unread означает «не спросили», а не
+	«отложенных нет» (ADR-0010): подмена им записей выдала бы неполный
+	список за полный — человек решил бы, что отложенные исчезли.
+	"""
+	items = [_item(1, 1), _item(2, 1)]
+	failed = ScheduledList(items=[], unread=(UnreadCommunity(1, "Канал"),))
+
+	kept, unread = merge_reread(items, (), 1, failed)
+	assert kept == items  # записи на месте
+	assert unread == (UnreadCommunity(1, "Канал"),)  # и сообщество названо
+
+	# повторная неудача не удваивает пометку
+	kept, unread = merge_reread(kept, unread, 1, failed)
+	assert unread == (UnreadCommunity(1, "Канал"),)
+
+	# удачное чтение заменяет записи этого сообщества и снимает пометку
+	kept, unread = merge_reread(kept, unread, 1, ScheduledList(items=[_item(1, 5)]))
+	assert [scheduled_key(item) for item in kept] == [(2, 1), (1, 5)]
+	assert unread == ()
+
+
 def test_apply_scheduled_view_filters_and_sorts() -> None:
 	items = [
 		_item(2, 1, 30, title="Бета"),
@@ -105,7 +136,8 @@ def test_apply_scheduled_view_filters_and_sorts() -> None:
 def test_unread_text() -> None:
 	"""Прочитано всё — строки нет; иначе сообщества названы поимённо."""
 	assert unread_text(()) == ""
-	assert unread_text(("Канал", "Группа")) == "Не удалось прочитать отложенные: «Канал», «Группа»."
+	unread = (UnreadCommunity(1, "Канал"), UnreadCommunity(2, "Группа"))
+	assert unread_text(unread) == "Не удалось прочитать отложенные: «Канал», «Группа»."
 
 
 def _draft(kind: MediaKind, topic_id: int | None = None) -> ScheduledDraft:

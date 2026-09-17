@@ -80,7 +80,7 @@ class ScheduledEditor(QWidget):
 		parent: QWidget,
 		draft: ScheduledDraft,
 		topic_title: str | None,
-		on_saved: Callable[[], None],
+		on_settled: Callable[[], None],
 		on_close: Callable[[], None],
 	) -> None:
 		"""Args:
@@ -88,13 +88,14 @@ class ScheduledEditor(QWidget):
 		parent: владелец (карточка списка).
 		draft: запись, как её отдал сервер (``PostsService.scheduled_draft``).
 		topic_title: название темы форума (None — не прочиталось или нет темы).
-		on_saved: вызвать после успешного сохранения (перечитать сообщество).
+		on_settled: вызвать после любого исхода правки (перечитать
+			сообщество, ADR-0028, п. 3).
 		on_close: закрыть форму (свернуть карточку).
 		"""
 		super().__init__(parent)
 		self._worker = worker
 		self._draft = draft
-		self._on_saved = on_saved
+		self._on_settled = on_settled
 		self._on_close = on_close
 		self._build(topic_title)
 
@@ -154,13 +155,23 @@ class ScheduledEditor(QWidget):
 
 	def _on_save_done(self) -> None:
 		"""Правка принята сервером: перечитать сообщество и закрыть форму."""
-		self._on_saved()
+		self._on_settled()
 		self._on_close()
 
 	def _on_save_failed(self, message: str) -> None:
-		"""Отказ — причина в форме, набранное не теряется."""
+		"""Отказ — причина в форме, набранное не теряется.
+
+		Сообщество перечитывается и здесь: правка — такое же действие
+		над записью, как «Сейчас» и «Удалить», а истина о записях живёт
+		на сервере (ADR-0010). Отказ мог прийти именно потому, что
+		записи там больше нет (её удалили из другого клиента), и тогда
+		оставшаяся карточка врала бы. Правило одно на все действия —
+		«после любого исхода перечитать затронутое сообщество»
+		(ADR-0028, п. 3).
+		"""
 		self._save_button.setEnabled(True)
 		self._error.fail(message)
+		self._on_settled()
 
 
 def mount_scheduled_editor(
@@ -169,7 +180,7 @@ def mount_scheduled_editor(
 	item: ScheduledPostDto,
 	body: QVBoxLayout,
 	collapse: Callable[[], None],
-	on_saved: Callable[[], None],
+	on_settled: Callable[[], None],
 ) -> None:
 	"""Наполняет тело раскрытой карточки формой правки записи.
 
@@ -184,7 +195,8 @@ def mount_scheduled_editor(
 		item: запись из списка (адрес — ``item.ref``).
 		body: компоновка тела карточки.
 		collapse: свернуть карточку (после сохранения или отмены).
-		on_saved: вызвать после сохранения (перечитать сообщество).
+		on_settled: вызвать после любого исхода правки — перечитать
+			сообщество (ADR-0028, п. 3).
 	"""
 	body.addWidget(CaptionLabel("Читаю запись из Telegram…", page))
 
@@ -194,7 +206,7 @@ def mount_scheduled_editor(
 
 	def show(draft: ScheduledDraft, topic_title: str | None = None) -> None:
 		clear_layout(body)
-		body.addWidget(ScheduledEditor(worker, page, draft, topic_title, on_saved, collapse))
+		body.addWidget(ScheduledEditor(worker, page, draft, topic_title, on_settled, collapse))
 
 	def with_draft(draft: ScheduledDraft) -> None:
 		if draft.topic_id is None:

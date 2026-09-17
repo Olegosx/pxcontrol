@@ -21,7 +21,11 @@ from qfluentwidgets import CaptionLabel, FluentIcon, PushButton
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
-from pxcontrol.engine.services.posts import ScheduledList, ScheduledPostDto
+from pxcontrol.engine.services.posts import (
+	ScheduledList,
+	ScheduledPostDto,
+	UnreadCommunity,
+)
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import noop
@@ -42,7 +46,7 @@ from pxcontrol.ui.pages.scheduled_panel import (
 )
 
 
-def unread_text(unread: tuple[str, ...]) -> str:
+def unread_text(unread: tuple[UnreadCommunity, ...]) -> str:
 	"""Предупреждение над списком: какие сообщества прочитать не удалось.
 
 	Пустая строка — прочитано всё. Честность важнее краткости: без этой
@@ -51,7 +55,7 @@ def unread_text(unread: tuple[str, ...]) -> str:
 	"""
 	if not unread:
 		return ""
-	names = ", ".join(f"«{title}»" for title in unread)
+	names = ", ".join(f"«{entry.title}»" for entry in unread)
 	return f"Не удалось прочитать отложенные: {names}."
 
 

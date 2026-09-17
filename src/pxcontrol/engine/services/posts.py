@@ -992,6 +992,23 @@ class PublishedList:
 	next_offset_id: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class UnreadCommunity:
+	"""Сообщество, чьи отложенные прочитать не удалось.
+
+	Идентификатор, а не одно название: названия сообществ не уникальны
+	(тот же урок, что у фильтров очереди), а показ сверяет по нему,
+	какое сообщество перечитано удачно и пометку с него пора снять.
+
+	Attributes:
+		id: сообщество.
+		title: название — им зовут сообщество в тексте для человека.
+	"""
+
+	id: int
+	title: str
+
+
 @dataclass(frozen=True)
 class ScheduledList:
 	"""Отложенные записи и сообщества, которые прочитать не удалось.
@@ -1003,8 +1020,8 @@ class ScheduledList:
 	"""
 
 	items: list[ScheduledPostDto]
-	#: названия сообществ, чьи отложенные прочитать не удалось
-	unread: tuple[str, ...] = ()
+	#: сообщества, чьи отложенные прочитать не удалось
+	unread: tuple[UnreadCommunity, ...] = ()
 
 
 class PostsService:
@@ -2048,7 +2065,7 @@ class PostsService:
 				.all()
 			)
 		items: list[ScheduledPostDto] = []
-		unread: list[str] = []
+		unread: list[UnreadCommunity] = []
 		for community in communities:
 			if community_id is not None and community.id != community_id:
 				continue
@@ -2068,7 +2085,7 @@ class PostsService:
 						account_id,
 						exc,
 					)
-					unread.append(community.title)
+					unread.append(UnreadCommunity(community.id, community.title))
 					continue
 				except UserbotUnavailableError as exc:
 					logger.warning(
@@ -2077,7 +2094,7 @@ class PostsService:
 						account_id,
 						exc,
 					)
-					unread.append(community.title)
+					unread.append(UnreadCommunity(community.id, community.title))
 					continue
 				promised = (
 					await self._promised_markups(community.id)

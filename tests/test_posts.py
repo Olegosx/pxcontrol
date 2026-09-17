@@ -659,7 +659,7 @@ async def test_list_scheduled_isolates_community_failure(db: Database) -> None:
 	scheduled = await service.list_scheduled()
 	assert [item.community_title for item in scheduled.items] == ["Второй"]
 	# упавшее сообщество названо: «нет отложенных» о нём утверждать нельзя
-	assert scheduled.unread == ("Канал",)
+	assert [(e.id, e.title) for e in scheduled.unread] == [(1, "Канал")]
 
 
 async def test_publish_rejects_disabled_community(db: Database) -> None:
@@ -924,7 +924,8 @@ async def test_list_scheduled_isolates_flooded_account(db: Database) -> None:
 	service = PostsService(db, _PartlyFloodedGateway(flooded_id))
 	scheduled = await service.list_scheduled()
 	assert [item.community_title for item in scheduled.items] == ["Свободный"]
-	assert scheduled.unread == ("Канал",)  # про него честно сказано «не прочитано»
+	# про него честно сказано «не прочитано»
+	assert [(e.id, e.title) for e in scheduled.unread] == [(1, "Канал")]
 
 
 async def test_topic_requires_forum(db: Database) -> None:
@@ -1076,7 +1077,7 @@ async def test_list_scheduled_flood_of_member_spares_others(db: Database) -> Non
 	scheduled = await service.list_scheduled()
 	assert [item.text_preview for item in scheduled.items] == ["живой"]
 	# группу опрашивают двое: непрочитанной она названа один раз
-	assert scheduled.unread == ("Группа",)
+	assert [e.title for e in scheduled.unread] == ["Группа"]
 
 
 async def test_list_scheduled_dedups_identical(db: Database) -> None:
