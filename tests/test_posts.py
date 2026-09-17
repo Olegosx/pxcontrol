@@ -2068,6 +2068,28 @@ async def test_poll_draft_rejects_mixed_content(db: Database) -> None:
 	service.validate_draft(PostDraft(community_id, poll=poll))
 
 
+async def test_public_poll_is_refused_in_channel(db: Database) -> None:
+	"""Неанонимный опрос в канале отклоняется движком, а не сервером.
+
+	Правило Telegram (проверено живьём 17.09.2026): в канале опрос
+	с открытыми голосами невозможен. Отказ приходит при постановке —
+	у отложенного опроса иначе он всплыл бы в момент выхода.
+	"""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	public = PollDraft("Голоса видны?", ("Да", "Нет"), anonymous=False)
+	with pytest.raises(PostError, match="только анонимным"):
+		await service.publish(PostDraft(community_id, poll=public))
+	assert not gateway.published  # до транспорта дело не дошло
+	# и та же проверка на входе в очередь, а не только при отправке
+	with pytest.raises(PostError, match="только анонимным"):
+		await service.check_markup_allowed(PostDraft(community_id, poll=public))
+	# анонимный уходит штатно
+	await service.publish(PostDraft(community_id, poll=PollDraft("Анонимно?", ("Да", "Нет"))))
+	assert gateway.published
+
+
 def test_poll_draft_names_its_kind() -> None:
 	"""Вид поста-опроса — POLL: списки показывают его наравне с прочими."""
 	draft = PostDraft(1, poll=PollDraft("Вопрос", ("А", "Б")))

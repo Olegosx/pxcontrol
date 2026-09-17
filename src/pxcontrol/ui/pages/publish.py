@@ -52,6 +52,7 @@ from pxcontrol.engine.services.publish_route import (
 	PublishRoute,
 	choose_route,
 	markup_blocker,
+	poll_blocker,
 )
 from pxcontrol.engine.services.settings import (
 	PUBLISH_TIMES,
@@ -268,6 +269,10 @@ class PublishPage(ScrollArea):
 			return
 		scheduled = not self._when_row.is_now()
 		markup = self._markup.markup()
+		# правило опроса тоже от сообщества: в канале он только анонимный
+		self._poll.set_anonymous_forced(
+			poll_blocker(False, title=community.title, kind=community.kind)
+		)
 		# выбор режима есть только у отложенного поста с кнопками
 		self._markup.set_mode_available(scheduled and markup is not None)
 		if self._kind is not MediaKind.POLL and len(self._media.files()) > 1:

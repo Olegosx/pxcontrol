@@ -80,7 +80,28 @@ class PollEditor(QWidget):
 		self._note = tinted(CaptionLabel("", self), DIM_TEXT)
 		self._note.setWordWrap(True)
 		layout.addWidget(self._note)
+		self._rule = tinted(CaptionLabel("", self), DIM_TEXT)
+		self._rule.setWordWrap(True)
+		self._rule.hide()
+		layout.addWidget(self._rule)
 		self.set_poll(None)
+
+	def set_anonymous_forced(self, reason: str | None) -> None:
+		"""Запрещает неанонимный опрос (в канале его не бывает, ADR-0033).
+
+		Правило приходит из движка (`poll_blocker`), а не выдумывается
+		формой: галочка встаёт и гаснет, а под ней — причина. Молча
+		гасить нельзя — человек решил бы, что приложение сломалось.
+		"""
+		forced = reason is not None
+		if forced:
+			self._anonymous.blockSignals(True)
+			self._anonymous.setChecked(True)
+			self._anonymous.blockSignals(False)
+		self._anonymous.setEnabled(not forced)
+		self._rule.setText(reason or "")
+		self._rule.setVisible(forced)
+		self._render()
 
 	# --- сборка ------------------------------------------------------------------
 

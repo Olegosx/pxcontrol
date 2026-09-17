@@ -1083,11 +1083,19 @@ class MtprotoTransport:
 		``send_file``, что и файлы, — со своей отложкой и своей темой.
 		Подписи у опроса не бывает: вопрос и есть его текст.
 
-		Правильный ответ викторины уезжает **номером варианта**:
-		в нынешнем слое схемы (227) ``correct_answers`` — вектор
-		целых, 0-based индексы (сверено с api.tl Telegram Desktop;
-		страница-справочник на сайте показывает устаревший конструктор
-		с байтами).
+		Ключ варианта и правильный ответ викторины — место, где
+		документация расходится с сервером; разбиралось оно живой пробой
+		(17.09.2026, `_misc/tg_live_probe.py`). Сервер принимает
+		``correct_answers`` **числом** — как в схеме Telegram Desktop
+		и в сериализаторе Telethon, а не байтовой строкой, как показывает
+		страница-справочник на сайте. Но сравнивает он это число
+		**с ключом варианта**, а не с его порядком: ключ из сырого байта
+		(``b"\x01"``) числом не читается, и в ответ приходит «The correct
+		answer is not an existing answer».
+
+		Поэтому ключом варианта служит его номер цифрами (``b"0"``,
+		``b"1"``, …): тогда номер и ключ — одно и то же число, и обе
+		трактовки сходятся.
 		"""
 		from telethon.tl import types
 
@@ -1095,7 +1103,8 @@ class MtprotoTransport:
 		assert poll is not None  # ветка выбрана по его наличию
 		answers = [
 			types.PollAnswer(
-				text=types.TextWithEntities(text=option, entities=[]), option=bytes([index])
+				text=types.TextWithEntities(text=option, entities=[]),
+				option=str(index).encode(),
 			)
 			for index, option in enumerate(poll.options)
 		]

@@ -31,6 +31,7 @@ from pxcontrol.engine.services.publish_route import (
 	PublishRoute,
 	choose_route,
 	markup_blocker,
+	poll_blocker,
 	post_markup_blocker,
 	publish_capabilities,
 	route_uses_userbot,
@@ -1121,6 +1122,9 @@ class PostsService:
 		blocker = self._markup_blocker(community, draft, over_bot_limit)
 		if blocker is not None:
 			raise PostError(blocker)
+		blocker = self._poll_blocker(community, draft)
+		if blocker is not None:
+			raise PostError(blocker)
 		route = choose_route(
 			caps,
 			with_markup=bool(draft.markup),
@@ -1152,6 +1156,17 @@ class PostsService:
 			poll=draft.poll is not None,
 		)
 
+	@staticmethod
+	def _poll_blocker(community: Community, draft: PostDraft) -> str | None:
+		"""Что мешает опросу этого черновика в этом сообществе (None — ничего)."""
+		if draft.poll is None:
+			return None
+		return poll_blocker(
+			draft.poll.anonymous,
+			title=community.title,
+			kind=CommunityKind(community.kind),
+		)
+
 	async def check_markup_allowed(self, draft: PostDraft) -> None:
 		"""Отклоняет черновик, если кнопки в этом сообществе невозможны.
 
@@ -1163,10 +1178,14 @@ class PostsService:
 		Raises:
 			PostError: Кнопки этому посту недоступны (с причиной).
 		"""
-		if not draft.markup:
+		if not draft.markup and draft.poll is None:
 			return
 		community = await self._get_community(draft.community_id)
 		blocker = self._markup_blocker(community, draft, self._over_bot_limit(draft))
+		if blocker is None:
+			# опрос проверяется здесь же: правило у него тоже от сообщества,
+			# и отказ обязан всплыть при постановке, а не в момент выхода
+			blocker = self._poll_blocker(community, draft)
 		if blocker is not None:
 			raise PostError(blocker)
 

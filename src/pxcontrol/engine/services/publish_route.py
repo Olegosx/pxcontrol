@@ -158,6 +158,34 @@ def markup_blocker(
 	return None
 
 
+def polls_are_anonymous_only(kind: CommunityKind) -> bool:
+	"""Обязателен ли анонимный опрос в сообществе этого вида.
+
+	Правило Telegram, а не наше: в **канале** опрос с открытыми голосами
+	невозможен — сервер отвечает «You cannot broadcast polls where the
+	voters are public» (проверено живьём 17.09.2026). В группе видно,
+	кто как проголосовал, если автор это разрешил.
+	"""
+	return kind is CommunityKind.CHANNEL
+
+
+def poll_blocker(anonymous: bool, *, title: str, kind: CommunityKind) -> str | None:
+	"""Что мешает этому опросу в этом сообществе (None — ничего).
+
+	Одна точка правды на две стороны, как у клавиатуры
+	(:func:`markup_blocker`): движок по ней отклоняет черновик,
+	интерфейс — гасит галочку с объяснением вместо молчаливого отказа
+	из канала.
+	"""
+	if not anonymous and polls_are_anonymous_only(kind):
+		return (
+			f"В канале «{title}» опрос бывает только анонимным: Telegram не публикует "
+			"в каналах опросы с открытыми голосами. Снимите «видно, кто голосовал» "
+			"или отправьте опрос в группу."
+		)
+	return None
+
+
 def post_markup_blocker(
 	caps: PublishCapabilities, *, title: str, kind: CommunityKind
 ) -> str | None:

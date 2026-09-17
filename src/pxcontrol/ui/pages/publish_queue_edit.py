@@ -27,7 +27,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import PostDraft, TextLimits
-from pxcontrol.engine.services.publish_route import choose_route, markup_blocker
+from pxcontrol.engine.services.publish_route import choose_route, markup_blocker, poll_blocker
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import (
@@ -205,6 +205,9 @@ class QueueItemEditor(QWidget):
 		over = self._media_over_bot_limit()
 		scheduled = not self._when_row.is_now()
 		markup = self._markup.markup()
+		self._poll.set_anonymous_forced(
+			poll_blocker(False, title=self._community.title, kind=self._community.kind)
+		)
 		self._markup.set_mode_available(scheduled and markup is not None)
 		reason = markup_blocker(
 			self._caps,

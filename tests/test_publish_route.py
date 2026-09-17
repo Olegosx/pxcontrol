@@ -15,6 +15,8 @@ from pxcontrol.engine.services.publish_route import (
 	PublishRoute,
 	choose_route,
 	markup_blocker,
+	poll_blocker,
+	polls_are_anonymous_only,
 	publish_capabilities,
 	route_uses_userbot,
 )
@@ -174,3 +176,19 @@ def test_scheduled_poll_has_no_buttons_unless_bot_sends_it() -> None:
 	assert "У отложенного опроса кнопок не бывает" in reason
 	assert "кнопки важнее" in reason
 	assert _blocker(scheduled=True, poll=True, markup_first=True) is None
+
+
+def test_channel_polls_are_anonymous_only() -> None:
+	"""В канале опрос бывает только анонимным — правило Telegram.
+
+	Проверено живьём 17.09.2026: сервер отвечает «You cannot broadcast
+	polls where the voters are public». Отказ обязан приходить от нас
+	и до отправки, иначе человек узнаёт о правиле из сырой ошибки.
+	"""
+	assert polls_are_anonymous_only(CommunityKind.CHANNEL)
+	assert not polls_are_anonymous_only(CommunityKind.GROUP)
+	reason = poll_blocker(False, title="Канал", kind=CommunityKind.CHANNEL) or ""
+	assert "только анонимным" in reason
+	assert poll_blocker(True, title="Канал", kind=CommunityKind.CHANNEL) is None
+	# в группе открытые голоса разрешены — там правило не действует
+	assert poll_blocker(False, title="Группа", kind=CommunityKind.GROUP) is None

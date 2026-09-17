@@ -375,8 +375,8 @@ async def test_publish_poll_goes_as_input_media() -> None:
 	assert isinstance(media, types.InputMediaPoll)
 	assert media.poll.question.text == "Любимый цвет?"
 	assert [answer.text.text for answer in media.poll.answers] == ["Синий", "Зелёный"]
-	# ключи вариантов различны — по ним Telegram считает голоса
-	assert len({answer.option for answer in media.poll.answers}) == 2
+	# ключи вариантов — номера цифрами: сервер читает их числом
+	assert [answer.option for answer in media.poll.answers] == [b"0", b"1"]
 	assert media.poll.public_voters is True  # неанонимный опрос
 	assert media.poll.quiz is None and media.correct_answers is None
 	assert sent["schedule"] == when and sent["reply_to"] == 12
@@ -405,7 +405,10 @@ async def test_publish_quiz_carries_correct_answer() -> None:
 	)
 	media = fake.files[0]["file"]
 	assert media.poll.quiz is True
-	# в нынешнем слое схемы correct_answers — номера вариантов
+	# сервер принимает correct_answers числом, но сравнивает его с ключом
+	# варианта — поэтому ключом служит номер цифрами (проверено живьём
+	# 17.09.2026: с сырым байтом приходит QUIZ_CORRECT_ANSWER_INVALID)
+	assert [answer.option for answer in media.poll.answers] == [b"0", b"1"]
 	assert media.correct_answers == [1]
 	assert media.solution == "Париж с 987 года"
 
