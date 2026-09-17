@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QHideEvent, QShowEvent
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, ScrollArea, SubtitleLabel
 
 from pxcontrol.ui.pages.common import page_layout
@@ -40,6 +40,15 @@ class StagePage(ScrollArea):
 		hint = CaptionLabel(stage_hint(stage), self)
 		hint.setWordWrap(True)
 		self._layout.addWidget(hint)
+
+	def body_layout(self) -> QVBoxLayout:
+		"""Компоновка под шапкой — для экрана, который кладёт блоки сам.
+
+		Форма поста состоит из десятка блоков подряд (адресат, текст,
+		файлы, время, кнопки), и заворачивать их в одно тело незачем:
+		ей нужна та же компоновка, что у шапки.
+		"""
+		return self._layout
 
 	def mount(self, body: QWidget) -> None:
 		"""Ставит тело экрана под шапку (наследник зовёт это один раз)."""

@@ -20,15 +20,12 @@ from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	CaptionLabel,
 	FluentIcon,
 	PrimaryPushButton,
 	PushButton,
-	ScrollArea,
-	SubtitleLabel,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -78,7 +75,6 @@ from pxcontrol.ui.pages.common import (
 	kind_label,
 	kind_segments,
 	noop,
-	page_layout,
 	plural,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, MarkupState, markup_state
@@ -91,9 +87,10 @@ from pxcontrol.ui.pages.publish_queue_view import (
 	queue_leading,
 	queue_subtitle,
 )
-from pxcontrol.ui.pages.publish_stages import PublishStage, stage_hint, stage_title
+from pxcontrol.ui.pages.publish_stages import PublishStage
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
+from pxcontrol.ui.pages.stage_page import StagePage
 
 #: Пределы, пока сообщество не ответило: базовые — они не обещают лишнего.
 _BASE_LIMITS = TextLimits(
@@ -117,15 +114,21 @@ def _actor_note(community: CommunityDto) -> str:
 	return f" Пост уйдёт от имени {actor} (админ)."
 
 
-class PublishPage(ScrollArea):
-	"""Создание публикации: тип контента, канал, текст, время, отправка."""
+class PublishPage(StagePage):
+	"""Создание публикации: тип контента, канал, текст, время, отправка.
+
+	Экран стадии, как и соседние (ADR-0032): заголовок, подсказка
+	и правило «экран видно — экран работает» достаются от общей рамки.
+	Пока эта страница жила отдельно, правило её не касалось — и панель
+	очереди под формой опрашивала движок круглосуточно, даже когда
+	экран не виден, вторым опросчиком поверх наблюдателя главного окна.
+	"""
 
 	#: «Вся очередь…» — соседний экран раздела «Очередь».
 	queue_requested = Signal()
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
-		super().__init__(parent)
-		self.setObjectName("publish")
+		super().__init__(PublishStage.NEW_POST, parent)
 		self._worker = worker
 		self._show_error = error_reporter(self)
 		# канал прошлой публикации: предвыбор после загрузки списка
@@ -141,11 +144,7 @@ class PublishPage(ScrollArea):
 	# --- сборка страницы ---------------------------------------------------------
 
 	def _build(self) -> None:
-		layout = page_layout(self)
-		layout.addWidget(SubtitleLabel(stage_title(PublishStage.NEW_POST), self))
-		hint = CaptionLabel(stage_hint(PublishStage.NEW_POST), self)
-		hint.setWordWrap(True)
-		layout.addWidget(hint)
+		layout = self.body_layout()
 		self._build_kind_segments(layout)
 		self._community = CommunityChoice(self, self._worker)
 		self._community.chosen.connect(self._on_community_changed)
@@ -349,10 +348,16 @@ class PublishPage(ScrollArea):
 
 	# --- поведение -----------------------------------------------------------------
 
-	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
-		"""Обновляет список каналов при каждом открытии страницы."""
-		super().showEvent(event)
-		self._reload_communities()
+	def set_active(self, active: bool) -> None:
+		"""Экран показан или скрыт: список каналов и опрос очереди.
+
+		Панель очереди под формой — зритель: завершёнными владеет
+		наблюдатель главного окна (ADR-0032). Но опрашивать движок
+		скрытой ей незачем — он уже опрашивается наблюдателем.
+		"""
+		self._queue.set_polling(active)
+		if active:
+			self._reload_communities()
 
 	def prefill_media(self, kind: MediaKind, path: str, community_id: int | None = None) -> None:
 		"""Подставляет вложение (переход с других страниц, например «Видео»).
@@ -702,7 +707,14 @@ class PublishPage(ScrollArea):
 		)
 
 	def _on_enqueued(self, _item_id: object = None) -> None:
-		"""Черновик принят в очередь — чистим форму под следующий пост."""
+		"""Черновик принят в очередь — чистим форму под следующий пост.
+
+		Чистится содержимое: текст, файлы, опрос. Кнопки и настройки
+		превью **остаются намеренно** — серию однотипных постов с одной
+		клавиатурой набирают подряд, и стирать её каждый раз значило бы
+		заставлять собирать заново. Сохранённые кнопки видны сводкой
+		на свёрнутой карточке блока, так что они не уходят молча.
+		"""
 		self._post_text.clear()
 		self._media.clear()
 		self._poll.clear()
