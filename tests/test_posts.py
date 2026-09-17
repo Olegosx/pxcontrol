@@ -1331,13 +1331,13 @@ async def test_publish_rejects_caption_over_channel_limit(db: Database, tmp_path
 	assert len(gateway.published) == 1
 
 
-async def test_check_draft_limits_rejects_before_sending(db: Database) -> None:
-	"""Точная проверка канала доступна отдельно — очередь зовёт её при постановке."""
+async def test_check_draft_rules_rejects_before_sending(db: Database) -> None:
+	"""Точная проверка правил сообщества — очередь зовёт её при постановке."""
 	service = PostsService(db, _FakeGateway())
 	community_id = await _add_community(db)
-	await service.check_draft_limits(PostDraft(community_id, text="я" * 4096))
+	await service.check_draft_rules(PostDraft(community_id, text="я" * 4096))
 	with pytest.raises(PostError, match="Текст поста длиннее"):
-		await service.check_draft_limits(PostDraft(community_id, text="я" * 4097))
+		await service.check_draft_rules(PostDraft(community_id, text="я" * 4097))
 
 
 async def test_bot_path_uses_base_limits(db: Database) -> None:
@@ -1562,6 +1562,12 @@ async def test_bot_route_uses_base_text_limits(db: Database) -> None:
 	# без кнопок тот же текст уходит публикателем с Premium-пределом
 	await service.publish(PostDraft(community_id, text=long_text))
 	assert len(gateway.published) == 1
+	# и тот же отказ приходит **при постановке**, а не только при отправке:
+	# у отложенного поста «при отправке» — это часы спустя, карточкой
+	# с ошибкой, когда человека уже нет рядом
+	with pytest.raises(PostError, match="длиннее"):
+		await service.check_draft_rules(PostDraft(community_id, text=long_text, markup=_markup()))
+	await service.check_draft_rules(PostDraft(community_id, text=long_text))
 
 
 async def test_list_scheduled_marks_promised_buttons(db: Database) -> None:
@@ -1750,6 +1756,32 @@ async def test_edit_published_checks_text_and_sends(db: Database) -> None:
 		await service.edit_published(draft, "х" * 11)
 	await service.edit_published(draft, "  стало  ")
 	assert gateway.post_edits == [(await _bound_account(db, community_id), "-1001", 77, "стало")]
+
+
+async def test_edit_published_trims_text_together_with_markup(db: Database) -> None:
+	"""Обрезка краёв двигает смещения разметки, а не оставляет их на месте.
+
+	Простой strip() укоротил бы текст, не тронув сущности, — и оформление
+	наехало бы на чужие буквы. Для того в проекте и заведена `trimmed`.
+	"""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	draft = PublishedDraft(
+		ref=PublishedRef(community_id, 77),
+		community_title="Канал",
+		text="было",
+		media_kind=MediaKind.NONE,
+		topic_id=None,
+		buttons=0,
+		markup=None,
+		text_limit=100,
+		markup_blocker=None,
+	)
+	bold = TextEntity(TextStyle.BOLD, 2, 6)  # «жирный» в «  жирный  »
+	await service.edit_published(draft, "  жирный  ", (bold,))
+	assert gateway.post_edits[-1][3] == "жирный"
+	assert gateway.post_entities[-1] == (TextEntity(TextStyle.BOLD, 0, 6),)
 
 
 async def test_edit_published_poll_has_no_editable_text(db: Database) -> None:
@@ -2141,7 +2173,7 @@ async def test_public_poll_is_refused_in_channel(db: Database) -> None:
 	assert not gateway.published  # до транспорта дело не дошло
 	# и та же проверка на входе в очередь, а не только при отправке
 	with pytest.raises(PostError, match="только анонимным"):
-		await service.check_markup_allowed(PostDraft(community_id, poll=public))
+		await service.check_draft_rules(PostDraft(community_id, poll=public))
 	# анонимный уходит штатно
 	await service.publish(PostDraft(community_id, poll=PollDraft("Анонимно?", ("Да", "Нет"))))
 	assert gateway.published

@@ -41,8 +41,6 @@ from pxcontrol.engine.services.posts import (
 	PostNotReadyError,
 	PostsService,
 	PublishOutcome,
-	TextLimits,
-	check_text_length,
 	media_from_json,
 	media_to_json,
 	refresh_draft_media,
@@ -367,24 +365,16 @@ class PublishQueue:
 		if not drafts:
 			raise PostError("Пакет пуст — отправлять нечего.")
 		titles: dict[int, str] = {}
-		# пределы длины — по одному чтению на канал, как и названия:
-		# у пакета из полусотни строк канал обычно один (ADR-0015)
-		limits: dict[int, TextLimits] = {}
 		for draft in drafts:
 			self._posts.validate_draft(draft)
 			if draft.community_id not in titles:
 				titles[draft.community_id] = await self._posts.community_title(draft.community_id)
-				limits[draft.community_id] = await self._posts.text_limits(draft.community_id)
-			check_text_length(
-				draft.text,
-				limits[draft.community_id].for_draft(draft),
-				draft.with_media,
-			)
-		for draft in drafts:
-			# кнопки проверяются при постановке, а не при отправке: отказ
+			# правила сообщества — при постановке, а не при отправке: отказ
 			# должен всплыть под рукой у человека, а не через час, когда
-			# пост дождётся своей минуты (ADR-0031)
-			await self._posts.check_markup_allowed(draft)
+			# пост дождётся своей минуты (ADR-0031). Предел длины среди
+			# них: он зависит от маршрута, и у поста с кнопками он вдвое
+			# меньше, чем у публикатора с Premium
+			await self._posts.check_draft_rules(draft)
 		stashed, moved = await self._stash_all(drafts)
 		try:
 			rows = [
@@ -532,8 +522,9 @@ class PublishQueue:
 					"и создайте пост в нужном сообществе."
 				)
 			self._posts.validate_draft(draft)
-			# точный предел канала: validate_draft знает только потолок Premium
-			await self._posts.check_draft_limits(draft)
+			# правила сообщества: validate_draft знает только потолок Premium,
+			# а предел зависит от маршрута — и кнопки с опросом тоже
+			await self._posts.check_draft_rules(draft)
 			self._check_pipeline_kind(draft)
 			status = self._initial_status(draft)
 			stashed_drafts, moved = await self._stash_all([draft])

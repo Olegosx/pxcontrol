@@ -54,10 +54,13 @@ from pxcontrol.engine.telegram.rich_text import (
 	TextEntity,
 	first_link,
 	keep_entities,
+	trimmed,
 	validate_rich_text,
 )
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
+	CAPTION_LENGTH_LIMIT,
+	TEXT_LENGTH_LIMIT,
 	BotRef,
 	CommunityKind,
 	ForumTopicInfo,
@@ -216,9 +219,37 @@ class TextLimits:
 	text: int
 	caption: int
 
+	def on_route(self, route: PublishRoute) -> TextLimits:
+		"""Пределы, действующие на этом маршруте отправки.
+
+		Пост, который отправляет бот, ограничен базовыми пределами
+		Telegram: подписки у ботов не бывает, и Premium-пределы
+		публикатора к нему не относятся. Правило одно на троих —
+		постановку в очередь (отказ обязан всплыть под рукой у человека,
+		а не через час), выбор транспорта при отправке и счётчик
+		символов в форме, чтобы тот не обещал больше, чем пройдёт.
+		"""
+		if route is not PublishRoute.BOT:
+			return self
+		return TextLimits(text=TEXT_LENGTH_LIMIT, caption=CAPTION_LENGTH_LIMIT)
+
 	def for_draft(self, draft: PostDraft) -> int:
 		"""Предел, действующий для этого черновика."""
 		return self.caption if draft.with_media else self.text
+
+
+def check_schedule_ahead(when: datetime | None) -> None:
+	"""Отклоняет время публикации, до которого меньше минуты.
+
+	Отложенную запись хранит сервер Telegram (ADR-0010), и «через
+	пару секунд» он не примет: пока пост дойдёт до него, названное время
+	уже пройдёт. ``None`` — публикация «сейчас», проверять нечего.
+
+	Raises:
+		PostError: До названного времени меньше минуты.
+	"""
+	if when is not None and when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
+		raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
 
 
 def check_text_length(text: str, limit: int, with_media: bool) -> None:
@@ -1099,8 +1130,16 @@ class PostsService:
 		Returns:
 			Текст причины для человека или None, если препятствий нет.
 		"""
-		community = await self._get_community(community_id)
-		if not await self._settings.get_for(COMMUNITY_ENABLED, community_id):
+		return await self._publish_blocker(await self._get_community(community_id))
+
+	async def _publish_blocker(self, community: Community) -> str | None:
+		"""То же правило, но на уже прочитанной строке сообщества.
+
+		Подготовка публикации читает сообщество для себя и не должна
+		читать его второй раз ради этой проверки: два чтения — это ещё
+		и два разных снимка одной строки в одной операции.
+		"""
+		if not await self._settings.get_for(COMMUNITY_ENABLED, community.id):
 			return f"Сообщество «{community.title}» выключено — пост ждёт, пока его включат."
 		caps = community_capabilities(community)
 		if not caps.userbot and not caps.bot:
@@ -1133,7 +1172,7 @@ class PostsService:
 		# правило системы, не интерфейса: любой будущий вход в публикацию
 		# (автопостинг из источников) не должен писать в выключенное
 		# сообщество или в сообщество без публикатора
-		blocker = await self.publish_blocker(draft.community_id)
+		blocker = await self._publish_blocker(community)
 		if blocker is not None:
 			raise PostNotReadyError(blocker)
 		if draft.topic_id is not None and not community.forum:
@@ -1144,10 +1183,9 @@ class PostsService:
 				"обновите выбор темы или перепроверьте доступы."
 			)
 		over_bot_limit = self._over_bot_limit(draft)
-		blocker = self._markup_blocker(community, draft, over_bot_limit)
-		if blocker is not None and self._rights_may_be_stale(community):
-			community = await self._fresh_community(community)
-			blocker = self._markup_blocker(community, draft, over_bot_limit)
+		community, blocker = await self._fresh_blocker(
+			community, lambda item: self._markup_blocker(item, draft, over_bot_limit)
+		)
 		if blocker is not None:
 			raise PostError(blocker)
 		caps = community_capabilities(community)
@@ -1244,31 +1282,83 @@ class PostsService:
 			kind=CommunityKind(community.kind),
 		)
 
-	async def check_markup_allowed(self, draft: PostDraft) -> None:
-		"""Отклоняет черновик, если кнопки в этом сообществе невозможны.
+	async def _fresh_blocker(
+		self, community: Community, rule: Callable[[Community], str | None]
+	) -> tuple[Community, str | None]:
+		"""Причина отказа по правилу — с живой перепроверкой прав, если надо.
 
-		Публичная точка для постановки в очередь: отказ должен всплыть
-		сразу, при нажатии «Отправить», а не через час, когда пост
-		дождётся своей минуты. Правило одно и то же с подготовкой
-		публикации — иначе формы и отправка разошлись бы в словах.
+		Снимок прав бота стареет, и отказ по памяти может оказаться
+		неправдой: право могли выдать в Telegram уже после нашей
+		последней перепроверки. Спрашиваем живьём узко — только когда
+		отказ вообще мог возникнуть из-за снимка, и один раз на операцию;
+		сбой зонда оставляет прежний отказ.
 
-		Raises:
-			PostError: Кнопки этому посту недоступны (с причиной).
+		Returns:
+			Пара «сообщество (возможно, перечитанное) и причина или None».
 		"""
-		if not draft.markup and draft.poll is None:
-			return
-		community = await self._get_community(draft.community_id)
-		over_bot_limit = self._over_bot_limit(draft)
-		blocker = self._markup_blocker(community, draft, over_bot_limit)
+		blocker = rule(community)
 		if blocker is not None and self._rights_may_be_stale(community):
 			community = await self._fresh_community(community)
-			blocker = self._markup_blocker(community, draft, over_bot_limit)
-		if blocker is None:
-			# опрос проверяется здесь же: правило у него тоже от сообщества,
-			# и отказ обязан всплыть при постановке, а не в момент выхода
-			blocker = self._poll_blocker(community, draft)
-		if blocker is not None:
-			raise PostError(blocker)
+			blocker = rule(community)
+		return community, blocker
+
+	def _base_limits(self, community: Community) -> TextLimits:
+		"""Пределы длины публикатора сообщества (с учётом его Premium)."""
+		premium = community.default_tg_account_id is not None and self._gateway.userbot_premium(
+			community.default_tg_account_id
+		)
+		return TextLimits(
+			text=text_length_limit(premium, with_media=False),
+			caption=text_length_limit(premium, with_media=True),
+		)
+
+	def _draft_limits(
+		self, community: Community, draft: PostDraft, over_bot_limit: bool
+	) -> TextLimits:
+		"""Пределы длины, действующие **на этом черновике**.
+
+		Не «пределы сообщества»: пост с кнопками уходит ботом даже там,
+		где у публикатора Premium, и предел у него базовый. Считать
+		по сообществу значило бы принять в очередь пост, который упадёт
+		при отправке, — а у отложенного это случится часы спустя,
+		карточкой с ошибкой.
+		"""
+		route = choose_route(
+			community_capabilities(community),
+			with_markup=bool(draft.markup),
+			media_over_bot_limit=over_bot_limit,
+			scheduled=draft.when is not None,
+			markup_first=draft.markup_first,
+		)
+		return self._base_limits(community).on_route(route)
+
+	async def check_draft_rules(self, draft: PostDraft) -> None:
+		"""Проверяет черновик по правилам его сообщества — до постановки.
+
+		Одна точка на три правила, которые зависят от сообщества и от
+		того, кто повезёт пост: предел длины текста (по маршруту),
+		кнопки и опрос. Отказ обязан всплыть под рукой у человека,
+		при нажатии «Отправить», а не через час, когда пост дождётся
+		своей минуты.
+
+		Raises:
+			PostError: Сообщество не найдено, текст длиннее предела
+				маршрута, кнопки или опрос этому сообществу недоступны.
+		"""
+		community = await self._get_community(draft.community_id)
+		over_bot_limit = self._over_bot_limit(draft)
+		if draft.markup or draft.poll is not None:
+			community, blocker = await self._fresh_blocker(
+				community, lambda item: self._markup_blocker(item, draft, over_bot_limit)
+			)
+			if blocker is None:
+				# опрос проверяется здесь же: правило у него тоже
+				# от сообщества, и отказ обязан всплыть при постановке
+				blocker = self._poll_blocker(community, draft)
+			if blocker is not None:
+				raise PostError(blocker)
+		limits = self._draft_limits(community, draft, over_bot_limit)
+		check_text_length(draft.text, limits.for_draft(draft), draft.with_media)
 
 	def _over_bot_limit(self, draft: PostDraft) -> bool:
 		"""Файл черновика не по силам боту (лимит заливки — 50 МБ).
@@ -1399,11 +1489,15 @@ class PostsService:
 		"""
 		with_media = draft.with_media
 		biggest = max((self._file_size(file.path) for file in draft.media), default=0)
+		premium = route_uses_userbot(route) and self._gateway.userbot_premium(account_id)
+		# длина — по тому же правилу, что при постановке: у бота подписки
+		# не бывает, и `on_route` сводит его к базовым пределам
+		limits = TextLimits(
+			text=text_length_limit(premium, with_media=False),
+			caption=text_length_limit(premium, with_media=True),
+		).on_route(route)
+		check_text_length(draft.text, limits.for_draft(draft), with_media)
 		if route_uses_userbot(route):
-			premium = self._gateway.userbot_premium(account_id)
-			# длина — рядом с размером файла: оба предела зависят от того,
-			# чьей сессией уходит пост (Premium аккаунта канала, ADR-0019)
-			check_text_length(draft.text, text_length_limit(premium, with_media), with_media)
 			limit = userbot_max_file_bytes(premium)
 			if biggest > limit:
 				raise PostError(
@@ -1412,8 +1506,6 @@ class PostsService:
 					"на странице «Видео»)."
 				)
 			return
-		# бот-путь: подписки у ботов не бывает — пределы всегда базовые
-		check_text_length(draft.text, text_length_limit(False, with_media), with_media)
 		if draft.when is not None:
 			# поправимо человеком (вернуть userbot в доступы), поэтому
 			# очередь такой пост придержит, а не похоронит ошибкой
@@ -1885,28 +1977,7 @@ class PostsService:
 		Raises:
 			PostError: Сообщество не найдено.
 		"""
-		community = await self._get_community(community_id)
-		premium = community.default_tg_account_id is not None and self._gateway.userbot_premium(
-			community.default_tg_account_id
-		)
-		return TextLimits(
-			text=text_length_limit(premium, with_media=False),
-			caption=text_length_limit(premium, with_media=True),
-		)
-
-	async def check_draft_limits(self, draft: PostDraft) -> None:
-		"""Проверяет черновик по фактическим пределам его сообщества.
-
-		Постановка в очередь зовёт её следом за :meth:`validate_draft`:
-		та знает только потолок Premium, а здесь уже виден публикатор
-		канала — и слишком длинный пост отвергается на месте, а не сырой
-		ошибкой Telegram после загрузки файла.
-
-		Raises:
-			PostError: Сообщество не найдено или текст длиннее предела.
-		"""
-		limits = await self.text_limits(draft.community_id)
-		check_text_length(draft.text, limits.for_draft(draft), draft.with_media)
+		return self._base_limits(await self._get_community(community_id))
 
 	async def community_title(self, community_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).
@@ -1939,8 +2010,7 @@ class PostsService:
 		if draft.markup is not None:
 			validate_markup(draft.markup)
 		when = draft.when
-		if when is not None and when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
-			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
+		check_schedule_ahead(when)
 
 	@staticmethod
 	def check_rename_name(rename_to: str) -> None:
@@ -2019,8 +2089,7 @@ class PostsService:
 			if not Path(file.path).is_file():
 				raise PostError(f"Файл не найден: {file.path}")
 		when = draft.when
-		if when is not None and when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
-			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
+		check_schedule_ahead(when)
 
 	async def list_scheduled(self, community_id: int | None = None) -> ScheduledList:
 		"""Собирает отложенные записи активных userbot-сообществ из Telegram.
@@ -2252,12 +2321,16 @@ class PostsService:
 				"Telegram менять не даёт."
 			)
 		with_media = draft.media_kind is not MediaKind.NONE
-		cleaned = text.strip()
+		# обрезка краёв — только вместе со смещениями: простой strip()
+		# оставлял бы разметку на прежних местах, и оформление наезжало
+		# бы на чужие буквы (для того `trimmed` и заведена, ADR-0033)
+		rich = trimmed(RichText(text, entities or ()))
+		cleaned = rich.text
 		if not cleaned and not with_media:
 			raise PostError("Текст поста пуст — у поста без вложения он обязателен.")
 		check_text_length(cleaned, draft.text_limit, with_media)
-		if entities:
-			validate_rich_text(RichText(cleaned, entities))
+		if entities is not None:
+			validate_rich_text(rich)
 		community = await self._get_community(draft.ref.community_id)
 		account_id = self._published_reader(community)
 		try:
@@ -2266,7 +2339,7 @@ class PostsService:
 				community.tg_chat_id,
 				draft.ref.message_id,
 				cleaned,
-				entities
+				rich.entities
 				if entities is not None
 				else keep_entities(draft.text, cleaned, draft.entities),
 			)
@@ -2299,12 +2372,7 @@ class PostsService:
 				kind=CommunityKind(item.kind),
 			)
 
-		blocker = blocked(community)
-		if blocker is not None and self._rights_may_be_stale(community):
-			# право могли выдать в Telegram уже после нашей последней
-			# перепроверки — спрашиваем живьём, прежде чем отказать
-			community = await self._fresh_community(community)
-			blocker = blocked(community)
+		community, blocker = await self._fresh_blocker(community, blocked)
 		if blocker is not None:
 			raise PostError(blocker)
 		if markup is not None:
@@ -2551,8 +2619,7 @@ class PostsService:
 		check_text_length(text, text_length_limit(premium, with_media), with_media)
 		if entities:
 			validate_rich_text(RichText(text, entities))
-		if when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
-			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
+		check_schedule_ahead(when)
 		community = await self._get_community(draft.ref.community_id)
 		await self._scheduled_call(
 			self._gateway.edit_scheduled(

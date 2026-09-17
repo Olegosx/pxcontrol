@@ -1256,14 +1256,14 @@ async def test_worker_skips_item_from_the_first_await_of_edit(
 	item = await queue.enqueue(PostDraft(community_id, text="правится"))
 	entered = asyncio.Event()
 	proceed = asyncio.Event()
-	original = queue._posts.check_draft_limits  # noqa: SLF001 — подмена первого ожидания
+	original = queue._posts.check_draft_rules  # noqa: SLF001 — подмена первого ожидания
 
-	async def slow_limits(draft: PostDraft) -> None:
+	async def slow_rules(draft: PostDraft) -> None:
 		entered.set()
 		await proceed.wait()
 		await original(draft)
 
-	monkeypatch.setattr(queue._posts, "check_draft_limits", slow_limits)  # noqa: SLF001
+	monkeypatch.setattr(queue._posts, "check_draft_rules", slow_rules)  # noqa: SLF001
 	editing = asyncio.create_task(queue.edit(item, PostDraft(community_id, text="правлено")))
 	await entered.wait()
 	gateway.release.set()  # воркер дописывает первый и идёт за следующим
