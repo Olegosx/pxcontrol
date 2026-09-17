@@ -45,6 +45,7 @@ from pxcontrol.engine.services.settings import (
 	SettingsService,
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
+from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
 from pxcontrol.engine.telegram.lane import TelegramPriority
 from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
@@ -2380,9 +2381,16 @@ class PostsService:
 		bot = community.bot
 		if bot is None:  # проверка выше уже это исключила — страховка контракта
 			raise PostError(f"У «{community.title}» нет бота — кнопки ставить некому.")
-		await self._gateway.bot_edit_markup(
-			BotRef(bot.id, bot.token), community.tg_chat_id, ref.message_id, markup
-		)
+		try:
+			await self._gateway.bot_edit_markup(
+				BotRef(bot.id, bot.token), community.tg_chat_id, ref.message_id, markup
+			)
+		except BotMessageGoneError as exc:
+			# та же гонка, что и у правки текста: пост удалили из другого
+			# клиента между чтением ленты и действием. Исход должен
+			# звучать одинаково на обеих ветках формы — иначе человек
+			# на одну и ту же причину получает два разных совета
+			raise PublishedGoneError(_PUBLISHED_GONE_TEXT) from exc
 		logger.info(
 			"Кнопки поста %s в «%s»: %s.",
 			ref.message_id,

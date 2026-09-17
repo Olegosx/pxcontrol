@@ -603,7 +603,7 @@ async def test_bot_errors_translate_flood_and_server_failures() -> None:
 	"""Флуд-лимит, «файл велик» и 5xx Bot API — понятные тексты, не дампы."""
 	from aiogram.methods import GetMe
 
-	from pxcontrol.engine.telegram.bot_api import CommunityCheckError, _bot_errors
+	from pxcontrol.engine.telegram.bot_api import BotError, _bot_errors
 
 	async def _raise_inside(exc: BaseException) -> None:
 		async with _bot_errors("нет прав", "отклонено"):
@@ -621,10 +621,22 @@ async def test_bot_errors_translate_flood_and_server_failures() -> None:
 		await _raise_inside(TelegramRetryAfter(GetMe(), "flood", retry_after=17))
 	assert flood.value.retry_after_s == 17  # очередь ждёт ровно названный срок
 	# «файл велик» наследует сетевую ошибку — не должен стать «нет связи»
-	with pytest.raises(CommunityCheckError, match="лимита Bot API"):
+	with pytest.raises(BotError, match="лимита Bot API"):
 		await _raise_inside(TelegramEntityTooLarge(GetMe(), "too large"))
-	with pytest.raises(CommunityCheckError, match="отклонил операцию"):
+	with pytest.raises(BotError, match="отклонил операцию"):
 		await _raise_inside(TelegramServerError(GetMe(), "internal"))
+
+	# «сообщения нет» отделено от «нет прав»: у Bot API кода для этого
+	# отказа нет — только описание словами, поэтому сверяем по нему
+	from aiogram.exceptions import TelegramBadRequest
+
+	from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
+
+	with pytest.raises(BotMessageGoneError, match="уже нет"):
+		await _raise_inside(TelegramBadRequest(GetMe(), "Bad Request: message to edit not found"))
+	# обычный отказ остаётся обычным
+	with pytest.raises(BotError, match="отклонено"):
+		await _raise_inside(TelegramBadRequest(GetMe(), "Bad Request: chat not found"))
 
 
 def test_community_kind_from_entity() -> None:

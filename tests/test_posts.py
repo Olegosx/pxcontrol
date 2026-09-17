@@ -33,7 +33,7 @@ from pxcontrol.engine.services.posts import (
 )
 from pxcontrol.engine.services.publish_route import PublishCapabilities, post_markup_blocker
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
-from pxcontrol.engine.telegram.bot_api import CommunityCheckError
+from pxcontrol.engine.telegram.bot_api import BotError
 from pxcontrol.engine.telegram.markup import (
 	ButtonKind,
 	MarkupError,
@@ -1474,9 +1474,7 @@ async def test_markup_failure_keeps_post_and_reports(
 	video = tmp_path / "большое.mp4"
 	video.write_bytes(b"video")
 	gateway = _FakeGateway()
-	gateway.markup_edit_error = CommunityCheckError(
-		"У бота нет права изменять сообщения в этом сообществе."
-	)
+	gateway.markup_edit_error = BotError("У бота нет права изменять сообщения в этом сообществе.")
 	service = PostsService(db, gateway)
 	community_id = await _add_community(db, bot_can_edit=True)
 	outcome = await service.publish(

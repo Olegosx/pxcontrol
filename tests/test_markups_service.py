@@ -378,6 +378,25 @@ def test_promise_expired_counts_from_publication_or_promise() -> None:
 	assert not promise_expired(_promise_dto(when=None, created_at=now), now)
 
 
+async def test_watcher_drops_promise_when_post_is_gone(db: Database) -> None:
+	"""Пост удалили из другого клиента — обещание снимается сразу.
+
+	Раньше отказ «сообщения нет» был неотличим от «нет прав»: дозор
+	считал его обычной неудачей и ходил за исчезнувшим постом сутки,
+	раз в минуту дёргая бота.
+	"""
+	from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
+
+	gateway = _FakeGateway()
+	gateway.edit_error = BotMessageGoneError("Сообщения уже нет.")
+	service = MarkupsService(db, gateway)
+	community_id = await make_ready_community(db)
+	await service.promise(community_id, markup(), match_text="текст", message_id=42)
+
+	assert await service.apply_due() == 0
+	assert await service.pending() == []  # обещания больше нет
+
+
 def test_promise_without_attempt_survives_deadline() -> None:
 	"""Просрочка без единой попытки обещание не отпускает.
 

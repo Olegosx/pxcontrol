@@ -49,6 +49,7 @@ from pxcontrol.engine.db.types import as_utc, as_utc_optional
 from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.periodic import PeriodicTask
 from pxcontrol.engine.services.posts import community_capabilities
+from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
 from pxcontrol.engine.telegram.markup import (
 	MarkupError,
 	PostMarkup,
@@ -551,6 +552,17 @@ class MarkupsService:
 			await self._gateway.bot_edit_markup(bot, chat_id, message_id, promise.markup)  # type: ignore[union-attr]
 		except TelegramFloodError:
 			raise
+		except BotMessageGoneError:
+			# пост удалили из другого клиента: ставить кнопки некуда,
+			# и ходить за этим обещанием сутки незачем
+			await self.drop(promise.id)
+			logger.info(
+				"Обещание id=%s снято: поста id=%s в сообществе id=%s больше нет.",
+				promise.id,
+				message_id,
+				promise.community_id,
+			)
+			return False
 		except Exception as exc:  # noqa: BLE001 — исход обещания, а не дозора
 			await self._miss(promise, user_message(exc))
 			return False

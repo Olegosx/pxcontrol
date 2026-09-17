@@ -27,7 +27,7 @@ from pxcontrol.engine.services.publish_route import (
 	publish_capabilities,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
-from pxcontrol.engine.telegram.bot_api import CommunityCheckError
+from pxcontrol.engine.telegram.bot_api import BotError
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
 from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind, UserbotRole
 
@@ -230,7 +230,7 @@ class CommunitiesService:
 
 		Raises:
 			CommunityError: Бот не найден или канал уже подключён.
-			CommunityCheckError: Канал не прошёл проверку Telegram.
+			BotError: Канал не прошёл проверку Telegram.
 			ConnectionError: Нет связи с Telegram.
 		"""
 		bot = await self._get_bot(bot_id)
@@ -661,7 +661,7 @@ class CommunitiesService:
 
 		Raises:
 			CommunityError: Канал или бот не найдены.
-			CommunityCheckError: Бот не админ канала / без права публиковать.
+			BotError: Бот не админ канала / без права публиковать.
 		"""
 		bot = await self._get_bot(bot_id)
 		async with self._db.session_factory() as session:
@@ -706,7 +706,7 @@ class CommunitiesService:
 		"""
 		try:
 			info = await self._gateway.bot_check_community(bot, chat_id)
-		except CommunityCheckError as exc:
+		except BotError as exc:
 			logger.info("Бот не может публиковать в сообществе %s: %s", chat_id, exc)
 			return _ProbeResult(ok=False)
 		except Exception as exc:  # noqa: BLE001 — вспомогательная проверка

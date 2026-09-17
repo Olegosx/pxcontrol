@@ -39,13 +39,40 @@ class InvalidBotTokenError(EngineError):
 	"""Telegram отклонил токен бота (или токен неправильного формата)."""
 
 
-class CommunityCheckError(EngineError):
-	"""Сообщество не прошло проверку подключения (с понятным текстом).
+class BotError(EngineError):
+	"""Telegram отклонил операцию бота (с понятным человеку текстом).
 
-	Канал или группа — оба вида (ADR-0021): бот штатно публикует
-	и в группы, и говорить человеку про канал там, где канала нет,
-	нельзя.
+	Базовая ошибка бот-пути: и проверка сообщества при подключении,
+	и отправка, и правка клавиатуры. Прежнее имя обещало только
+	проверку, а несли им два десятка разных отказов.
+
+	Сообщество здесь — и канал, и группа (ADR-0021): бот штатно
+	публикует и туда, и говорить человеку про канал там, где канала
+	нет, нельзя.
 	"""
+
+
+class BotMessageGoneError(BotError):
+	"""Сообщения, которое бот собрался править или удалить, больше нет.
+
+	Наследник базовой ошибки бот-пути: обработчики, ловящие ``BotError``,
+	продолжают работать. Отдельный класс нужен дозору кнопок (ADR-0031):
+	обещание на исчезнувший пост держать незачем — его надо отпускать
+	сразу, а не ходить за ним сутки.
+	"""
+
+
+#: Что Telegram отвечает, когда правит или удаляет исчезнувшее сообщение.
+#: Кода у этого отказа нет: Bot API отдаёт 400 и описание словами
+#: (в отличие от MTProto, где есть типизованный MESSAGE_ID_INVALID).
+#: Поэтому сверяем по описанию — список короткий, и он проверяется живьём.
+_MESSAGE_GONE = ("message to edit not found", "message to delete not found", "message not found")
+
+
+def _message_gone(description: str | None) -> bool:
+	"""Отказ означает «сообщения больше нет», а не «нет прав»."""
+	text = (description or "").lower()
+	return any(mark in text for mark in _MESSAGE_GONE)
 
 
 @asynccontextmanager
@@ -60,7 +87,7 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен (Unauthorized).
 		TelegramFloodError: Флуд-лимит — подождать и повторить.
-		CommunityCheckError: Telegram отклонил операцию (права, запрос).
+		BotError: Telegram отклонил операцию (права, запрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.exceptions import (
@@ -78,7 +105,7 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	except TelegramUnauthorizedError as exc:
 		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
 	except TelegramForbiddenError as exc:
-		raise CommunityCheckError(f"{forbidden} (Telegram: {exc.message})") from exc
+		raise BotError(f"{forbidden} (Telegram: {exc.message})") from exc
 	except TelegramRetryAfter as exc:
 		# флуд-лимит (429) — временное состояние: очередь отправки ждёт
 		# и повторяет (парный перевод — FloodWaitError в mtproto)
@@ -86,18 +113,22 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 			f"Telegram просит подождать {exc.retry_after} с.", retry_after_s=exc.retry_after
 		) from exc
 	except TelegramBadRequest as exc:
-		raise CommunityCheckError(f"{bad_request} (Telegram: {exc.message})") from exc
+		if _message_gone(exc.message):
+			raise BotMessageGoneError(
+				"Сообщения уже нет — его удалили из другого клиента Telegram."
+			) from exc
+		raise BotError(f"{bad_request} (Telegram: {exc.message})") from exc
 	except TelegramEntityTooLarge as exc:
 		# наследует сетевую ошибку — ветка обязана стоять раньше неё,
 		# иначе «файл велик» превратился бы в ложное «нет связи»
-		raise CommunityCheckError(
+		raise BotError(
 			f"Файл больше лимита Bot API ({limit_mb(BOT_MAX_FILE_BYTES)} МБ) — уменьшите файл."
 		) from exc
 	except TelegramNetworkError as exc:
 		raise ConnectionError("Нет связи с Telegram — проверьте сеть.") from exc
 	except TelegramAPIError as exc:
 		# запасная ветка: серверные сбои (5xx) и прочие отказы API
-		raise CommunityCheckError(f"Telegram отклонил операцию: {exc}") from exc
+		raise BotError(f"Telegram отклонил операцию: {exc}") from exc
 
 
 def post_html(text: str, entities: tuple[TextEntity, ...] = ()) -> str:
@@ -242,14 +273,14 @@ def _make_bot(token: str) -> Bot:
 
 def _chat_id(chat_id: str) -> int:
 	"""Числовой ID из строки БД (:func:`refs.numeric_chat_id` с нашим классом)."""
-	return numeric_chat_id(chat_id, CommunityCheckError)
+	return numeric_chat_id(chat_id, BotError)
 
 
 def community_kind_from_chat_type(chat_type: str) -> CommunityKind:
 	"""Вид сообщества по типу чата Bot API (ADR-0021).
 
 	Raises:
-		CommunityCheckError: Тип не подключается: малая группа —
+		BotError: Тип не подключается: малая группа —
 			с подсказкой преобразовать в супергруппу, личный чат — с
 			объяснением, что нужен канал или группа.
 	"""
@@ -258,26 +289,26 @@ def community_kind_from_chat_type(chat_type: str) -> CommunityKind:
 	if chat_type == "supergroup":
 		return CommunityKind.GROUP
 	if chat_type == "group":
-		raise CommunityCheckError(
+		raise BotError(
 			"Малые группы не подключаются — преобразуйте группу "
 			"в супергруппу (в настройках группы) и повторите."
 		)
-	raise CommunityCheckError("Это личный чат — укажите канал или группу.")
+	raise BotError("Это личный чат — укажите канал или группу.")
 
 
 def ensure_bot_can_post(member: Any) -> None:
 	"""Проверяет, что бот — администратор канала с правом публиковать.
 
 	Raises:
-		CommunityCheckError: Бот не админ или без права публикации.
+		BotError: Бот не админ или без права публикации.
 	"""
 	status = getattr(member, "status", "")
 	if status == "creator":
 		return
 	if status != "administrator":
-		raise CommunityCheckError("Бот не администратор канала — добавьте его администратором.")
+		raise BotError("Бот не администратор канала — добавьте его администратором.")
 	if getattr(member, "can_post_messages", None) is not True:
-		raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
+		raise BotError("У бота нет права публиковать сообщения в канале.")
 
 
 def bot_can_edit_messages(member: Any) -> bool:
@@ -311,20 +342,20 @@ def ensure_bot_can_send_in_group(member: Any, default_permissions: Any) -> None:
 		default_permissions: общие права группы (``chat.permissions``).
 
 	Raises:
-		CommunityCheckError: Бот не участник или не может писать.
+		BotError: Бот не участник или не может писать.
 	"""
 	status = getattr(member, "status", "")
 	if status in ("creator", "administrator"):
 		return
 	if status == "restricted":
 		if getattr(member, "is_member", None) is not True:
-			raise CommunityCheckError("Бот не участник группы — добавьте его в группу.")
+			raise BotError("Бот не участник группы — добавьте его в группу.")
 		if getattr(member, "can_send_messages", None) is not True:
-			raise CommunityCheckError("Бот ограничен в отправке сообщений в этой группе.")
+			raise BotError("Бот ограничен в отправке сообщений в этой группе.")
 	elif status != "member":
-		raise CommunityCheckError("Бот не участник группы — добавьте его в группу.")
+		raise BotError("Бот не участник группы — добавьте его в группу.")
 	if getattr(default_permissions, "can_send_messages", None) is False:
-		raise CommunityCheckError(
+		raise BotError(
 			"В группе писать могут только администраторы — назначьте бота администратором."
 		)
 
@@ -372,7 +403,7 @@ async def edit_markup(token: str, chat_id: str, message_id: int, markup: PostMar
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Telegram отклонил правку (нет права
+		BotError: Telegram отклонил правку (нет права
 			изменять сообщения, пост не найден, разметка не годится).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
@@ -412,7 +443,7 @@ async def send_media(
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Telegram отклонил отправку (нет прав, размер и т.п.).
+		BotError: Telegram отклонил отправку (нет прав, размер и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.types import FSInputFile
@@ -486,7 +517,7 @@ async def send_album(
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Telegram отклонил отправку (нет прав, размер).
+		BotError: Telegram отклонил отправку (нет прав, размер).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.types import (
@@ -544,7 +575,7 @@ async def send_poll(
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Telegram отклонил отправку (нет прав и т.п.).
+		BotError: Telegram отклонил отправку (нет прав и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.types import InputPollOption
@@ -588,7 +619,7 @@ async def send_text(
 	Raises:
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Telegram отклонил отправку (нет прав и т.п.).
+		BotError: Telegram отклонил отправку (нет прав и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	bot = _make_bot(token)
@@ -644,7 +675,7 @@ async def get_bot_events(token: str) -> list[str]:
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен.
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Telegram отклонил запрос (вебхук, параллельный опрос).
+		BotError: Telegram отклонил запрос (вебхук, параллельный опрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	from aiogram.exceptions import TelegramConflictError
@@ -660,7 +691,7 @@ async def get_bot_events(token: str) -> list[str]:
 				updates = await bot.get_updates(timeout=1)
 			except TelegramConflictError as exc:
 				# точный совет ценнее запасной ветки единого маппера
-				raise CommunityCheckError(
+				raise BotError(
 					"События недоступны: у бота включён вебхук или его "
 					"опрашивает другое приложение."
 				) from exc
@@ -681,7 +712,7 @@ async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 		ChatRefError: Введённую ссылку/имя не удалось разобрать.
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Сообщество не найдено / бот не добавлен /
+		BotError: Сообщество не найдено / бот не добавлен /
 			нет прав / вид не подключается (малая группа, личный чат).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
@@ -727,7 +758,7 @@ async def get_community_stats(token: str, chat_id: str) -> CommunityStatsInfo:
 	Raises:
 		InvalidBotTokenError: Токен отклонён Telegram.
 		TelegramFloodError: Флуд-лимит — подождать и повторить.
-		CommunityCheckError: Бот не видит сообщество или запрос отклонён.
+		BotError: Бот не видит сообщество или запрос отклонён.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	bot = _make_bot(token)
@@ -755,7 +786,7 @@ async def check_token(token: str) -> str:
 	Raises:
 		InvalidBotTokenError: Токен неверного формата или отклонён Telegram.
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		CommunityCheckError: Telegram отклонил запрос getMe (практически
+		BotError: Telegram отклонил запрос getMe (практически
 			не случается — запасные ветки единого маппера).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""

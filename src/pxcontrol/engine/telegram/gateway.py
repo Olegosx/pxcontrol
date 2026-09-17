@@ -307,7 +307,7 @@ class TelegramGateway:
 
 	# Исходы бот-методов — таксономия бот-пути, единая для всех пяти
 	# (см. Raises одноимённых функций bot_api): InvalidBotTokenError /
-	# TelegramFloodError / CommunityCheckError / ConnectionError.
+	# TelegramFloodError / BotError / ConnectionError.
 	# Плюс отказ дорожки бота (ADR-0030) — тот же TelegramFloodError.
 
 	# --- запасной путь: Bot API ------------------------------------------------

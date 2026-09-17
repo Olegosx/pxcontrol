@@ -21,7 +21,7 @@ from pxcontrol.engine.services.communities import CommunityError
 from pxcontrol.engine.services.posts import PostError
 from pxcontrol.engine.services.settings import SettingsError
 from pxcontrol.engine.services.video import VideoError
-from pxcontrol.engine.telegram.bot_api import CommunityCheckError, InvalidBotTokenError
+from pxcontrol.engine.telegram.bot_api import BotError, InvalidBotTokenError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
 from pxcontrol.engine.telegram.refs import ChatRefError
 
@@ -29,7 +29,7 @@ from pxcontrol.engine.telegram.refs import ChatRefError
 DOMAIN_ERRORS = [
 	AccountsError,
 	CaptionsError,
-	CommunityCheckError,
+	BotError,
 	CommunityError,
 	ChatRefError,
 	InvalidBotTokenError,

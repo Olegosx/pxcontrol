@@ -30,7 +30,7 @@ def numeric_chat_id(chat_id: str, error: type[Exception]) -> int:
 	Общий помощник обоих транспортов: нечисловая строка — повреждённая
 	запись БД, а не сетевой сбой, и заслуживает понятного текста. Класс
 	ошибки — параметр, потому что таксономии транспортов разные
-	(бот — ``CommunityCheckError``, userbot — ``UserbotUnavailableError``).
+	(бот — ``BotError``, userbot — ``UserbotUnavailableError``).
 
 	Raises:
 		error: В БД оказался нечисловой ID.

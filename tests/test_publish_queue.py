@@ -1611,7 +1611,7 @@ async def test_markup_failure_notes_card_and_keeps_promise(
 	вышедшего поста остаётся в базе — по нему попытку можно повторить.
 	"""
 	from pxcontrol.engine.services.posts import PostsService
-	from pxcontrol.engine.telegram.bot_api import CommunityCheckError
+	from pxcontrol.engine.telegram.bot_api import BotError
 	from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
 	from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES
 
@@ -1622,7 +1622,7 @@ async def test_markup_failure_notes_card_and_keeps_promise(
 
 	gateway = _SlowGateway()
 	gateway.release.set()
-	gateway.markup_edit_error = CommunityCheckError("У бота нет права изменять сообщения.")
+	gateway.markup_edit_error = BotError("У бота нет права изменять сообщения.")
 	queue = make_queue(gateway)
 	community_id = await _add_community(db)
 	await _attach_bot(db, community_id)  # право есть, но Telegram откажет

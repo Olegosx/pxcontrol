@@ -12,7 +12,7 @@ from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.communities import CommunitiesService, CommunityError
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import (
-	CommunityCheckError,
+	BotError,
 	community_kind_from_chat_type,
 	ensure_bot_can_post,
 	ensure_bot_can_send_in_group,
@@ -50,9 +50,9 @@ class _FakeGateway:
 
 	async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo:
 		if chat_ref == "@notfound":
-			raise CommunityCheckError("Канал не найден — проверьте @имя или ID.")
+			raise BotError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_is_admin:
-			raise CommunityCheckError("У бота нет права публиковать сообщения в канале.")
+			raise BotError("У бота нет права публиковать сообщения в канале.")
 		return CommunityInfo(
 			"-1001234",
 			self.title,
@@ -109,9 +109,9 @@ async def test_failed_check_not_saved(db: Database) -> None:
 	"""Не прошедший проверку канал не сохраняется."""
 	bot_id = await _make_bot(db)
 	service = CommunitiesService(db, _FakeGateway())
-	with pytest.raises(CommunityCheckError, match="не найден"):
+	with pytest.raises(BotError, match="не найден"):
 		await service.add_community(bot_id, "@notfound")
-	with pytest.raises(CommunityCheckError, match="нет права"):
+	with pytest.raises(BotError, match="нет права"):
 		await service.add_community(bot_id, "@noperm")
 	assert await service.list_communities() == []
 
@@ -225,7 +225,7 @@ async def test_assign_and_unassign_bot(db: Database) -> None:
 	assert dto.bot_id is None
 	# без прав — не назначается
 	gateway.bot_is_admin = False
-	with pytest.raises(CommunityCheckError, match="нет права"):
+	with pytest.raises(BotError, match="нет права"):
 		await service.assign_bot(dto.id, bot_id)
 	# с правами — назначается
 	gateway.bot_is_admin = True
@@ -314,9 +314,9 @@ def test_ensure_bot_can_post() -> None:
 	"""Право публиковать: владелец и админ с правом проходят, прочие — нет."""
 	ensure_bot_can_post(SimpleNamespace(status="creator"))
 	ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=True))
-	with pytest.raises(CommunityCheckError, match="не администратор"):
+	with pytest.raises(BotError, match="не администратор"):
 		ensure_bot_can_post(SimpleNamespace(status="member"))
-	with pytest.raises(CommunityCheckError, match="нет права"):
+	with pytest.raises(BotError, match="нет права"):
 		ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=False))
 
 
@@ -339,9 +339,9 @@ def test_community_kind_from_chat_type() -> None:
 	"""Вид по типу чата Bot API; малая группа и личный чат — отказ."""
 	assert community_kind_from_chat_type("channel") is CommunityKind.CHANNEL
 	assert community_kind_from_chat_type("supergroup") is CommunityKind.GROUP
-	with pytest.raises(CommunityCheckError, match="супергруппу"):
+	with pytest.raises(BotError, match="супергруппу"):
 		community_kind_from_chat_type("group")
-	with pytest.raises(CommunityCheckError, match="личный чат"):
+	with pytest.raises(BotError, match="личный чат"):
 		community_kind_from_chat_type("private")
 
 
@@ -358,15 +358,15 @@ def test_ensure_bot_can_send_in_group() -> None:
 	ensure_bot_can_send_in_group(
 		SimpleNamespace(status="restricted", is_member=True, can_send_messages=True), allow
 	)
-	with pytest.raises(CommunityCheckError, match="только администраторы"):
+	with pytest.raises(BotError, match="только администраторы"):
 		ensure_bot_can_send_in_group(SimpleNamespace(status="member"), deny)
-	with pytest.raises(CommunityCheckError, match="не участник"):
+	with pytest.raises(BotError, match="не участник"):
 		ensure_bot_can_send_in_group(SimpleNamespace(status="left"), allow)
-	with pytest.raises(CommunityCheckError, match="не участник"):
+	with pytest.raises(BotError, match="не участник"):
 		ensure_bot_can_send_in_group(
 			SimpleNamespace(status="restricted", is_member=False, can_send_messages=True), allow
 		)
-	with pytest.raises(CommunityCheckError, match="ограничен в отправке"):
+	with pytest.raises(BotError, match="ограничен в отправке"):
 		ensure_bot_can_send_in_group(
 			SimpleNamespace(status="restricted", is_member=True, can_send_messages=False), allow
 		)
@@ -572,7 +572,7 @@ async def test_bot_probe_separates_refusal_from_no_connection(db: Database) -> N
 	отсутствие знания. Прежде обе причины давали одинаковый приговор,
 	и человек видел «права потеряны» из-за пропавшей сети.
 	"""
-	from pxcontrol.engine.telegram.bot_api import CommunityCheckError
+	from pxcontrol.engine.telegram.bot_api import BotError
 
 	class _BrokenBotGateway(_FakeGateway):
 		"""Бот-проверка падает заданной ошибкой; userbot отвечает как обычно."""
@@ -585,7 +585,7 @@ async def test_bot_probe_separates_refusal_from_no_connection(db: Database) -> N
 			raise self.failure
 
 	bot_id = await _make_bot(db)
-	refusal = CommunitiesService(db, _BrokenBotGateway(CommunityCheckError("Бот не админ.")))
+	refusal = CommunitiesService(db, _BrokenBotGateway(BotError("Бот не админ.")))
 	dto = await CommunitiesService(db, _FakeGateway()).add_community(bot_id, "@testchan")
 	assert (await refusal.recheck_community(dto.id)).bot_ok is False
 
