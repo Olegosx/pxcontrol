@@ -611,7 +611,7 @@ class MarkupsService:
 		Повреждённую запись не показываем и не применяем: без клавиатуры
 		обещание бессмысленно, а причина уже в журнале (``markup_from_json``).
 		"""
-		markup = markup_from_json(row.markup)
+		markup = markup_from_json(row.markup, f"обещание кнопок id={row.id}")
 		if markup is None:
 			logger.warning("Обещание id=%s без разборчивой клавиатуры — пропущено.", row.id)
 			return None

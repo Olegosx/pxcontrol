@@ -311,17 +311,21 @@ class PublishQueue:
 		for row in rows:
 			if row.community_id not in titles:
 				titles[row.community_id] = await self._posts.community_title(row.community_id)
+			# имя владельца записи — в разборы: по «не разобралось»
+			# без него нельзя понять, у какого поста пропали кнопки
+			# или оформление, а в очереди их сотни
+			source = f"элемент очереди id={row.id}"
 			draft = refresh_draft_media(
 				PostDraft(
 					community_id=row.community_id,
 					text=row.text,
 					media=media_from_json(row.media),
-					poll=poll_from_json(row.poll),
+					poll=poll_from_json(row.poll, source),
 					when=as_utc_optional(row.when),
 					topic_id=row.topic_id,
-					markup=markup_from_json(row.markup),
+					markup=markup_from_json(row.markup, source),
 					markup_first=row.markup_first,
-					entities=rich_from_json(row.text, row.entities).entities,
+					entities=rich_from_json(row.text, row.entities, source).entities,
 					preview=preview_from_json(row.preview),
 				)
 			)

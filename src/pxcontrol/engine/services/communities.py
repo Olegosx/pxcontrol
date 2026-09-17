@@ -425,7 +425,9 @@ class CommunitiesService:
 					community_id, account_id, probe.info.role or UserbotRole.MEMBER
 				)
 			elif probe.ok is False:
-				await self._drop_member(community_id, account_id)
+				await self._drop_member(
+					community_id, account_id, reason="подтверждённый отказ прав"
+				)
 		if not member_ids:
 			found = await self._find_userbot_publisher(tg_chat_id)
 			if found is not None:
@@ -470,11 +472,16 @@ class CommunitiesService:
 					role,
 				)
 
-	async def _drop_member(self, community_id: int, account_id: int) -> None:
-		"""Удаляет членство по подтверждённому отказу Telegram.
+	async def _drop_member(self, community_id: int, account_id: int, *, reason: str) -> None:
+		"""Удаляет членство: по отказу Telegram или по воле человека.
 
 		Участник-умолчание теряет и умолчание (инвариант ADR-0022:
 		умолчание — действующий участник); авто-замены нет.
+
+		``reason`` попадает в журнал. Это два разных события: зонд
+		подтвердил потерю прав — или оператор нажал «Удалить». Пока
+		причина была одна на оба пути, действие человека выглядело
+		в журнале потерей прав, и разбор инцидента уводило в сторону.
 		"""
 		async with self._db.session_factory() as session:
 			member = await session.get(CommunityMember, (community_id, account_id))
@@ -486,9 +493,10 @@ class CommunitiesService:
 				community.default_tg_account_id = None
 			await session.commit()
 		logger.info(
-			"Аккаунт id=%s исключён из сообщества id=%s (подтверждённый отказ прав).",
+			"Аккаунт id=%s исключён из сообщества id=%s (%s).",
 			account_id,
 			community_id,
+			reason,
 		)
 
 	async def _adopt_member(
@@ -627,7 +635,7 @@ class CommunitiesService:
 			await self._community_in_session(session, community_id)
 			if await session.get(CommunityMember, (community_id, account_id)) is None:
 				raise CommunityError("Аккаунт не участник этого сообщества.")
-		await self._drop_member(community_id, account_id)
+		await self._drop_member(community_id, account_id, reason="снят человеком")
 		return await self.list_members(community_id)
 
 	async def set_default(self, community_id: int, account_id: int) -> CommunityDto:

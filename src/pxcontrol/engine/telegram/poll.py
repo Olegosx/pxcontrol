@@ -201,7 +201,7 @@ def poll_to_json(poll: PollDraft | None) -> dict[str, Any] | None:
 	}
 
 
-def poll_from_json(raw: Any) -> PollDraft | None:
+def poll_from_json(raw: Any, source: str = "") -> PollDraft | None:
 	"""Собирает опрос из значения колонки БД.
 
 	Повреждённая запись (чужой формат, испорченный JSON) не роняет
@@ -227,5 +227,9 @@ def poll_from_json(raw: Any) -> PollDraft | None:
 			explanation=str(raw.get("explanation", "")),
 		)
 	except (TypeError, ValueError, KeyError, AttributeError):
-		logger.warning("Опрос в базе не разобрался — пост остался без него.", exc_info=True)
+		logger.warning(
+			"Опрос в базе не разобрался%s — пост остался без него.",
+			f" ({source})" if source else "",
+			exc_info=True,
+		)
 		return None

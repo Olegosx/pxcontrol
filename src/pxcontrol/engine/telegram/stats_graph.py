@@ -38,7 +38,7 @@ class GraphSeries:
 	points: tuple[tuple[int, float], ...]
 
 
-def parse_graph(json_text: str) -> list[GraphSeries]:
+def parse_graph(json_text: str, name: str = "") -> list[GraphSeries]:
 	"""Разбирает JSON графика Telegram в ряды.
 
 	Колонка типа ``x`` даёт моменты, каждая остальная — ряд. Ряд короче
@@ -54,7 +54,10 @@ def parse_graph(json_text: str) -> list[GraphSeries]:
 	try:
 		data = json.loads(json_text)
 	except (TypeError, ValueError):
-		logger.warning("График статистики Telegram: JSON не разобран.")
+		logger.warning(
+			"График статистики Telegram%s: JSON не разобран.",
+			f" «{name}»" if name else "",
+		)
 		return []
 	columns = data.get("columns") if isinstance(data, dict) else None
 	if not isinstance(columns, list):

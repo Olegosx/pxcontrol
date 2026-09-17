@@ -175,7 +175,7 @@ def markup_to_json(markup: PostMarkup | None) -> list[list[dict[str, str]]] | No
 	]
 
 
-def markup_from_json(raw: Any) -> PostMarkup | None:
+def markup_from_json(raw: Any, source: str = "") -> PostMarkup | None:
 	"""Собирает клавиатуру из значения колонки БД.
 
 	Повреждённая запись (чужой формат, неизвестный вид кнопки) — не повод
@@ -197,7 +197,11 @@ def markup_from_json(raw: Any) -> PostMarkup | None:
 			for row in raw
 		)
 	except (TypeError, ValueError, KeyError):
-		logger.warning("Клавиатура в базе не разобралась — пост пойдёт без кнопок.", exc_info=True)
+		logger.warning(
+			"Клавиатура в базе не разобралась%s — пост пойдёт без кнопок.",
+			f" ({source})" if source else "",
+			exc_info=True,
+		)
 		return None
 	markup = PostMarkup(rows)
 	return markup if markup else None

@@ -224,6 +224,15 @@ def keep_entities(
 	return entities if new_text == old_text else ()
 
 
+def _named(source: str) -> str:
+	"""Пометка «чья это запись» для журнала (пусто — не сказали).
+
+	По записи «не разобралось» без имени владельца нельзя понять,
+	у какого поста пропало оформление: в очереди их сотни.
+	"""
+	return f" ({source})" if source else ""
+
+
 def rich_to_json(rich: RichText) -> list[dict[str, Any]]:
 	"""Переводит разметку в JSON для колонки БД (пустой список — её нет).
 
@@ -244,7 +253,7 @@ def rich_to_json(rich: RichText) -> list[dict[str, Any]]:
 	]
 
 
-def rich_from_json(text: str, raw: Any) -> RichText:
+def rich_from_json(text: str, raw: Any, source: str = "") -> RichText:
 	"""Собирает размеченный текст из колонок БД.
 
 	Пусто (пустой список) — оформления нет, текст уйдёт как набран.
@@ -269,6 +278,10 @@ def rich_from_json(text: str, raw: Any) -> RichText:
 			for item in raw
 		)
 	except (TypeError, KeyError, ValueError):
-		logger.warning("Разметка текста в БД не разобралась — пост уедет без неё.", exc_info=True)
+		logger.warning(
+			"Разметка текста в БД не разобралась%s — пост уедет без неё.",
+			_named(source),
+			exc_info=True,
+		)
 		return RichText(text)
 	return RichText(text, entities)
