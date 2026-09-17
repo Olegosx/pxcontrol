@@ -19,6 +19,7 @@ from typing import Any
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
+from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
 from pxcontrol.engine.telegram.stats_graph import (
 	GraphSeries,
 	daily,
@@ -493,6 +494,105 @@ def markup_button_count(markup: Any) -> int:
 	return sum(len(getattr(row, "buttons", None) or ()) for row in rows)
 
 
+def _styling(entities: tuple[TextEntity, ...]) -> dict[str, Any]:
+	"""Как отдать текст Telethon: сущностями или прежним разбором строки.
+
+	Размеченный текст уходит готовыми сущностями, и парсер разделителей
+	при этом отключается (``parse_mode=None``): иначе он съел бы звёздочки
+	из видимого текста и сдвинул бы все смещения. Текст без разметки —
+	прежний путь: его разбирает Telethon, как разбирала до ADR-0033
+	(так уходят старые элементы очереди и всё, что пока пишет форма).
+	"""
+	if not entities:
+		return {}
+	return {
+		"formatting_entities": entities_to_telethon(RichText("", entities)),
+		"parse_mode": None,
+	}
+
+
+def entities_to_telethon(rich: RichText) -> list[Any]:
+	"""Переводит нашу разметку в сущности Telethon (ADR-0033).
+
+	Перевод в одну сторону и без сети — проверяется тестами целиком.
+	Смещения не пересчитываются: и мы, и Telethon меряем текст
+	кодовыми единицами UTF-16.
+	"""
+	from telethon.tl import types
+
+	makers: dict[TextStyle, Any] = {
+		TextStyle.BOLD: types.MessageEntityBold,
+		TextStyle.ITALIC: types.MessageEntityItalic,
+		TextStyle.UNDERLINE: types.MessageEntityUnderline,
+		TextStyle.STRIKE: types.MessageEntityStrike,
+		TextStyle.CODE: types.MessageEntityCode,
+		TextStyle.SPOILER: types.MessageEntitySpoiler,
+	}
+	result: list[Any] = []
+	for entity in rich.entities:
+		if entity.style is TextStyle.LINK:
+			result.append(
+				types.MessageEntityTextUrl(entity.offset, entity.length, url=entity.value)
+			)
+		elif entity.style is TextStyle.PRE:
+			result.append(types.MessageEntityPre(entity.offset, entity.length, entity.value))
+		elif entity.style in (TextStyle.QUOTE, TextStyle.EXPANDABLE_QUOTE):
+			result.append(
+				types.MessageEntityBlockquote(
+					entity.offset,
+					entity.length,
+					collapsed=entity.style is TextStyle.EXPANDABLE_QUOTE,
+				)
+			)
+		else:
+			result.append(makers[entity.style](entity.offset, entity.length))
+	return result
+
+
+def rich_from_telethon(text: str, entities: Any) -> RichText:
+	"""Собирает размеченный текст из сообщения Telethon.
+
+	Нужен правке (ADR-0033, п. 6): форма обязана показать оформление
+	поста, иначе сохранение сотрёт его — как сотрёт клавиатуру бот,
+	не передавший её заново. Виды, которых приложение не создаёт
+	(упоминания, кастомные эмодзи, банковские карты), пропускаются:
+	показать их полями формы нечем, а притворяться, что мы ими
+	управляем, нельзя.
+	"""
+	from telethon.tl import types
+
+	known: list[tuple[Any, TextStyle]] = [
+		(types.MessageEntityBold, TextStyle.BOLD),
+		(types.MessageEntityItalic, TextStyle.ITALIC),
+		(types.MessageEntityUnderline, TextStyle.UNDERLINE),
+		(types.MessageEntityStrike, TextStyle.STRIKE),
+		(types.MessageEntityCode, TextStyle.CODE),
+		(types.MessageEntitySpoiler, TextStyle.SPOILER),
+	]
+	result: list[TextEntity] = []
+	for entity in entities or ():
+		offset, length = int(entity.offset), int(entity.length)
+		if isinstance(entity, types.MessageEntityTextUrl):
+			result.append(TextEntity(TextStyle.LINK, offset, length, entity.url))
+			continue
+		if isinstance(entity, types.MessageEntityPre):
+			result.append(TextEntity(TextStyle.PRE, offset, length, entity.language or ""))
+			continue
+		if isinstance(entity, types.MessageEntityBlockquote):
+			style = (
+				TextStyle.EXPANDABLE_QUOTE
+				if getattr(entity, "collapsed", False)
+				else TextStyle.QUOTE
+			)
+			result.append(TextEntity(style, offset, length))
+			continue
+		for entity_type, style in known:
+			if isinstance(entity, entity_type):
+				result.append(TextEntity(style, offset, length))
+				break
+	return RichText(text, tuple(result))
+
+
 def markup_from(markup: Any) -> PostMarkup | None:
 	"""Разбирает клавиатуру поста в наш тип (None — не наших видов).
 
@@ -540,10 +640,13 @@ def _topic_of(message: Any) -> int | None:
 
 def _published_from(message: Any) -> PublishedMessage:
 	"""Собирает вышедший пост границы из сообщения Telethon (у него есть дата)."""
+	text = getattr(message, "message", "") or ""
 	return PublishedMessage(
 		id=int(message.id),
-		text=getattr(message, "message", "") or "",
+		text=text,
 		date=message.date,
+		# разметку читаем, чтобы правка её не стёрла (ADR-0033, п. 6)
+		entities=rich_from_telethon(text, getattr(message, "entities", None)).entities,
 		media_kind=media_kind_of(getattr(message, "media", None)),
 		topic_id=_topic_of(message),
 		buttons=markup_button_count(getattr(message, "reply_markup", None)),
@@ -554,10 +657,13 @@ def _published_from(message: Any) -> PublishedMessage:
 
 def _scheduled_from(message: Any) -> ScheduledMessage:
 	"""Собирает запись границы из сообщения Telethon (у него есть дата)."""
+	text = getattr(message, "message", "") or ""
 	return ScheduledMessage(
 		id=int(message.id),
-		text=getattr(message, "message", "") or "",
+		text=text,
 		scheduled_at=message.date,
+		# разметку читаем, чтобы правка её не стёрла (ADR-0033, п. 6)
+		entities=rich_from_telethon(text, getattr(message, "entities", None)).entities,
 		media_kind=media_kind_of(getattr(message, "media", None)),
 		topic_id=_topic_of(message),
 	)
@@ -849,9 +955,14 @@ class MtprotoTransport:
 
 		async with _mtproto_errors():
 			# тема форума адресуется ответом на её корневое сообщение
+			# у размеченного текста разбирать нечего: сущности готовы,
+			# и парсер разделителей только испортил бы видимый текст
+			# (ADR-0033). Без разметки — прежний путь, как у старых
+			# элементов очереди: строку разбирает Telethon
+			styling = _styling(post.entities)
 			if post.media_path is None:
 				sent = await client.send_message(
-					peer, post.text, schedule=post.when, reply_to=post.topic_id
+					peer, post.text, schedule=post.when, reply_to=post.topic_id, **styling
 				)
 			else:
 				sent = await client.send_file(
@@ -859,6 +970,7 @@ class MtprotoTransport:
 					post.media_path,
 					caption=post.text or None,
 					schedule=post.when,
+					**styling,
 					supports_streaming=post.media_kind is MediaKind.VIDEO,
 					force_document=post.media_kind is MediaKind.DOCUMENT,
 					progress_callback=_progress,
@@ -1224,7 +1336,9 @@ class MtprotoTransport:
 				return _published_from(message)
 		return None
 
-	async def edit_post(self, chat_id: str, message_id: int, text: str) -> None:
+	async def edit_post(
+		self, chat_id: str, message_id: int, text: str, entities: tuple[TextEntity, ...] = ()
+	) -> None:
 		"""Меняет текст вышедшего поста (``messages.editMessage``).
 
 		Тот же метод, что правит отложенные, но без ``schedule_date``:
@@ -1254,7 +1368,7 @@ class MtprotoTransport:
 		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
 			try:
-				await client.edit_message(entity, message_id, text)
+				await client.edit_message(entity, message_id, text, **_styling(entities))
 			except errors.MessageNotModifiedError:
 				logger.info(
 					"Пост %s в чате %s уже в запрошенном виде — правка не нужна.",
@@ -1504,7 +1618,12 @@ class MtprotoTransport:
 		return None
 
 	async def edit_scheduled(
-		self, chat_id: str, message_id: int, text: str, when: datetime
+		self,
+		chat_id: str,
+		message_id: int,
+		text: str,
+		when: datetime,
+		entities: tuple[TextEntity, ...] = (),
 	) -> None:
 		"""Меняет текст и/или время отложенной записи (``messages.editMessage``).
 
@@ -1535,7 +1654,9 @@ class MtprotoTransport:
 		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
 			try:
-				await client.edit_message(entity, message_id, text, schedule=when)
+				await client.edit_message(
+					entity, message_id, text, schedule=when, **_styling(entities)
+				)
 			except errors.MessageNotModifiedError:
 				logger.info(
 					"Отложка %s в чате %s уже в запрошенном виде — правка не нужна.",

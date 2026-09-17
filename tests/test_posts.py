@@ -42,6 +42,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotMessageGoneError,
 	UserbotUnavailableError,
 )
+from pxcontrol.engine.telegram.rich_text import RichTextError, TextEntity, TextStyle
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CAPTION_LENGTH_LIMIT,
@@ -72,6 +73,7 @@ class _FakeGateway:
 		#: вышедший пост для формы правки (None — его уже нет)
 		self.post: PublishedMessage | None = None
 		self.post_edits: list[tuple[int, str, int, str]] = []
+		self.post_entities: list[tuple[object, ...]] = []
 		self.post_gone = False  # правка натыкается на исчезнувший пост
 		self.deleted: list[tuple[int, str, list[int]]] = []
 		self.delete_result = 1  # сколько записей Telegram согласился удалить
@@ -85,11 +87,13 @@ class _FakeGateway:
 		self.scheduled_by_id: dict[int, ScheduledMessage] = {}
 		self.scheduled_reads: list[tuple[int, str, int]] = []
 		self.scheduled_edits: list[tuple[int, str, int, str, datetime]] = []
+		self.scheduled_entities: list[tuple[object, ...]] = []
 		self.scheduled_sent: list[tuple[int, str, tuple[int, ...]]] = []
 		self.scheduled_deleted: list[tuple[int, str, tuple[int, ...]]] = []
 		self.scheduled_gone = False
 		# кнопки (ADR-0031): что ушло с постом и что дорисовано правкой
 		self.sent_markups: list[object] = []
+		self.sent_entities: list[object] = []
 		self.markup_edits: list[tuple[str, int, object]] = []
 		self.markup_edit_error: Exception | None = None
 
@@ -103,10 +107,12 @@ class _FakeGateway:
 		text: str,
 		topic_id: int | None = None,
 		markup: object = None,
+		entities: object = (),
 	) -> int:
 		self.sent.append((bot.token, chat_id, text))
 		self.sent_topics.append(topic_id)
 		self.sent_markups.append(markup)
+		self.sent_entities.append(entities)
 		return 42
 
 	async def bot_send_media(
@@ -118,6 +124,7 @@ class _FakeGateway:
 		caption: str,
 		topic_id: int | None = None,
 		markup: object = None,
+		entities: object = (),
 	) -> int:
 		self.media.append((bot.token, chat_id, kind, path, caption))
 		self.sent_markups.append(markup)
@@ -164,8 +171,14 @@ class _FakeGateway:
 		return self.post
 
 	async def userbot_edit_post(
-		self, account_id: int, chat_id: str, message_id: int, text: str
+		self,
+		account_id: int,
+		chat_id: str,
+		message_id: int,
+		text: str,
+		entities: tuple[object, ...] = (),
 	) -> None:
+		self.post_entities.append(entities)
 		if self.post_gone:
 			raise UserbotMessageGoneError("Этого поста в Telegram уже нет.")
 		self.post_edits.append((account_id, chat_id, message_id, text))
@@ -192,11 +205,18 @@ class _FakeGateway:
 		return self.scheduled_by_id.get(message_id)
 
 	async def edit_scheduled(
-		self, account_id: int, chat_id: str, message_id: int, text: str, when: datetime
+		self,
+		account_id: int,
+		chat_id: str,
+		message_id: int,
+		text: str,
+		when: datetime,
+		entities: tuple[object, ...] = (),
 	) -> None:
 		if self.scheduled_gone:
 			raise UserbotMessageGoneError("Этой записи в Telegram уже нет.")
 		self.scheduled_edits.append((account_id, chat_id, message_id, text, when))
+		self.scheduled_entities.append(entities)
 
 	async def send_scheduled_now(
 		self, account_id: int, chat_id: str, message_ids: list[int]
@@ -1799,3 +1819,50 @@ def test_post_markup_blocker_rules() -> None:
 		)
 		is None
 	)
+
+
+async def test_publish_sends_entities_by_both_transports(db: Database) -> None:
+	"""Разметка уезжает сущностями: у публикатора — в посте, у бота — в подписи."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	entities = (TextEntity(TextStyle.SPOILER, 0, 5),)
+	community_id = await _add_community(db)
+	await service.publish(PostDraft(community_id, text="тайна", entities=entities))
+	assert gateway.published[0][2].entities == entities
+	# бот-путь: у сообщества без публикатора отправляет он
+	bot_only = await _add_community(db, userbot_assigned=False, tg_chat_id="-1002")
+	await service.publish(PostDraft(bot_only, text="тайна", entities=entities))
+	assert gateway.sent_entities == [entities]
+
+
+async def test_validate_draft_rejects_broken_entities(db: Database) -> None:
+	"""Разъехавшаяся разметка отклоняется при постановке, а не сервером."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db)
+	draft = PostDraft(community_id, text="текст", entities=(TextEntity(TextStyle.BOLD, 0, 99),))
+	with pytest.raises(RichTextError, match="границы"):
+		service.validate_draft(draft)
+
+
+async def test_edit_published_drops_stale_entities(db: Database) -> None:
+	"""Правка передаёт разметку заново; изменённому тексту старая не годится."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	entities = (TextEntity(TextStyle.BOLD, 0, 4),)
+	draft = PublishedDraft(
+		ref=PublishedRef(community_id, 77),
+		community_title="Канал",
+		text="было",
+		media_kind=MediaKind.NONE,
+		topic_id=None,
+		buttons=0,
+		markup=None,
+		text_limit=4096,
+		markup_blocker=None,
+		entities=entities,
+	)
+	await service.edit_published(draft, "было")  # текст тот же — оформление живо
+	assert gateway.post_entities == [entities]
+	await service.edit_published(draft, "стало")  # текст другой — разметку снимаем
+	assert gateway.post_entities[-1] == ()

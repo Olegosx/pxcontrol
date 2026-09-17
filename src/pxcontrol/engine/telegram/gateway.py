@@ -54,6 +54,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotPausedError,
 )
+from pxcontrol.engine.telegram.rich_text import TextEntity
 from pxcontrol.engine.telegram.types import (
 	BotRef,
 	CommunityAnalytics,
@@ -348,13 +349,17 @@ class TelegramGateway:
 		text: str,
 		topic_id: int | None = None,
 		markup: PostMarkup | None = None,
+		entities: tuple[TextEntity, ...] = (),
 	) -> int:
 		"""Публикует текстовый пост «сейчас» через бота (с кнопками, если есть).
+
+		``entities`` — разметка текста (ADR-0033): пусто — прежний разбор
+		разделителей строки.
 
 		Raises: см. :func:`bot_api.send_text`.
 		"""
 		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
-			return await send_text(token, chat_id, text, topic_id, markup)
+			return await send_text(token, chat_id, text, topic_id, markup, entities)
 
 	async def bot_send_media(
 		self,
@@ -365,13 +370,16 @@ class TelegramGateway:
 		caption: str,
 		topic_id: int | None = None,
 		markup: PostMarkup | None = None,
+		entities: tuple[TextEntity, ...] = (),
 	) -> int:
 		"""Отправляет медиа ботом (лимит 50 МБ; с кнопками, если есть).
+
+		``entities`` — разметка подписи (ADR-0033).
 
 		Raises: см. :func:`bot_api.send_media`.
 		"""
 		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
-			return await send_media(token, chat_id, kind, path, caption, topic_id, markup)
+			return await send_media(token, chat_id, kind, path, caption, topic_id, markup, entities)
 
 	async def bot_edit_markup(
 		self, bot: BotRef, chat_id: str, message_id: int, markup: PostMarkup | None
@@ -551,14 +559,19 @@ class TelegramGateway:
 			return await transport.get_post(chat_id, message_id)
 
 	async def userbot_edit_post(
-		self, account_id: int, chat_id: str, message_id: int, text: str
+		self,
+		account_id: int,
+		chat_id: str,
+		message_id: int,
+		text: str,
+		entities: tuple[TextEntity, ...] = (),
 	) -> None:
 		"""Меняет текст вышедшего поста публикатором (ADR-0032, подача A4).
 
 		Raises: см. :meth:`MtprotoTransport.edit_post`.
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
-			await transport.edit_post(chat_id, message_id, text)
+			await transport.edit_post(chat_id, message_id, text, entities)
 
 	async def service_messages_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
@@ -666,7 +679,13 @@ class TelegramGateway:
 			return await transport.get_scheduled_message(chat_id, message_id)
 
 	async def edit_scheduled(
-		self, account_id: int, chat_id: str, message_id: int, text: str, when: datetime
+		self,
+		account_id: int,
+		chat_id: str,
+		message_id: int,
+		text: str,
+		when: datetime,
+		entities: tuple[TextEntity, ...] = (),
 	) -> None:
 		"""Меняет текст и/или время отложенной записи аккаунтом, который её видит.
 
@@ -681,7 +700,7 @@ class TelegramGateway:
 			UserbotUnavailableError: Время отклонено и прочие отказы.
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
-			await transport.edit_scheduled(chat_id, message_id, text, when)
+			await transport.edit_scheduled(chat_id, message_id, text, when, entities)
 
 	async def send_scheduled_now(
 		self, account_id: int, chat_id: str, message_ids: list[int]

@@ -33,6 +33,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotScheduleFullError,
 )
+from pxcontrol.engine.telegram.rich_text import TextEntity, TextStyle
 from pxcontrol.engine.telegram.types import (
 	TELEGRAM_MAX_SCHEDULED,
 	MediaKind,
@@ -599,6 +600,27 @@ async def test_queue_survives_restart(db: Database, make_queue: QueueFactory) ->
 	assert items[bad].error is not None and "отклонил" in items[bad].error
 	assert items[waiting].status is JobStatus.WAITING
 	assert items[waiting].when is not None and items[waiting].when.tzinfo is not None
+
+
+async def test_queue_keeps_text_entities(db: Database, make_queue: QueueFactory) -> None:
+	"""Разметка текста переживает перезапуск вместе с постом (ADR-0033).
+
+	Без хранения оформление терялось бы на первом же перезапуске —
+	а очередь персистентна именно затем, чтобы пост уходил таким, каким
+	его собрали.
+	"""
+	gateway = _SlotGateway()
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	entities = (TextEntity(TextStyle.SPOILER, 0, 5),)
+	item_id = await queue.enqueue(
+		PostDraft(community_id, text="тайна", when=_future(600), entities=entities)
+	)
+	await queue.shutdown()
+
+	restarted = make_queue(gateway)
+	await restarted.load()
+	assert (await restarted.get_draft(item_id)).entities == entities
 
 
 # --- папка очереди на диске (ADR-0016) --------------------------------------

@@ -1384,7 +1384,12 @@ async def test_gateway_bot_lane_freezes_after_retry_after(monkeypatch: pytest.Mo
 	calls: list[str] = []
 
 	async def fake_send_text(
-		token: str, chat_id: str, text: str, topic_id: int | None, markup: object = None
+		token: str,
+		chat_id: str,
+		text: str,
+		topic_id: int | None,
+		markup: object = None,
+		entities: object = (),
 	) -> int:
 		calls.append(token)
 		if token == "flooded":

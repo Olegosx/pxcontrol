@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.markup import ButtonKind, PostMarkup
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
+from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityInfo,
@@ -102,8 +103,22 @@ _MARKUP: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+def post_html(text: str, entities: tuple[TextEntity, ...] = ()) -> str:
+	"""HTML поста для Bot API: из сущностей, а без них — из старой разметки.
+
+	Одна точка на оба случая (ADR-0033). У размеченного текста истина —
+	сущности, и строка уже чистая: её переводит :func:`html_from_rich`.
+	У текста без разметки (старые элементы очереди и всё, что пока
+	пишет форма) остаётся прежний путь — разбор разделителей строки,
+	чтобы бот-канал выглядел так же, как userbot-канал.
+	"""
+	if entities:
+		return html_from_rich(RichText(text, entities))
+	return to_html(text)
+
+
 def to_html(text: str) -> str:
-	"""Переводит текст поста из разметки поля ввода в HTML для Bot API.
+	"""Переводит текст поста из старой разметки поля ввода в HTML.
 
 	Поле текста поста живёт в разметке, которую Telethon (основной путь,
 	ADR-0011) разбирает сам: ``**жирный**``, ``__курсив__``,
@@ -118,6 +133,94 @@ def to_html(text: str) -> str:
 	for pattern, replacement in _MARKUP:
 		escaped = pattern.sub(replacement, escaped)
 	return escaped
+
+
+#: Наши виды разметки → пары HTML-тегов Bot API. Спойлер и цитата
+#: здесь есть, а у HTML-парсера Telethon спойлера нет — потому оба
+#: транспорта и получают своё представление, а не общую строку
+#: (ADR-0033). Ссылка и блок кода собираются отдельно: у них атрибуты.
+_STYLE_TAGS: dict[TextStyle, tuple[str, str]] = {
+	TextStyle.BOLD: ("<b>", "</b>"),
+	TextStyle.ITALIC: ("<i>", "</i>"),
+	TextStyle.UNDERLINE: ("<u>", "</u>"),
+	TextStyle.STRIKE: ("<s>", "</s>"),
+	TextStyle.CODE: ("<code>", "</code>"),
+	TextStyle.SPOILER: ("<tg-spoiler>", "</tg-spoiler>"),
+	TextStyle.QUOTE: ("<blockquote>", "</blockquote>"),
+	TextStyle.EXPANDABLE_QUOTE: ("<blockquote expandable>", "</blockquote>"),
+}
+
+
+def _style_tags(entity: TextEntity) -> tuple[str, str]:
+	"""Пара тегов для куска разметки (у ссылки и блока кода — с атрибутом)."""
+	if entity.style is TextStyle.LINK:
+		return f'<a href="{html.escape(entity.value, quote=True)}">', "</a>"
+	if entity.style is TextStyle.PRE:
+		if entity.value:
+			language = html.escape(entity.value, quote=True)
+			return f'<pre><code class="language-{language}">', "</code></pre>"
+		return "<pre>", "</pre>"
+	return _STYLE_TAGS[entity.style]
+
+
+def html_from_rich(rich: RichText) -> str:
+	"""Переводит размеченный текст в HTML для Bot API (ADR-0033).
+
+	Две тонкости, каждая — из живой ошибки, а не из теории.
+
+	**Смещения считаются в кодовых единицах UTF-16**, поэтому текст
+	режется по этим же единицам, но кусками между границами разметки,
+	а не по одной единице: эмодзи — суррогатная пара, и раздельно её
+	половинки даже не декодируются.
+
+	**Куски разметки могут перекрываться** (жирный поверх спойлера
+	и ссылки), а HTML требует правильной вложенности. Поэтому текст
+	разбивается на отрезки с постоянным набором стилей: на границе
+	отрезка лишние теги закрываются в обратном порядке, недостающие
+	открываются. Наивное «открыть на начале, закрыть на конце» давало
+	``<tg-spoiler><b>…</tg-spoiler>…</b>`` — сервер такого не примет.
+
+	Чистая функция в одну сторону: обратного разбора HTML у нас нет
+	и не нужно — истина живёт в сущностях.
+	"""
+	units = rich.text.encode("utf-16-le")
+	total = len(units) // 2
+	if not rich.entities:
+		return html.escape(rich.text, quote=False)
+	bounds = {0, total}
+	for entity in rich.entities:
+		bounds.add(entity.offset)
+		bounds.add(entity.offset + entity.length)
+	edges = sorted(bound for bound in bounds if 0 <= bound <= total)
+	parts: list[str] = []
+	open_stack: list[TextEntity] = []
+	for index, start in enumerate(edges[:-1]):
+		stop = edges[index + 1]
+		active = [
+			entity
+			for entity in rich.entities
+			if entity.offset <= start and entity.offset + entity.length >= stop
+		]
+		# порядок вложения устойчивый: сначала то, что началось раньше
+		# и тянется дальше — иначе теги «мигали» бы на каждом отрезке
+		active.sort(key=lambda entity: (entity.offset, -entity.length))
+		shared = 0
+		while (
+			shared < len(open_stack)
+			and shared < len(active)
+			and open_stack[shared] is active[shared]
+		):
+			shared += 1
+		for entity in reversed(open_stack[shared:]):
+			parts.append(_style_tags(entity)[1])
+		for entity in active[shared:]:
+			parts.append(_style_tags(entity)[0])
+		open_stack = active
+		chunk = units[start * 2 : stop * 2].decode("utf-16-le")
+		parts.append(html.escape(chunk, quote=False))
+	for entity in reversed(open_stack):
+		parts.append(_style_tags(entity)[1])
+	return "".join(parts)
 
 
 def _make_bot(token: str) -> Bot:
@@ -299,6 +402,7 @@ async def send_media(
 	caption: str,
 	topic_id: int | None = None,
 	markup: PostMarkup | None = None,
+	entities: tuple[TextEntity, ...] = (),
 ) -> int:
 	"""Отправляет медиа через Bot API (лимит — 50 МБ на файл).
 
@@ -318,7 +422,7 @@ async def send_media(
 
 	bot = _make_bot(token)
 	file = FSInputFile(path)
-	text = to_html(caption) if caption else None
+	text = post_html(caption, entities) if caption else None
 	mode = "HTML"
 	keyboard = to_reply_markup(markup)
 	try:
@@ -371,6 +475,7 @@ async def send_text(
 	text: str,
 	topic_id: int | None = None,
 	markup: PostMarkup | None = None,
+	entities: tuple[TextEntity, ...] = (),
 ) -> int:
 	"""Публикует текстовый пост через Bot API («сейчас»).
 
@@ -390,7 +495,7 @@ async def send_text(
 		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
 			message = await bot.send_message(
 				_chat_id(chat_id),
-				to_html(text),
+				post_html(text, entities),
 				parse_mode="HTML",
 				message_thread_id=topic_id,
 				reply_markup=to_reply_markup(markup),

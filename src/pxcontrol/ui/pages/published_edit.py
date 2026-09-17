@@ -62,6 +62,23 @@ _LIMITS_NOTE = (
 )
 
 
+def styling_note(draft: PublishedDraft) -> str:
+	"""Оговорка об оформлении текста (пустая — оформления нет).
+
+	Разметка привязана к своему тексту: пока форма правит текст полями
+	без стилей (визуальный редактор — подача C2 ADR-0033), изменённый
+	текст оформление потеряет. Молчать об этом нельзя — человек узнал бы
+	из канала.
+	"""
+	if not draft.entities:
+		return ""
+	return (
+		"У поста есть оформление (жирный, ссылки, спойлер). Пока форма правит "
+		"только буквы: оставите текст как есть — оформление сохранится, "
+		"измените — оно снимется."
+	)
+
+
 def attachment_note(draft: PublishedDraft) -> str:
 	"""Строка о вложении поста (пустая — обычный текстовый пост).
 
@@ -126,9 +143,9 @@ class PublishedEditor(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(_FORM_SPACING)
-		note = attachment_note(self._draft)
-		if note:
-			layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
+		for note in (attachment_note(self._draft), styling_note(self._draft)):
+			if note:
+				layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
 		with_media = self._draft.media_kind is not MediaKind.NONE
 		self._text = TextEdit(self)
 		self._text.setPlainText(self._draft.text)

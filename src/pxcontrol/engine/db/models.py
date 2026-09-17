@@ -424,6 +424,10 @@ class PublishQueueItem(TimestampMixin, Base):
 	# обещанная клавиатура (ADR-0031), формат — markup_to_json;
 	# NULL — кнопок у поста нет
 	markup: Mapped[Any | None] = mapped_column(JSON, default=None)
+	# разметка текста (ADR-0033), формат — rich_to_json; NULL — текст
+	# без разметки: такой уходит прежним путём (разбор разделителей),
+	# и так же читаются элементы, поставленные до ADR-0033
+	entities: Mapped[Any | None] = mapped_column(JSON, default=None)
 	# режим «кнопки важнее» (ADR-0031, п. 4): пост ждёт своей минуты
 	# здесь, а не отложкой на сервере, и уходит ботом вместе с кнопками.
 	# Значение по умолчанию задаётся через sql_text: имя text в этом

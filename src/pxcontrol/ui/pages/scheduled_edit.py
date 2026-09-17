@@ -51,6 +51,22 @@ _LIMITS_NOTE = (
 )
 
 
+def styling_note(draft: ScheduledDraft) -> str:
+	"""Оговорка об оформлении текста записи (пустая — оформления нет).
+
+	То же правило, что у вышедшего поста (ADR-0033): разметка живёт
+	вместе со своим текстом, и до визуального редактора (подача C2)
+	изменённый текст её теряет.
+	"""
+	if not draft.entities:
+		return ""
+	return (
+		"У записи есть оформление (жирный, ссылки, спойлер). Пока форма правит "
+		"только буквы: оставите текст как есть — оформление сохранится, "
+		"измените — оно снимется."
+	)
+
+
 def attachment_note(draft: ScheduledDraft, topic_title: str | None) -> str:
 	"""Строка о вложении и теме записи (пустая — текст в общей ленте).
 
@@ -98,9 +114,9 @@ class ScheduledEditor(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(_FORM_SPACING)
-		note = attachment_note(self._draft, topic_title)
-		if note:
-			layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
+		for note in (attachment_note(self._draft, topic_title), styling_note(self._draft)):
+			if note:
+				layout.addWidget(tinted(CaptionLabel(note, self), DIM_TEXT))
 		with_media = self._draft.media_kind is not MediaKind.NONE
 		self._text = TextEdit(self)
 		self._text.setPlainText(self._draft.text)

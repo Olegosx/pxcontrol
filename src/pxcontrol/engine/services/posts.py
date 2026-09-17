@@ -47,6 +47,12 @@ from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.lane import TelegramPriority
 from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
+from pxcontrol.engine.telegram.rich_text import (
+	RichText,
+	TextEntity,
+	keep_entities,
+	validate_rich_text,
+)
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	BotRef,
@@ -285,6 +291,14 @@ class PostDraft:
 	topic_id: int | None = None
 	markup: PostMarkup | None = None
 	markup_first: bool = False
+	#: разметка текста (ADR-0033): пусто — обычный текст, и транспорт
+	#: разбирает строку по-старому (так пока приходит форма поста)
+	entities: tuple[TextEntity, ...] = ()
+
+	@property
+	def rich(self) -> RichText:
+		"""Текст поста вместе с его разметкой — как его видит Telegram."""
+		return RichText(self.text, self.entities)
 
 
 def _free_name(target: Path) -> Path:
@@ -331,6 +345,7 @@ class _PostPort(Protocol):
 		text: str,
 		topic_id: int | None = None,
 		markup: PostMarkup | None = None,
+		entities: tuple[TextEntity, ...] = (),
 	) -> int: ...
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]: ...
@@ -356,6 +371,7 @@ class _PostPort(Protocol):
 		caption: str,
 		topic_id: int | None = None,
 		markup: PostMarkup | None = None,
+		entities: tuple[TextEntity, ...] = (),
 	) -> int: ...
 
 	async def userbot_history_page(
@@ -367,7 +383,12 @@ class _PostPort(Protocol):
 	) -> PublishedMessage | None: ...
 
 	async def userbot_edit_post(
-		self, account_id: int, chat_id: str, message_id: int, text: str
+		self,
+		account_id: int,
+		chat_id: str,
+		message_id: int,
+		text: str,
+		entities: tuple[TextEntity, ...] = (),
 	) -> None: ...
 
 	async def delete_messages(
@@ -385,7 +406,13 @@ class _PostPort(Protocol):
 	) -> ScheduledMessage | None: ...
 
 	async def edit_scheduled(
-		self, account_id: int, chat_id: str, message_id: int, text: str, when: datetime
+		self,
+		account_id: int,
+		chat_id: str,
+		message_id: int,
+		text: str,
+		when: datetime,
+		entities: tuple[TextEntity, ...] = (),
 	) -> None: ...
 
 	async def send_scheduled_now(
@@ -541,6 +568,8 @@ class ScheduledDraft:
 		ref: адрес записи.
 		community_title: название сообщества.
 		text: полный текст (у записи с вложением — подпись).
+		entities: разметка текста (ADR-0033) — её надо передать серверу
+			заново, иначе правка сотрёт оформление.
 		when: момент публикации (UTC).
 		media_kind: вид вложения (``NONE`` — текст, ``OTHER`` — вложение,
 			которого приложение не создаёт: у него правится только время).
@@ -556,6 +585,7 @@ class ScheduledDraft:
 	media_kind: MediaKind
 	topic_id: int | None
 	text_limit: int
+	entities: tuple[TextEntity, ...] = ()
 
 	@property
 	def text_editable(self) -> bool:
@@ -637,6 +667,8 @@ class PublishedDraft:
 		text: текст поста (у поста с вложением — подпись).
 		media_kind: вид вложения (``NONE`` — текст).
 		topic_id: тема форума (None — общая лента).
+		entities: разметка текста поста (ADR-0033) — её надо передать
+			серверу заново, иначе правка сотрёт оформление.
 		buttons: сколько кнопок стоит под постом сейчас.
 		markup: клавиатура поста в нашем виде — ею наполняется форма.
 			None при ненулевом ``buttons`` означает «клавиатура не наших
@@ -655,6 +687,7 @@ class PublishedDraft:
 	markup: PostMarkup | None
 	text_limit: int
 	markup_blocker: str | None
+	entities: tuple[TextEntity, ...] = ()
 
 	@property
 	def markup_ours(self) -> bool:
@@ -1067,6 +1100,7 @@ class PostsService:
 				thumb = await asyncio.to_thread(self._video_thumbnail, media_path, tmp)
 			post = OutgoingPost(
 				text=draft.text,
+				entities=draft.entities,
 				media_path=media_path,
 				media_kind=draft.media_kind,
 				when=draft.when,
@@ -1099,6 +1133,7 @@ class PostsService:
 				draft.text,
 				draft.topic_id,
 				markup=draft.markup,
+				entities=draft.entities,
 			)
 		return await self._gateway.bot_send_media(
 			bot,
@@ -1108,6 +1143,7 @@ class PostsService:
 			draft.text,
 			draft.topic_id,
 			markup=draft.markup,
+			entities=draft.entities,
 		)
 
 	async def list_topics(self, community_id: int) -> list[ForumTopicInfo]:
@@ -1531,6 +1567,8 @@ class PostsService:
 
 		Raises:
 			PostError: Черновик не готов к отправке.
+			MarkupError: Клавиатура не проходит пределы Telegram (ADR-0031).
+			RichTextError: Разметка текста разъехалась (ADR-0033).
 		"""
 		if not draft.text and draft.media_path is None:
 			raise PostError("Пост пуст — добавьте текст или файл.")
@@ -1538,6 +1576,9 @@ class PostsService:
 			# пределы клавиатуры Telegram не объявляет и молча обрезает
 			# лишнее (ADR-0031, п. 11) — проверяем до отправки
 			validate_markup(draft.markup)
+		# разъехавшуюся разметку сервер отвергает невнятной ошибкой
+		# разбора, а то и молча теряет оформление (ADR-0033)
+		validate_rich_text(draft.rich)
 		with_media = draft.media_path is not None
 		check_text_length(draft.text, text_length_limit(True, with_media), with_media)
 		if draft.rename_to:
@@ -1735,6 +1776,7 @@ class PostsService:
 			ref=ref,
 			community_title=community.title,
 			text=message.text,
+			entities=message.entities,
 			media_kind=message.media_kind,
 			topic_id=message.topic_id,
 			buttons=message.buttons,
@@ -1777,7 +1819,11 @@ class PostsService:
 		account_id = self._published_reader(community)
 		try:
 			await self._gateway.userbot_edit_post(
-				account_id, community.tg_chat_id, draft.ref.message_id, cleaned
+				account_id,
+				community.tg_chat_id,
+				draft.ref.message_id,
+				cleaned,
+				keep_entities(draft.text, cleaned, draft.entities),
 			)
 		except UserbotMessageGoneError as exc:
 			raise PublishedGoneError(_PUBLISHED_GONE_TEXT) from exc
@@ -1996,6 +2042,7 @@ class PostsService:
 			media_kind=message.media_kind,
 			topic_id=message.topic_id,
 			text_limit=text_length_limit(premium, with_media),
+			entities=message.entities,
 		)
 
 	async def edit_scheduled(self, draft: ScheduledDraft, text: str, when: datetime) -> None:
@@ -2029,7 +2076,14 @@ class PostsService:
 		community = await self._get_community(draft.ref.community_id)
 		await self._scheduled_call(
 			self._gateway.edit_scheduled(
-				draft.ref.account_id, community.tg_chat_id, draft.ref.message_id, text, when
+				draft.ref.account_id,
+				community.tg_chat_id,
+				draft.ref.message_id,
+				text,
+				when,
+				# разметку передаём заново, иначе сервер сотрёт оформление;
+				# при изменённом тексте она уже не годится (ADR-0033)
+				keep_entities(draft.text, text, draft.entities),
 			)
 		)
 		# обещанные кнопки едут за постом: дозор опознаёт вышедший пост

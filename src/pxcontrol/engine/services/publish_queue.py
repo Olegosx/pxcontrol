@@ -52,6 +52,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotScheduleFullError,
 	UserbotUnavailableError,
 )
+from pxcontrol.engine.telegram.rich_text import rich_from_json, rich_to_json
 from pxcontrol.engine.telegram.types import TELEGRAM_MAX_SCHEDULED, MediaKind, TelegramFloodError
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,7 @@ class PublishQueue:
 					topic_id=row.topic_id,
 					markup=markup_from_json(row.markup),
 					markup_first=row.markup_first,
+					entities=rich_from_json(row.text, row.entities).entities,
 				)
 			)
 			item = _PublishJob(row.id, draft, titles[row.community_id])
@@ -363,6 +365,7 @@ class PublishQueue:
 					topic_id=draft.topic_id,
 					markup=markup_to_json(draft.markup),
 					markup_first=draft.markup_first,
+					entities=rich_to_json(draft.rich),
 					status=self._initial_status(draft).value,
 				)
 				for draft in stashed
@@ -915,6 +918,7 @@ class PublishQueue:
 					topic_id=draft.topic_id,
 					markup=markup_to_json(draft.markup),
 					markup_first=draft.markup_first,
+					entities=rich_to_json(draft.rich),
 					status=status.value,
 					error=None,
 				)

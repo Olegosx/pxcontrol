@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 
 from pxcontrol.engine.errors import EngineError
 
-if TYPE_CHECKING:  # разбор клавиатуры живёт в markup.py, а он опирается
-	# на этот модуль — ссылку держим только для проверки типов
+if TYPE_CHECKING:  # разбор клавиатуры и текста живёт в своих модулях,
+	# а они опираются на этот — ссылки держим для проверки типов
 	from pxcontrol.engine.telegram.markup import PostMarkup
+	from pxcontrol.engine.telegram.rich_text import TextEntity
 
 
 @dataclass(frozen=True)
@@ -262,6 +263,8 @@ class PublishedMessage:
 		id: номер поста в ленте сообщества.
 		text: текст поста или подпись к вложению.
 		date: когда пост вышел.
+		entities: разметка текста поста (ADR-0033) — правка обязана
+			передать её заново, иначе оформление слетит.
 		media_kind: вид вложения; ``NONE`` — текст (превью ссылки
 			вложением не считается), ``OTHER`` — то, чего приложение
 			не создаёт (опрос, геопозиция…).
@@ -277,6 +280,7 @@ class PublishedMessage:
 	id: int
 	text: str
 	date: datetime
+	entities: tuple[TextEntity, ...] = ()
 	media_kind: MediaKind = MediaKind.NONE
 	topic_id: int | None = None
 	buttons: int = 0
@@ -634,6 +638,8 @@ class OutgoingPost:
 
 	Attributes:
 		text: текст поста или подпись к медиа.
+		entities: разметка текста (ADR-0033; пусто — обычный текст,
+			и тогда транспорт разбирает строку по-старому).
 		media_path: путь к файлу вложения (None — чистый текст).
 		media_kind: тип вложения.
 		when: момент публикации (None — «сейчас»).
@@ -643,6 +649,7 @@ class OutgoingPost:
 	"""
 
 	text: str = ""
+	entities: tuple[TextEntity, ...] = ()
 	media_path: str | None = None
 	media_kind: MediaKind = MediaKind.NONE
 	when: datetime | None = None
@@ -689,6 +696,8 @@ class ScheduledMessage:
 			будет другой id.
 		text: текст записи (пустая строка — медиа без текста).
 		scheduled_at: момент будущей публикации.
+		entities: разметка текста записи (ADR-0033) — форма правки
+			обязана её показать, иначе сохранение сотрёт оформление.
 		media_kind: вид вложения; ``NONE`` — текст (превью ссылки
 			вложением не считается), ``OTHER`` — вложение, которого
 			приложение не создаёт (опрос, геопозиция…).
@@ -699,5 +708,6 @@ class ScheduledMessage:
 	id: int
 	text: str
 	scheduled_at: datetime
+	entities: tuple[TextEntity, ...] = ()
 	media_kind: MediaKind = MediaKind.NONE
 	topic_id: int | None = None
