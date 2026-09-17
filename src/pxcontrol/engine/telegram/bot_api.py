@@ -40,7 +40,12 @@ class InvalidBotTokenError(EngineError):
 
 
 class CommunityCheckError(EngineError):
-	"""Канал не прошёл проверку подключения (с понятным текстом)."""
+	"""Сообщество не прошло проверку подключения (с понятным текстом).
+
+	Канал или группа — оба вида (ADR-0021): бот штатно публикует
+	и в группы, и говорить человеку про канал там, где канала нет,
+	нельзя.
+	"""
 
 
 @asynccontextmanager
@@ -418,7 +423,7 @@ async def send_media(
 	mode = "HTML"
 	keyboard = to_reply_markup(markup)
 	try:
-		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
+		async with _bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."):
 			if kind is MediaKind.PHOTO:
 				message = await bot.send_photo(
 					_chat_id(chat_id),
@@ -510,7 +515,7 @@ async def send_album(
 		for index, (kind, path) in enumerate(files)
 	]
 	try:
-		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
+		async with _bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."):
 			messages = await bot.send_media_group(
 				_chat_id(chat_id), group, message_thread_id=topic_id
 			)
@@ -546,7 +551,7 @@ async def send_poll(
 
 	bot = _make_bot(token)
 	try:
-		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
+		async with _bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."):
 			message = await bot.send_poll(
 				_chat_id(chat_id),
 				question=poll.question,
@@ -588,7 +593,7 @@ async def send_text(
 	"""
 	bot = _make_bot(token)
 	try:
-		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
+		async with _bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."):
 			message = await bot.send_message(
 				_chat_id(chat_id),
 				post_html(text, entities),

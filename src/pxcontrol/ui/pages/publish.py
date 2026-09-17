@@ -115,7 +115,7 @@ def _actor_note(community: CommunityDto) -> str:
 
 
 class PublishPage(StagePage):
-	"""Создание публикации: тип контента, канал, текст, время, отправка.
+	"""Создание публикации: тип контента, сообщество, текст, время, отправка.
 
 	Экран стадии, как и соседние (ADR-0032): заголовок, подсказка
 	и правило «экран видно — экран работает» достаются от общей рамки.
@@ -397,7 +397,7 @@ class PublishPage(StagePage):
 		return self._community.current()
 
 	def _on_community_changed(self) -> None:
-		"""Адаптирует форму под возможности и времена выбранного канала."""
+		"""Адаптирует форму под возможности и времена выбранного сообщества."""
 		community = self._community_or_none()
 		if community is None:
 			self._caps_hint.setText("")
@@ -441,7 +441,9 @@ class PublishPage(StagePage):
 				f"Публикация через бота: файлы до {limit_mb(BOT_MAX_FILE_BYTES)} "
 				"МБ, только «сейчас» (для отложенных нужен userbot-админ)."
 			)
-			self._when_row.set_schedule_allowed(False, "Отложенные требуют userbot-админа в канале")
+			self._when_row.set_schedule_allowed(
+				False, "Отложенные требуют userbot-админа в сообществе"
+			)
 		else:
 			self._caps_hint.setText(
 				"⚠ Нет способа публикации — проверьте доступы на странице сообщества."
@@ -451,7 +453,7 @@ class PublishPage(StagePage):
 		self._refresh_markup()
 
 	def _apply_limits(self, community_id: int, limits: TextLimits) -> None:
-		"""Запоминает пределы длины канала, если он всё ещё выбран."""
+		"""Запоминает пределы длины сообщества, если оно всё ещё выбрано."""
 		if self._is_stale(community_id):
 			return
 		self._limits = limits
@@ -483,7 +485,7 @@ class PublishPage(StagePage):
 		return self._community.is_stale(community_id)
 
 	def _apply_times(self, community_id: int, times: list[str]) -> None:
-		"""Подставляет времена канала, если он всё ещё выбран."""
+		"""Подставляет времена сообщества, если оно всё ещё выбрано."""
 		if not self._is_stale(community_id):
 			self._when_row.set_times(times)
 
@@ -563,20 +565,20 @@ class PublishPage(StagePage):
 	# --- подпись по шаблону -----------------------------------------------------
 
 	def _current_community(self) -> CommunityDto | None:
-		"""Выбранный канал или None (с показом подсказки)."""
+		"""Выбранное сообщество или None (с показом подсказки)."""
 		community = self._community_or_none()
 		if community is None:
-			self._show_error("Сначала подключите и выберите канал.")
+			self._show_error("Сначала подключите и выберите сообщество.")
 		return community
 
 	def _on_setup_fields(self) -> None:
-		"""Открывает настройку полей и шаблонов подписи канала."""
+		"""Открывает настройку полей и шаблонов подписи сообщества."""
 		community = self._current_community()
 		if community is not None:
 			exec_dialog(FieldsDialog(self._worker, community.id, community.title, self.window()))
 
 	def _on_compose_caption(self) -> None:
-		"""Загружает шаблоны канала и открывает диалог сборки."""
+		"""Загружает шаблоны сообщества и открывает диалог сборки."""
 		community = self._current_community()
 		if community is None:
 			return

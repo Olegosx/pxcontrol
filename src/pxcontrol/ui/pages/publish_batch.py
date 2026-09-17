@@ -100,7 +100,7 @@ _CASE_MODES: list[tuple[str, TitleCaseMode]] = [
 
 #: Стратегии раскладки: подпись → вид плана и «раз в N дней?».
 _STRATEGIES: list[tuple[str, PlanKind, bool]] = [
-	("По временам канала", PlanKind.COMMUNITY_TIMES, False),
+	("По временам сообщества", PlanKind.COMMUNITY_TIMES, False),
 	("Каждый день в…", PlanKind.DAILY, False),
 	("Раз в N дней в…", PlanKind.DAILY, True),
 	("Каждые N часов от…", PlanKind.EVERY_HOURS, False),
@@ -166,7 +166,7 @@ class _BatchRow:
 		head.addWidget(self.check)
 		label = f"{video.name} — {human_size(video.size_bytes)}"
 		if oversized:
-			label += " · ⚠ больше лимита канала"
+			label += " · ⚠ больше лимита сообщества"
 		title = StrongBodyLabel(label, self.card)
 		title.setWordWrap(True)
 		head.addWidget(title, stretch=1)
@@ -355,7 +355,7 @@ class BatchEditor(QWidget):
 			if when is not None and not self._schedule_allowed:
 				return self._error.fail(
 					f"{row.video.name}: отложенная публикация недоступна — "
-					"у канала нет userbot-админа, только «сейчас»."
+					"у сообщества нет userbot-админа, только «сейчас»."
 				)
 		return self._error.succeed()
 
@@ -590,11 +590,11 @@ class BatchEditor(QWidget):
 			# бот-канал не умеет отложку — только «сейчас»
 			self._strategy.setCurrentIndex(len(_STRATEGIES) - 1)
 			self._strategy.setEnabled(False)
-			self._strategy.setToolTip("Отложенные требуют userbot-админа в канале")
+			self._strategy.setToolTip("Отложенные требуют userbot-админа в сообществе")
 		self._on_strategy_changed(int(self._strategy.currentIndex()))
 
 	def _default_at(self) -> str:
-		"""Время по умолчанию для «каждый день»: первое валидное у канала."""
+		"""Время по умолчанию для «каждый день»: первое валидное у сообщества."""
 		for item in self._community_times:
 			try:
 				hours, minutes = parse_hhmm(str(item))

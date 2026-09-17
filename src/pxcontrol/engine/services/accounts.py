@@ -41,11 +41,17 @@ def _account_not_found() -> AccountsError:
 	отношения не имеет, и человек получал разный текст в зависимости
 	от того, каким путём попал в отказ.
 	"""
-	return AccountsError("Аккаунт не найден — обновите список.")
+	return AccountsError("Пользователь не найден — обновите список.")
 
 
 class AccountsError(EngineError):
-	"""Ошибка операций с аккаунтами (с понятным человеку текстом)."""
+	"""Ошибка операций с аккаунтами (с понятным человеку текстом).
+
+	Тексты зовут исполнителя **пользователем**: так он назван в разделе
+	«Пользователи и боты», и сообщение об ошибке — это интерфейс
+	(ADR-0029, п. 2). В журнале и в именах кода остаётся «аккаунт»:
+	журнал читает разработчик, и переименовывать там нечего.
+	"""
 
 
 class _LoginFlow(Protocol):
@@ -102,7 +108,7 @@ def account_display(
 	"""
 	full_name = " ".join(part for part in (first_name, last_name) if part)
 	at_name = f"@{username}" if username else None
-	return label or full_name or at_name or phone or "аккаунт"
+	return label or full_name or at_name or phone or "пользователь"
 
 
 async def _count_by(session: AsyncSession, column: InstrumentedAttribute[Any]) -> dict[int, int]:
@@ -504,7 +510,7 @@ class AccountsService:
 		"""
 		phone = phone.strip()
 		if not phone:
-			raise AccountsError("Укажите телефон аккаунта — на него придёт код входа.")
+			raise AccountsError("Укажите телефон пользователя — на него придёт код входа.")
 		async with self._db.session_factory() as session:
 			acc = TgAccount(label=label.strip() or None, phone=phone)
 			session.add(acc)
@@ -672,7 +678,7 @@ class AccountsService:
 		"""
 		account = await self._require_account(account_id)
 		if not account.phone:
-			raise LoginError("У аккаунта не указан номер телефона.")
+			raise LoginError("У пользователя не указан номер телефона.")
 		credential = await self._require_tg_api()
 		await self._gateway.login.start(
 			account.id, credential.api_id, credential.api_hash, account.phone

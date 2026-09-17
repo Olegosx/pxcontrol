@@ -1,8 +1,8 @@
 """Настройки в БД: реестр ключей и сервис (ADR-0013).
 
 Хранение — «строка = имя → значение»: настройки приложения —
-в ``app_settings``, настройки канала — в ``community_settings`` (по строке
-на канал × имя, с внешним ключом на канал). Состав, типы и умолчания
+в ``app_settings``, настройки сообщества — в ``community_settings``
+(по строке на сообщество × имя, с внешним ключом на него). Состав, типы и умолчания
 задаёт реестр ключей ниже; сервис принимает только объекты ключей,
 поэтому мусорные имена не заводятся в принципе.
 
@@ -40,7 +40,7 @@ class SettingScope(StrEnum):
 	"""Владелец настройки."""
 
 	APP = "app"  # приложение в целом (одно значение)
-	COMMUNITY = "community"  # конкретный канал (значение на канал)
+	COMMUNITY = "community"  # конкретное сообщество (значение на него)
 
 
 @dataclass(frozen=True)
@@ -76,12 +76,12 @@ PUBLISH_LAST_COMMUNITY_ID: SettingKey[int | None] = SettingKey(
 #: Путь к ffmpeg; пусто — бутстрап из .env / поиск в PATH.
 FFMPEG_PATH: SettingKey[str] = SettingKey("ffmpeg_path", SettingScope.APP, "", str)
 
-#: Пресет обработки видео по умолчанию для канала (id пресета).
+#: Пресет обработки видео по умолчанию для сообщества (id пресета).
 COMMUNITY_DEFAULT_PRESET: SettingKey[int | None] = SettingKey(
 	"default_video_preset", SettingScope.COMMUNITY, None, int
 )
 
-#: Стандартные времена публикации канала: список «ЧЧ:ММ», первое — по умолчанию.
+#: Стандартные времена публикации сообщества: список «ЧЧ:ММ», первое — по умолчанию.
 #: Сервис проверяет только «это список»; формат элементов валидирует интерфейс
 #: при сохранении и отфильтровывает битые при чтении (parse_hhmm).
 PUBLISH_TIMES: SettingKey[list[str]] = SettingKey("publish_times", SettingScope.COMMUNITY, [], list)
@@ -116,7 +116,7 @@ COMMUNITY_ENABLED: SettingKey[bool] = SettingKey("enabled", SettingScope.COMMUNI
 #: Заготовка правил разбора имени файла для пакетной публикации:
 #: список токенов ``TitleParseRules`` (сериализацию и терпимость
 #: к незнакомым токенам держит сам датакласс в сервисе подписей).
-#: Правила пакетные по природе; у канала хранится последний применённый
+#: Правила пакетные по природе; у сообщества хранится последний применённый
 #: набор как удобный старт следующего пакета.
 TITLE_PARSE_RULES: SettingKey[list[str]] = SettingKey(
 	"title_parse_rules", SettingScope.COMMUNITY, [], list
@@ -147,7 +147,7 @@ UI_COMMUNITIES_VIEW: SettingKey[str] = SettingKey(
 
 
 class SettingsService:
-	"""Чтение и запись настроек приложения и каналов.
+	"""Чтение и запись настроек приложения и сообществ.
 
 	Настройки приложения кэшируются в памяти движка (``prime()`` при
 	старте): ``cached()`` даёт синхронный доступ для провайдеров —
@@ -230,20 +230,20 @@ class SettingsService:
 		self._require_scope(key, SettingScope.APP)
 		return self._validated(key, self._cache.get(key.name))
 
-	# --- настройки каналов -----------------------------------------------------
+	# --- настройки сообществ ---------------------------------------------------
 
 	async def get_for(self, key: SettingKey[_T], community_id: int) -> _T:
-		"""Возвращает настройку канала (умолчание — если не задана)."""
+		"""Возвращает настройку сообщества (умолчание — если не задана)."""
 		self._require_scope(key, SettingScope.COMMUNITY)
 		async with self._db.session_factory() as session:
 			row = await session.get(CommunitySetting, (community_id, key.name))
 		return self._validated(key, row.value if row is not None else None)
 
 	async def get_for_all(self, key: SettingKey[_T]) -> dict[int, _T]:
-		"""Значения настройки по всем каналам одним запросом (для списков).
+		"""Значения настройки по всем сообществам одним запросом (для списков).
 
 		Returns:
-			Отображение «id канала → значение» только для каналов,
+			Отображение «id сообщества → значение» только для тех,
 			у которых настройка задана; остальные — умолчание ключа.
 		"""
 		self._require_scope(key, SettingScope.COMMUNITY)
@@ -256,7 +256,7 @@ class SettingsService:
 			return {row.community_id: self._validated(key, row.value) for row in rows}
 
 	async def drop_community_value(self, key: SettingKey[_T], value: _T) -> None:
-		"""Снимает настройку со значением ``value`` у всех каналов.
+		"""Снимает настройку со значением ``value`` у всех сообществ.
 
 		Целостность настроек-ссылок держит сервис (ADR-0013, вариант «а»):
 		при удалении сущности, на которую ссылается настройка (например,
@@ -282,14 +282,14 @@ class SettingsService:
 			await session.commit()
 		if removed:
 			logger.info(
-				"Настройка %s со значением %r снята у %d канал(ов).",
+				"Настройка %s со значением %r снята у %d сообществ(а).",
 				key.name,
 				value,
 				removed,
 			)
 
 	async def set_for(self, key: SettingKey[_T], community_id: int, value: _T) -> None:
-		"""Сохраняет настройку канала (None — сброс к умолчанию).
+		"""Сохраняет настройку сообщества (None — сброс к умолчанию).
 
 		Raises:
 			SettingsError: Сообщество не найдено или значение не подходит по типу.
@@ -299,9 +299,9 @@ class SettingsService:
 	async def set_for_many(
 		self, community_id: int, items: Sequence[tuple[SettingKey[Any], Any]]
 	) -> None:
-		"""Сохраняет несколько настроек канала одной транзакцией.
+		"""Сохраняет несколько настроек сообщества одной транзакцией.
 
-		Диалог «Настройки канала» сохраняет пресет и времена одной
+		Диалог «Настройки сообщества» сохраняет пресет и времена одной
 		пользовательской операцией — движок и пишет их одной записью,
 		а не цепочкой отдельных вызовов из интерфейса.
 
@@ -328,7 +328,7 @@ class SettingsService:
 					row.value = value
 			await session.commit()
 		logger.info(
-			"Настройки канала id=%s сохранены: %s.",
+			"Настройки сообщества id=%s сохранены: %s.",
 			community_id,
 			", ".join(key.name for key, _value in items),
 		)

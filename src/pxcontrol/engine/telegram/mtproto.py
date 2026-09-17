@@ -183,11 +183,12 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		| errors.ChannelPrivateError
 		| errors.ChatWriteForbiddenError,
 	):
-		# подтверждённый отказ: userbot удалили из канала / канал закрыли
+		# подтверждённый отказ: userbot удалили из сообщества / его закрыли
 		# от него / запретили писать — основание снять хранимый флаг прав
 		return UserbotAccessError(
-			"Userbot не состоит в канале или не может в нём публиковать — "
-			"добавьте аккаунт администратором с правом публиковать."
+			"Userbot не состоит в сообществе или не может в нём публиковать — "
+			"добавьте аккаунт участником, а в канал — администратором "
+			"с правом публиковать."
 		)
 	if isinstance(
 		exc,
@@ -241,8 +242,8 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		# не про доступ: общий текст вместо ложного совета про права.
 		if "entity" in str(exc).lower():
 			return UserbotAccessError(
-				"Userbot не видит этот канал — убедитесь, что аккаунт "
-				"добавлен в канал администратором."
+				"Userbot не видит это сообщество — убедитесь, что аккаунт "
+				"в него добавлен (в канал — администратором)."
 			)
 		return UserbotUnavailableError(f"Telegram отклонил операцию: {exc}")
 	if isinstance(exc, ConnectionError | OSError | TimeoutError):
@@ -1373,21 +1374,24 @@ class MtprotoTransport:
 			sender = await client._borrow_exported_sender(dc) if dc is not None else None  # noqa: SLF001 — приём самого Telethon
 			try:
 				send = sender.send if sender is not None else client
-				growth = await _graph(send, getattr(stats, "growth_graph", None))
+				growth = await _graph(send, getattr(stats, "growth_graph", None), "growth_graph")
 				# у канала ряд подписок/отписок — followers_graph, у группы — members_graph
 				flow = await _graph(
 					send,
 					getattr(stats, "followers_graph", None)
 					or getattr(stats, "members_graph", None),
+					"followers_graph/members_graph",
 				)
-				hours = await _graph(send, getattr(stats, "top_hours_graph", None))
+				hours = await _graph(
+					send, getattr(stats, "top_hours_graph", None), "top_hours_graph"
+				)
 				# остальные графики — все, что отдал ответ: ряды по дням и доли
 				daily_graphs = {
-					field: await _graph(send, getattr(stats, attr, None))
+					field: await _graph(send, getattr(stats, attr, None), attr)
 					for field, attr in _DAILY_GRAPHS.items()
 				}
 				share_graphs = {
-					field: await _graph(send, _first_attr(stats, attrs))
+					field: await _graph(send, _first_attr(stats, attrs), field)
 					for field, attrs in _SHARE_GRAPHS.items()
 				}
 			finally:
@@ -1955,7 +1959,7 @@ async def _fetch_stats(client: Any, entity: Any) -> tuple[Any, int | None]:
 		await client._return_exported_sender(sender)  # noqa: SLF001
 
 
-async def _graph(send: Any, graph: Any) -> list[GraphSeries]:
+async def _graph(send: Any, graph: Any, name: str = "") -> list[GraphSeries]:
 	"""Ряды графика: готовый JSON или догрузка по токену через ``send``.
 
 	``send`` — клиент или ``sender.send`` одолженного канала в дата-центр
@@ -1972,12 +1976,15 @@ async def _graph(send: Any, graph: Any) -> list[GraphSeries]:
 		try:
 			graph = await send(LoadAsyncGraphRequest(token=graph.token))
 		except GraphInvalidReloadError:
-			logger.warning("График статистики Telegram не догрузился: токен отклонён.")
+			logger.warning(
+				"График статистики Telegram%s не догрузился: токен отклонён.",
+				f" «{name}»" if name else "",
+			)
 			return []
 	if not isinstance(graph, StatsGraph):
 		return []
 	payload = getattr(getattr(graph, "json", None), "data", None)
-	return parse_graph(payload) if isinstance(payload, str) else []
+	return parse_graph(payload, name) if isinstance(payload, str) else []
 
 
 #: Графики «ряды по дням»: поле границы → атрибут ответа Telegram.
