@@ -32,7 +32,9 @@ from pxcontrol.engine.telegram.markup import (
 from pxcontrol.engine.telegram.types import BotRef, TelegramFloodError
 
 
-def _promise_dto(*, when: datetime | None, created_at: datetime) -> PromisedMarkupDto:
+def _promise_dto(
+	*, when: datetime | None, created_at: datetime, attempts: int = 1
+) -> PromisedMarkupDto:
 	"""Снимок обещания для проверки чистого правила срока."""
 	return PromisedMarkupDto(
 		id=1,
@@ -42,7 +44,7 @@ def _promise_dto(*, when: datetime | None, created_at: datetime) -> PromisedMark
 		when=when,
 		match_text="текст",
 		markup=markup(),
-		attempts=0,
+		attempts=attempts,
 		error=None,
 		created_at=created_at,
 	)
@@ -344,13 +346,23 @@ async def test_watcher_releases_promise_after_deadline(db: Database) -> None:
 		match_text="текст",
 		when=datetime.now(UTC) - APPLY_MAX_AGE - timedelta(minutes=1),
 	)
+	# первый проход даёт обещанию его единственный шанс: приложение
+	# могло быть выключено все сутки, и «срок вышел» без попытки —
+	# это потеря кнопок молча
 	await service.apply_due()
-	assert gateway.lookups == []  # просроченным Telegram не тревожим
+	assert len(gateway.lookups) == 1
+	promises = await service.pending()
+	assert promises[0].attempts == 1
+
+	# шанс израсходован — теперь срок отпускает обещание, и Telegram
+	# больше не тревожим
+	await service.apply_due()
 	promises = await service.pending()
 	assert len(promises) == 1  # запись остаётся: человек увидит причину
 	assert promises[0].error is not None and "срок обещания вышел" in promises[0].error
+	assert len(gateway.lookups) == 1
 	await service.apply_due()  # повторный проход молчит и не тревожит сеть
-	assert gateway.lookups == []
+	assert len(gateway.lookups) == 1
 
 
 def test_promise_expired_counts_from_publication_or_promise() -> None:
@@ -364,6 +376,20 @@ def test_promise_expired_counts_from_publication_or_promise() -> None:
 	# пост «сейчас»: срок идёт от самой записи
 	assert promise_expired(_promise_dto(when=None, created_at=born), now)
 	assert not promise_expired(_promise_dto(when=None, created_at=now), now)
+
+
+def test_promise_without_attempt_survives_deadline() -> None:
+	"""Просрочка без единой попытки обещание не отпускает.
+
+	Срок меряется настенным временем, а дозор работает, только пока
+	запущено приложение: посты с кнопками на пятницу и выключенное
+	до воскресенья приложение иначе лишились бы кнопок молча, ни разу
+	не попробовав.
+	"""
+	now = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
+	born = now - APPLY_MAX_AGE - timedelta(days=2)
+	assert not promise_expired(_promise_dto(when=born, created_at=born, attempts=0), now)
+	assert promise_expired(_promise_dto(when=born, created_at=born, attempts=1), now)
 
 
 async def test_watcher_uses_known_message_id(db: Database) -> None:

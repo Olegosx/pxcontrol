@@ -98,8 +98,17 @@ def promise_deadline(promise: PromisedMarkupDto) -> datetime:
 
 
 def promise_expired(promise: PromisedMarkupDto, moment: datetime) -> bool:
-	"""Вышел ли срок обещания (дозор за ним больше не ходит)."""
-	return moment > promise_deadline(promise)
+	"""Вышел ли срок обещания (дозор за ним больше не ходит).
+
+	Срок меряется настенным временем, а дозор живёт, только пока
+	запущено приложение, — и это не одно и то же. Поставили посты
+	с кнопками на пятницу, приложение до воскресенья не открывали:
+	срок вышел, хотя **ни одной попытки не было**, и кнопки пропали бы
+	молча. Поэтому просрочка отпускает обещание лишь после настоящей
+	попытки (``attempts``): у каждого обещания есть хотя бы один шанс,
+	и он приходится на первый запуск после срока.
+	"""
+	return promise.attempts > 0 and moment > promise_deadline(promise)
 
 
 class _MarkupPort(Protocol):
@@ -329,6 +338,24 @@ class MarkupsService:
 			)
 		return moved
 
+	async def remember_post(self, promise_id: int, message_id: int) -> None:
+		"""Запоминает опознанный пост за обещанием.
+
+		Нужно до попытки поставить клавиатуру, а не после удачи: если
+		правка не пройдёт (у бота отняли право, он на паузе), запись
+		с номером поста покажет причину на «Опубликовано» — экран
+		отбирает обещания именно по номеру (ADR-0031, п. 12). Заодно
+		следующая попытка не перечитывает историю сообщества: пост
+		уже найден, а дозор просыпается раз в минуту целые сутки.
+		"""
+		async with self._db.session_factory() as session:
+			await session.execute(
+				update(PromisedMarkup)
+				.where(PromisedMarkup.id == promise_id)
+				.values(message_id=message_id)
+			)
+			await session.commit()
+
 	async def fail(self, promise_id: int, error: str) -> None:
 		"""Записывает неудачную попытку применить клавиатуру.
 
@@ -527,6 +554,8 @@ class MarkupsService:
 			message_id = await self._gateway.userbot_find_published(  # type: ignore[union-attr]
 				account_id, chat_id, promise.match_text, after, HISTORY_LOOKUP_LIMIT
 			)
+			if message_id is not None:
+				await self.remember_post(promise.id, message_id)
 		if message_id is None:
 			await self._miss(promise, "вышедший пост не опознан")
 			return False
