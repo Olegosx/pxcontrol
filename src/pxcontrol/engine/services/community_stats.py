@@ -31,7 +31,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, tzinfo
@@ -50,7 +49,9 @@ from pxcontrol.engine.db.models import (
 )
 from pxcontrol.engine.db.types import as_utc_optional
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.periodic import PeriodicTask
 from pxcontrol.engine.services.community_overview import (
+	GROWTH_DAYS,
 	CommunityOverviewDto,
 	HistorySample,
 	build_overview,
@@ -96,6 +97,11 @@ HISTORY_KEEP_DAYS = 90
 
 #: Свежесть файла аватара: старше — перекачивается (по mtime файла).
 AVATAR_TTL_S = 24 * 60 * 60
+
+#: Как часто убирать историю старше срока хранения: раз в сутки.
+#: Хранение измеряется месяцами, и чаще смысла нет — а пишущая
+#: транзакция каждым тиком идёт круглосуточно.
+PRUNE_EVERY = timedelta(days=1)
 
 #: Сколько ждать периодическую задачу при остановке движка (ADR-0020):
 #: между обращениями к Telegram она выходит сразу, внутри обращения —
@@ -290,8 +296,13 @@ class CommunityStatsService:
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._avatars_dir = avatars_dir if avatars_dir is not None else cache_dir() / "avatars"
 		self._tz: tzinfo = tz if tz is not None else (datetime.now(UTC).astimezone().tzinfo or UTC)
-		self._stop = asyncio.Event()
-		self._poller: asyncio.Task[None] | None = None
+		self._pruned_at: datetime | None = None
+		self._poller = PeriodicTask(
+			self.refresh_due,
+			name="Опрос статистики",
+			interval_s=POLL_TICK_S,
+			shutdown_timeout_s=_SHUTDOWN_TIMEOUT_S,
+		)
 
 	# --- чтение кэша -------------------------------------------------------------
 
@@ -330,11 +341,19 @@ class CommunityStatsService:
 				raise CommunityStatsError("Сообщество не найдено — обновите список.")
 			row = await session.get(CommunityStats, community_id)
 			analytics_row = await session.get(CommunityAnalyticsRow, community_id)
+			# горизонт снимков — ровно тот, что показывают графики
+			# (GROWTH_DAYS). Хранится втрое больше (HISTORY_KEEP_DAYS),
+			# и поднимать всё хранилище ради месяца незачем: это тысячи
+			# строк на сообщество, которые потом трижды сортируются
+			since = (now or datetime.now(UTC)) - timedelta(days=GROWTH_DAYS)
 			history = (
 				(
 					await session.execute(
 						select(CommunityStatsHistory)
-						.where(CommunityStatsHistory.community_id == community_id)
+						.where(
+							CommunityStatsHistory.community_id == community_id,
+							CommunityStatsHistory.at >= since,
+						)
 						.order_by(CommunityStatsHistory.at)
 					)
 				)
@@ -388,8 +407,7 @@ class CommunityStatsService:
 
 	def start_polling(self) -> None:
 		"""Запускает периодическую задачу опроса (при старте движка)."""
-		if self._poller is None or self._poller.done():
-			self._poller = asyncio.create_task(self._poll_forever())
+		self._poller.start()
 
 	async def shutdown(self) -> None:
 		"""Гасит периодическую задачу кооперативно (ADR-0020).
@@ -398,21 +416,7 @@ class CommunityStatsService:
 		сразу, начатое обращение к Telegram дожидается конца; не успевшая
 		за страховочный срок — отменяется как последнее средство.
 		"""
-		self._stop.set()
-		if self._poller is not None:
-			with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-				await asyncio.wait_for(self._poller, timeout=_SHUTDOWN_TIMEOUT_S)
-			self._poller = None
-
-	async def _poll_forever(self) -> None:
-		"""Цикл опроса: проход по «должникам», пауза, снова — до остановки."""
-		while not self._stop.is_set():
-			try:
-				await self.refresh_due()
-			except Exception:  # noqa: BLE001 — опрос не должен умирать
-				logger.exception("Проход опроса статистики не удался.")
-			with contextlib.suppress(TimeoutError):
-				await asyncio.wait_for(self._stop.wait(), timeout=POLL_TICK_S)
+		await self._poller.shutdown()
 
 	async def refresh_due(
 		self,
@@ -474,7 +478,7 @@ class CommunityStatsService:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):
 				continue
 			row = rows.get(community.id)
-			if self._stop.is_set():
+			if self._poller.stopping:
 				break
 			bot = bot_refs.get(community.id)
 			if bot is not None and due(
@@ -496,7 +500,7 @@ class CommunityStatsService:
 					changed = True
 				else:
 					await self._mark_pass(community.id, now, "full_fetched_at")
-		await self._prune_history(now)
+		await self._prune_if_due(now)
 		return changed
 
 	async def record_members_report(
@@ -712,6 +716,19 @@ class CommunityStatsService:
 			row.fetched_at = now
 			row.payload = analytics_to_payload(analytics)
 			await session.commit()
+
+	async def _prune_if_due(self, now: datetime) -> None:
+		"""Убирает старьё не чаще раза в сутки.
+
+		Уборка — пишущая транзакция и просмотр всей растущей таблицы,
+		а хранение измеряется месяцами: делать её каждым тиком (раз
+		в минуту, круглосуточно) незачем. Тот же приём, что у учёта
+		активности.
+		"""
+		if self._pruned_at is not None and now - self._pruned_at < PRUNE_EVERY:
+			return
+		self._pruned_at = now
+		await self._prune_history(now)
 
 	async def _prune_history(self, now: datetime, keep_days: int = HISTORY_KEEP_DAYS) -> None:
 		"""Убирает историю старше срока хранения (одним запросом)."""
