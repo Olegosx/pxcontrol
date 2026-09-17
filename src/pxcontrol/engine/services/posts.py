@@ -14,7 +14,7 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -50,6 +50,7 @@ from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUn
 from pxcontrol.engine.telegram.rich_text import (
 	RichText,
 	TextEntity,
+	first_link,
 	keep_entities,
 	validate_rich_text,
 )
@@ -58,6 +59,7 @@ from pxcontrol.engine.telegram.types import (
 	BotRef,
 	CommunityKind,
 	ForumTopicInfo,
+	LinkPreview,
 	MediaKind,
 	OutgoingPost,
 	PublishedMessage,
@@ -292,8 +294,11 @@ class PostDraft:
 	markup: PostMarkup | None = None
 	markup_first: bool = False
 	#: разметка текста (ADR-0033): пусто — обычный текст, и транспорт
-	#: разбирает строку по-старому (так пока приходит форма поста)
+	#: разбирает строку по-старому (так уходят старые элементы очереди)
 	entities: tuple[TextEntity, ...] = ()
+	#: превью ссылки у текстового поста (ADR-0033, подача C3):
+	#: выключить, крупное, над текстом. У поста с вложением его не бывает
+	preview: LinkPreview = field(default_factory=LinkPreview)
 
 	@property
 	def rich(self) -> RichText:
@@ -311,6 +316,19 @@ def _free_name(target: Path) -> Path:
 		if not candidate.exists():
 			return candidate
 		counter += 1
+
+
+def resolve_preview(preview: LinkPreview, rich: RichText) -> LinkPreview:
+	"""Подставляет ссылку превью, если человек её не называл (ADR-0033).
+
+	Крупное превью и превью над текстом Telegram строит **по адресу**,
+	а не «по первой ссылке сам»: обычной отправке адрес не нужен,
+	сырому запросу — обязателен. Поэтому недостающий адрес берём из
+	текста тем же правилом, каким его выбрал бы сам Telegram.
+	"""
+	if preview.url or not preview.needs_media:
+		return preview
+	return replace(preview, url=first_link(rich))
 
 
 def refresh_draft_media(draft: PostDraft) -> PostDraft:
@@ -346,6 +364,7 @@ class _PostPort(Protocol):
 		topic_id: int | None = None,
 		markup: PostMarkup | None = None,
 		entities: tuple[TextEntity, ...] = (),
+		preview: LinkPreview | None = None,
 	) -> int: ...
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]: ...
@@ -1111,6 +1130,9 @@ class PostsService:
 			post = OutgoingPost(
 				text=draft.text,
 				entities=draft.entities,
+				# ссылку для превью выбираем здесь: транспорту нужен
+				# конкретный адрес, а человек обычно его не называет
+				preview=resolve_preview(draft.preview, draft.rich),
 				media_path=media_path,
 				media_kind=draft.media_kind,
 				when=draft.when,
@@ -1144,6 +1166,7 @@ class PostsService:
 				draft.topic_id,
 				markup=draft.markup,
 				entities=draft.entities,
+				preview=draft.preview,
 			)
 		return await self._gateway.bot_send_media(
 			bot,
@@ -1589,6 +1612,13 @@ class PostsService:
 		# разъехавшуюся разметку сервер отвергает невнятной ошибкой
 		# разбора, а то и молча теряет оформление (ADR-0033)
 		validate_rich_text(draft.rich)
+		if draft.media_path is not None and draft.preview:
+			raise PostError("У поста с вложением превью ссылки не бывает — место занято файлом.")
+		if draft.preview.needs_media and not (draft.preview.url or first_link(draft.rich)):
+			raise PostError(
+				"Крупное превью и превью над текстом строятся по ссылке, "
+				"а в тексте поста ссылки нет."
+			)
 		with_media = draft.media_path is not None
 		check_text_length(draft.text, text_length_limit(True, with_media), with_media)
 		if draft.rename_to:

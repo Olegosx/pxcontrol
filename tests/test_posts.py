@@ -49,6 +49,7 @@ from pxcontrol.engine.telegram.types import (
 	BotRef,
 	CommunityKind,
 	ForumTopicInfo,
+	LinkPreview,
 	MediaKind,
 	OutgoingPost,
 	PublishedMessage,
@@ -94,6 +95,7 @@ class _FakeGateway:
 		# кнопки (ADR-0031): что ушло с постом и что дорисовано правкой
 		self.sent_markups: list[object] = []
 		self.sent_entities: list[object] = []
+		self.sent_previews: list[object] = []
 		self.markup_edits: list[tuple[str, int, object]] = []
 		self.markup_edit_error: Exception | None = None
 
@@ -108,8 +110,10 @@ class _FakeGateway:
 		topic_id: int | None = None,
 		markup: object = None,
 		entities: object = (),
+		preview: object = None,
 	) -> int:
 		self.sent.append((bot.token, chat_id, text))
+		self.sent_previews.append(preview)
 		self.sent_topics.append(topic_id)
 		self.sent_markups.append(markup)
 		self.sent_entities.append(entities)
@@ -1866,3 +1870,56 @@ async def test_edit_published_drops_stale_entities(db: Database) -> None:
 	assert gateway.post_entities == [entities]
 	await service.edit_published(draft, "стало")  # текст другой — разметку снимаем
 	assert gateway.post_entities[-1] == ()
+
+
+async def test_preview_disabled_goes_by_plain_send(db: Database) -> None:
+	"""Выключенное превью — обычная отправка с флагом, без сырого пути."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	await service.publish(
+		PostDraft(
+			community_id,
+			text="текст https://telegram.org",
+			preview=LinkPreview(disabled=True),
+		)
+	)
+	assert gateway.published[0][2].preview.disabled
+	assert not gateway.published[0][2].preview.needs_media
+
+
+async def test_preview_resolves_link_from_text(db: Database) -> None:
+	"""Крупному превью нужен адрес — он берётся из текста поста."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	await service.publish(
+		PostDraft(
+			community_id,
+			text="читайте https://telegram.org",
+			preview=LinkPreview(large=True),
+		)
+	)
+	assert gateway.published[0][2].preview.url == "https://telegram.org"
+
+
+async def test_preview_rejected_without_link_and_with_media(db: Database, tmp_path: Path) -> None:
+	"""Превью просят там, где его быть не может — отказ с причиной."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db)
+	with pytest.raises(PostError, match="ссылки нет"):
+		service.validate_draft(
+			PostDraft(community_id, text="без ссылок", preview=LinkPreview(above=True))
+		)
+	video = tmp_path / "ролик.mp4"
+	video.write_bytes(b"x")
+	with pytest.raises(PostError, match="вложением превью"):
+		service.validate_draft(
+			PostDraft(
+				community_id,
+				text="подпись",
+				media_path=str(video),
+				media_kind=MediaKind.VIDEO,
+				preview=LinkPreview(large=True),
+			)
+		)

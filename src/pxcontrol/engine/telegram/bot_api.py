@@ -26,6 +26,7 @@ from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	CommunityKind,
 	CommunityStatsInfo,
+	LinkPreview,
 	MediaKind,
 	TelegramFloodError,
 	limit_mb,
@@ -221,6 +222,25 @@ def html_from_rich(rich: RichText) -> str:
 	for entity in reversed(open_stack):
 		parts.append(_style_tags(entity)[1])
 	return "".join(parts)
+
+
+def _preview_options(preview: LinkPreview | None) -> Any:
+	"""Настройки превью ссылки для Bot API (None — как решит Telegram).
+
+	У Bot API все три вида штатные — в отличие от MTProto, где крупное
+	превью и превью над текстом задаются только вместе с самой ссылкой
+	(ADR-0033, подача C3).
+	"""
+	if preview is None or not preview:
+		return None
+	from aiogram.types import LinkPreviewOptions
+
+	return LinkPreviewOptions(
+		is_disabled=preview.disabled or None,
+		url=preview.url or None,
+		prefer_large_media=preview.large or None,
+		show_above_text=preview.above or None,
+	)
 
 
 def _make_bot(token: str) -> Bot:
@@ -476,6 +496,7 @@ async def send_text(
 	topic_id: int | None = None,
 	markup: PostMarkup | None = None,
 	entities: tuple[TextEntity, ...] = (),
+	preview: LinkPreview | None = None,
 ) -> int:
 	"""Публикует текстовый пост через Bot API («сейчас»).
 
@@ -499,6 +520,7 @@ async def send_text(
 				parse_mode="HTML",
 				message_thread_id=topic_id,
 				reply_markup=to_reply_markup(markup),
+				link_preview_options=_preview_options(preview),
 			)
 			return int(message.message_id)
 	finally:

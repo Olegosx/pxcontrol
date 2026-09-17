@@ -161,3 +161,47 @@ def test_post_html_falls_back_to_old_markup() -> None:
 	"""Без разметки — прежний разбор разделителей: старые посты не ломаются."""
 	assert post_html("**жирный**") == "<b>жирный</b>"
 	assert post_html("жирный", (_bold(0, 6),)) == "<b>жирный</b>"
+
+
+def test_first_link_prefers_signed_links() -> None:
+	"""Превью строится по первой ссылке: подписанная важнее голой."""
+	from pxcontrol.engine.telegram.rich_text import first_link
+
+	assert first_link(RichText("текст https://telegram.org хвост")) == "https://telegram.org"
+	assert first_link(RichText("без ссылок")) == ""
+	signed = RichText(
+		"тут ссылка и https://later.example",
+		(TextEntity(TextStyle.LINK, 4, 6, "https://first.example"),),
+	)
+	assert first_link(signed) == "https://first.example"
+
+
+def test_preview_json_round_trip() -> None:
+	"""Настройки превью переживают хранение; обычное поведение — NULL."""
+	from pxcontrol.engine.telegram.types import (
+		LinkPreview,
+		preview_from_json,
+		preview_to_json,
+	)
+
+	preview = LinkPreview(large=True, above=True, url="https://telegram.org")
+	assert preview_from_json(preview_to_json(preview)) == preview
+	assert preview_to_json(LinkPreview()) is None
+	assert preview_from_json(None) == LinkPreview()
+	assert preview_from_json("мусор") == LinkPreview()
+
+
+def test_preview_needs_media_only_for_large_and_above() -> None:
+	"""Сырой путь нужен только крупному превью и превью над текстом.
+
+	Выключение превью — обычный флаг отправки, и гонять ради него
+	сырой запрос незачем.
+	"""
+	from pxcontrol.engine.telegram.types import LinkPreview
+
+	assert not LinkPreview().needs_media
+	assert not LinkPreview(disabled=True).needs_media
+	assert LinkPreview(large=True).needs_media
+	assert LinkPreview(above=True).needs_media
+	# выключенное превью крупным не бывает — противоречие решается в пользу «нет»
+	assert not LinkPreview(disabled=True, large=True).needs_media

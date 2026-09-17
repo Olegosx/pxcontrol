@@ -63,6 +63,7 @@ from pxcontrol.engine.telegram.types import (
 	DeletedAccount,
 	ForumTopicInfo,
 	HistoryMarks,
+	LinkPreview,
 	MediaKind,
 	OutgoingPost,
 	ParticipantsPage,
@@ -350,6 +351,7 @@ class TelegramGateway:
 		topic_id: int | None = None,
 		markup: PostMarkup | None = None,
 		entities: tuple[TextEntity, ...] = (),
+		preview: LinkPreview | None = None,
 	) -> int:
 		"""Публикует текстовый пост «сейчас» через бота (с кнопками, если есть).
 
@@ -359,7 +361,7 @@ class TelegramGateway:
 		Raises: см. :func:`bot_api.send_text`.
 		"""
 		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
-			return await send_text(token, chat_id, text, topic_id, markup, entities)
+			return await send_text(token, chat_id, text, topic_id, markup, entities, preview)
 
 	async def bot_send_media(
 		self,

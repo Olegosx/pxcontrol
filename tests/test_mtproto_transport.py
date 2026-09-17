@@ -38,6 +38,7 @@ class _FakeClient:
 		self.connect_calls = 0
 		self.me_premium = False
 		self.sent: list[tuple[Any, str, Any]] = []
+		self.previews: list[bool] = []
 		self.files: list[dict[str, Any]] = []
 		# сущность и права для check_community (тесты задают под сценарий)
 		self.entity: Any = None
@@ -62,9 +63,16 @@ class _FakeClient:
 		self.connected = False
 
 	async def send_message(
-		self, entity: Any, text: str, schedule: Any = None, reply_to: Any = None
+		self,
+		entity: Any,
+		text: str,
+		schedule: Any = None,
+		reply_to: Any = None,
+		link_preview: bool = True,
+		**kwargs: Any,
 	) -> None:
 		self.sent.append((entity, text, schedule, reply_to))
+		self.previews.append(link_preview)
 
 	async def send_file(self, entity: Any, file: str, **kwargs: Any) -> None:
 		progress = kwargs.pop("progress_callback", None)
@@ -1390,6 +1398,7 @@ async def test_gateway_bot_lane_freezes_after_retry_after(monkeypatch: pytest.Mo
 		topic_id: int | None,
 		markup: object = None,
 		entities: object = (),
+		preview: object = None,
 	) -> int:
 		calls.append(token)
 		if token == "flooded":
@@ -1510,3 +1519,28 @@ async def test_history_page_marks_end_of_feed() -> None:
 	last = await transport.history_page("-1001", 0, 50)
 	assert [message.id for message in last.messages] == [1]
 	assert last.next_offset_id is None
+
+
+def test_sent_message_id_reads_raw_answer() -> None:
+	"""Номер поста достаётся из сырого ответа Telegram (ADR-0033, C3).
+
+	Приватным помощником библиотеки не пользуемся: он сломался бы молча
+	при её обновлении, а номер нужен кнопкам под постом.
+	"""
+	from telethon.tl import types
+
+	from pxcontrol.engine.telegram.mtproto import sent_message_id
+
+	message = types.Message(id=77, peer_id=types.PeerChannel(1), message="пост")
+	by_random = SimpleNamespace(
+		updates=[
+			types.UpdateMessageID(id=77, random_id=42),
+			types.UpdateNewChannelMessage(message, 0, 0),
+		]
+	)
+	assert sent_message_id(by_random, 42) == 77
+	# чужой random_id — берём сам пост из обновления
+	assert sent_message_id(by_random, 999) == 77
+	scheduled = SimpleNamespace(updates=[types.UpdateNewScheduledMessage(message)])
+	assert sent_message_id(scheduled, 1) == 77
+	assert sent_message_id(SimpleNamespace(updates=[]), 1) == 0

@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 from pxcontrol.engine.errors import EngineError
@@ -593,6 +595,40 @@ def rich_from_telethon(text: str, entities: Any) -> RichText:
 	return RichText(text, tuple(result))
 
 
+def sent_message_id(result: Any, random_id: int) -> int:
+	"""Номер отправленного поста из ответа сырого запроса.
+
+	Telegram отвечает пачкой обновлений, и номер лежит в одном из трёх
+	видов: ``UpdateMessageID`` (обычная отправка — сопоставляется
+	по нашему ``random_id``), ``UpdateNewChannelMessage``/
+	``UpdateNewMessage`` (само сообщение) и ``UpdateNewScheduledMessage``
+	(отложенная запись). Чистая функция: разбор ответа проверяется
+	тестом без сети.
+
+	Returns:
+		Номер поста; 0 — в ответе его не оказалось (для нас это значит
+		«пост ушёл, но номер неизвестен»: кнопки к нему не дорисуются).
+	"""
+	from telethon.tl import types
+
+	updates = getattr(result, "updates", None) or []
+	for update in updates:
+		if isinstance(update, types.UpdateMessageID) and update.random_id == random_id:
+			return int(update.id)
+	for update in updates:
+		if isinstance(
+			update,
+			(
+				types.UpdateNewChannelMessage,
+				types.UpdateNewMessage,
+				types.UpdateNewScheduledMessage,
+			),
+		):
+			return int(getattr(update.message, "id", 0) or 0)
+	logger.warning("В ответе Telegram нет номера отправленного поста — кнопки не встанут.")
+	return 0
+
+
 def markup_from(markup: Any) -> PostMarkup | None:
 	"""Разбирает клавиатуру поста в наш тип (None — не наших видов).
 
@@ -960,9 +996,19 @@ class MtprotoTransport:
 			# (ADR-0033). Без разметки — прежний путь, как у старых
 			# элементов очереди: строку разбирает Telethon
 			styling = _styling(post.entities)
-			if post.media_path is None:
+			if post.media_path is None and post.preview.needs_media:
+				# крупное превью и превью над текстом Telegram принимает
+				# только вместе с самой ссылкой: у обычной отправки таких
+				# полей нет (ADR-0033, подача C3)
+				sent = await self._send_with_preview(client, peer, post, styling)
+			elif post.media_path is None:
 				sent = await client.send_message(
-					peer, post.text, schedule=post.when, reply_to=post.topic_id, **styling
+					peer,
+					post.text,
+					schedule=post.when,
+					reply_to=post.topic_id,
+					link_preview=not post.preview.disabled,
+					**styling,
 				)
 			else:
 				sent = await client.send_file(
@@ -986,6 +1032,56 @@ class MtprotoTransport:
 			f"отложено на {post.when}" if post.when else "сразу",
 		)
 		return message_id
+
+	async def _send_with_preview(
+		self, client: Any, peer: int, post: OutgoingPost, styling: dict[str, Any]
+	) -> Any:
+		"""Отправляет текстовый пост с настроенным превью ссылки.
+
+		Путь сырого запроса: у ``send_message`` библиотеки есть только
+		«показывать превью или нет», а крупное превью
+		(``force_large_media``) и превью над текстом (``invert_media``)
+		живут полями ``messages.sendMedia``. Обычные посты сюда
+		не заходят — только те, где человек прямо попросил эти два вида.
+
+		Номер вышедшего поста достаётся из ответа своими руками
+		(:func:`sent_message_id`), а не приватным помощником библиотеки:
+		чужая внутренность сломалась бы молча при её обновлении.
+
+		Raises:
+			UserbotUnavailableError: Ссылки в тексте нет — превью
+				собирать не из чего.
+		"""
+		from telethon.tl import functions, types
+
+		if not post.preview.url:
+			raise UserbotUnavailableError(
+				"Крупное превью и превью над текстом строятся по ссылке, "
+				"а в тексте поста ссылки нет."
+			)
+		random_id = int.from_bytes(os.urandom(8), "big", signed=True)
+		request = functions.messages.SendMediaRequest(
+			peer=await client.get_input_entity(peer),
+			media=types.InputMediaWebPage(
+				url=post.preview.url,
+				force_large_media=post.preview.large or None,
+				# «необязательное» превью: не собралось — пост уходит
+				# обычным текстом, а не падает ошибкой
+				optional=True,
+			),
+			message=post.text,
+			random_id=random_id,
+			invert_media=post.preview.above or None,
+			entities=styling.get("formatting_entities"),
+			reply_to=(
+				None
+				if post.topic_id is None
+				else types.InputReplyToMessage(reply_to_msg_id=post.topic_id)
+			),
+			schedule_date=post.when,
+		)
+		result = await client(request)
+		return SimpleNamespace(id=sent_message_id(result, random_id))
 
 	async def me(self) -> UserbotProfile:
 		"""Профиль владельца сессии: @имя и имя (живой запрос «кто я»).

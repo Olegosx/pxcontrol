@@ -21,6 +21,7 @@ Telegram (та же единица, что у :func:`telegram_text_length`): э�
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -154,6 +155,28 @@ def validate_rich_text(rich: RichText) -> None:
 def _known_scheme(url: str) -> bool:
 	"""Начинается ли адрес со схемы, которую принимает Telegram."""
 	return url.startswith(ALLOWED_URL_SCHEMES)
+
+
+#: Как выглядит ссылка в тексте без разметки: до пробела или конца строки.
+_BARE_URL = re.compile(r"(https?://|tg://)\S+")
+
+
+def first_link(rich: RichText) -> str:
+	"""Первая ссылка поста — та, по которой Telegram строит превью.
+
+	Сначала ищется среди подписанных ссылок (сущности разметки), потом
+	в самом тексте. Пустая строка означает «ссылок нет»: крупное превью
+	и превью над текстом такому посту недоступны — Telegram собирает
+	их по конкретному адресу, а не из воздуха.
+
+	Чистая функция: правило выбора ссылки одно на форму (что показать
+	человеку) и на транспорт (что отправить серверу).
+	"""
+	linked = [entity for entity in rich.entities if entity.style is TextStyle.LINK]
+	if linked:
+		return min(linked, key=lambda entity: entity.offset).value
+	found = _BARE_URL.search(rich.text)
+	return found.group(0) if found else ""
 
 
 def trimmed(rich: RichText) -> RichText:

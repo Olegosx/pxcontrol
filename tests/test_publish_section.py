@@ -11,7 +11,9 @@ from datetime import UTC, datetime
 
 from pxcontrol.engine.services.posts import PublishedDraft, PublishedPostDto, PublishedRef
 from pxcontrol.engine.telegram.markup import PostMarkup
+from pxcontrol.engine.telegram.rich_text import RichText
 from pxcontrol.engine.telegram.types import MediaKind
+from pxcontrol.ui.pages.preview_row import preview_hint
 from pxcontrol.ui.pages.publish_batch_page import source_text
 from pxcontrol.ui.pages.publish_stages import (
 	SECTION_ROUTE_KEY,
@@ -177,3 +179,12 @@ def test_published_draft_markup_ours() -> None:
 	assert _draft().markup_ours  # кнопок нет — показывать нечего
 	assert _draft(buttons=1, markup=PostMarkup()).markup_ours
 	assert not _draft(buttons=1).markup_ours
+
+
+def test_preview_hint_states() -> None:
+	"""Подсказка ряда превью честно называет причину недоступности."""
+	assert "вложением" in preview_hint(RichText("подпись"), True)
+	assert "Добавьте ссылку" in preview_hint(RichText("без ссылок"), False)
+	assert preview_hint(RichText("см. https://telegram.org"), False) == (
+		"Превью по ссылке: https://telegram.org"
+	)

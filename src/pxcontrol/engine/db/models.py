@@ -428,6 +428,9 @@ class PublishQueueItem(TimestampMixin, Base):
 	# без разметки: такой уходит прежним путём (разбор разделителей),
 	# и так же читаются элементы, поставленные до ADR-0033
 	entities: Mapped[Any | None] = mapped_column(JSON, default=None)
+	# превью ссылки (ADR-0033, подача C3): выключено, крупное, над
+	# текстом и адрес; NULL — как решит Telegram сам
+	preview: Mapped[Any | None] = mapped_column(JSON, default=None)
 	# режим «кнопки важнее» (ADR-0031, п. 4): пост ждёт своей минуты
 	# здесь, а не отложкой на сервере, и уходит ботом вместе с кнопками.
 	# Значение по умолчанию задаётся через sql_text: имя text в этом

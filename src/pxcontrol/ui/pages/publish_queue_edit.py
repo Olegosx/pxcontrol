@@ -31,7 +31,12 @@ from pxcontrol.engine.services.posts import PostDraft, TextLimits
 from pxcontrol.engine.services.publish_route import choose_route, markup_blocker
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.rich_text import trimmed
-from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES, ForumTopicInfo, MediaKind
+from pxcontrol.engine.telegram.types import (
+	BOT_MAX_FILE_BYTES,
+	ForumTopicInfo,
+	LinkPreview,
+	MediaKind,
+)
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DIM_TEXT,
@@ -54,6 +59,7 @@ from pxcontrol.ui.pages.common import (
 	visible_topics,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
+from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
 #: Подсказка под временем, когда канал публикует только ботом: у бота
@@ -137,6 +143,11 @@ class QueueItemEditor(QWidget):
 		self._post_text.set_rich(self._draft.rich)
 		layout.addWidget(self._post_text)
 		self._counter = CharCounter(self, layout, self._text)
+		# те же настройки превью, что в форме нового поста (ADR-0033, C3)
+		self._preview = PreviewRow(self, layout)
+		self._preview.set_preview(self._draft.preview)
+		self._preview.changed.connect(self._refresh_preview)
+		self._text.textChanged.connect(self._refresh_preview)
 		self._build_markup_block(layout)
 		# по макету кнопки формы стоят в ряду времени, справа
 		self._when_row = WhenRow(
@@ -295,6 +306,10 @@ class QueueItemEditor(QWidget):
 
 	# --- поведение формы -------------------------------------------------------
 
+	def _refresh_preview(self) -> None:
+		"""Приводит ряд превью к тексту и типу поста."""
+		self._preview.refresh(self._post_text.rich(), self._kind is not MediaKind.NONE)
+
 	def _on_kind_changed(self, kind_key: str) -> None:
 		"""Меняет состав формы под выбранный тип контента."""
 		self._kind = MediaKind(kind_key)
@@ -304,6 +319,7 @@ class QueueItemEditor(QWidget):
 		"""Показывает ряды вложения по типу и правит подсказку с пределом."""
 		is_text = self._kind is MediaKind.NONE
 		self._file_box.setVisible(not is_text)
+		self._refresh_preview()
 		self._rename_box.setVisible(not is_text)
 		self._text.setPlaceholderText(caption_placeholder(is_text))
 		# подпись к файлу вчетверо короче поста без вложения; предел
@@ -392,6 +408,7 @@ class QueueItemEditor(QWidget):
 			community_id=self._draft.community_id,
 			text=rich.text,
 			entities=rich.entities,
+			preview=self._preview.preview() if is_text else LinkPreview(),
 			media_path=None if is_text else media,
 			media_kind=MediaKind.NONE if is_text else self._kind,
 			when=self._when_row.when(),

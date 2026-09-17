@@ -61,6 +61,7 @@ from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityKind,
+	LinkPreview,
 	MediaKind,
 	UserbotRole,
 	limit_mb,
@@ -87,6 +88,7 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
 from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
+from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
 	queue_leading,
@@ -158,6 +160,10 @@ class PublishPage(ScrollArea):
 		self._text.setMinimumHeight(120)
 		layout.addWidget(self._post_text)
 		self._counter = CharCounter(self, layout, self._text)
+		# превью ссылки (ADR-0033, C3): только у поста без вложения
+		self._preview = PreviewRow(self, layout)
+		self._preview.changed.connect(self._refresh_preview)
+		self._text.textChanged.connect(self._refresh_preview)
 		self._build_caption_tools(layout)
 		self._build_file_row(layout)
 		self._build_markup_block(layout)
@@ -491,11 +497,16 @@ class PublishPage(ScrollArea):
 			+ (_actor_note(community) if community is not None else "")
 		)
 
+	def _refresh_preview(self) -> None:
+		"""Приводит ряд превью к тексту и типу поста."""
+		self._preview.refresh(self._post_text.rich(), self._kind is not MediaKind.NONE)
+
 	def _on_kind_changed(self, kind_key: str) -> None:
 		"""Меняет состав формы под выбранный тип контента."""
 		self._kind = MediaKind(kind_key)
 		is_text = self._kind is MediaKind.NONE
 		self._file_box.setVisible(not is_text)
+		self._refresh_preview()
 		self._text.setPlaceholderText(caption_placeholder(is_text))
 		# подпись к файлу вчетверо короче поста без вложения; маршрут
 		# и доступность кнопок тоже зависят от типа и файла
@@ -670,6 +681,7 @@ class PublishPage(ScrollArea):
 			when=self._when_row.when(),
 			rename_to=self._rename_to(),
 			topic_id=self._topics.topic_id(),
+			preview=self._preview.preview() if is_text else LinkPreview(),
 			markup=self._markup.markup(),
 			markup_first=self._markup.markup_first(),
 		)

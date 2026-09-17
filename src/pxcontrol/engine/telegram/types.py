@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from pxcontrol.engine.errors import EngineError
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # разбор клавиатуры и текста живёт в своих модулях,
 	# а они опираются на этот — ссылки держим для проверки типов
@@ -630,6 +633,82 @@ class UserbotProfile:
 
 
 @dataclass(frozen=True)
+class LinkPreview:
+	"""Как показать превью ссылки у текстового поста (ADR-0033, подача C3).
+
+	Превью — не часть текста и не вложение: Telegram собирает его сам
+	по первой ссылке. Управлять им можно тремя способами, и все три
+	просил владелец.
+
+	Attributes:
+		disabled: не показывать превью вовсе.
+		large: крупное превью (обычно Telegram выбирает размер сам).
+		above: превью над текстом, а не под ним.
+		url: какую ссылку показывать (пусто — первую в тексте).
+
+	У поста с вложением превью не бывает: там место занято файлом.
+	"""
+
+	disabled: bool = False
+	large: bool = False
+	above: bool = False
+	url: str = ""
+
+	def __bool__(self) -> bool:
+		"""Просили ли что-то, кроме обычного поведения Telegram."""
+		return self.disabled or self.large or self.above or bool(self.url)
+
+	@property
+	def needs_media(self) -> bool:
+		"""Нужен ли путь «превью отдельным вложением».
+
+		Крупное превью и превью над текстом Telegram принимает только
+		вместе с самой ссылкой (``InputMediaWebPage``) — обычной
+		отправкой текста их не задать. Выключение превью, наоборот,
+		задаётся флагом обычной отправки.
+		"""
+		return not self.disabled and (self.large or self.above)
+
+
+def preview_to_json(preview: LinkPreview) -> dict[str, object] | None:
+	"""Настройки превью в JSON для колонки БД (None — обычное поведение).
+
+	Пустая настройка даёт None: в базе не должно быть двух способов
+	сказать «как решит Telegram».
+	"""
+	if not preview:
+		return None
+	return {
+		"disabled": preview.disabled,
+		"large": preview.large,
+		"above": preview.above,
+		"url": preview.url,
+	}
+
+
+def preview_from_json(raw: object) -> LinkPreview:
+	"""Собирает настройки превью из значения колонки БД.
+
+	Повреждённая запись не роняет восстановление очереди: пост уедет
+	с обычным превью, а разбор останется в журнале — как у клавиатуры
+	и разметки текста.
+	"""
+	if not raw:
+		return LinkPreview()
+	try:
+		values = dict(raw)  # type: ignore[call-overload]
+		return LinkPreview(
+			disabled=bool(values.get("disabled")),
+			large=bool(values.get("large")),
+			above=bool(values.get("above")),
+			url=str(values.get("url", "")),
+		)
+	except (TypeError, ValueError):
+		logger.warning("Настройки превью в БД не разобрались — пост уедет с обычным.")
+		return LinkPreview()
+
+
+@dataclass(frozen=True)
 class OutgoingPost:
 	"""Исходящий пост для транспорта: текст или медиа с подписью.
 
@@ -640,6 +719,8 @@ class OutgoingPost:
 		text: текст поста или подпись к медиа.
 		entities: разметка текста (ADR-0033; пусто — обычный текст,
 			и тогда транспорт разбирает строку по-старому).
+		preview: как показать превью ссылки (у поста с вложением
+			превью не бывает).
 		media_path: путь к файлу вложения (None — чистый текст).
 		media_kind: тип вложения.
 		when: момент публикации (None — «сейчас»).
@@ -650,6 +731,7 @@ class OutgoingPost:
 
 	text: str = ""
 	entities: tuple[TextEntity, ...] = ()
+	preview: LinkPreview = field(default_factory=LinkPreview)
 	media_path: str | None = None
 	media_kind: MediaKind = MediaKind.NONE
 	when: datetime | None = None
