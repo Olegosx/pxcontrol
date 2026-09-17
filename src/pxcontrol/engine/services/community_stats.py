@@ -216,8 +216,15 @@ def analytics_to_payload(analytics: CommunityAnalytics) -> dict[str, Any]:
 	return payload
 
 
-def analytics_from_payload(payload: Any) -> CommunityAnalytics | None:
-	"""Словарь из БД → ряды; None — запись битая (в журнал, не наружу)."""
+def analytics_from_payload(
+	payload: Any, community_id: int | None = None
+) -> CommunityAnalytics | None:
+	"""Словарь из БД → ряды; None — запись битая (в журнал, не наружу).
+
+	``community_id`` попадает в запись журнала: без него по «не разобрана»
+	не понять, у какого сообщества «Обзор» молча перешёл на локальные
+	снимки вместо рядов Telegram.
+	"""
 
 	def points(raw: Any) -> tuple[DayPoint, ...]:
 		return tuple(DayPoint(date.fromisoformat(day), int(value)) for day, value in raw)
@@ -271,7 +278,13 @@ def analytics_from_payload(payload: Any) -> CommunityAnalytics | None:
 			**extras,  # ключи — поля границы
 		)
 	except (KeyError, TypeError, ValueError, AttributeError):
-		logger.warning("Запись статистики Telegram не разобрана — считаю, что её нет.")
+		# чья запись и что именно сломалось: без этого по журналу не понять,
+		# у какого сообщества «Обзор» молча перешёл на локальные снимки
+		logger.warning(
+			"Запись статистики Telegram%s не разобрана — считаю, что её нет.",
+			f" сообщества id={community_id}" if community_id is not None else "",
+			exc_info=True,
+		)
 		return None
 
 
@@ -377,7 +390,7 @@ class CommunityStatsService:
 		# статистика Telegram годится, только пока сервер подтверждает
 		# доступ: право могли отобрать, а прежний ответ остался в кэше
 		analytics = (
-			analytics_from_payload(analytics_row.payload)
+			analytics_from_payload(analytics_row.payload, community_id)
 			if analytics_row is not None and row is not None and row.can_view_stats
 			else None
 		)
