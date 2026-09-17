@@ -35,6 +35,7 @@ from pxcontrol.engine.jobs import Job, JobCancelled, JobDeferred, JobQueue, JobS
 from pxcontrol.engine.services.markups import MarkupsService
 from pxcontrol.engine.services.posts import (
 	MIN_SCHEDULE_AHEAD,
+	MediaFile,
 	PostDraft,
 	PostError,
 	PostNotReadyError,
@@ -42,6 +43,8 @@ from pxcontrol.engine.services.posts import (
 	PublishOutcome,
 	TextLimits,
 	check_text_length,
+	media_from_json,
+	media_to_json,
 	refresh_draft_media,
 	text_preview,
 )
@@ -99,10 +102,11 @@ class QueueItemDto:
 		progress: доля загрузки 0.0..1.0 (для отправляющегося).
 		error: текст ошибки (для статуса ERROR).
 		note: пометка состояния для карточки (флуд-пауза); None — нет.
-		media_path: путь к вложению (None — пост без файла). Карточка
-			даёт по нему посмотреть файл системным приложением: пока
-			пост ждёт слота, это единственный способ увидеть, что
+		media_path: путь к **первому** вложению (None — пост без файла).
+			Карточка даёт по нему посмотреть файл системным приложением:
+			пока пост ждёт слота, это единственный способ увидеть, что
 			именно уйдёт (файл уже уехал из «Готовых видео»).
+		files: сколько файлов у поста (больше одного — альбом).
 	"""
 
 	id: int
@@ -115,6 +119,7 @@ class QueueItemDto:
 	error: str | None
 	note: str | None = None
 	media_path: str | None = None
+	files: int = 0
 
 	@property
 	def scheduled(self) -> bool:
@@ -157,14 +162,22 @@ class _PublishJob(Job):
 			progress=self.progress,
 			error=self.error,
 			note=self.note,
-			media_path=self.draft.media_path,
+			media_path=self.draft.media[0].path if self.draft.media else None,
+			files=len(self.draft.media),
 		)
 
 
 def _draft_title(draft: PostDraft) -> str:
-	"""Заголовок элемента: имя файла, иначе начало текста."""
-	if draft.media_path is not None:
-		return (draft.rename_to or Path(draft.media_path).name).strip()
+	"""Заголовок элемента: имя файла, иначе начало текста.
+
+	У альбома — имя первого файла и счёт остальных: список из десяти
+	имён в строку карточки не влезет, а первое имя обычно и есть
+	название всего пакета.
+	"""
+	if draft.media:
+		first = draft.media[0]
+		name = (first.rename_to or Path(first.path).name).strip()
+		return f"{name} + ещё {len(draft.media) - 1}" if draft.is_album else name
 	return text_preview(draft.text.strip(), _TITLE_PREVIEW_CHARS)
 
 
@@ -290,10 +303,8 @@ class PublishQueue:
 				PostDraft(
 					community_id=row.community_id,
 					text=row.text,
-					media_path=row.media_path,
-					media_kind=MediaKind(row.media_kind),
+					media=media_from_json(row.media),
 					when=as_utc_optional(row.when),
-					rename_to=row.rename_to,
 					topic_id=row.topic_id,
 					markup=markup_from_json(row.markup),
 					markup_first=row.markup_first,
@@ -352,7 +363,7 @@ class PublishQueue:
 			check_text_length(
 				draft.text,
 				limits[draft.community_id].for_draft(draft),
-				draft.media_path is not None,
+				draft.with_media,
 			)
 		for draft in drafts:
 			# кнопки проверяются при постановке, а не при отправке: отказ
@@ -365,10 +376,8 @@ class PublishQueue:
 				PublishQueueItem(
 					community_id=draft.community_id,
 					text=draft.text,
-					media_path=draft.media_path,
-					media_kind=str(draft.media_kind),
+					media=media_to_json(draft.media),
 					when=draft.when,
-					rename_to=draft.rename_to,
 					topic_id=draft.topic_id,
 					markup=markup_to_json(draft.markup),
 					markup_first=draft.markup_first,
@@ -524,9 +533,11 @@ class PublishQueue:
 			except BaseException:
 				await self._unstash_moved(moved)
 				raise
-			if current.media_path is not None and current.media_path != stashed.media_path:
-				# прежнее вложение больше не принадлежит очереди
-				await self._posts.unstash_from_queue(current.media_path)
+			kept = {file.path for file in stashed.media}
+			for file in current.media:
+				if file.path not in kept:
+					# прежнее вложение больше не принадлежит очереди
+					await self._posts.unstash_from_queue(file.path)
 			item.draft = stashed
 			item.status = status
 			item.progress = 0.0
@@ -576,14 +587,15 @@ class PublishQueue:
 		Raises:
 			PostError: Файл конвейера отправляется не как видео.
 		"""
-		if draft.media_path is None or draft.media_kind is MediaKind.VIDEO:
-			return
-		if self._posts.pipeline_file(draft.media_path):
-			raise PostError(
-				f"«{Path(draft.media_path).name}» — файл конвейера обработки видео, "
-				"отправить его можно только видео. Чтобы отправить его как фото "
-				"или документ, скопируйте файл в другую папку."
-			)
+		for file in draft.media:
+			if file.kind is MediaKind.VIDEO:
+				continue
+			if self._posts.pipeline_file(file.path):
+				raise PostError(
+					f"«{Path(file.path).name}» — файл конвейера обработки видео, "
+					"отправить его можно только видео. Чтобы отправить его как фото "
+					"или документ, скопируйте файл в другую папку."
+				)
 
 	async def drop_community(self, community_id: int) -> None:
 		"""Снимает все элементы канала из очереди (канал удаляется).
@@ -874,13 +886,16 @@ class PublishQueue:
 		moved: list[str] = []
 		try:
 			for draft in drafts:
-				if draft.media_path is None:
+				if not draft.media:
 					stashed.append(draft)
 					continue
-				new_path = await self._posts.stash_for_queue(draft.media_path, draft.media_kind)
-				if new_path != draft.media_path:
-					moved.append(new_path)
-				stashed.append(replace(draft, media_path=new_path))
+				files: list[MediaFile] = []
+				for file in draft.media:
+					new_path = await self._posts.stash_for_queue(file.path, file.kind)
+					if new_path != file.path:
+						moved.append(new_path)
+					files.append(replace(file, path=new_path))
+				stashed.append(replace(draft, media=tuple(files)))
 		except BaseException:
 			await self._unstash_moved(moved)
 			raise
@@ -919,10 +934,8 @@ class PublishQueue:
 				.where(PublishQueueItem.id == item_id)
 				.values(
 					text=draft.text,
-					media_path=draft.media_path,
-					media_kind=str(draft.media_kind),
+					media=media_to_json(draft.media),
 					when=draft.when,
-					rename_to=draft.rename_to,
 					topic_id=draft.topic_id,
 					markup=markup_to_json(draft.markup),
 					markup_first=draft.markup_first,
@@ -976,9 +989,12 @@ class PublishQueue:
 	async def _leave_queue(self, item: _PublishJob) -> None:
 		"""Элемент покидает очередь без отправки: строка — долой, файл — назад."""
 		await self._delete_row(item.id)
-		if item.draft.media_path is not None:
-			returned = await self._posts.unstash_from_queue(item.draft.media_path)
-			item.draft = replace(item.draft, media_path=returned)
+		if item.draft.media:
+			files = [
+				replace(file, path=await self._posts.unstash_from_queue(file.path))
+				for file in item.draft.media
+			]
+			item.draft = replace(item.draft, media=tuple(files))
 
 	# --- отправка -------------------------------------------------------------
 

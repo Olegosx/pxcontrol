@@ -16,6 +16,7 @@ from pxcontrol.engine.db.models import Community, PublishQueueItem, TgAccount
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.markups import MarkupsService
 from pxcontrol.engine.services.posts import (
+	MediaFile,
 	PostDraft,
 	PostError,
 	PostsService,
@@ -256,9 +257,7 @@ async def test_dto_titles_and_flags(db: Database, make_queue: QueueFactory, tmp_
 	await queue.enqueue(
 		PostDraft(
 			community_id,
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
-			rename_to="Новое имя.mp4",
+			media=(MediaFile(str(video), MediaKind.VIDEO, "Новое имя.mp4"),),
 		)
 	)
 	when = datetime.now(UTC) + timedelta(hours=1)
@@ -303,8 +302,7 @@ async def test_retry_validates_draft_again(
 		PostDraft(
 			community_id,
 			text="с файлом",
-			media_path=str(attachment),
-			media_kind=MediaKind.DOCUMENT,
+			media=(MediaFile(str(attachment), MediaKind.DOCUMENT),),
 		)
 	)
 	failed = await _wait_status(queue, item, JobStatus.ERROR)
@@ -331,9 +329,7 @@ async def test_retry_after_rename_uses_new_name(
 		PostDraft(
 			community_id,
 			text="с файлом",
-			media_path=str(attachment),
-			media_kind=MediaKind.DOCUMENT,
-			rename_to="новое.pdf",
+			media=(MediaFile(str(attachment), MediaKind.DOCUMENT, "новое.pdf"),),
 		)
 	)
 	await _wait_status(queue, item, JobStatus.ERROR)
@@ -342,7 +338,7 @@ async def test_retry_after_rename_uses_new_name(
 	await queue.retry(item)
 	await _wait_status(queue, item, JobStatus.DONE)
 	published = gateway.published[0]
-	assert published.media_path == str(tmp_path / "новое.pdf")
+	assert published.files[0].path == str(tmp_path / "новое.pdf")
 
 
 async def test_retry_ignores_unfinished(db: Database, make_queue: QueueFactory) -> None:
@@ -652,9 +648,7 @@ async def test_enqueue_stashes_file_and_cancel_returns_it(
 	queue = make_queue(gateway)
 	community_id = await _add_community(db)
 	item = await queue.enqueue(
-		PostDraft(
-			community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120)
-		)
+		PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),), when=_future(120))
 	)
 	await _wait_status(queue, item, JobStatus.WAITING)
 	queued = tmp_path / "media" / "queued" / "суб" / "ролик.mp4"
@@ -677,7 +671,7 @@ async def test_sent_file_moves_from_queued_to_published(
 	queue = make_queue(gateway)
 	community_id = await _add_community(db)
 	item = await queue.enqueue(
-		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO)
+		PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),))
 	)
 	await _wait_status(queue, item, JobStatus.DONE)
 	published = tmp_path / "media" / "published" / "суб" / "ролик.mp4"
@@ -697,15 +691,13 @@ async def test_stash_collision_rejects_batch(
 	queue = make_queue(gateway)
 	community_id = await _add_community(db)
 	await queue.enqueue(
-		PostDraft(
-			community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120)
-		)
+		PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),), when=_future(120))
 	)
 	twin = _make_video(processed)  # обработали заново под тем же именем
 	with pytest.raises(PostError, match="уже есть файл"):
 		await queue.enqueue(
 			PostDraft(
-				community_id, media_path=str(twin), media_kind=MediaKind.VIDEO, when=_future(180)
+				community_id, media=(MediaFile(str(twin), MediaKind.VIDEO),), when=_future(180)
 			)
 		)
 	assert twin.is_file()  # отклонённый пакет не трогает диск
@@ -725,7 +717,7 @@ async def test_enqueue_rejects_non_video_from_processed(
 	community_id = await _add_community(db)
 	with pytest.raises(PostError, match="только видео"):
 		await queue.enqueue(
-			PostDraft(community_id, media_path=str(photo), media_kind=MediaKind.PHOTO)
+			PostDraft(community_id, media=(MediaFile(str(photo), MediaKind.PHOTO),))
 		)
 	assert photo.is_file()  # файл остался в результатах
 	assert await queue.state() == []  # постановка атомарна — очередь пуста
@@ -762,9 +754,7 @@ async def test_drop_community_removes_items_and_returns_files(
 	queue = make_queue(gateway)
 	community_id = await _add_community(db)
 	item = await queue.enqueue(
-		PostDraft(
-			community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120)
-		)
+		PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),), when=_future(120))
 	)
 	await _wait_status(queue, item, JobStatus.WAITING)
 	assert not video.exists()  # файл ушёл в папку очереди
@@ -1114,7 +1104,7 @@ async def test_edit_replaces_media_file(
 	community_id = await _add_community(db)
 	when = _future(120)
 	item = await queue.enqueue(
-		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=when)
+		PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),), when=when)
 	)
 	await _wait_status(queue, item, JobStatus.WAITING)
 	queued_root = tmp_path / "media" / "queued" / "суб"
@@ -1122,8 +1112,7 @@ async def test_edit_replaces_media_file(
 		item,
 		PostDraft(
 			community_id,
-			media_path=str(replacement),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(replacement), MediaKind.VIDEO),),
 			when=when,
 		),
 	)
@@ -1145,14 +1134,14 @@ async def test_edit_drops_media_and_returns_file(
 	community_id = await _add_community(db)
 	when = _future(120)
 	item = await queue.enqueue(
-		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=when)
+		PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),), when=when)
 	)
 	await _wait_status(queue, item, JobStatus.WAITING)
 	await queue.edit(item, PostDraft(community_id, text="теперь просто текст", when=when))
 	assert video.is_file() and video.with_suffix(".png").is_file()
 	assert not (tmp_path / "media" / "queued" / "суб" / "ролик.mp4").exists()
 	draft = await queue.get_draft(item)
-	assert draft.media_path is None and draft.media_kind is MediaKind.NONE
+	assert draft.media == ()
 
 
 async def test_edit_adds_media_to_text_post(
@@ -1173,8 +1162,7 @@ async def test_edit_adds_media_to_text_post(
 		PostDraft(
 			community_id,
 			text="подпись",
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 			when=when,
 		),
 	)
@@ -1236,8 +1224,7 @@ async def test_worker_skips_item_while_edit_is_saving(
 			PostDraft(
 				community_id,
 				text="правится",
-				media_path=str(video),
-				media_kind=MediaKind.VIDEO,
+				media=(MediaFile(str(video), MediaKind.VIDEO),),
 			),
 		)
 	)
@@ -1248,7 +1235,7 @@ async def test_worker_skips_item_while_edit_is_saving(
 	proceed.set()
 	await editing
 	await _wait_status(queue, item, JobStatus.DONE)
-	assert [post.media_path for post in gateway.published][-1] is not None
+	assert gateway.published[-1].files, "последним ушёл правленый пост с файлом"
 
 
 async def test_edit_rejects_sending_item(db: Database, make_queue: QueueFactory) -> None:
@@ -1291,16 +1278,14 @@ async def test_edit_rejects_pipeline_file_as_document(
 	community_id = await _add_community(db)
 	when = _future(120)
 	item = await queue.enqueue(
-		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=when)
+		PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),), when=when)
 	)
 	await _wait_status(queue, item, JobStatus.WAITING)
 	queued = tmp_path / "media" / "queued" / "суб" / "ролик.mp4"
 	with pytest.raises(PostError, match="только видео"):
 		await queue.edit(
 			item,
-			PostDraft(
-				community_id, media_path=str(queued), media_kind=MediaKind.DOCUMENT, when=when
-			),
+			PostDraft(community_id, media=(MediaFile(str(queued), MediaKind.DOCUMENT),), when=when),
 		)
 	assert queued.is_file()  # отклонённая правка не трогает диск
 	assert (await queue.get_draft(item)).media_kind is MediaKind.VIDEO
@@ -1374,9 +1359,7 @@ async def test_state_carries_media_path_from_queue_folder(
 	queue = make_queue(gateway)
 	community_id = await _add_community(db)
 	item = await queue.enqueue(
-		PostDraft(
-			community_id, media_path=str(video), media_kind=MediaKind.VIDEO, when=_future(120)
-		)
+		PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),), when=_future(120))
 	)
 	await _wait_status(queue, item, JobStatus.WAITING)
 	shown = (await _statuses(queue))[item]
@@ -1573,8 +1556,7 @@ async def test_markup_failure_notes_card_and_keeps_promise(
 		PostDraft(
 			community_id,
 			text="подпись",
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 			markup=markup,
 		)
 	)

@@ -41,6 +41,7 @@ from pxcontrol.engine.services.captions import (
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.posts import (
+	MediaFile,
 	PostDraft,
 	TextLimits,
 )
@@ -676,10 +677,8 @@ class PublishPage(ScrollArea):
 			community_id=community_id,
 			text=rich.text,
 			entities=rich.entities,
-			media_path=None if is_text else media,
-			media_kind=MediaKind.NONE if is_text else self._kind,
+			media=() if is_text else (MediaFile(media or "", self._kind, self._rename_to()),),
 			when=self._when_row.when(),
-			rename_to=self._rename_to(),
 			topic_id=self._topics.topic_id(),
 			preview=self._preview.preview() if is_text else LinkPreview(),
 			markup=self._markup.markup(),

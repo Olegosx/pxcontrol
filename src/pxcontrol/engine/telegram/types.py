@@ -709,6 +709,22 @@ def preview_from_json(raw: object) -> LinkPreview:
 
 
 @dataclass(frozen=True)
+class OutgoingFile:
+	"""Файл исходящего поста: путь, вид и миниатюра.
+
+	Attributes:
+		path: путь к файлу на диске.
+		kind: вид вложения.
+		thumb_path: JPEG-миниатюра видео (None — без неё). У альбома
+			миниатюр нет: Telegram берёт их из самих файлов.
+	"""
+
+	path: str
+	kind: MediaKind
+	thumb_path: str | None = None
+
+
+@dataclass(frozen=True)
 class OutgoingPost:
 	"""Исходящий пост для транспорта: текст или медиа с подписью.
 
@@ -721,10 +737,9 @@ class OutgoingPost:
 			и тогда транспорт разбирает строку по-старому).
 		preview: как показать превью ссылки (у поста с вложением
 			превью не бывает).
-		media_path: путь к файлу вложения (None — чистый текст).
-		media_kind: тип вложения.
+		files: файлы поста: пусто — текст, один — обычное вложение,
+			несколько — альбом (ADR-0033, подача C4).
 		when: момент публикации (None — «сейчас»).
-		thumb_path: JPEG-миниатюра видео (None — без неё).
 		topic_id: тема форума (id корневого сообщения темы;
 			None — общая лента, для каналов и обычных групп всегда None).
 	"""
@@ -732,11 +747,19 @@ class OutgoingPost:
 	text: str = ""
 	entities: tuple[TextEntity, ...] = ()
 	preview: LinkPreview = field(default_factory=LinkPreview)
-	media_path: str | None = None
-	media_kind: MediaKind = MediaKind.NONE
+	files: tuple[OutgoingFile, ...] = ()
 	when: datetime | None = None
-	thumb_path: str | None = None
 	topic_id: int | None = None
+
+	@property
+	def single(self) -> OutgoingFile | None:
+		"""Единственный файл поста (None — текст или альбом)."""
+		return self.files[0] if len(self.files) == 1 else None
+
+	@property
+	def is_album(self) -> bool:
+		"""Пост — альбом: несколько файлов одной записью."""
+		return len(self.files) > 1
 
 
 #: Тема «General» форума: её id всегда 1, публикация в неё — обычная

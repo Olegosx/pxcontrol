@@ -10,7 +10,7 @@ from __future__ import annotations
 import html
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -485,6 +485,64 @@ async def send_media(
 					message_thread_id=topic_id,
 				)
 			return int(message.message_id)
+	finally:
+		await bot.session.close()
+
+
+async def send_album(
+	token: str,
+	chat_id: str,
+	files: Sequence[tuple[MediaKind, str]],
+	caption: str,
+	topic_id: int | None = None,
+	entities: tuple[TextEntity, ...] = (),
+) -> int:
+	"""Отправляет альбом через Bot API (лимит — 50 МБ на файл).
+
+	Подпись достаётся первому файлу — так альбом устроен у самого
+	Telegram. Кнопок у альбома не бывает (ADR-0031), поэтому клавиатуры
+	здесь нет вовсе.
+
+	Returns:
+		ID первого сообщения альбома.
+
+	Raises:
+		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
+		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
+		CommunityCheckError: Telegram отклонил отправку (нет прав, размер).
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	from aiogram.types import (
+		FSInputFile,
+		InputMediaAudio,
+		InputMediaDocument,
+		InputMediaPhoto,
+		InputMediaVideo,
+	)
+
+	builders: dict[MediaKind, Any] = {
+		MediaKind.PHOTO: InputMediaPhoto,
+		MediaKind.VIDEO: InputMediaVideo,
+		MediaKind.AUDIO: InputMediaAudio,
+		MediaKind.DOCUMENT: InputMediaDocument,
+	}
+	bot = _make_bot(token)
+	text = post_html(caption, entities) if caption else None
+	group = [
+		builders[kind](
+			media=FSInputFile(path),
+			# подпись — только у первого: остальные идут без неё
+			caption=text if index == 0 else None,
+			parse_mode="HTML" if index == 0 else None,
+		)
+		for index, (kind, path) in enumerate(files)
+	]
+	try:
+		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
+			messages = await bot.send_media_group(
+				_chat_id(chat_id), group, message_thread_id=topic_id
+			)
+			return int(messages[0].message_id)
 	finally:
 		await bot.session.close()
 

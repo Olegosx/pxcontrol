@@ -411,11 +411,12 @@ class PublishQueueItem(TimestampMixin, Base):
 	id: Mapped[int] = mapped_column(primary_key=True)
 	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
 	text: Mapped[str] = mapped_column(Text)
-	media_path: Mapped[str | None] = mapped_column(String(1024))
-	media_kind: Mapped[str] = mapped_column(String(16))
+	# файлы поста (ADR-0033, подача C4), формат — media_to_json:
+	# NULL — текстовый пост, один элемент — обычное вложение,
+	# несколько — альбом. До C4 файл был один и жил тремя колонками
+	media: Mapped[Any | None] = mapped_column(JSON, default=None)
 	# желаемый момент публикации (UTC); NULL — «сейчас»
 	when: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-	rename_to: Mapped[str | None] = mapped_column(String(255))
 	# тема форума (id корневого сообщения темы); NULL — общая лента (ADR-0021)
 	topic_id: Mapped[int | None] = mapped_column(Integer)
 	# pending — готов к отправке; waiting — ждёт слота отложек; error

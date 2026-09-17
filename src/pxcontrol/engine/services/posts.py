@@ -13,11 +13,11 @@ import asyncio
 import logging
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -61,6 +61,7 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	LinkPreview,
 	MediaKind,
+	OutgoingFile,
 	OutgoingPost,
 	PublishedMessage,
 	PublishedPage,
@@ -215,7 +216,7 @@ class TextLimits:
 
 	def for_draft(self, draft: PostDraft) -> int:
 		"""Предел, действующий для этого черновика."""
-		return self.caption if draft.media_path is not None else self.text
+		return self.caption if draft.with_media else self.text
 
 
 def check_text_length(text: str, limit: int, with_media: bool) -> None:
@@ -259,6 +260,31 @@ def text_preview(text: str, limit: int) -> str:
 	return f"{text[: limit - 1]}…"
 
 
+#: Сколько файлов Telegram принимает одним альбомом (ADR-0033, C4).
+MAX_ALBUM_FILES = 10
+
+
+@dataclass(frozen=True)
+class MediaFile:
+	"""Один файл поста: путь, вид и имя, под которым он уйдёт.
+
+	Пост — это текст и **список** файлов: ноль (текстовый пост), один
+	(обычное вложение) или несколько (альбом, ADR-0033 подача C4).
+	Прежде файл был один и жил тремя полями черновика; список сделал
+	альбом выразимым, а одиночный пост — его частным случаем.
+
+	Attributes:
+		path: путь к файлу на диске.
+		kind: вид вложения.
+		rename_to: новое имя файла (без пути) перед отправкой; вместе
+			с файлом переименовывается его кадр-превью (сосед ``.png``).
+	"""
+
+	path: str
+	kind: MediaKind
+	rename_to: str | None = None
+
+
 @dataclass(frozen=True)
 class PostDraft:
 	"""Черновик публикации — единая сущность для всех типов контента.
@@ -266,11 +292,9 @@ class PostDraft:
 	Attributes:
 		community_id: подключённый канал (id в нашей БД).
 		text: текст поста или подпись к медиа.
-		media_path: путь к файлу вложения (None — чистый текст).
-		media_kind: тип вложения.
+		media: файлы поста: пусто — текст, один — обычное вложение,
+			несколько — альбом (ADR-0033, подача C4).
 		when: момент публикации (None — «сейчас»).
-		rename_to: новое имя файла (без пути) перед отправкой; вместе
-			с файлом переименовывается его кадр-превью (сосед ``.png``).
 		topic_id: тема форума (id корневого сообщения; None — общая
 			лента; допустима только у сообществ с включёнными темами).
 		markup: клавиатура под постом (None — кнопок нет). Ставит её
@@ -286,10 +310,8 @@ class PostDraft:
 
 	community_id: int
 	text: str = ""
-	media_path: str | None = None
-	media_kind: MediaKind = MediaKind.NONE
+	media: tuple[MediaFile, ...] = ()
 	when: datetime | None = None
-	rename_to: str | None = None
 	topic_id: int | None = None
 	markup: PostMarkup | None = None
 	markup_first: bool = False
@@ -304,6 +326,102 @@ class PostDraft:
 	def rich(self) -> RichText:
 		"""Текст поста вместе с его разметкой — как его видит Telegram."""
 		return RichText(self.text, self.entities)
+
+	@property
+	def with_media(self) -> bool:
+		"""Есть ли у поста вложение (хоть одно)."""
+		return bool(self.media)
+
+	@property
+	def is_album(self) -> bool:
+		"""Пост — альбом: несколько файлов одной записью."""
+		return len(self.media) > 1
+
+	@property
+	def media_kind(self) -> MediaKind:
+		"""Вид первого вложения (``NONE`` — текстовый пост).
+
+		У альбома вид первого файла задаёт его характер для показа:
+		мешать документы с фото и видео Telegram всё равно не даёт
+		(:func:`album_blocker`).
+		"""
+		return self.media[0].kind if self.media else MediaKind.NONE
+
+
+def media_to_json(media: Sequence[MediaFile]) -> list[dict[str, str | None]] | None:
+	"""Файлы поста в JSON для колонки БД (None — текстовый пост)."""
+	if not media:
+		return None
+	return [
+		{"path": file.path, "kind": str(file.kind), "rename_to": file.rename_to} for file in media
+	]
+
+
+def media_from_json(raw: object) -> tuple[MediaFile, ...]:
+	"""Собирает файлы поста из значения колонки БД.
+
+	Повреждённая запись не роняет восстановление очереди: такой элемент
+	станет текстовым постом и будет отвергнут проверкой при отправке —
+	с понятной причиной, а не падением при старте.
+	"""
+	if not raw:
+		return ()
+	try:
+		items: list[Any] = list(raw)  # type: ignore[call-overload]
+		return tuple(
+			MediaFile(
+				path=str(item["path"]),
+				kind=MediaKind(item["kind"]),
+				rename_to=item.get("rename_to") or None,
+			)
+			for item in items
+		)
+	except (TypeError, KeyError, ValueError):
+		logger.warning("Файлы поста в БД не разобрались — элемент остался без вложений.")
+		return ()
+
+
+def album_blocker(media: Sequence[MediaFile], *, with_markup: bool) -> str | None:
+	"""Что мешает отправить эти файлы одним постом (None — ничего).
+
+	Правила Telegram, а не наши: альбом — до десяти файлов; фото и видео
+	группируются вместе, документы — только с документами, музыка —
+	только с музыкой; кнопок у альбома не бывает вовсе (проверено
+	живьём 15.09.2026, ADR-0031). Чистая функция: то же правило
+	показывает форма и проверяет движок.
+	"""
+	if len(media) <= 1:
+		return None
+	if len(media) > MAX_ALBUM_FILES:
+		return (
+			f"В альбоме не больше {MAX_ALBUM_FILES} файлов, а выбрано {len(media)} — "
+			"уберите лишние или отправьте двумя постами."
+		)
+	if with_markup:
+		return "У альбома не бывает кнопок — снимите их или отправьте файлы по одному."
+	groups = {_album_group(file.kind) for file in media}
+	if len(groups) > 1:
+		return (
+			"Telegram не смешивает в альбоме фото и видео с документами и музыкой — "
+			"разложите такие файлы по разным постам."
+		)
+	return None
+
+
+def _album_group(kind: MediaKind) -> str:
+	"""Группа совместимости вложения внутри альбома."""
+	if kind in (MediaKind.PHOTO, MediaKind.VIDEO):
+		return "visual"
+	return str(kind)
+
+
+def _media_note(draft: PostDraft) -> str:
+	"""Чем пост наполнен — строкой для журнала («текст», «видео», «альбом…»)."""
+	if not draft.media:
+		return "текст"
+	if draft.is_album:
+		return f"альбом из {len(draft.media)}"
+	return str(draft.media[0].kind)
 
 
 def _free_name(target: Path) -> Path:
@@ -340,15 +458,20 @@ def refresh_draft_media(draft: PostDraft) -> PostDraft:
 	``rename_to`` в той же папке есть — черновик указывает на него,
 	и повторное переименование снимается.
 	"""
-	if draft.media_path is None or not draft.rename_to:
-		return draft
-	source = Path(draft.media_path)
-	if source.is_file():
-		return draft
-	target = source.with_name(draft.rename_to)
-	if target.is_file():
-		return replace(draft, media_path=str(target), rename_to=None)
-	return draft
+	updated: list[MediaFile] = []
+	changed = False
+	for file in draft.media:
+		source = Path(file.path)
+		if not file.rename_to or source.is_file():
+			updated.append(file)
+			continue
+		target = source.with_name(file.rename_to)
+		if target.is_file():
+			updated.append(replace(file, path=str(target), rename_to=None))
+			changed = True
+		else:
+			updated.append(file)
+	return replace(draft, media=tuple(updated)) if changed else draft
 
 
 class _PostPort(Protocol):
@@ -390,6 +513,16 @@ class _PostPort(Protocol):
 		caption: str,
 		topic_id: int | None = None,
 		markup: PostMarkup | None = None,
+		entities: tuple[TextEntity, ...] = (),
+	) -> int: ...
+
+	async def bot_send_album(
+		self,
+		bot: BotRef,
+		chat_id: str,
+		files: Sequence[tuple[MediaKind, str]],
+		caption: str,
+		topic_id: int | None = None,
 		entities: tuple[TextEntity, ...] = (),
 	) -> int: ...
 
@@ -475,15 +608,21 @@ class PublishPlan:
 	Attributes:
 		draft: черновик (после снятия просрочки, если она была).
 		community: канал-получатель (строка БД с привязками).
-		media_path: путь файла после переименования; None — текст.
+		files: файлы поста после переименования (пусто — текст;
+			несколько — альбом).
 		route: каким путём уходит пост (ADR-0031): публикатор, бот
 			или «публикатор отправил — бот дорисовал кнопки».
 	"""
 
 	draft: PostDraft
 	community: Community
-	media_path: str | None
+	files: tuple[MediaFile, ...]
 	route: PublishRoute
+
+	@property
+	def single_path(self) -> str | None:
+		"""Путь единственного файла (None — текст или альбом)."""
+		return self.files[0].path if len(self.files) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -893,10 +1032,13 @@ class PostsService:
 			markup_first=draft.markup_first,
 		)
 		self._check_transport(route, draft, community.default_tg_account_id)
-		media_path = draft.media_path
-		if media_path is not None and draft.rename_to:
-			media_path = self._apply_rename(media_path, draft.rename_to)
-		return PublishPlan(draft=draft, community=community, media_path=media_path, route=route)
+		files = tuple(
+			replace(file, path=self._apply_rename(file.path, file.rename_to), rename_to=None)
+			if file.rename_to
+			else file
+			for file in draft.media
+		)
+		return PublishPlan(draft=draft, community=community, files=files, route=route)
 
 	@staticmethod
 	def _markup_blocker(community: Community, draft: PostDraft, over_bot_limit: bool) -> str | None:
@@ -936,9 +1078,7 @@ class PostsService:
 		Размер решает выбор маршрута: пост, который бот может отправить
 		сам, уходит одним вызовом и с кнопками сразу (ADR-0031, п. 2a).
 		"""
-		if draft.media_path is None:
-			return False
-		return self._file_size(draft.media_path) > BOT_MAX_FILE_BYTES
+		return any(self._file_size(file.path) > BOT_MAX_FILE_BYTES for file in draft.media)
 
 	async def transmit(
 		self, plan: PublishPlan, on_progress: ProgressCallback | None = None
@@ -960,12 +1100,10 @@ class PostsService:
 		markup_pending = False
 		if plan.route is PublishRoute.BOT:
 			# бот отправляет сам — кнопки уходят вместе с постом
-			message_id = await self._publish_bot(plan.community, draft, plan.media_path)
+			message_id = await self._publish_bot(plan.community, draft, plan.files)
 			markup_error = None
 		else:
-			message_id = await self._publish_userbot(
-				plan.community, draft, plan.media_path, on_progress
-			)
+			message_id = await self._publish_userbot(plan.community, draft, plan.files, on_progress)
 			markup_error = None
 			if plan.route is PublishRoute.USERBOT_MARKUP and draft.when is not None:
 				# поста ещё нет в канале: его опубликует сервер Telegram,
@@ -976,7 +1114,7 @@ class PostsService:
 				markup_error = await self._apply_markup(plan, message_id)
 		logger.info(
 			"Пост (%s) → «%s» (%s, %s).",
-			draft.media_kind if draft.media_path else "текст",
+			_media_note(draft),
 			plan.community.title,
 			plan.route,
 			f"отложено на {draft.when}" if draft.when else "опубликовано",
@@ -1035,8 +1173,9 @@ class PostsService:
 		Сбой переноса публикацию не отменяет: он вспомогательный,
 		и след о нём остаётся в журнале.
 		"""
-		if plan.draft.media_kind is MediaKind.VIDEO and plan.media_path is not None:
-			await self._move_to_published(plan.media_path)
+		for file in plan.files:
+			if file.kind is MediaKind.VIDEO:
+				await self._move_to_published(file.path)
 
 	def _check_transport(
 		self, route: PublishRoute, draft: PostDraft, account_id: int | None
@@ -1060,15 +1199,15 @@ class PostsService:
 			PostError: Текст длиннее предела или файл больше лимита
 				выбранного транспорта.
 		"""
-		media_path = draft.media_path
-		with_media = media_path is not None
+		with_media = draft.with_media
+		biggest = max((self._file_size(file.path) for file in draft.media), default=0)
 		if route_uses_userbot(route):
 			premium = self._gateway.userbot_premium(account_id)
 			# длина — рядом с размером файла: оба предела зависят от того,
 			# чьей сессией уходит пост (Premium аккаунта канала, ADR-0019)
 			check_text_length(draft.text, text_length_limit(premium, with_media), with_media)
 			limit = userbot_max_file_bytes(premium)
-			if media_path is not None and self._file_size(media_path) > limit:
+			if biggest > limit:
 				raise PostError(
 					f"Файл больше {limit_gb(limit)} ГБ — лимит Telegram на файл "
 					"для этого аккаунта. Уменьшите файл (например, битрейтом "
@@ -1084,7 +1223,7 @@ class PostsService:
 				"Отложенные посты требуют userbot-админа в сообществе — "
 				"через бота доступно только «сейчас»."
 			)
-		if media_path is not None and self._file_size(media_path) > BOT_MAX_FILE_BYTES:
+		if biggest > BOT_MAX_FILE_BYTES:
 			raise PostError(
 				f"Файл больше {limit_mb(BOT_MAX_FILE_BYTES)} МБ — лимит "
 				"отправки ботом. Добавьте userbot администратором канала "
@@ -1108,7 +1247,7 @@ class PostsService:
 		self,
 		community: Community,
 		draft: PostDraft,
-		media_path: str | None,
+		files: tuple[MediaFile, ...],
 		on_progress: ProgressCallback | None,
 	) -> int:
 		"""Полный путь через userbot: из сессии аккаунта канала (ADR-0019).
@@ -1124,19 +1263,24 @@ class PostsService:
 		if community.default_tg_account_id is None:  # publish() сюда без умолчания не приводит
 			raise PostError("У сообщества нет userbot-публикатора — проверьте доступы.")
 		with tempfile.TemporaryDirectory() as tmp:
+			# миниатюра — только у одиночного видео: в альбоме Telegram
+			# берёт обложки из самих файлов, а класть десяток временных
+			# кадров ради этого незачем
 			thumb: str | None = None
-			if draft.media_kind is MediaKind.VIDEO and media_path:
-				thumb = await asyncio.to_thread(self._video_thumbnail, media_path, tmp)
+			single = files[0] if len(files) == 1 else None
+			if single is not None and single.kind is MediaKind.VIDEO:
+				thumb = await asyncio.to_thread(self._video_thumbnail, single.path, tmp)
 			post = OutgoingPost(
 				text=draft.text,
 				entities=draft.entities,
 				# ссылку для превью выбираем здесь: транспорту нужен
 				# конкретный адрес, а человек обычно его не называет
 				preview=resolve_preview(draft.preview, draft.rich),
-				media_path=media_path,
-				media_kind=draft.media_kind,
+				files=tuple(
+					OutgoingFile(file.path, file.kind, thumb if file is single else None)
+					for file in files
+				),
 				when=draft.when,
-				thumb_path=thumb,
 				topic_id=draft.topic_id,
 			)
 			return await self._gateway.publish(
@@ -1144,7 +1288,7 @@ class PostsService:
 			)
 
 	async def _publish_bot(
-		self, community: Community, draft: PostDraft, media_path: str | None
+		self, community: Community, draft: PostDraft, files: tuple[MediaFile, ...]
 	) -> int:
 		"""Путь через бота: текст и медиа до 50 МБ, только «сейчас».
 
@@ -1158,7 +1302,16 @@ class PostsService:
 		if community.bot is None:  # publish() сюда без бота не приводит
 			raise PostError("У сообщества не назначен бот — переподключите его.")
 		bot = BotRef(community.bot.id, community.bot.token)
-		if media_path is None:
+		if len(files) > 1:
+			return await self._gateway.bot_send_album(
+				bot,
+				community.tg_chat_id,
+				[(file.kind, file.path) for file in files],
+				draft.text,
+				draft.topic_id,
+				entities=draft.entities,
+			)
+		if not files:
 			return await self._gateway.bot_send_text(
 				bot,
 				community.tg_chat_id,
@@ -1171,8 +1324,8 @@ class PostsService:
 		return await self._gateway.bot_send_media(
 			bot,
 			community.tg_chat_id,
-			draft.media_kind,
-			media_path,
+			files[0].kind,
+			files[0].path,
 			draft.text,
 			draft.topic_id,
 			markup=draft.markup,
@@ -1550,7 +1703,7 @@ class PostsService:
 			PostError: Сообщество не найдено или текст длиннее предела.
 		"""
 		limits = await self.text_limits(draft.community_id)
-		check_text_length(draft.text, limits.for_draft(draft), draft.media_path is not None)
+		check_text_length(draft.text, limits.for_draft(draft), draft.with_media)
 
 	async def community_title(self, community_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).
@@ -1603,8 +1756,11 @@ class PostsService:
 			MarkupError: Клавиатура не проходит пределы Telegram (ADR-0031).
 			RichTextError: Разметка текста разъехалась (ADR-0033).
 		"""
-		if not draft.text and draft.media_path is None:
+		if not draft.text and not draft.with_media:
 			raise PostError("Пост пуст — добавьте текст или файл.")
+		album_problem = album_blocker(draft.media, with_markup=draft.markup is not None)
+		if album_problem is not None:
+			raise PostError(album_problem)
 		if draft.markup is not None:
 			# пределы клавиатуры Telegram не объявляет и молча обрезает
 			# лишнее (ADR-0031, п. 11) — проверяем до отправки
@@ -1612,23 +1768,24 @@ class PostsService:
 		# разъехавшуюся разметку сервер отвергает невнятной ошибкой
 		# разбора, а то и молча теряет оформление (ADR-0033)
 		validate_rich_text(draft.rich)
-		if draft.media_path is not None and draft.preview:
+		if draft.with_media and draft.preview:
 			raise PostError("У поста с вложением превью ссылки не бывает — место занято файлом.")
 		if draft.preview.needs_media and not (draft.preview.url or first_link(draft.rich)):
 			raise PostError(
 				"Крупное превью и превью над текстом строятся по ссылке, "
 				"а в тексте поста ссылки нет."
 			)
-		with_media = draft.media_path is not None
+		with_media = draft.with_media
 		check_text_length(draft.text, text_length_limit(True, with_media), with_media)
-		if draft.rename_to:
-			PostsService.check_rename_name(draft.rename_to)
-		if draft.media_path is not None and draft.media_kind is MediaKind.NONE:
-			raise PostError("У вложения не указан тип контента.")
-		if not draft.media_kind.creatable:
-			raise PostError("Вложения такого вида приложение не отправляет.")
-		if draft.media_path is not None and not Path(draft.media_path).is_file():
-			raise PostError(f"Файл не найден: {draft.media_path}")
+		for file in draft.media:
+			if file.rename_to:
+				PostsService.check_rename_name(file.rename_to)
+			if file.kind is MediaKind.NONE:
+				raise PostError("У вложения не указан тип контента.")
+			if not file.kind.creatable:
+				raise PostError("Вложения такого вида приложение не отправляет.")
+			if not Path(file.path).is_file():
+				raise PostError(f"Файл не найден: {file.path}")
 		when = draft.when
 		if when is not None and when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
 			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")

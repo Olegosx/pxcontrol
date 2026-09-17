@@ -27,7 +27,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import PostDraft, TextLimits
+from pxcontrol.engine.services.posts import MediaFile, PostDraft, TextLimits
 from pxcontrol.engine.services.publish_route import choose_route, markup_blocker
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.rich_text import trimmed
@@ -268,7 +268,7 @@ class QueueItemEditor(QWidget):
 		row.setContentsMargins(0, 0, 0, 0)
 		self._file_edit = LineEdit(self._file_box)
 		self._file_edit.setPlaceholderText("Файл вложения…")
-		self._file_edit.setText(self._draft.media_path or "")
+		self._file_edit.setText(self._draft.media[0].path if self._draft.media else "")
 		row.addWidget(self._file_edit, stretch=1)
 		browse = PushButton("Обзор…", self._file_box)
 		browse.clicked.connect(self._pick_file)
@@ -280,13 +280,23 @@ class QueueItemEditor(QWidget):
 		layout.addWidget(self._file_box)
 		self._build_rename_row(layout)
 
+	@property
+	def _first_file(self) -> MediaFile | None:
+		"""Первый файл поста (None — текстовый).
+
+		Форма правит один файл: альбом в ней пока не разбирается —
+		у него своя подача (ADR-0033, C4b), а до неё список показывается
+		счётом в заголовке карточки.
+		"""
+		return self._draft.media[0] if self._draft.media else None
+
 	def _build_rename_row(self, layout: QVBoxLayout) -> None:
 		"""Строка переименования файла при отправке."""
 		row = rename_row(
 			self,
 			layout,
-			checked=bool(self._draft.rename_to),
-			name=self._draft.rename_to or "",
+			checked=bool(self._first_file.rename_to if self._first_file else None),
+			name=(self._first_file.rename_to if self._first_file else "") or "",
 		)
 		self._rename_box, self._rename_check, self._rename_edit = row.box, row.check, row.edit
 
@@ -409,10 +419,8 @@ class QueueItemEditor(QWidget):
 			text=rich.text,
 			entities=rich.entities,
 			preview=self._preview.preview() if is_text else LinkPreview(),
-			media_path=None if is_text else media,
-			media_kind=MediaKind.NONE if is_text else self._kind,
+			media=() if is_text else (MediaFile(media or "", self._kind, self._rename_to()),),
 			when=self._when_row.when(),
-			rename_to=self._rename_to(),
 			topic_id=self._selected_topic_id(),
 			markup=self._markup.markup(),
 			markup_first=self._markup.markup_first(),

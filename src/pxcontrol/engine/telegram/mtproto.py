@@ -595,6 +595,15 @@ def rich_from_telethon(text: str, entities: Any) -> RichText:
 	return RichText(text, tuple(result))
 
 
+def _post_note(post: OutgoingPost) -> str:
+	"""Чем пост наполнен — строкой для журнала («текст», «видео», «альбом…»)."""
+	if not post.files:
+		return "текст"
+	if post.is_album:
+		return f"альбом из {len(post.files)}"
+	return str(post.files[0].kind)
+
+
 def sent_message_id(result: Any, random_id: int) -> int:
 	"""Номер отправленного поста из ответа сырого запроса.
 
@@ -996,12 +1005,12 @@ class MtprotoTransport:
 			# (ADR-0033). Без разметки — прежний путь, как у старых
 			# элементов очереди: строку разбирает Telethon
 			styling = _styling(post.entities)
-			if post.media_path is None and post.preview.needs_media:
+			if not post.files and post.preview.needs_media:
 				# крупное превью и превью над текстом Telegram принимает
 				# только вместе с самой ссылкой: у обычной отправки таких
 				# полей нет (ADR-0033, подача C3)
 				sent = await self._send_with_preview(client, peer, post, styling)
-			elif post.media_path is None:
+			elif not post.files:
 				sent = await client.send_message(
 					peer,
 					post.text,
@@ -1010,28 +1019,67 @@ class MtprotoTransport:
 					link_preview=not post.preview.disabled,
 					**styling,
 				)
+			elif post.is_album:
+				sent = await self._send_album(client, peer, post, styling, _progress)
 			else:
+				single = post.files[0]
 				sent = await client.send_file(
 					peer,
-					post.media_path,
+					single.path,
 					caption=post.text or None,
 					schedule=post.when,
 					**styling,
-					supports_streaming=post.media_kind is MediaKind.VIDEO,
-					force_document=post.media_kind is MediaKind.DOCUMENT,
+					supports_streaming=single.kind is MediaKind.VIDEO,
+					force_document=single.kind is MediaKind.DOCUMENT,
 					progress_callback=_progress,
-					thumb=post.thumb_path,
+					thumb=single.thumb_path,
 					reply_to=post.topic_id,
 				)
-		message_id = int(getattr(sent, "id", 0))
+		# альбом возвращает список сообщений — номер берём у первого:
+		# по нему пост узнаётся в ленте, и к нему привязана подпись
+		first = sent[0] if isinstance(sent, list) and sent else sent
+		message_id = int(getattr(first, "id", 0))
 		logger.info(
 			"Пост id=%s отправлен в чат %s (%s, %s).",
 			message_id,
 			chat_id,
-			post.media_kind if post.media_path else "текст",
+			_post_note(post),
 			f"отложено на {post.when}" if post.when else "сразу",
 		)
 		return message_id
+
+	async def _send_album(
+		self,
+		client: Any,
+		peer: int,
+		post: OutgoingPost,
+		styling: dict[str, Any],
+		progress: Callable[[int, int], None],
+	) -> Any:
+		"""Отправляет альбом: несколько файлов одной записью (ADR-0033, C4).
+
+		Библиотека сама собирает ``messages.sendMultiMedia``: подпись
+		и её разметка достаются **первому** файлу, остальные уходят
+		без подписи — так альбом устроен у самого Telegram.
+
+		Разметку приходится передавать списком даже когда её нет: при
+		альбоме библиотека требует список (``None`` она отвергает
+		проверкой типа), а пустой список означает «разбери строку
+		по-старому» — то же поведение, что у одиночного поста.
+		"""
+		kinds = {file.kind for file in post.files}
+		return await client.send_file(
+			peer,
+			[file.path for file in post.files],
+			caption=post.text or None,
+			schedule=post.when,
+			formatting_entities=list(styling.get("formatting_entities") or []),
+			parse_mode=styling.get("parse_mode", ()),
+			supports_streaming=MediaKind.VIDEO in kinds,
+			force_document=kinds == {MediaKind.DOCUMENT},
+			progress_callback=progress,
+			reply_to=post.topic_id,
+		)
 
 	async def _send_with_preview(
 		self, client: Any, peer: int, post: OutgoingPost, styling: dict[str, Any]

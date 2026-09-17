@@ -33,6 +33,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	edit_markup,
 	get_bot_events,
 	get_community_stats,
+	send_album,
 	send_media,
 	send_text,
 )
@@ -382,6 +383,22 @@ class TelegramGateway:
 		"""
 		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
 			return await send_media(token, chat_id, kind, path, caption, topic_id, markup, entities)
+
+	async def bot_send_album(
+		self,
+		bot: BotRef,
+		chat_id: str,
+		files: Sequence[tuple[MediaKind, str]],
+		caption: str,
+		topic_id: int | None = None,
+		entities: tuple[TextEntity, ...] = (),
+	) -> int:
+		"""Отправляет альбом ботом (лимит 50 МБ на файл; кнопок у альбома нет).
+
+		Raises: см. :func:`bot_api.send_album`.
+		"""
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+			return await send_album(token, chat_id, files, caption, topic_id, entities)
 
 	async def bot_edit_markup(
 		self, bot: BotRef, chat_id: str, message_id: int, markup: PostMarkup | None

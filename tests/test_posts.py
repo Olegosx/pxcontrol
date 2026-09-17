@@ -13,7 +13,9 @@ from sqlalchemy.orm import selectinload
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
 from pxcontrol.engine.services.posts import (
+	MAX_ALBUM_FILES,
 	PUBLISHED_PAGE_SIZE,
+	MediaFile,
 	PostDraft,
 	PostError,
 	PostNotReadyError,
@@ -27,6 +29,7 @@ from pxcontrol.engine.services.posts import (
 	ScheduledList,
 	ScheduledPostDto,
 	ScheduledRef,
+	album_blocker,
 )
 from pxcontrol.engine.services.publish_route import PublishCapabilities, post_markup_blocker
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
@@ -96,6 +99,7 @@ class _FakeGateway:
 		self.sent_markups: list[object] = []
 		self.sent_entities: list[object] = []
 		self.sent_previews: list[object] = []
+		self.albums: list[tuple[str, list[tuple[MediaKind, str]], str]] = []
 		self.markup_edits: list[tuple[str, int, object]] = []
 		self.markup_edit_error: Exception | None = None
 
@@ -141,6 +145,18 @@ class _FakeGateway:
 			raise self.markup_edit_error
 		self.markup_edits.append((chat_id, message_id, markup))
 
+	async def bot_send_album(
+		self,
+		bot: BotRef,
+		chat_id: str,
+		files: object,
+		caption: str,
+		topic_id: int | None = None,
+		entities: object = (),
+	) -> int:
+		self.albums.append((chat_id, list(files), caption))  # type: ignore[arg-type]
+		return 44
+
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
 		return list(self.topics)
 
@@ -149,7 +165,7 @@ class _FakeGateway:
 	) -> int:
 		if not self.userbot_ok:
 			raise UserbotUnavailableError("Userbot не подключён — войдите в аккаунт.")
-		if post.media_path is not None and callable(on_progress):
+		if post.files and callable(on_progress):
 			on_progress(0.5)
 			on_progress(1.0)
 		self.published.append((account_id, chat_id, post))
@@ -161,7 +177,9 @@ class _FakeGateway:
 
 	def thumbs(self) -> list[str | None]:
 		"""Миниатюры отправленных постов (в порядке отправки)."""
-		return [post.thumb_path for _acc, _chat, post in self.published]
+		return [
+			post.files[0].thumb_path if post.files else None for _acc, _chat, post in self.published
+		]
 
 	async def userbot_history_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
@@ -321,13 +339,12 @@ async def test_publish_media_with_progress(db: Database, tmp_path: Path) -> None
 	draft = PostDraft(
 		community_id,
 		text="подпись",
-		media_path=str(video),
-		media_kind=MediaKind.VIDEO,
+		media=(MediaFile(str(video), MediaKind.VIDEO),),
 	)
 	await service.publish(draft, on_progress=received.append)
 	chat_id, post = gateway.sent_posts()[0]
-	assert (chat_id, post.text, post.media_path) == ("-1001", "подпись", str(video))
-	assert post.media_kind == "video" and post.when is None
+	assert (chat_id, post.text, post.files[0].path) == ("-1001", "подпись", str(video))
+	assert post.files[0].kind == MediaKind.VIDEO and post.when is None
 	assert received == [0.5, 1.0]
 
 
@@ -339,18 +356,15 @@ async def test_publish_validations(db: Database, tmp_path: Path) -> None:
 	with pytest.raises(PostError, match="пуст"):
 		await service.publish(PostDraft(community_id))
 	with pytest.raises(PostError, match="не указан тип"):
-		await service.publish(PostDraft(community_id, media_path="x.bin"))
+		await service.publish(PostDraft(community_id, media=(MediaFile("x.bin", MediaKind.NONE),)))
 	# вид «прочее» приложение только читает (отложки из клиента Telegram)
 	with pytest.raises(PostError, match="не отправляет"):
-		await service.publish(
-			PostDraft(community_id, media_path="x.bin", media_kind=MediaKind.OTHER)
-		)
+		await service.publish(PostDraft(community_id, media=(MediaFile("x.bin", MediaKind.OTHER),)))
 	with pytest.raises(PostError, match="не найден"):
 		await service.publish(
 			PostDraft(
 				community_id,
-				media_path=str(tmp_path / "нет.jpg"),
-				media_kind=MediaKind.PHOTO,
+				media=(MediaFile(str(tmp_path / "нет.jpg"), MediaKind.PHOTO),),
 			)
 		)
 	with pytest.raises(PostError, match="в будущем"):
@@ -378,8 +392,7 @@ async def test_video_thumbnail_from_neighbor_preview(
 	await service.publish(
 		PostDraft(
 			community_id,
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 		)
 	)
 	assert sources == [(str(tmp_path / "ролик.png"), 0.0)]
@@ -410,8 +423,7 @@ async def test_video_thumbnail_random_middle_without_preview(
 	await service.publish(
 		PostDraft(
 			community_id,
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 		)
 	)
 	assert gateway.thumbs()[0] is not None
@@ -435,8 +447,7 @@ async def test_video_thumbnail_failure_does_not_block_publish(
 	await service.publish(
 		PostDraft(
 			community_id,
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 		)
 	)
 	assert len(gateway.published) == 1 and gateway.thumbs() == [None]
@@ -461,13 +472,11 @@ async def test_publish_renames_file_and_preview(
 	await service.publish(
 		PostDraft(
 			community_id,
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
-			rename_to="Новое имя.mp4",
+			media=(MediaFile(str(video), MediaKind.VIDEO, "Новое имя.mp4"),),
 		)
 	)
 	_chat, post = gateway.sent_posts()[0]
-	assert post.media_path == str(tmp_path / "Новое имя.mp4")
+	assert post.files[0].path == str(tmp_path / "Новое имя.mp4")
 	assert (tmp_path / "Новое имя.mp4").is_file()
 	assert (tmp_path / "Новое имя.png").is_file()
 	assert not video.exists()
@@ -484,9 +493,7 @@ async def test_publish_rename_validations(db: Database, tmp_path: Path) -> None:
 		await service.publish(
 			PostDraft(
 				community_id,
-				media_path=str(video),
-				media_kind=MediaKind.VIDEO,
-				rename_to="a/b.mp4",
+				media=(MediaFile(str(video), MediaKind.VIDEO, "a/b.mp4"),),
 			)
 		)
 	(tmp_path / "занято.mp4").write_bytes(b"x")
@@ -494,9 +501,7 @@ async def test_publish_rename_validations(db: Database, tmp_path: Path) -> None:
 		await service.publish(
 			PostDraft(
 				community_id,
-				media_path=str(video),
-				media_kind=MediaKind.VIDEO,
-				rename_to="занято.mp4",
+				media=(MediaFile(str(video), MediaKind.VIDEO, "занято.mp4"),),
 			)
 		)
 	assert gateway.published == []
@@ -527,8 +532,7 @@ async def test_publish_bot_fallback_text_and_media(db: Database, tmp_path: Path)
 		PostDraft(
 			community_id,
 			text="подпись",
-			media_path=str(photo),
-			media_kind=MediaKind.PHOTO,
+			media=(MediaFile(str(photo), MediaKind.PHOTO),),
 		)
 	)
 	assert gateway.media == [("123:AAA", "-1001", "photo", str(photo), "подпись")]
@@ -550,8 +554,7 @@ async def test_publish_bot_limits(db: Database, tmp_path: Path) -> None:
 		await service.publish(
 			PostDraft(
 				community_id,
-				media_path=str(big),
-				media_kind=MediaKind.VIDEO,
+				media=(MediaFile(str(big), MediaKind.VIDEO),),
 			)
 		)
 	assert gateway.sent == [] and gateway.media == []
@@ -671,8 +674,7 @@ async def test_publish_userbot_rejects_oversized_file(
 	community_id = await _add_community(db)
 	draft = PostDraft(
 		community_id,
-		media_path=str(big),
-		media_kind=MediaKind.DOCUMENT,
+		media=(MediaFile(str(big), MediaKind.DOCUMENT),),
 	)
 	with pytest.raises(PostError, match="лимит"):
 		await service.publish(draft)
@@ -714,8 +716,7 @@ async def test_published_video_moves_to_published_dir(
 	await service.publish(
 		PostDraft(
 			community_id,
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 		)
 	)
 	published = tmp_path / "media" / "published" / "суб"
@@ -736,8 +737,7 @@ async def test_video_outside_processed_dir_stays(
 	await service.publish(
 		PostDraft(
 			community_id,
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 		)
 	)
 	assert video.is_file()
@@ -763,8 +763,7 @@ async def test_move_failure_does_not_break_publish(
 	await service.publish(
 		PostDraft(
 			community_id,
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 		)
 	)
 	assert len(gateway.published) == 1  # пост ушёл, несмотря на сбой переезда
@@ -786,9 +785,7 @@ async def test_publish_from_queue_prunes_emptied_batch_dirs(
 	video.write_bytes(b"video")
 	service = PostsService(db, _FakeGateway())
 	community_id = await _add_community(db)
-	await service.publish(
-		PostDraft(community_id, media_path=str(video), media_kind=MediaKind.VIDEO)
-	)
+	await service.publish(PostDraft(community_id, media=(MediaFile(str(video), MediaKind.VIDEO),)))
 	assert (tmp_path / "media" / "published" / "пакет" / "ролик.mp4").is_file()
 	assert not queued.exists()  # очередь по папке отработана
 	assert not processed.exists()  # зеркало опустело — файлы уже не вернутся
@@ -858,9 +855,7 @@ def test_validate_draft_checks_rename_early(tmp_path: Path) -> None:
 	for bad_name in (".", "..", "a/b.mp4", "a\\b.mp4"):
 		draft = PostDraft(
 			1,
-			media_path=str(media),
-			media_kind=MediaKind.VIDEO,
-			rename_to=bad_name,
+			media=(MediaFile(str(media), MediaKind.VIDEO, bad_name),),
 		)
 		with pytest.raises(PostError):
 			PostsService.validate_draft(draft)
@@ -1269,11 +1264,11 @@ def test_validate_draft_caption_ceiling_is_lower(tmp_path: Path) -> None:
 	"""У поста с вложением предел другой: потолок подписи — 4096."""
 	media = _media_file(tmp_path)
 	PostsService.validate_draft(
-		PostDraft(1, text="я" * 4096, media_path=media, media_kind=MediaKind.VIDEO)
+		PostDraft(1, text="я" * 4096, media=(MediaFile(media, MediaKind.VIDEO),))
 	)
 	with pytest.raises(PostError, match="Подпись к файлу длиннее"):
 		PostsService.validate_draft(
-			PostDraft(1, text="я" * 4097, media_path=media, media_kind=MediaKind.VIDEO)
+			PostDraft(1, text="я" * 4097, media=(MediaFile(media, MediaKind.VIDEO),))
 		)
 
 
@@ -1297,9 +1292,7 @@ async def test_text_limits_for_draft_picks_caption_with_media(db: Database, tmp_
 	community_id = await _add_community(db)
 	limits = await service.text_limits(community_id)
 	assert limits.for_draft(PostDraft(community_id, text="текст")) == limits.text
-	with_media = PostDraft(
-		community_id, media_path=_media_file(tmp_path), media_kind=MediaKind.VIDEO
-	)
+	with_media = PostDraft(community_id, media=(MediaFile(_media_file(tmp_path), MediaKind.VIDEO),))
 	assert limits.for_draft(with_media) == limits.caption
 
 
@@ -1311,8 +1304,7 @@ async def test_publish_rejects_caption_over_channel_limit(db: Database, tmp_path
 	draft = PostDraft(
 		community_id,
 		text="я" * 1025,
-		media_path=_media_file(tmp_path),
-		media_kind=MediaKind.VIDEO,
+		media=(MediaFile(_media_file(tmp_path), MediaKind.VIDEO),),
 	)
 	with pytest.raises(PostError, match="Подпись к файлу длиннее"):
 		await service.publish(draft)
@@ -1445,8 +1437,7 @@ async def test_big_file_with_buttons_publishes_then_bot_draws(
 		PostDraft(
 			community_id,
 			text="подпись",
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 			markup=markup,
 		)
 	)
@@ -1477,8 +1468,7 @@ async def test_markup_failure_keeps_post_and_reports(
 		PostDraft(
 			community_id,
 			text="подпись",
-			media_path=str(video),
-			media_kind=MediaKind.VIDEO,
+			media=(MediaFile(str(video), MediaKind.VIDEO),),
 			markup=_markup(),
 		)
 	)
@@ -1918,8 +1908,71 @@ async def test_preview_rejected_without_link_and_with_media(db: Database, tmp_pa
 			PostDraft(
 				community_id,
 				text="подпись",
-				media_path=str(video),
-				media_kind=MediaKind.VIDEO,
+				media=(MediaFile(str(video), MediaKind.VIDEO),),
 				preview=LinkPreview(large=True),
 			)
 		)
+
+
+def _photo(tmp_path: Path, name: str) -> MediaFile:
+	"""Файл-картинка на диске (проверки смотрят на настоящий файл)."""
+	path = tmp_path / name
+	path.write_bytes(b"x")
+	return MediaFile(str(path), MediaKind.PHOTO)
+
+
+def test_album_blocker_rules(tmp_path: Path) -> None:
+	"""Правила альбома — Telegram, а не наши (ADR-0033, подача C4)."""
+	one = (_photo(tmp_path, "1.jpg"),)
+	assert album_blocker(one, with_markup=True) is None  # один файл — не альбом
+	pair = (_photo(tmp_path, "2.jpg"), _photo(tmp_path, "3.jpg"))
+	assert album_blocker(pair, with_markup=False) is None
+	assert "кнопок" in (album_blocker(pair, with_markup=True) or "")
+	too_many = tuple(_photo(tmp_path, f"m{i}.jpg") for i in range(MAX_ALBUM_FILES + 1))
+	assert "не больше" in (album_blocker(too_many, with_markup=False) or "")
+	mixed = (
+		_photo(tmp_path, "4.jpg"),
+		MediaFile(str(tmp_path / "4.jpg"), MediaKind.DOCUMENT),
+	)
+	assert "не смешивает" in (album_blocker(mixed, with_markup=False) or "")
+
+
+async def test_publish_album_by_userbot(db: Database, tmp_path: Path) -> None:
+	"""Альбом уходит одной записью: файлы списком, подпись общая."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	files = (_photo(tmp_path, "a.jpg"), _photo(tmp_path, "b.jpg"))
+	await service.publish(PostDraft(community_id, text="подпись альбома", media=files))
+	post = gateway.published[0][2]
+	assert [file.path for file in post.files] == [file.path for file in files]
+	assert post.text == "подпись альбома"
+	# миниатюру альбому не готовим: Telegram берёт обложки из самих файлов
+	assert all(file.thumb_path is None for file in post.files)
+
+
+async def test_publish_album_by_bot(db: Database, tmp_path: Path) -> None:
+	"""Без публикатора альбом отправляет бот — своим методом группы."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, userbot_assigned=False)
+	files = (_photo(tmp_path, "c.jpg"), _photo(tmp_path, "d.jpg"))
+	await service.publish(PostDraft(community_id, text="подпись", media=files))
+	assert gateway.albums == [
+		("-1001", [(MediaKind.PHOTO, file.path) for file in files], "подпись")
+	]
+
+
+async def test_album_with_buttons_is_refused(db: Database, tmp_path: Path) -> None:
+	"""Кнопок у альбома не бывает — отказ при постановке, а не в канале."""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db, bot_can_edit=True)
+	markup = PostMarkup(((PostButton(ButtonKind.LINK, "Открыть", "https://telegram.org"),),))
+	draft = PostDraft(
+		community_id,
+		text="альбом",
+		media=(_photo(tmp_path, "e.jpg"), _photo(tmp_path, "f.jpg")),
+		markup=markup,
+	)
+	with pytest.raises(PostError, match="кнопок"):
+		service.validate_draft(draft)

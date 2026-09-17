@@ -49,7 +49,7 @@ from pxcontrol.engine.services.captions import (
 	title_from_filename,
 )
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import PostDraft
+from pxcontrol.engine.services.posts import MediaFile, PostDraft
 from pxcontrol.engine.services.schedule_plan import (
 	DAYS_STEP_RANGE,
 	DEFAULT_HOURS_STEP,
@@ -310,10 +310,14 @@ class BatchEditor(QWidget):
 					community_id,
 					text=caption.text,
 					entities=caption.entities,
-					media_path=row.video.path,
-					media_kind=MediaKind.VIDEO,
+					media=(
+						MediaFile(
+							row.video.path,
+							MediaKind.VIDEO,
+							str(row.rename.text()).strip() or None,
+						),
+					),
 					when=when_local.astimezone(UTC) if when_local else None,
-					rename_to=str(row.rename.text()).strip() or None,
 					topic_id=topic_id,
 					markup=markup,
 					markup_first=markup_first,

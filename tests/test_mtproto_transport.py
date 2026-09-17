@@ -25,6 +25,7 @@ from pxcontrol.engine.telegram.mtproto import (
 from pxcontrol.engine.telegram.types import (
 	CommunityKind,
 	MediaKind,
+	OutgoingFile,
 	OutgoingPost,
 	UserbotRole,
 )
@@ -336,14 +337,13 @@ async def test_publish_media_maps_kind_to_hints() -> None:
 		"-1001234",
 		OutgoingPost(
 			text="подпись",
-			media_path="/tmp/v.mp4",
-			media_kind=MediaKind.VIDEO,
+			files=(OutgoingFile("/tmp/v.mp4", MediaKind.VIDEO),),
 		),
 		on_progress=received.append,
 	)
 	await transport.publish(
 		"-1001234",
-		OutgoingPost(media_path="/tmp/d.zip", media_kind=MediaKind.DOCUMENT),
+		OutgoingPost(files=(OutgoingFile("/tmp/d.zip", MediaKind.DOCUMENT),)),
 	)
 	video, doc = fake.files
 	assert video["file"] == "/tmp/v.mp4" and video["caption"] == "подпись"
@@ -629,7 +629,7 @@ async def test_publish_passes_topic() -> None:
 	await transport.publish("-1001234", OutgoingPost(text="в тему", topic_id=7))
 	assert fake.sent == [(-1001234, "в тему", None, 7)]
 	await transport.publish(
-		"-1001234", OutgoingPost(media_path="v.mp4", media_kind=MediaKind.VIDEO, topic_id=7)
+		"-1001234", OutgoingPost(files=(OutgoingFile("v.mp4", MediaKind.VIDEO),), topic_id=7)
 	)
 	assert fake.files[-1]["reply_to"] == 7
 
@@ -948,7 +948,8 @@ async def test_premium_upload_limit_is_a_wait_not_an_error() -> None:
 
 	with pytest.raises(UserbotFloodError) as flood:
 		await transport.publish(
-			"-1001", OutgoingPost(text="видео", media_path="/tmp/x.mp4", media_kind=MediaKind.VIDEO)
+			"-1001",
+			OutgoingPost(text="видео", files=(OutgoingFile("/tmp/x.mp4", MediaKind.VIDEO),)),
 		)
 	assert flood.value.retry_after_s == 17
 
