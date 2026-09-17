@@ -131,6 +131,11 @@ TAB_MAINTENANCE = "maintenance"
 TAB_SETTINGS = "settings"
 _TABS = (TAB_OVERVIEW, TAB_QUEUE, TAB_SCHEDULED, TAB_MEMBERS, TAB_MAINTENANCE, TAB_SETTINGS)
 
+#: Вкладки, чьё тело сложено по снимку сообщества: «Обслуживание»
+#: решает по нему, есть ли userbot-публикатор, «Участники» держат
+#: список аккаунтов на момент сборки. Свежий снимок их пересобирает.
+_SNAPSHOT_TABS = (TAB_MEMBERS, TAB_MAINTENANCE)
+
 
 def community_route_key(community_id: int) -> str:
 	"""Ключ маршрута страницы сообщества в навигации (objectName)."""
@@ -738,7 +743,17 @@ class CommunityPage(ScrollArea):
 		return self._community.id
 
 	def update_community(self, community: CommunityDto) -> None:
-		"""Обновляет страницу свежим снимком (синхронизация главного окна)."""
+		"""Обновляет страницу свежим снимком (синхронизация главного окна).
+
+		Тела вкладок строятся один раз и живут до конца сеанса, а часть
+		из них сложена по снимку: «Обслуживание» решает по нему, есть ли
+		userbot-публикатор, «Участники» держат список аккаунтов на момент
+		сборки. Назначили публикатора на «Участниках» — «Обслуживание»
+		до перезапуска твердило бы, что его нет; отвязали — наоборот,
+		осталось бы рабочим. Поэтому такие тела снимаются: следующее
+		открытие соберёт их по свежему снимку. Видимая вкладка
+		пересобирается сразу, иначе человек смотрел бы на устаревшее.
+		"""
 		self._community = community
 		self._render_header()
 		self._render_settings()
@@ -746,6 +761,22 @@ class CommunityPage(ScrollArea):
 		overview = self._tabs.get(TAB_OVERVIEW)
 		if isinstance(overview, OverviewTab):
 			overview.update_community(community)
+		self._drop_snapshot_tabs()
+
+	def _drop_snapshot_tabs(self) -> None:
+		"""Снимает тела вкладок, сложенных по прежнему снимку сообщества."""
+		for key in _SNAPSHOT_TABS:
+			body = self._tabs.pop(key, None)
+			if body is None:
+				continue
+			_set_polling(body, False)
+			self._body.removeWidget(body)
+			body.deleteLater()
+			if key == self._current_tab:
+				fresh = self._mount_tab(key)
+				self._body.addWidget(fresh)
+				fresh.show()
+				_set_polling(fresh, True)
 
 	# --- сборка -----------------------------------------------------------------
 
