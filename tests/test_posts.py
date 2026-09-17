@@ -45,6 +45,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotMessageGoneError,
 	UserbotUnavailableError,
 )
+from pxcontrol.engine.telegram.poll import PollDraft, PollError
 from pxcontrol.engine.telegram.rich_text import RichTextError, TextEntity, TextStyle
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
@@ -100,11 +101,24 @@ class _FakeGateway:
 		self.sent_entities: list[object] = []
 		self.sent_previews: list[object] = []
 		self.albums: list[tuple[str, list[tuple[MediaKind, str]], str]] = []
+		#: опросы, отправленные ботом (ADR-0033, C5)
+		self.polls: list[tuple[str, object, int | None, object]] = []
 		self.markup_edits: list[tuple[str, int, object]] = []
 		self.markup_edit_error: Exception | None = None
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return account_id in self.premium_ids
+
+	async def bot_send_poll(
+		self,
+		bot: BotRef,
+		chat_id: str,
+		poll: object,
+		topic_id: int | None = None,
+		markup: object = None,
+	) -> int:
+		self.polls.append((chat_id, poll, topic_id, markup))
+		return 321
 
 	async def bot_send_text(
 		self,
@@ -2012,3 +2026,50 @@ async def test_album_with_buttons_is_refused(db: Database, tmp_path: Path) -> No
 	)
 	with pytest.raises(PostError, match="кнопок"):
 		service.validate_draft(draft)
+
+
+async def test_poll_goes_by_publisher_and_by_bot(db: Database) -> None:
+	"""Опрос отправляют оба транспорта: публикатор — сам, бот — запасным путём."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	poll = PollDraft("Любимый цвет?", ("Синий", "Зелёный"))
+	await service.publish(PostDraft(community_id, poll=poll))
+	_account_id, _chat, post = gateway.published[0]
+	assert post.poll == poll
+	assert post.text == "" and post.files == ()
+	# без публикатора остаётся бот: опрос ему по силам — файла в нём нет
+	bot_only = await _add_community(db, userbot_assigned=False, tg_chat_id="-1002")
+	await service.publish(PostDraft(bot_only, poll=poll))
+	chat_id, sent_poll, topic_id, markup = gateway.polls[0]
+	assert sent_poll == poll and topic_id is None and markup is None
+	assert chat_id == "-1002"
+
+
+async def test_poll_draft_rejects_mixed_content(db: Database) -> None:
+	"""Опрос — самостоятельный пост: ни подписи, ни файла, ни превью."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	poll = PollDraft("Вопрос", ("А", "Б"))
+	with pytest.raises(PostError, match="самостоятельный пост"):
+		service.validate_draft(PostDraft(community_id, text="подпись", poll=poll))
+	with pytest.raises(PostError, match="самостоятельный пост"):
+		service.validate_draft(
+			PostDraft(community_id, media=(MediaFile("/tmp/x.jpg", MediaKind.PHOTO),), poll=poll)
+		)
+	with pytest.raises(PostError, match="превью ссылки не бывает"):
+		service.validate_draft(
+			PostDraft(community_id, poll=poll, preview=LinkPreview(disabled=True))
+		)
+	# сам опрос тоже проверяется здесь, а не в канале
+	with pytest.raises(PollError, match="хотя бы 2"):
+		service.validate_draft(PostDraft(community_id, poll=PollDraft("Вопрос", ("А",))))
+	service.validate_draft(PostDraft(community_id, poll=poll))
+
+
+def test_poll_draft_names_its_kind() -> None:
+	"""Вид поста-опроса — POLL: списки показывают его наравне с прочими."""
+	draft = PostDraft(1, poll=PollDraft("Вопрос", ("А", "Б")))
+	assert draft.media_kind is MediaKind.POLL
+	assert not draft.with_media and not draft.is_album

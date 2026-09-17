@@ -55,6 +55,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotScheduleFullError,
 	UserbotUnavailableError,
 )
+from pxcontrol.engine.telegram.poll import poll_from_json, poll_to_json
 from pxcontrol.engine.telegram.rich_text import rich_from_json, rich_to_json
 from pxcontrol.engine.telegram.types import (
 	TELEGRAM_MAX_SCHEDULED,
@@ -172,8 +173,12 @@ def _draft_title(draft: PostDraft) -> str:
 
 	У альбома — имя первого файла и счёт остальных: список из десяти
 	имён в строку карточки не влезет, а первое имя обычно и есть
-	название всего пакета.
+	название всего пакета. У опроса — его вопрос: своего текста
+	у опроса нет, и пустая строка спрятала бы пост в списке
+	(ADR-0033, C5).
 	"""
+	if draft.poll is not None:
+		return text_preview(draft.poll.question, _TITLE_PREVIEW_CHARS)
 	if draft.media:
 		first = draft.media[0]
 		name = (first.rename_to or Path(first.path).name).strip()
@@ -304,6 +309,7 @@ class PublishQueue:
 					community_id=row.community_id,
 					text=row.text,
 					media=media_from_json(row.media),
+					poll=poll_from_json(row.poll),
 					when=as_utc_optional(row.when),
 					topic_id=row.topic_id,
 					markup=markup_from_json(row.markup),
@@ -377,6 +383,7 @@ class PublishQueue:
 					community_id=draft.community_id,
 					text=draft.text,
 					media=media_to_json(draft.media),
+					poll=poll_to_json(draft.poll),
 					when=draft.when,
 					topic_id=draft.topic_id,
 					markup=markup_to_json(draft.markup),
@@ -935,6 +942,7 @@ class PublishQueue:
 				.values(
 					text=draft.text,
 					media=media_to_json(draft.media),
+					poll=poll_to_json(draft.poll),
 					when=draft.when,
 					topic_id=draft.topic_id,
 					markup=markup_to_json(draft.markup),

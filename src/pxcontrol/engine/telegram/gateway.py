@@ -35,6 +35,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	get_community_stats,
 	send_album,
 	send_media,
+	send_poll,
 	send_text,
 )
 from pxcontrol.engine.telegram.lane import (
@@ -55,6 +56,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotPausedError,
 )
+from pxcontrol.engine.telegram.poll import PollDraft
 from pxcontrol.engine.telegram.rich_text import TextEntity
 from pxcontrol.engine.telegram.types import (
 	BotRef,
@@ -363,6 +365,21 @@ class TelegramGateway:
 		"""
 		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
 			return await send_text(token, chat_id, text, topic_id, markup, entities, preview)
+
+	async def bot_send_poll(
+		self,
+		bot: BotRef,
+		chat_id: str,
+		poll: PollDraft,
+		topic_id: int | None = None,
+		markup: PostMarkup | None = None,
+	) -> int:
+		"""Публикует опрос «сейчас» через бота (ADR-0033, C5).
+
+		Raises: см. :func:`bot_api.send_poll`.
+		"""
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+			return await send_poll(token, chat_id, poll, topic_id, markup)
 
 	async def bot_send_media(
 		self,

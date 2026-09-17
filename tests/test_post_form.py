@@ -85,10 +85,11 @@ def test_content_kinds_cover_every_media_kind(kind: MediaKind) -> None:
 		assert kind not in {item_kind for _label, item_kind, _filter in CONTENT_KINDS}
 		return
 	file_filter = kind_file_filter(kind)
-	if kind is MediaKind.NONE:
-		assert file_filter == ""  # текстовому посту файл не выбирают
-	else:
+	if kind.needs_file:
 		assert file_filter
+	else:
+		# текст и опрос файла не выбирают: фильтру взяться неоткуда
+		assert file_filter == ""
 
 
 def test_content_kinds_start_with_text() -> None:

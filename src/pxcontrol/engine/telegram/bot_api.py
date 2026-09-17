@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.markup import ButtonKind, PostMarkup
+from pxcontrol.engine.telegram.poll import PollDraft
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
 from pxcontrol.engine.telegram.types import (
@@ -543,6 +544,51 @@ async def send_album(
 				_chat_id(chat_id), group, message_thread_id=topic_id
 			)
 			return int(messages[0].message_id)
+	finally:
+		await bot.session.close()
+
+
+async def send_poll(
+	token: str,
+	chat_id: str,
+	poll: PollDraft,
+	topic_id: int | None = None,
+	markup: PostMarkup | None = None,
+) -> int:
+	"""Публикует опрос через Bot API («сейчас», ADR-0033, C5).
+
+	Разметки в вопросе и вариантах нет осознанно: Bot API принимает там
+	только кастомные эмодзи, которых приложение не умеет, — см. модуль
+	``telegram/poll.py``. Викторина уходит номером правильного варианта
+	(``correct_option_id``), пояснение — обычным текстом.
+
+	Returns:
+		ID сообщения в Telegram.
+
+	Raises:
+		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
+		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
+		CommunityCheckError: Telegram отклонил отправку (нет прав и т.п.).
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	from aiogram.types import InputPollOption
+
+	bot = _make_bot(token)
+	try:
+		async with _bot_errors("Бот не может писать в канал.", "Telegram отклонил отправку."):
+			message = await bot.send_poll(
+				_chat_id(chat_id),
+				question=poll.question,
+				options=[InputPollOption(text=option) for option in poll.options],
+				is_anonymous=poll.anonymous,
+				type="quiz" if poll.quiz else "regular",
+				allows_multiple_answers=poll.multiple,
+				correct_option_id=poll.correct_option if poll.quiz else None,
+				explanation=poll.explanation or None,
+				message_thread_id=topic_id,
+				reply_markup=to_reply_markup(markup),
+			)
+			return int(message.message_id)
 	finally:
 		await bot.session.close()
 

@@ -429,6 +429,9 @@ class PublishQueueItem(TimestampMixin, Base):
 	# без разметки: такой уходит прежним путём (разбор разделителей),
 	# и так же читаются элементы, поставленные до ADR-0033
 	entities: Mapped[Any | None] = mapped_column(JSON, default=None)
+	# опрос поста (ADR-0033, подача C5), формат — poll_to_json;
+	# NULL — обычный пост (текст или файлы)
+	poll: Mapped[Any | None] = mapped_column(JSON, default=None)
 	# превью ссылки (ADR-0033, подача C3): выключено, крупное, над
 	# текстом и адрес; NULL — как решит Telegram сам
 	preview: Mapped[Any | None] = mapped_column(JSON, default=None)

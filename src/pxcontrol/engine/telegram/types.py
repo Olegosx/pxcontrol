@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:  # разбор клавиатуры и текста живёт в своих модулях,
 	# а они опираются на этот — ссылки держим для проверки типов
 	from pxcontrol.engine.telegram.markup import PostMarkup
+	from pxcontrol.engine.telegram.poll import PollDraft
 	from pxcontrol.engine.telegram.rich_text import TextEntity
 
 
@@ -145,7 +146,10 @@ class MediaKind(StrEnum):
 	VIDEO = "video"
 	AUDIO = "audio"
 	DOCUMENT = "document"  # любой файл «как документ»
-	# вложение не из наших видов (опрос, геопозиция, контакт, стикер…):
+	# опрос: у Telegram это тоже вложение (InputMediaPoll), только
+	# без файла — его содержимое живёт в PollDraft (ADR-0033, C5)
+	POLL = "poll"
+	# вложение не из наших видов (геопозиция, контакт, стикер…):
 	# приложение таких не создаёт, но читает — их ставят отложенными
 	# из клиента Telegram; править у них можно только время
 	OTHER = "other"
@@ -158,6 +162,27 @@ class MediaKind(StrEnum):
 		файлов, и черновик с ним отклоняется до отправки.
 		"""
 		return self is not MediaKind.OTHER
+
+	@property
+	def has_caption(self) -> bool:
+		"""Бывает ли у поста с таким вложением текст, который правится.
+
+		У опроса текста нет вовсе (вопрос и варианты после отправки
+		не меняются ничем), у чужих видов — тоже: Telegram не даёт
+		менять ни вопрос опроса, ни подпись геопозиции.
+		"""
+		return self not in (MediaKind.POLL, MediaKind.OTHER)
+
+	@property
+	def needs_file(self) -> bool:
+		"""Нужен ли этому виду файл с диска.
+
+		Вид вложения и файл — не одно и то же: у текста файла нет,
+		у опроса тоже (его содержимое — вопрос и варианты), а чужие
+		виды приложение только читает. Спрашивать признак надёжнее,
+		чем перечислять виды в каждом месте, где выбирается файл.
+		"""
+		return self in (MediaKind.PHOTO, MediaKind.VIDEO, MediaKind.AUDIO, MediaKind.DOCUMENT)
 
 
 class UserbotRole(StrEnum):
@@ -743,6 +768,9 @@ class OutgoingPost:
 			превью не бывает).
 		files: файлы поста: пусто — текст, один — обычное вложение,
 			несколько — альбом (ADR-0033, подача C4).
+		poll: опрос (None — обычный пост). Опрос исключает и текст,
+			и файлы: у Telegram это самостоятельное вложение
+			(ADR-0033, подача C5).
 		when: момент публикации (None — «сейчас»).
 		topic_id: тема форума (id корневого сообщения темы;
 			None — общая лента, для каналов и обычных групп всегда None).
@@ -752,6 +780,7 @@ class OutgoingPost:
 	entities: tuple[TextEntity, ...] = ()
 	preview: LinkPreview = field(default_factory=LinkPreview)
 	files: tuple[OutgoingFile, ...] = ()
+	poll: PollDraft | None = None
 	when: datetime | None = None
 	topic_id: int | None = None
 

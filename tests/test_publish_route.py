@@ -160,3 +160,17 @@ def test_default_mode_still_uses_markup_edit() -> None:
 		choose_route(BOTH, with_markup=True, media_over_bot_limit=False, scheduled=True)
 		is PublishRoute.USERBOT_MARKUP
 	)
+
+
+def test_scheduled_poll_has_no_buttons_unless_bot_sends_it() -> None:
+	"""У отложенного опроса кнопки бывают только в режиме «кнопки важнее».
+
+	Отложку создаёт публикатор, а дорисовать клавиатуру к опросу нечем
+	(матрица маршрутов, ADR-0031): остаётся путь, где опрос в назначенную
+	минуту отправляет сам бот — вместе с кнопками (ADR-0033, C5).
+	"""
+	assert _blocker(poll=True) is None  # «сейчас» — бот отправляет сам
+	reason = _blocker(scheduled=True, poll=True) or ""
+	assert "У отложенного опроса кнопок не бывает" in reason
+	assert "кнопки важнее" in reason
+	assert _blocker(scheduled=True, poll=True, markup_first=True) is None

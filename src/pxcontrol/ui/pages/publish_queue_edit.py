@@ -56,6 +56,7 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
 from pxcontrol.ui.pages.media_picker import MediaPicker
+from pxcontrol.ui.pages.poll_editor import PollEditor
 from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
@@ -133,6 +134,7 @@ class QueueItemEditor(QWidget):
 		self._build_topic_row(layout, topics, topics_error)
 		self._build_kind_segments(layout)
 		self._build_file_row(layout)
+		self._build_poll_block(layout)
 		# поле с оформлением (ADR-0033): правка не теряет разметку —
 		# она показана стилями и уезжает сущностями
 		self._post_text = RichPostEdit(self, height=_TEXT_HEIGHT)
@@ -160,6 +162,19 @@ class QueueItemEditor(QWidget):
 		layout.addWidget(self._error)
 		layout.addWidget(tinted(CaptionLabel(_RECIPIENT_NOTE, self), DIM_TEXT))
 		self._apply_kind()
+
+	def _build_poll_block(self, layout: QVBoxLayout) -> None:
+		"""Поля опроса — тот же блок, что в форме нового поста (ADR-0033, C5).
+
+		Опрос правится, **пока пост ждёт у нас**: отправленный опрос
+		Telegram менять не даёт вовсе, и эта форма — последняя
+		возможность передумать.
+		"""
+		self._poll = PollEditor(self)
+		self._poll.set_poll(self._draft.poll)
+		self._poll.changed.connect(self._refresh_markup)
+		self._poll.hide()
+		layout.addWidget(self._poll)
 
 	def _build_markup_block(self, layout: QVBoxLayout) -> None:
 		"""Блок кнопок под постом — тот же, что на «Публикации» (ADR-0031).
@@ -198,6 +213,7 @@ class QueueItemEditor(QWidget):
 			scheduled=scheduled,
 			media_over_bot_limit=over,
 			markup_first=self._markup.markup_first(),
+			poll=self._kind is MediaKind.POLL,
 		)
 		self._markup.set_blocked(reason)
 		route = choose_route(
@@ -303,7 +319,13 @@ class QueueItemEditor(QWidget):
 	def _apply_kind(self) -> None:
 		"""Показывает ряды вложения по типу и правит подсказку с пределом."""
 		is_text = self._kind is MediaKind.NONE
-		self._media.set_kind(self._kind)
+		is_poll = self._kind is MediaKind.POLL
+		self._media.set_kind(MediaKind.NONE if is_poll else self._kind)
+		self._poll.setVisible(is_poll)
+		# рядом превью управляет он сам (у поста с вложением его нет),
+		# здесь — только то, что принадлежит тексту
+		for widget in (self._post_text, self._counter.label):
+			widget.setVisible(not is_poll)
 		self._refresh_preview()
 		self._text.setPlaceholderText(caption_placeholder(is_text))
 		# подпись к файлу вчетверо короче поста без вложения; предел
@@ -366,6 +388,15 @@ class QueueItemEditor(QWidget):
 				время публикации не «ЧЧ:ММ».
 		"""
 		files = self._media.files()
+		if self._kind is MediaKind.POLL:
+			return PostDraft(
+				community_id=self._draft.community_id,
+				poll=self._poll.poll(),
+				when=self._when_row.when(),
+				topic_id=self._selected_topic_id(),
+				markup=self._markup.markup(),
+				markup_first=self._markup.markup_first(),
+			)
 		is_text = self._kind is MediaKind.NONE
 		rich = trimmed(self._post_text.rich())
 		if not is_text and not files:

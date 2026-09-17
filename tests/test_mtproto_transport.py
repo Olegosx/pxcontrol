@@ -352,6 +352,94 @@ async def test_publish_media_maps_kind_to_hints() -> None:
 	assert received == [0.5, 1.0]
 
 
+async def test_publish_poll_goes_as_input_media() -> None:
+	"""Опрос уходит вложением без файла: вопрос, варианты, правила (C5)."""
+	from telethon.tl import types
+
+	from pxcontrol.engine.telegram.poll import PollDraft
+
+	fake = _FakeClient()
+	transport = _transport(fake)
+	await transport.start()
+	when = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
+	await transport.publish(
+		"-1001234",
+		OutgoingPost(
+			poll=PollDraft("Любимый цвет?", ("Синий", "Зелёный"), anonymous=False),
+			when=when,
+			topic_id=12,
+		),
+	)
+	sent = fake.files[0]
+	media = sent["file"]
+	assert isinstance(media, types.InputMediaPoll)
+	assert media.poll.question.text == "Любимый цвет?"
+	assert [answer.text.text for answer in media.poll.answers] == ["Синий", "Зелёный"]
+	# ключи вариантов различны — по ним Telegram считает голоса
+	assert len({answer.option for answer in media.poll.answers}) == 2
+	assert media.poll.public_voters is True  # неанонимный опрос
+	assert media.poll.quiz is None and media.correct_answers is None
+	assert sent["schedule"] == when and sent["reply_to"] == 12
+	# подписи у опроса не бывает: вопрос и есть его текст
+	assert "caption" not in sent
+
+
+async def test_publish_quiz_carries_correct_answer() -> None:
+	"""Викторина уезжает номером правильного варианта и пояснением."""
+	from pxcontrol.engine.telegram.poll import PollDraft
+
+	fake = _FakeClient()
+	transport = _transport(fake)
+	await transport.start()
+	await transport.publish(
+		"-1001234",
+		OutgoingPost(
+			poll=PollDraft(
+				"Столица Франции?",
+				("Берлин", "Париж"),
+				quiz=True,
+				correct_option=1,
+				explanation="Париж с 987 года",
+			)
+		),
+	)
+	media = fake.files[0]["file"]
+	assert media.poll.quiz is True
+	# в нынешнем слое схемы correct_answers — номера вариантов
+	assert media.correct_answers == [1]
+	assert media.solution == "Париж с 987 года"
+
+
+def test_message_text_reads_poll_question() -> None:
+	"""У опроса своего текста нет — списки и дозор берут его вопрос."""
+	from telethon.tl import types
+
+	from pxcontrol.engine.telegram.mtproto import message_text
+
+	poll = types.Poll(
+		id=1,
+		hash=0,
+		question=types.TextWithEntities(text="Любимый цвет?", entities=[]),
+		answers=[],
+	)
+	media = types.MessageMediaPoll(poll=poll, results=types.PollResults())
+	assert message_text(SimpleNamespace(message="", media=media)) == "Любимый цвет?"
+	# у обычного поста — его собственный текст
+	assert message_text(SimpleNamespace(message="пост", media=None)) == "пост"
+	assert message_text(SimpleNamespace(message="", media=None)) == ""
+
+
+def test_media_kind_of_names_poll() -> None:
+	"""Опрос — свой вид вложения, а не «чужое» (его приложение создаёт)."""
+	from telethon.tl import types
+
+	poll = types.Poll(
+		id=1, hash=0, question=types.TextWithEntities(text="?", entities=[]), answers=[]
+	)
+	media = types.MessageMediaPoll(poll=poll, results=types.PollResults())
+	assert media_kind_of(media) is MediaKind.POLL
+
+
 def test_ensure_userbot_can_post() -> None:
 	"""Права userbot: админ с публикацией или владелец; иначе — ошибка."""
 	ok = SimpleNamespace(

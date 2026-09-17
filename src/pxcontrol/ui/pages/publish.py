@@ -85,6 +85,7 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
 from pxcontrol.ui.pages.media_picker import MediaPicker
+from pxcontrol.ui.pages.poll_editor import PollEditor
 from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
 from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
@@ -164,6 +165,7 @@ class PublishPage(ScrollArea):
 		self._text.textChanged.connect(self._refresh_preview)
 		self._build_caption_tools(layout)
 		self._build_file_row(layout)
+		self._build_poll_block(layout)
 		self._build_markup_block(layout)
 		self._when_row = WhenRow(self, layout, on_now_changed=self._on_when_changed)
 		self._build_send_row(layout)
@@ -177,7 +179,9 @@ class PublishPage(ScrollArea):
 
 	def _build_caption_tools(self, layout: QVBoxLayout) -> None:
 		"""Кнопки шаблонизатора подписи."""
-		row = QHBoxLayout()
+		self._caption_tools = QWidget(self)
+		row = QHBoxLayout(self._caption_tools)
+		row.setContentsMargins(0, 0, 0, 0)
 		compose = PushButton("Собрать подпись…", self)
 		compose.clicked.connect(self._on_compose_caption)
 		row.addWidget(compose)
@@ -185,7 +189,7 @@ class PublishPage(ScrollArea):
 		setup.clicked.connect(self._on_setup_fields)
 		row.addWidget(setup)
 		row.addStretch()
-		layout.addLayout(row)
+		layout.addWidget(self._caption_tools)
 
 	def _build_file_row(self, layout: QVBoxLayout) -> None:
 		"""Список файлов поста: один — вложение, несколько — альбом (C4)."""
@@ -193,6 +197,13 @@ class PublishPage(ScrollArea):
 		self._media.changed.connect(self._on_media_changed)
 		self._media.hide()
 		layout.addWidget(self._media)
+
+	def _build_poll_block(self, layout: QVBoxLayout) -> None:
+		"""Поля опроса: вопрос, варианты, правила голосования (C5)."""
+		self._poll = PollEditor(self)
+		self._poll.changed.connect(self._refresh_markup)
+		self._poll.hide()
+		layout.addWidget(self._poll)
 
 	def _build_markup_block(self, layout: QVBoxLayout) -> None:
 		"""Блок кнопок под постом (свёрнут: кнопки нужны не каждому посту).
@@ -259,7 +270,7 @@ class PublishPage(ScrollArea):
 		markup = self._markup.markup()
 		# выбор режима есть только у отложенного поста с кнопками
 		self._markup.set_mode_available(scheduled and markup is not None)
-		if len(self._media.files()) > 1:
+		if self._kind is not MediaKind.POLL and len(self._media.files()) > 1:
 			# альбому клавиатуру Telegram не прикрепляет вовсе (ADR-0031)
 			self._markup.set_blocked(
 				"У альбома не бывает кнопок: Telegram не прикрепляет клавиатуру "
@@ -275,6 +286,7 @@ class PublishPage(ScrollArea):
 			scheduled=scheduled,
 			media_over_bot_limit=self._media_over_bot_limit(),
 			markup_first=self._markup.markup_first(),
+			poll=self._kind is MediaKind.POLL,
 		)
 		self._markup.set_blocked(reason)
 		self._markup.set_notice(
@@ -488,14 +500,27 @@ class PublishPage(ScrollArea):
 		)
 
 	def _refresh_preview(self) -> None:
-		"""Приводит ряд превью к тексту и типу поста."""
+		"""Приводит ряд превью к тексту и типу поста.
+
+		У опроса превью ссылки не бывает — показывать ему негде,
+		и ряд прячется так же, как у поста с вложением.
+		"""
 		self._preview.refresh(self._post_text.rich(), self._kind is not MediaKind.NONE)
 
 	def _on_kind_changed(self, kind_key: str) -> None:
-		"""Меняет состав формы под выбранный тип контента."""
+		"""Меняет состав формы под выбранный тип контента.
+
+		У опроса своих полей нет ни у текста, ни у файла и наоборот:
+		форма показывает то, из чего состоит выбранный пост, а не всё
+		сразу с оговорками (ADR-0033, C5).
+		"""
 		self._kind = MediaKind(kind_key)
 		is_text = self._kind is MediaKind.NONE
-		self._media.set_kind(self._kind)
+		is_poll = self._kind is MediaKind.POLL
+		self._media.set_kind(MediaKind.NONE if is_poll else self._kind)
+		self._poll.setVisible(is_poll)
+		for widget in (self._post_text, self._counter.label, self._caption_tools):
+			widget.setVisible(not is_poll)
 		self._refresh_preview()
 		self._text.setPlaceholderText(caption_placeholder(is_text))
 		# подпись к файлу вчетверо короче поста без вложения; маршрут
@@ -650,6 +675,15 @@ class PublishPage(ScrollArea):
 				а файл не указан, либо время публикации не «ЧЧ:ММ».
 		"""
 		files = self._media.files()
+		if self._kind is MediaKind.POLL:
+			return PostDraft(
+				community_id=community_id,
+				poll=self._poll.poll(),
+				when=self._when_row.when(),
+				topic_id=self._topics.topic_id(),
+				markup=self._markup.markup(),
+				markup_first=self._markup.markup_first(),
+			)
 		is_text = self._kind is MediaKind.NONE
 		# видимый текст и его разметка — одной точкой, чтобы они
 		# не разъехались между проверкой и сборкой черновика
@@ -676,6 +710,7 @@ class PublishPage(ScrollArea):
 		"""Черновик принят в очередь — чистим форму под следующий пост."""
 		self._post_text.clear()
 		self._media.clear()
+		self._poll.clear()
 		self._queue.poll()  # панель очереди обновляется сразу, не по таймеру
 
 	# --- панель очереди -------------------------------------------------------------

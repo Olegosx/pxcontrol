@@ -140,6 +140,9 @@ CONTENT_KINDS: list[tuple[str, MediaKind, str]] = [
 	("Видео", MediaKind.VIDEO, video_dialog_filter()),
 	("Аудио", MediaKind.AUDIO, "Аудио (*.mp3 *.m4a *.flac *.ogg *.wav)"),
 	("Файл", MediaKind.DOCUMENT, "Все файлы (*)"),
+	# опрос — вид содержимого без файла (ADR-0033, C5): фильтра
+	# у него нет, вместо списка файлов форма показывает его поля
+	("Опрос", MediaKind.POLL, ""),
 ]
 
 
@@ -161,7 +164,10 @@ def kind_label(kind: MediaKind) -> str:
 
 
 def kind_file_filter(kind: MediaKind) -> str:
-	"""Фильтр диалога выбора файла для типа контента."""
+	"""Фильтр диалога выбора файла для типа контента.
+
+	У видов без файла (текст, опрос) он пуст: выбирать нечего.
+	"""
 	return next(
 		file_filter for _label, item_kind, file_filter in CONTENT_KINDS if item_kind is kind
 	)

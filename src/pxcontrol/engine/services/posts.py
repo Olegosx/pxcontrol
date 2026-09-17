@@ -47,6 +47,7 @@ from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.lane import TelegramPriority
 from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
+from pxcontrol.engine.telegram.poll import PollDraft, validate_poll
 from pxcontrol.engine.telegram.rich_text import (
 	RichText,
 	TextEntity,
@@ -294,6 +295,9 @@ class PostDraft:
 		text: текст поста или подпись к медиа.
 		media: файлы поста: пусто — текст, один — обычное вложение,
 			несколько — альбом (ADR-0033, подача C4).
+		poll: опрос (None — обычный пост). Опрос исключает текст
+			и файлы: у Telegram это самостоятельное вложение, его
+			содержимое — вопрос и варианты (ADR-0033, подача C5).
 		when: момент публикации (None — «сейчас»).
 		topic_id: тема форума (id корневого сообщения; None — общая
 			лента; допустима только у сообществ с включёнными темами).
@@ -311,6 +315,7 @@ class PostDraft:
 	community_id: int
 	text: str = ""
 	media: tuple[MediaFile, ...] = ()
+	poll: PollDraft | None = None
 	when: datetime | None = None
 	topic_id: int | None = None
 	markup: PostMarkup | None = None
@@ -339,12 +344,15 @@ class PostDraft:
 
 	@property
 	def media_kind(self) -> MediaKind:
-		"""Вид первого вложения (``NONE`` — текстовый пост).
+		"""Вид вложения поста (``NONE`` — текстовый пост).
 
 		У альбома вид первого файла задаёт его характер для показа:
 		мешать документы с фото и видео Telegram всё равно не даёт
-		(:func:`album_blocker`).
+		(:func:`album_blocker`). У опроса файла нет, но вид есть —
+		``POLL``: списки и карточки показывают его наравне с прочими.
 		"""
+		if self.poll is not None:
+			return MediaKind.POLL
 		return self.media[0].kind if self.media else MediaKind.NONE
 
 
@@ -417,6 +425,8 @@ def _album_group(kind: MediaKind) -> str:
 
 def _media_note(draft: PostDraft) -> str:
 	"""Чем пост наполнен — строкой для журнала («текст», «видео», «альбом…»)."""
+	if draft.poll is not None:
+		return "викторина" if draft.poll.quiz else "опрос"
 	if not draft.media:
 		return "текст"
 	if draft.is_album:
@@ -488,6 +498,15 @@ class _PostPort(Protocol):
 		markup: PostMarkup | None = None,
 		entities: tuple[TextEntity, ...] = (),
 		preview: LinkPreview | None = None,
+	) -> int: ...
+
+	async def bot_send_poll(
+		self,
+		bot: BotRef,
+		chat_id: str,
+		poll: PollDraft,
+		topic_id: int | None = None,
+		markup: PostMarkup | None = None,
 	) -> int: ...
 
 	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]: ...
@@ -754,10 +773,10 @@ class ScheduledDraft:
 	def text_editable(self) -> bool:
 		"""Есть ли у записи текст, который можно править.
 
-		У вложений не наших видов (опрос, геопозиция) подписи нет —
+		У опроса и у вложений не наших видов (геопозиция) подписи нет —
 		Telegram отвечал бы отказом на любую правку текста.
 		"""
-		return self.media_kind is not MediaKind.OTHER
+		return self.media_kind.has_caption
 
 
 @dataclass(frozen=True)
@@ -944,11 +963,11 @@ class PublishedDraft:
 	def text_editable(self) -> bool:
 		"""Есть ли у поста текст, который вообще можно править.
 
-		У опроса и геопозиции (``MediaKind.OTHER``) текста нет: Telegram
-		не даёт менять ни вопрос, ни варианты — такому посту доступны
-		только кнопки и удаление.
+		У опроса текста нет: Telegram не даёт менять ни вопрос,
+		ни варианты — такому посту доступны только кнопки и удаление.
+		То же у чужих видов вложений (геопозиция, контакт).
 		"""
-		return self.media_kind is not MediaKind.OTHER
+		return self.media_kind.has_caption
 
 
 @dataclass(frozen=True)
@@ -1130,6 +1149,7 @@ class PostsService:
 			scheduled=draft.when is not None,
 			media_over_bot_limit=over_bot_limit,
 			markup_first=draft.markup_first,
+			poll=draft.poll is not None,
 		)
 
 	async def check_markup_allowed(self, draft: PostDraft) -> None:
@@ -1351,6 +1371,7 @@ class PostsService:
 			post = OutgoingPost(
 				text=draft.text,
 				entities=draft.entities,
+				poll=draft.poll,
 				# ссылку для превью выбираем здесь: транспорту нужен
 				# конкретный адрес, а человек обычно его не называет
 				preview=resolve_preview(draft.preview, draft.rich),
@@ -1380,6 +1401,10 @@ class PostsService:
 		if community.bot is None:  # publish() сюда без бота не приводит
 			raise PostError("У сообщества не назначен бот — переподключите его.")
 		bot = BotRef(community.bot.id, community.bot.token)
+		if draft.poll is not None:
+			return await self._gateway.bot_send_poll(
+				bot, community.tg_chat_id, draft.poll, draft.topic_id, draft.markup
+			)
 		if len(files) > 1:
 			return await self._gateway.bot_send_album(
 				bot,
@@ -1792,6 +1817,32 @@ class PostsService:
 		return (await self._get_community(community_id)).title
 
 	@staticmethod
+	def _validate_poll_draft(draft: PostDraft) -> None:
+		"""Проверяет черновик-опрос (ADR-0033, C5).
+
+		У опроса свои правила и свой набор полей: ни подписи, ни файлов,
+		ни превью ссылки. Смешанный черновик — не «почти опрос», а знак
+		того, что форма собрала его неверно: молча отбрасывать лишнее
+		нельзя, человек увидел бы в канале не то, что собирал.
+
+		Raises:
+			PostError: Опрос смешан с текстом, файлом или превью.
+			PollError: Сам опрос не проходит пределы Telegram.
+			MarkupError: Клавиатура не проходит пределы (ADR-0031).
+		"""
+		assert draft.poll is not None  # ветка выбрана по его наличию
+		if draft.text or draft.with_media:
+			raise PostError("Опрос — самостоятельный пост: ни подписи, ни файла у него не бывает.")
+		if draft.preview:
+			raise PostError("У опроса превью ссылки не бывает — ссылке негде показаться.")
+		validate_poll(draft.poll)
+		if draft.markup is not None:
+			validate_markup(draft.markup)
+		when = draft.when
+		if when is not None and when.astimezone(UTC) - datetime.now(UTC) < MIN_SCHEDULE_AHEAD:
+			raise PostError("Время публикации должно быть хотя бы на минуту в будущем.")
+
+	@staticmethod
 	def check_rename_name(rename_to: str) -> None:
 		"""Отклоняет негодное имя для «переименовать при отправке».
 
@@ -1834,6 +1885,9 @@ class PostsService:
 			MarkupError: Клавиатура не проходит пределы Telegram (ADR-0031).
 			RichTextError: Разметка текста разъехалась (ADR-0033).
 		"""
+		if draft.poll is not None:
+			PostsService._validate_poll_draft(draft)
+			return
 		if not draft.text and not draft.with_media:
 			raise PostError("Пост пуст — добавьте текст или файл.")
 		album_problem = album_blocker(draft.media, with_markup=draft.markup is not None)

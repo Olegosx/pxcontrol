@@ -174,7 +174,11 @@ def test_attachment_note_names_what_is_not_editable() -> None:
 	"""Вложение подписывается, а не прячется: иначе его ищут глазами."""
 	assert attachment_note(_draft()) == ""
 	assert attachment_note(_draft(media_kind=MediaKind.VIDEO)) == "вложение: видео"
-	assert "опрос" in attachment_note(_draft(media_kind=MediaKind.OTHER))
+	assert "геопозиция" in attachment_note(_draft(media_kind=MediaKind.OTHER))
+	# опрос назван опросом, и сказано, что в нём необратимо (ADR-0033, C5)
+	poll_note_text = attachment_note(_draft(media_kind=MediaKind.POLL))
+	assert poll_note_text.startswith("опрос:")
+	assert "не меняются" in poll_note_text
 	# у альбома правится общая подпись — форма говорит это прямо
 	album = attachment_note(_draft(media_kind=MediaKind.PHOTO), album_size=3)
 	assert album == "альбом: 3 файла — правится общая подпись, сами файлы заменить нельзя"

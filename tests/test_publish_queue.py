@@ -1526,6 +1526,44 @@ async def test_markup_persisted_restored_and_edited(db: Database, make_queue: Qu
 	await restarted.shutdown()
 
 
+async def test_poll_persisted_restored_and_titled(db: Database, make_queue: QueueFactory) -> None:
+	"""Опрос переживает перезапуск, а карточка называет его вопросом (C5).
+
+	Своего текста у опроса нет: без вопроса в заголовке элемент очереди
+	выглядел бы пустой строкой — пост, которого не найти глазами.
+	"""
+	from pxcontrol.engine.telegram.poll import PollDraft
+
+	poll = PollDraft("Какой пресет использовать?", ("FullHD", "4K"), quiz=False)
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(PostDraft(community_id, poll=poll, when=_future(120)))
+	await _wait_status(queue, item, JobStatus.WAITING)
+	card = next(dto for dto in await queue.state() if dto.id == item)
+	assert card.title == "Какой пресет использовать?"
+	async with db.session_factory() as session:
+		row = await session.get(PublishQueueItem, item)
+		assert row is not None and row.poll is not None
+		assert row.poll["question"] == "Какой пресет использовать?"
+		assert row.poll["options"] == ["FullHD", "4K"]
+	await queue.shutdown()
+
+	restarted = make_queue(gateway)  # «перезапуск приложения»
+	await restarted.load()
+	drafts = {i.id: i.draft for i in restarted._jobs.all()}  # noqa: SLF001 — восстановленный черновик
+	assert drafts[item].poll == poll
+
+	# правка вернула пост к тексту: колонка опроса обнуляется
+	await restarted.edit(item, PostDraft(community_id, text="передумал", when=_future(300)))
+	async with db.session_factory() as session:
+		row = await session.get(PublishQueueItem, item)
+		assert row is not None and row.poll is None
+	await restarted.shutdown()
+
+
 async def test_markup_failure_notes_card_and_keeps_promise(
 	db: Database, make_queue: QueueFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

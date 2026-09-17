@@ -463,9 +463,10 @@ def media_kind_of(media: Any) -> MediaKind:
 	(``MessageMediaWebPage``) вложением не считается — это текст.
 	Документ различается по атрибутам так же, как его различает
 	Telethon (``Message.video``/``audio``): видео — атрибут видео,
-	аудио и голосовое — атрибут аудио, остальное — файл. Всё, чего
-	приложение не создаёт (опрос, геопозиция, контакт, стикер…), —
-	``OTHER``: у такой записи правится только время.
+	аудио и голосовое — атрибут аудио, остальное — файл. Опрос —
+	``POLL``: приложение его создаёт (ADR-0033, C5), хотя файла у него
+	нет. Всё прочее, чего приложение не создаёт (геопозиция, контакт,
+	стикер…), — ``OTHER``: у такой записи правится только время.
 	"""
 	from telethon.tl import types
 
@@ -473,6 +474,8 @@ def media_kind_of(media: Any) -> MediaKind:
 		return MediaKind.NONE
 	if isinstance(media, types.MessageMediaPhoto):
 		return MediaKind.PHOTO
+	if isinstance(media, types.MessageMediaPoll):
+		return MediaKind.POLL
 	if isinstance(media, types.MessageMediaDocument):
 		document = getattr(media, "document", None)
 		for attribute in getattr(document, "attributes", None) or ():
@@ -597,6 +600,8 @@ def rich_from_telethon(text: str, entities: Any) -> RichText:
 
 def _post_note(post: OutgoingPost) -> str:
 	"""Чем пост наполнен — строкой для журнала («текст», «видео», «альбом…»)."""
+	if post.poll is not None:
+		return "викторина" if post.poll.quiz else "опрос"
 	if not post.files:
 		return "текст"
 	if post.is_album:
@@ -683,9 +688,27 @@ def _topic_of(message: Any) -> int | None:
 	return int(top) if top is not None else getattr(header, "reply_to_msg_id", None)
 
 
+def message_text(message: Any) -> str:
+	"""Текст записи, каким его видит читатель (чистая функция).
+
+	У обычного поста это его текст или подпись, у опроса — **вопрос**:
+	своего текста у опроса нет, а показывать в списках пустую строку
+	значило бы прятать пост (ADR-0033, C5). По этому же тексту дозор
+	кнопок опознаёт вышедшую отложку (ADR-0031, п. 9) — иначе все
+	опросы сообщества были бы для него неразличимы.
+	"""
+	text = getattr(message, "message", "") or ""
+	if text:
+		return text
+	poll = getattr(getattr(message, "media", None), "poll", None)
+	question = getattr(poll, "question", None)
+	# в нынешнем слое вопрос — TextWithEntities, в прежних был строкой
+	return str(getattr(question, "text", question) or "")
+
+
 def _published_from(message: Any) -> PublishedMessage:
 	"""Собирает вышедший пост границы из сообщения Telethon (у него есть дата)."""
-	text = getattr(message, "message", "") or ""
+	text = message_text(message)
 	return PublishedMessage(
 		id=int(message.id),
 		text=text,
@@ -704,7 +727,7 @@ def _published_from(message: Any) -> PublishedMessage:
 
 def _scheduled_from(message: Any) -> ScheduledMessage:
 	"""Собирает запись границы из сообщения Telethon (у него есть дата)."""
-	text = getattr(message, "message", "") or ""
+	text = message_text(message)
 	return ScheduledMessage(
 		id=int(message.id),
 		text=text,
@@ -1007,7 +1030,9 @@ class MtprotoTransport:
 			# (ADR-0033). Без разметки — прежний путь, как у старых
 			# элементов очереди: строку разбирает Telethon
 			styling = _styling(post.entities)
-			if not post.files and post.preview.needs_media:
+			if post.poll is not None:
+				sent = await self._send_poll(client, peer, post)
+			elif not post.files and post.preview.needs_media:
 				# крупное превью и превью над текстом Telegram принимает
 				# только вместе с самой ссылкой: у обычной отправки таких
 				# полей нет (ADR-0033, подача C3)
@@ -1049,6 +1074,46 @@ class MtprotoTransport:
 			f"отложено на {post.when}" if post.when else "сразу",
 		)
 		return message_id
+
+	async def _send_poll(self, client: Any, peer: int, post: OutgoingPost) -> Any:
+		"""Отправляет опрос: у Telegram это вложение без файла (ADR-0033, C5).
+
+		Библиотека пропускает готовое вложение насквозь
+		(``utils.get_input_media``), поэтому опрос уходит тем же
+		``send_file``, что и файлы, — со своей отложкой и своей темой.
+		Подписи у опроса не бывает: вопрос и есть его текст.
+
+		Правильный ответ викторины уезжает **номером варианта**:
+		в нынешнем слое схемы (227) ``correct_answers`` — вектор
+		целых, 0-based индексы (сверено с api.tl Telegram Desktop;
+		страница-справочник на сайте показывает устаревший конструктор
+		с байтами).
+		"""
+		from telethon.tl import types
+
+		poll = post.poll
+		assert poll is not None  # ветка выбрана по его наличию
+		answers = [
+			types.PollAnswer(
+				text=types.TextWithEntities(text=option, entities=[]), option=bytes([index])
+			)
+			for index, option in enumerate(poll.options)
+		]
+		media = types.InputMediaPoll(
+			poll=types.Poll(
+				id=0,  # номер опроса назначает сервер
+				hash=0,
+				question=types.TextWithEntities(text=poll.question, entities=[]),
+				answers=answers,
+				public_voters=None if poll.anonymous else True,
+				multiple_choice=poll.multiple or None,
+				quiz=poll.quiz or None,
+			),
+			correct_answers=[poll.correct_option] if poll.quiz else None,
+			solution=poll.explanation or None,
+			solution_entities=[] if poll.explanation else None,
+		)
+		return await client.send_file(peer, media, schedule=post.when, reply_to=post.topic_id)
 
 	async def _send_album(
 		self,
@@ -1364,8 +1429,9 @@ class MtprotoTransport:
 
 		Отложенную запись публикует сервер Telegram, и у вышедшего поста
 		**новый** номер — поэтому его приходится опознавать. Совпадение
-		считается доказанным только при точном равенстве текста (или
-		подписи) и дате не раньше названной. Двусмысленность — не повод
+		считается доказанным только при точном равенстве текста (у поста
+		с вложением — подписи, у опроса — вопроса: :func:`message_text`)
+		и дате не раньше названной. Двусмысленность — не повод
 		угадывать: два одинаковых поста дают None, и кнопки не ставятся
 		вовсе. Промах здесь хуже отсутствия кнопок — клавиатура
 		приклеилась бы к чужому посту.
@@ -1393,7 +1459,7 @@ class MtprotoTransport:
 			date = getattr(message, "date", None)
 			if date is None or date < after:
 				continue
-			if (getattr(message, "message", None) or "") != text:
+			if message_text(message) != text:
 				continue
 			found.append(int(message.id))
 		if len(found) == 1:

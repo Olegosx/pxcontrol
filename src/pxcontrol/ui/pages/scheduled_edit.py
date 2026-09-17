@@ -60,8 +60,10 @@ def attachment_note(draft: ScheduledDraft, topic_title: str | None) -> str:
 	прячет — иначе человек искал бы, куда делось видео из его поста.
 	"""
 	parts: list[str] = []
-	if draft.media_kind is MediaKind.OTHER:
-		parts.append("вложение без подписи (опрос, геопозиция…) — правится только время")
+	if draft.media_kind is MediaKind.POLL:
+		parts.append("опрос: вопрос и варианты не меняются — правится только время")
+	elif draft.media_kind is MediaKind.OTHER:
+		parts.append("вложение без подписи (геопозиция, контакт…) — правится только время")
 	elif draft.media_kind is not MediaKind.NONE:
 		parts.append(f"вложение: {kind_label(draft.media_kind).lower()}")
 	if draft.topic_id is not None:
