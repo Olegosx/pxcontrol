@@ -34,8 +34,6 @@ ADR-0031, п. 9), дорисовать клавиатуру ботом, снят
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -49,6 +47,7 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, PromisedMarkup
 from pxcontrol.engine.db.types import as_utc, as_utc_optional
 from pxcontrol.engine.errors import user_message
+from pxcontrol.engine.periodic import PeriodicTask
 from pxcontrol.engine.services.posts import community_capabilities
 from pxcontrol.engine.telegram.markup import (
 	MarkupError,
@@ -165,8 +164,12 @@ class MarkupsService:
 		(в тестах хранилища сеть не нужна)."""
 		self._db = db
 		self._gateway = gateway
-		self._poller: asyncio.Task[None] | None = None
-		self._stop = asyncio.Event()
+		self._poller = PeriodicTask(
+			self.apply_due,
+			name="Дозор кнопок",
+			interval_s=APPLY_TICK_S,
+			shutdown_timeout_s=_SHUTDOWN_TIMEOUT_S,
+		)
 		#: обещания, срок которых уже отмечен в этом запуске (см. _release)
 		self._released: set[int] = set()
 
@@ -437,8 +440,7 @@ class MarkupsService:
 		"""Запускает дозор кнопок (при старте движка)."""
 		if self._gateway is None:
 			return
-		if self._poller is None or self._poller.done():
-			self._poller = asyncio.create_task(self._poll_forever())
+		self._poller.start()
 
 	async def shutdown(self) -> None:
 		"""Гасит дозор кооперативно (ADR-0020).
@@ -447,21 +449,7 @@ class MarkupsService:
 		к Telegram дожидается конца; не успевшая за страховочный срок —
 		отменяется как последнее средство.
 		"""
-		self._stop.set()
-		if self._poller is not None:
-			with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-				await asyncio.wait_for(self._poller, timeout=_SHUTDOWN_TIMEOUT_S)
-			self._poller = None
-
-	async def _poll_forever(self) -> None:
-		"""Цикл дозора: проход по обещаниям, пауза, снова — до остановки."""
-		while not self._stop.is_set():
-			try:
-				await self.apply_due()
-			except Exception:  # noqa: BLE001 — дозор не должен умирать
-				logger.exception("Проход дозора кнопок не удался.")
-			with contextlib.suppress(TimeoutError):
-				await asyncio.wait_for(self._stop.wait(), timeout=APPLY_TICK_S)
+		await self._poller.shutdown()
 
 	async def apply_due(self, now: datetime | None = None) -> int:
 		"""Один проход дозора: ставит кнопки там, где это уже можно.
@@ -479,7 +467,7 @@ class MarkupsService:
 		moment = now or datetime.now(UTC)
 		applied = 0
 		for promise in await self.pending():
-			if self._stop.is_set():
+			if self._poller.stopping:
 				break
 			if promise_expired(promise, moment):
 				await self._release(promise)

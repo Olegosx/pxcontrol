@@ -505,3 +505,35 @@ async def test_cooldown_paces_only_between_jobs() -> None:
 	queue.ensure_worker()
 	await queue.wait_idle()
 	assert paused == [5.0]
+
+
+async def test_periodic_task_survives_a_failed_pass_and_stops_fast() -> None:
+	"""Дозор: сбой прохода не убивает задачу, остановка не досиживает паузу.
+
+	Три дозора движка (статистика, кнопки, активность) жили тремя копиями
+	этого правила; каркас у них теперь общий.
+	"""
+	from pxcontrol.engine.periodic import PeriodicTask
+
+	passes: list[int] = []
+	release = asyncio.Event()
+
+	async def run() -> None:
+		passes.append(len(passes))
+		if len(passes) == 1:
+			raise RuntimeError("первый проход не удался")
+		release.set()
+
+	task = PeriodicTask(run, name="Тестовый дозор", interval_s=0.01)
+	task.start()
+	await asyncio.wait_for(release.wait(), timeout=1.0)
+	assert len(passes) >= 2  # после сбоя задача жива
+
+	# остановка не ждёт следующего тика: с интервалом в час это было бы
+	# видно сразу — приложение не закрылось бы
+	slow = PeriodicTask(run, name="Долгий дозор", interval_s=3600)
+	slow.start()
+	await asyncio.sleep(0)
+	await asyncio.wait_for(slow.shutdown(), timeout=1.0)
+	assert slow.stopping is True
+	await task.shutdown()

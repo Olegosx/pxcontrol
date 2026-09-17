@@ -20,8 +20,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -33,6 +31,7 @@ from sqlalchemy import delete, select
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AccountOperation, Bot, TgAccount
 from pxcontrol.engine.db.types import as_utc
+from pxcontrol.engine.periodic import PeriodicTask
 from pxcontrol.engine.telegram.lane import (
 	LaneLiveState,
 	LaneOwner,
@@ -285,16 +284,19 @@ class ActivityService:
 		self._db = db
 		self._gateway = gateway
 		self._tz: tzinfo = tz if tz is not None else (datetime.now(UTC).astimezone().tzinfo or UTC)
-		self._task: asyncio.Task[None] | None = None
-		self._stop = asyncio.Event()
+		self._task = PeriodicTask(
+			self._tick,
+			name="Учёт активности",
+			interval_s=FLUSH_INTERVAL_S,
+			shutdown_timeout_s=_SHUTDOWN_TIMEOUT_S,
+		)
 		self._last_prune: datetime | None = None
 
 	# --- жизненный цикл ------------------------------------------------------------
 
 	def start(self) -> None:
 		"""Запускает периодический сброс буфера (и уборку раз в час)."""
-		if self._task is None or self._task.done():
-			self._task = asyncio.create_task(self._run())
+		self._task.start()
 
 	async def shutdown(self) -> None:
 		"""Гасит задачу кооперативно (ADR-0020) и досбрасывает буфер.
@@ -302,26 +304,16 @@ class ActivityService:
 		Зовётся до остановки шлюза: последние операции сессии не должны
 		пропасть вместе с его буфером.
 		"""
-		self._stop.set()
-		if self._task is not None:
-			with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-				await asyncio.wait_for(self._task, timeout=_SHUTDOWN_TIMEOUT_S)
-			self._task = None
+		await self._task.shutdown()
 		try:
 			await self.flush()
 		except Exception:  # noqa: BLE001 — остановка важнее последней пачки
 			logger.exception("Последний сброс активности не удался.")
 
-	async def _run(self) -> None:
-		"""Цикл: сброс буфера, изредка уборка, пауза — до остановки."""
-		while not self._stop.is_set():
-			try:
-				await self.flush()
-				await self._prune_if_due()
-			except Exception:  # noqa: BLE001 — учёт не должен умирать
-				logger.exception("Сброс активности не удался.")
-			with contextlib.suppress(TimeoutError):
-				await asyncio.wait_for(self._stop.wait(), timeout=FLUSH_INTERVAL_S)
+	async def _tick(self) -> None:
+		"""Один проход: сброс буфера и — изредка — уборка старья."""
+		await self.flush()
+		await self._prune_if_due()
 
 	# --- запись ----------------------------------------------------------------------
 
