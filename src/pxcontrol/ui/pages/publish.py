@@ -25,7 +25,6 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	CaptionLabel,
 	FluentIcon,
-	LineEdit,
 	PrimaryPushButton,
 	PushButton,
 	ScrollArea,
@@ -78,16 +77,14 @@ from pxcontrol.ui.pages.common import (
 	caption_placeholder,
 	error_reporter,
 	exec_dialog,
-	kind_file_filter,
 	kind_label,
 	kind_segments,
 	noop,
 	page_layout,
-	pick_file,
 	plural,
-	rename_row,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
+from pxcontrol.ui.pages.media_picker import MediaPicker
 from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
 from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
@@ -191,20 +188,11 @@ class PublishPage(ScrollArea):
 		layout.addLayout(row)
 
 	def _build_file_row(self, layout: QVBoxLayout) -> None:
-		"""Строка выбора файла вложения (скрыта для типа «Текст»)."""
-		self._file_box = QWidget(self)
-		row = QHBoxLayout(self._file_box)
-		row.setContentsMargins(0, 0, 0, 0)
-		self._file_edit = LineEdit(self._file_box)
-		self._file_edit.setPlaceholderText("Файл вложения…")
-		self._file_edit.textChanged.connect(self._clear_rename)
-		browse = PushButton("Обзор…", self._file_box)
-		browse.clicked.connect(self._pick_file)
-		row.addWidget(self._file_edit)
-		row.addWidget(browse)
-		self._file_box.hide()
-		layout.addWidget(self._file_box)
-		self._build_rename_row(layout)
+		"""Список файлов поста: один — вложение, несколько — альбом (C4)."""
+		self._media = MediaPicker(self, on_pick=self._pick_file)
+		self._media.changed.connect(self._on_media_changed)
+		self._media.hide()
+		layout.addWidget(self._media)
 
 	def _build_markup_block(self, layout: QVBoxLayout) -> None:
 		"""Блок кнопок под постом (свёрнут: кнопки нужны не каждому посту).
@@ -224,18 +212,23 @@ class PublishPage(ScrollArea):
 		self._refresh_markup()
 
 	def _media_over_bot_limit(self) -> bool:
-		"""Файл не по силам боту (от этого зависит маршрут и кнопки).
+		"""Хоть один файл не по силам боту (от этого зависят маршрут и кнопки).
 
 		Недоступный файл считается маленьким: его судьбу решит проверка
 		при отправке, а не подсказка формы.
 		"""
-		path = str(self._file_edit.text()).strip()
-		if self._kind is MediaKind.NONE or not path:
-			return False
-		try:
-			return Path(path).stat().st_size > BOT_MAX_FILE_BYTES
-		except OSError:
-			return False
+		for file in self._media.files():
+			try:
+				if Path(file.path).stat().st_size > BOT_MAX_FILE_BYTES:
+					return True
+			except OSError:
+				continue
+		return False
+
+	def _on_media_changed(self) -> None:
+		"""Состав файлов изменился: правила кнопок, превью и маршрут."""
+		self._refresh_markup()
+		self._refresh_preview()
 
 	def _current_route(self) -> PublishRoute:
 		"""Каким путём уйдёт нынешний черновик (для пределов и подсказок)."""
@@ -266,6 +259,15 @@ class PublishPage(ScrollArea):
 		markup = self._markup.markup()
 		# выбор режима есть только у отложенного поста с кнопками
 		self._markup.set_mode_available(scheduled and markup is not None)
+		if len(self._media.files()) > 1:
+			# альбому клавиатуру Telegram не прикрепляет вовсе (ADR-0031)
+			self._markup.set_blocked(
+				"У альбома не бывает кнопок: Telegram не прикрепляет клавиатуру "
+				"к группе файлов. Отправьте файлы по одному или снимите кнопки."
+			)
+			self._markup.set_notice("")
+			self._apply_text_limit()
+			return
 		reason = markup_blocker(
 			community.capabilities,
 			title=community.title,
@@ -285,19 +287,6 @@ class PublishPage(ScrollArea):
 			f"{count} {plural(count, 'кнопка', 'кнопки', 'кнопок')}" if count else "нет"
 		)
 		self._apply_text_limit()
-
-	def _build_rename_row(self, layout: QVBoxLayout) -> None:
-		"""Строка переименования файла при отправке (появляется из подписи)."""
-		row = rename_row(self, layout)
-		self._rename_box, self._rename_check, self._rename_edit = row.box, row.check, row.edit
-		self._rename_box.hide()
-
-	def _clear_rename(self, _text: str = "") -> None:
-		"""Сбрасывает переименование (файл сменился — имя устарело)."""
-		self._rename_edit.clear()
-		self._rename_box.hide()
-		# размер нового файла может сменить маршрут и доступность кнопок
-		self._refresh_markup()
 
 	def _build_send_row(self, layout: QVBoxLayout) -> None:
 		"""Кнопки отправки (одиночной и пакетной) и панель очереди под ними."""
@@ -365,7 +354,7 @@ class PublishPage(ScrollArea):
 		"""
 		self._segments.setCurrentItem(kind.value)
 		self._on_kind_changed(kind.value)
-		self._file_edit.setText(path)
+		self._media.set_files((MediaFile(path, kind),))
 		if community_id is not None:
 			self._restore_community_id = community_id
 			self._apply_community_restore()
@@ -506,7 +495,7 @@ class PublishPage(ScrollArea):
 		"""Меняет состав формы под выбранный тип контента."""
 		self._kind = MediaKind(kind_key)
 		is_text = self._kind is MediaKind.NONE
-		self._file_box.setVisible(not is_text)
+		self._media.set_kind(self._kind)
 		self._refresh_preview()
 		self._text.setPlaceholderText(caption_placeholder(is_text))
 		# подпись к файлу вчетверо короче поста без вложения; маршрут
@@ -514,7 +503,7 @@ class PublishPage(ScrollArea):
 		self._refresh_markup()
 
 	def _pick_file(self) -> None:
-		"""Диалог выбора вложения с фильтром по текущему типу контента.
+		"""Диалог выбора файлов с фильтром по текущему типу контента.
 
 		Для видео диалог открывается в папке результатов обработки
 		выбранного канала (подпапка его пресета по умолчанию); для
@@ -542,11 +531,9 @@ class PublishPage(ScrollArea):
 		self._open_file_dialog("")
 
 	def _open_file_dialog(self, start: str | VideoDirs) -> None:
-		"""Открывает диалог вложения; ``start`` — папка или VideoDirs."""
+		"""Открывает диалог файлов; ``start`` — папка или VideoDirs."""
 		start_dir = start.processed if isinstance(start, VideoDirs) else start
-		path = pick_file(self, "Файл вложения", kind_file_filter(self._kind), start_dir=start_dir)
-		if path:
-			self._file_edit.setText(path)
+		self._media.open_dialog(start_dir)
 
 	# --- подпись по шаблону -----------------------------------------------------
 
@@ -584,7 +571,8 @@ class PublishPage(ScrollArea):
 		if not usable:
 			self._show_error("Сначала настройте поля и шаблон — кнопка «Поля подписи…».")
 			return
-		media = str(self._file_edit.text()).strip()
+		files = self._media.files()
+		media = files[0].path if files else ""
 		title = ""
 		if self._kind is not MediaKind.NONE and media:
 			title = title_from_filename(media)
@@ -631,9 +619,7 @@ class PublishPage(ScrollArea):
 
 	def _show_rename_suggestion(self, filename: str) -> None:
 		"""Показывает строку переименования с вычисленным именем."""
-		self._rename_edit.setText(filename)
-		self._rename_check.setChecked(True)
-		self._rename_box.show()
+		self._media.suggest_rename(filename)
 
 	# --- отправка через очередь ---------------------------------------------------
 
@@ -663,21 +649,22 @@ class PublishPage(ScrollArea):
 			ValueError: Поля формы не согласованы: выбран тип с вложением,
 				а файл не указан, либо время публикации не «ЧЧ:ММ».
 		"""
-		media = str(self._file_edit.text()).strip() or None
+		files = self._media.files()
 		is_text = self._kind is MediaKind.NONE
 		# видимый текст и его разметка — одной точкой, чтобы они
 		# не разъехались между проверкой и сборкой черновика
 		rich = trimmed(self._post_text.rich())
-		if not is_text and media is None:
+		if not is_text and not files:
 			raise ValueError(
-				f"Выбран тип «{kind_label(self._kind)}», а файл не указан — "
-				"выберите файл или переключитесь на «Текст»."
+				f"Выбран тип «{kind_label(self._kind)}», а файлы не выбраны — "
+				"выберите файл (или несколько для альбома) либо переключитесь "
+				"на «Текст»."
 			)
 		return PostDraft(
 			community_id=community_id,
 			text=rich.text,
 			entities=rich.entities,
-			media=() if is_text else (MediaFile(media or "", self._kind, self._rename_to()),),
+			media=() if is_text else files,
 			when=self._when_row.when(),
 			topic_id=self._topics.topic_id(),
 			preview=self._preview.preview() if is_text else LinkPreview(),
@@ -685,16 +672,10 @@ class PublishPage(ScrollArea):
 			markup_first=self._markup.markup_first(),
 		)
 
-	def _rename_to(self) -> str | None:
-		"""Новое имя файла, если переименование включено и имя задано."""
-		if not self._rename_box.isVisibleTo(self) or not self._rename_check.isChecked():
-			return None
-		return str(self._rename_edit.text()).strip() or None
-
 	def _on_enqueued(self, _item_id: object = None) -> None:
 		"""Черновик принят в очередь — чистим форму под следующий пост."""
 		self._post_text.clear()
-		self._file_edit.clear()
+		self._media.clear()
 		self._queue.poll()  # панель очереди обновляется сразу, не по таймеру
 
 	# --- панель очереди -------------------------------------------------------------

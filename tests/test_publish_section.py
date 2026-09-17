@@ -13,6 +13,7 @@ from pxcontrol.engine.services.posts import PublishedDraft, PublishedPostDto, Pu
 from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.rich_text import RichText
 from pxcontrol.engine.telegram.types import MediaKind
+from pxcontrol.ui.pages.media_picker import album_note
 from pxcontrol.ui.pages.preview_row import preview_hint
 from pxcontrol.ui.pages.publish_batch_page import source_text
 from pxcontrol.ui.pages.publish_stages import (
@@ -188,3 +189,16 @@ def test_preview_hint_states() -> None:
 	assert preview_hint(RichText("см. https://telegram.org"), False) == (
 		"Превью по ссылке: https://telegram.org"
 	)
+
+
+def test_album_note_states() -> None:
+	"""Строка под списком файлов называет и состав, и его цену."""
+	assert album_note(0) == ""
+	assert album_note(1) == "Один файл — обычное вложение."
+	note = album_note(3)
+	assert note.startswith("Альбом: 3 файла одной записью.")
+	# альбому недоступны кнопки, а подпись достаётся первому файлу —
+	# человек должен узнать это до отправки, а не по виду поста
+	assert "кнопок" in note
+	assert "первому файлу" in note
+	assert album_note(5).startswith("Альбом: 5 файлов")

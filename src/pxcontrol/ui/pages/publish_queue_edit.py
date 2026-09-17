@@ -17,17 +17,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	CaptionLabel,
-	LineEdit,
 	PrimaryPushButton,
 	PushButton,
 )
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import MediaFile, PostDraft, TextLimits
+from pxcontrol.engine.services.posts import PostDraft, TextLimits
 from pxcontrol.engine.services.publish_route import choose_route, markup_blocker
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.rich_text import trimmed
@@ -47,18 +46,16 @@ from pxcontrol.ui.pages.common import (
 	caption_placeholder,
 	clear_layout,
 	closed_topics_hint,
-	kind_file_filter,
 	kind_label,
 	kind_segments,
-	pick_file,
 	plural,
-	rename_row,
 	tinted,
 	topic_label,
 	topic_row,
 	visible_topics,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, limits_for_route, markup_notice
+from pxcontrol.ui.pages.media_picker import MediaPicker
 from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
@@ -179,14 +176,14 @@ class QueueItemEditor(QWidget):
 		layout.addWidget(self._markup_card)
 
 	def _media_over_bot_limit(self) -> bool:
-		"""Файл элемента не по силам боту (от этого зависят кнопки)."""
-		path = self._file_edit.text().strip()
-		if self._kind is MediaKind.NONE or not path:
-			return False
-		try:
-			return Path(path).stat().st_size > BOT_MAX_FILE_BYTES
-		except OSError:
-			return False
+		"""Хоть один файл элемента не по силам боту (от этого зависят кнопки)."""
+		for file in self._media.files():
+			try:
+				if Path(file.path).stat().st_size > BOT_MAX_FILE_BYTES:
+					return True
+			except OSError:
+				continue
+		return False
 
 	def _refresh_markup(self) -> None:
 		"""Приводит блок кнопок и предел текста к состоянию формы."""
@@ -262,43 +259,21 @@ class QueueItemEditor(QWidget):
 		self._segments.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
 	def _build_file_row(self, layout: QVBoxLayout) -> None:
-		"""Строка вложения: путь, «Обзор…», «Убрать» и переименование."""
-		self._file_box = QWidget(self)
-		row = QHBoxLayout(self._file_box)
-		row.setContentsMargins(0, 0, 0, 0)
-		self._file_edit = LineEdit(self._file_box)
-		self._file_edit.setPlaceholderText("Файл вложения…")
-		self._file_edit.setText(self._draft.media[0].path if self._draft.media else "")
-		row.addWidget(self._file_edit, stretch=1)
-		browse = PushButton("Обзор…", self._file_box)
-		browse.clicked.connect(self._pick_file)
-		row.addWidget(browse)
-		drop = PushButton("Убрать", self._file_box)
-		drop.setToolTip("Убрать вложение — пост станет текстовым.")
-		drop.clicked.connect(self._drop_file)
-		row.addWidget(drop)
-		layout.addWidget(self._file_box)
-		self._build_rename_row(layout)
+		"""Список файлов элемента: замена, удаление, добавление (альбом — C4)."""
+		self._media = MediaPicker(self, on_pick=self._pick_file)
+		self._media.set_files(self._draft.media)
+		self._media.changed.connect(self._on_media_changed)
+		layout.addWidget(self._media)
 
-	@property
-	def _first_file(self) -> MediaFile | None:
-		"""Первый файл поста (None — текстовый).
-
-		Форма правит один файл: альбом в ней пока не разбирается —
-		у него своя подача (ADR-0033, C4b), а до неё список показывается
-		счётом в заголовке карточки.
-		"""
-		return self._draft.media[0] if self._draft.media else None
-
-	def _build_rename_row(self, layout: QVBoxLayout) -> None:
-		"""Строка переименования файла при отправке."""
-		row = rename_row(
-			self,
-			layout,
-			checked=bool(self._first_file.rename_to if self._first_file else None),
-			name=(self._first_file.rename_to if self._first_file else "") or "",
-		)
-		self._rename_box, self._rename_check, self._rename_edit = row.box, row.check, row.edit
+	def _on_media_changed(self) -> None:
+		"""Состав файлов изменился: правила кнопок и пределы текста."""
+		if not self._media.files() and self._kind is not MediaKind.NONE:
+			# файлы убрали все — пост стал текстовым
+			self._segments.setCurrentItem(MediaKind.NONE.value)
+			self._kind = MediaKind.NONE
+			self._apply_kind()
+			return
+		self._refresh_markup()
 
 	def _build_buttons(self) -> list[QWidget]:
 		"""Кнопки формы (встают в ряд времени): сохранение возвращает пост в работу."""
@@ -328,22 +303,12 @@ class QueueItemEditor(QWidget):
 	def _apply_kind(self) -> None:
 		"""Показывает ряды вложения по типу и правит подсказку с пределом."""
 		is_text = self._kind is MediaKind.NONE
-		self._file_box.setVisible(not is_text)
+		self._media.set_kind(self._kind)
 		self._refresh_preview()
-		self._rename_box.setVisible(not is_text)
 		self._text.setPlaceholderText(caption_placeholder(is_text))
 		# подпись к файлу вчетверо короче поста без вложения; предел
 		# и доступность кнопок считает общий проход
 		self._refresh_markup()
-
-	def _drop_file(self) -> None:
-		"""Убирает вложение: пост становится текстовым."""
-		self._file_edit.clear()
-		self._rename_edit.clear()
-		self._rename_check.setChecked(False)
-		self._segments.setCurrentItem(MediaKind.NONE.value)
-		self._kind = MediaKind.NONE
-		self._apply_kind()
 
 	def _pick_file(self) -> None:
 		"""Диалог выбора вложения: видео — из папки результатов канала."""
@@ -357,19 +322,13 @@ class QueueItemEditor(QWidget):
 				lambda _message: self._open_file_dialog(""),
 			)
 			return
-		current = self._file_edit.text().strip()
-		self._open_file_dialog(str(Path(current).parent) if current else "")
+		files = self._media.files()
+		self._open_file_dialog(str(Path(files[0].path).parent) if files else "")
 
 	def _open_file_dialog(self, start: str | VideoDirs) -> None:
 		"""Открывает диалог вложения; ``start`` — папка или VideoDirs."""
 		start_dir = start.processed if isinstance(start, VideoDirs) else start
-		path = pick_file(self, "Файл вложения", kind_file_filter(self._kind), start_dir=start_dir)
-		if not path:
-			return
-		self._file_edit.setText(path)
-		# имя от прежнего файла к новому не относится
-		self._rename_edit.clear()
-		self._rename_check.setChecked(False)
+		self._media.open_dialog(start_dir)
 
 	# --- сохранение ------------------------------------------------------------
 
@@ -406,31 +365,26 @@ class QueueItemEditor(QWidget):
 			ValueError: Выбран тип с вложением, а файл не указан, либо
 				время публикации не «ЧЧ:ММ».
 		"""
-		media = self._file_edit.text().strip() or None
+		files = self._media.files()
 		is_text = self._kind is MediaKind.NONE
 		rich = trimmed(self._post_text.rich())
-		if not is_text and media is None:
+		if not is_text and not files:
 			raise ValueError(
-				f"Выбран тип «{kind_label(self._kind)}», а файл не указан — "
-				"выберите файл или переключитесь на «Текст»."
+				f"Выбран тип «{kind_label(self._kind)}», а файлы не выбраны — "
+				"выберите файл (или несколько для альбома) либо переключитесь "
+				"на «Текст»."
 			)
 		return PostDraft(
 			community_id=self._draft.community_id,
 			text=rich.text,
 			entities=rich.entities,
 			preview=self._preview.preview() if is_text else LinkPreview(),
-			media=() if is_text else (MediaFile(media or "", self._kind, self._rename_to()),),
+			media=() if is_text else files,
 			when=self._when_row.when(),
 			topic_id=self._selected_topic_id(),
 			markup=self._markup.markup(),
 			markup_first=self._markup.markup_first(),
 		)
-
-	def _rename_to(self) -> str | None:
-		"""Новое имя файла, если переименование включено и имя задано."""
-		if self._kind is MediaKind.NONE or not self._rename_check.isChecked():
-			return None
-		return self._rename_edit.text().strip() or None
 
 	def _selected_topic_id(self) -> int | None:
 		"""Тема из видимого ряда; ряд скрыт — прежняя тема поста."""
