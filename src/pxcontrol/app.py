@@ -27,13 +27,9 @@ from pathlib import Path
 from pxcontrol.config import get_settings
 from pxcontrol.engine import EngineWorker
 from pxcontrol.logging_config import setup_logging
+from pxcontrol.ui.async_bridge import ask_engine
 
 logger = logging.getLogger(__name__)
-
-#: Предел ожидания чтения оформления из цикла движка перед созданием
-#: окна: движок уже готов, штатно это миллисекунды — предел лишь
-#: страхует от зависшего цикла, не задерживая запуск заметно.
-_APPEARANCE_READ_TIMEOUT_S = 5
 
 
 def run() -> int:
@@ -108,16 +104,17 @@ def _run_qt(worker: EngineWorker) -> int:
 	# ожидание — мс): тема красит виджеты на лету, а плотность (отступы,
 	# высота полей, шрифт) применима только до их создания. Сбой чтения
 	# не валит запуск — откат к умолчаниям ключей.
-	try:
-		dark, compact, control_height, font_size = worker.submit(read_appearance()).result(
-			timeout=_APPEARANCE_READ_TIMEOUT_S
-		)
-	except Exception:  # noqa: BLE001 — оформление не стоит отказа в запуске
-		logger.warning("Не удалось прочитать оформление — использую умолчания.", exc_info=True)
-		dark = THEME_DARK.default
-		compact = UI_COMPACT_SPACING.default
-		control_height = UI_CONTROL_HEIGHT.default
-		font_size = UI_FONT_SIZE.default
+	dark, compact, control_height, font_size = ask_engine(
+		worker,
+		read_appearance(),
+		(
+			THEME_DARK.default,
+			UI_COMPACT_SPACING.default,
+			UI_CONTROL_HEIGHT.default,
+			UI_FONT_SIZE.default,
+		),
+		what="прочитать оформление — использую умолчания",
+	)
 	apply_theme(dark=dark)
 	density.init(compact, control_height, font_size)
 	try:

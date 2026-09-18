@@ -15,6 +15,7 @@ from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.services.settings import WINDOW_GEOMETRY
 from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.types import CommunityKind, MediaKind
+from pxcontrol.ui.async_bridge import ask_engine
 from pxcontrol.ui.pages.common import exec_dialog, show_info, show_success
 from pxcontrol.ui.pages.communities import CommunitiesPage
 from pxcontrol.ui.pages.community_page import CommunityPage
@@ -33,11 +34,6 @@ from pxcontrol.ui.pages.video import VideoPage
 from pxcontrol.ui.queue_watcher import QueueWatcher
 
 logger = logging.getLogger(__name__)
-
-#: Предел синхронного чтения/записи настроек окна из цикла движка:
-#: геометрия нужна до показа и при выходе, штатно это миллисекунды —
-#: предел лишь страхует от зависшего цикла.
-_SETTINGS_SYNC_TIMEOUT_S = 5
 
 
 class MainWindow(FluentWindow):
@@ -60,16 +56,19 @@ class MainWindow(FluentWindow):
 		Симметрично ``_save_geometry``: сбой чтения (зависший движок,
 		таймаут) не должен валить запуск — окно откроется с умолчаниями.
 		"""
+		saved = ask_engine(
+			self._worker,
+			self._worker.engine.settings.get(WINDOW_GEOMETRY),
+			None,
+			what="прочитать состояние окна",
+		)
 		try:
-			saved = self._worker.submit(self._worker.engine.settings.get(WINDOW_GEOMETRY)).result(
-				timeout=_SETTINGS_SYNC_TIMEOUT_S
-			)
-			# применение — тоже под защитой: битое значение из БД (не-ASCII,
-			# мусор вместо base64) не должно валить создание окна
+			# применение — под своей защитой: битое значение из БД
+			# (не-ASCII, мусор вместо base64) не должно валить создание окна
 			if saved:
 				self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii")))
 		except Exception:  # noqa: BLE001 — геометрия не стоит отказа в запуске
-			logger.warning("Не удалось прочитать состояние окна.", exc_info=True)
+			logger.warning("Состояние окна не восстановлено: запись повреждена.", exc_info=True)
 
 	def _build_navigation(self) -> None:
 		"""Наполняет боковую навигацию разделами приложения."""
@@ -290,9 +289,9 @@ class MainWindow(FluentWindow):
 	def _save_geometry(self) -> None:
 		"""Сохраняет состояние окна (движок ещё жив: он гасится после Qt)."""
 		data = bytes(self.saveGeometry().toBase64()).decode("ascii")
-		try:
-			self._worker.submit(self._worker.engine.settings.set(WINDOW_GEOMETRY, data)).result(
-				timeout=_SETTINGS_SYNC_TIMEOUT_S
-			)
-		except Exception:  # noqa: BLE001 — потеря геометрии не мешает выходу
-			logger.warning("Не удалось сохранить состояние окна.", exc_info=True)
+		ask_engine(
+			self._worker,
+			self._worker.engine.settings.set(WINDOW_GEOMETRY, data),
+			None,
+			what="сохранить состояние окна",
+		)
