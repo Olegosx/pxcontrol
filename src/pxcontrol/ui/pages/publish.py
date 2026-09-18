@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
@@ -78,7 +77,7 @@ from pxcontrol.ui.pages.common import (
 	plural,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, MarkupState, markup_state
-from pxcontrol.ui.pages.media_picker import MediaPicker
+from pxcontrol.ui.pages.media_picker import MediaPicker, over_bot_limit
 from pxcontrol.ui.pages.poll_editor import PollEditor
 from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
 from pxcontrol.ui.pages.preview_row import PreviewRow
@@ -225,20 +224,6 @@ class PublishPage(StagePage):
 		"""Смена «сейчас ↔ отложенно»: у отложенных кнопки пока недоступны."""
 		self._refresh_markup()
 
-	def _media_over_bot_limit(self) -> bool:
-		"""Хоть один файл не по силам боту (от этого зависят маршрут и кнопки).
-
-		Недоступный файл считается маленьким: его судьбу решит проверка
-		при отправке, а не подсказка формы.
-		"""
-		for file in self._media.files():
-			try:
-				if Path(file.path).stat().st_size > BOT_MAX_FILE_BYTES:
-					return True
-			except OSError:
-				continue
-		return False
-
 	def _on_media_changed(self) -> None:
 		"""Состав файлов изменился: правила кнопок, превью и маршрут."""
 		self._refresh_markup()
@@ -261,7 +246,7 @@ class PublishPage(StagePage):
 			scheduled=not self._when_row.is_now(),
 			has_markup=self._markup.markup() is not None,
 			markup_first=self._markup.markup_first(),
-			over_bot_limit=self._media_over_bot_limit(),
+			over_bot_limit=over_bot_limit(self._media.files()),
 			poll=self._kind is MediaKind.POLL,
 		)
 

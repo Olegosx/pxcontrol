@@ -1148,22 +1148,23 @@ class DtoComboBox(ComboBox, Generic[_T]):
 _LOGO_COLORS = ("#e17076", "#eda86c", "#a695e7", "#7bc862", "#6ec9cb", "#65aadd", "#ee7aae")
 
 
-def community_logo(
-	parent: QWidget, community_id: int, title: str, avatar_path: str | None, size: int
+def entity_avatar(
+	parent: QWidget, seed: int, title: str, avatar_path: str | None, size: int
 ) -> AvatarWidget:
-	"""Логотип сообщества: аватар из кэша, без него — буква на подложке.
+	"""Аватар сущности: картинка из кэша, без неё — буква на подложке.
 
-	Общий для плиток дашборда и карточек очереди отправки: аватар
-	лежит файлом в кэше (``community_stats``), и читают его одинаково.
-	Штатный ``AvatarWidget`` библиотеки: картинку кадрирует по кругу
-	сам, без неё рисует первую букву текста на подложке. Цвет подложки
-	берётся по id — у одного сообщества он не меняется от показа
-	к показу.
+	Общий для сообществ (плитки дашборда, карточки очереди, шапка
+	страницы) и для исполнителей (карточки раздела «Пользователи
+	и боты»): правило одно — картинка, если есть, иначе первая буква
+	названия на цвете, выбранном по ``seed``. Цвет по идентификатору,
+	а не случайный: у одной и той же записи он всегда один.
+	Виджет — штатный ``AvatarWidget`` библиотеки: картинку он кадрирует
+	по кругу сам, без неё рисует первую букву текста на подложке.
 	"""
 	logo = AvatarWidget(parent)
 	logo.setRadius(size // 2)
 	logo.setText(title[:1].upper() or "?")
-	color = QColor(_LOGO_COLORS[community_id % len(_LOGO_COLORS)])
+	color = QColor(_LOGO_COLORS[seed % len(_LOGO_COLORS)])
 	logo.setBackgroundColor(color, color)
 	if avatar_path:
 		logo.setImage(avatar_path)

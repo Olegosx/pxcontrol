@@ -80,9 +80,9 @@ from pxcontrol.ui.pages.common import (
 	account_caption,
 	bot_caption,
 	clear_layout,
-	community_logo,
 	dim_widget,
 	elide_text,
+	entity_avatar,
 	error_reporter,
 	exec_dialog,
 	flow_columns,
@@ -359,7 +359,7 @@ class CommunityCard(CardWidget):
 		layout.setSpacing(12)
 		avatar_path = stats.avatar_path if stats is not None else None
 		layout.addWidget(
-			community_logo(box, community.id, community.title, avatar_path, _CARD_LOGO_SIZE)
+			entity_avatar(box, community.id, community.title, avatar_path, _CARD_LOGO_SIZE)
 		)
 		column = QVBoxLayout()
 		column.setSpacing(2)
@@ -481,7 +481,7 @@ def _name_cell(row: Row, parent: QWidget) -> QWidget:
 	layout.setContentsMargins(16, 0, 8, 0)
 	layout.setSpacing(11)
 	avatar = stats.avatar_path if stats is not None else None
-	layout.addWidget(community_logo(box, community.id, community.title, avatar, _ROW_LOGO_SIZE))
+	layout.addWidget(entity_avatar(box, community.id, community.title, avatar, _ROW_LOGO_SIZE))
 	column = QVBoxLayout()
 	column.setSpacing(0)
 	title = BodyLabel(box)

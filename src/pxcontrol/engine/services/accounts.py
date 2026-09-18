@@ -32,6 +32,16 @@ from pxcontrol.engine.telegram.types import BotRef, UserbotProfile
 logger = logging.getLogger(__name__)
 
 
+def _bot_not_found() -> AccountsError:
+	"""Единый отказ «бота нет» — парный к :func:`_account_not_found`.
+
+	Тот же довод: текст был написан трижды (переименование, пауза,
+	удаление), и разойтись им нельзя — человек не должен получать
+	разные слова в зависимости от того, каким путём попал в отказ.
+	"""
+	return AccountsError("Бот не найден — обновите список.")
+
+
 def _account_not_found() -> AccountsError:
 	"""Единый отказ «userbot-аккаунта нет».
 
@@ -239,7 +249,7 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			bot = await session.get(Bot, bot_id)
 			if bot is None:
-				raise AccountsError("Бот не найден — обновите список.")
+				raise _bot_not_found()
 			bot.label = label
 			await session.commit()
 			await session.refresh(bot)
@@ -259,7 +269,7 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			bot = await session.get(Bot, bot_id)
 			if bot is None:
-				raise AccountsError("Бот не найден — обновите список.")
+				raise _bot_not_found()
 			bot.paused = paused
 			await session.commit()
 			await session.refresh(bot)
@@ -326,7 +336,7 @@ class AccountsService:
 		async with self._db.session_factory() as session:
 			bot = await session.get(Bot, bot_id)
 		if bot is None:
-			raise AccountsError("Бот не найден — обновите список.")
+			raise _bot_not_found()
 		return bot
 
 	@staticmethod

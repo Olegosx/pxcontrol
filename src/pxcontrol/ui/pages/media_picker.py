@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from PySide6.QtCore import Signal
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, CaptionLabel, PushButton
 
 from pxcontrol.engine.services.posts import MAX_ALBUM_FILES, MediaFile
-from pxcontrol.engine.telegram.types import MediaKind
+from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES, MediaKind
 from pxcontrol.ui.pages.common import (
 	DIM_TEXT,
 	bind,
@@ -39,6 +39,24 @@ from pxcontrol.ui.pages.common import (
 	rename_row,
 	tinted,
 )
+
+
+def over_bot_limit(files: Sequence[MediaFile]) -> bool:
+	"""Хоть один файл не по силам боту (от этого зависят маршрут и кнопки).
+
+	Правило щадящее, в отличие от одноимённой проверки движка: файл,
+	размер которого не прочитался (сетевой диск, права), считается
+	маленьким. Форма только подсказывает, а судьбу такого файла решит
+	отправка — она о недоступном скажет прямо, и пугать человека
+	заранее незачем.
+	"""
+	for file in files:
+		try:
+			if Path(file.path).stat().st_size > BOT_MAX_FILE_BYTES:
+				return True
+		except OSError:
+			continue
+	return False
 
 
 def album_note(count: int) -> str:

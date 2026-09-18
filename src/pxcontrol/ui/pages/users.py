@@ -24,11 +24,10 @@ from collections.abc import Callable
 from functools import partial
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QHideEvent, QShowEvent
+from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
-	AvatarWidget,
 	BodyLabel,
 	CaptionLabel,
 	CardWidget,
@@ -63,6 +62,7 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	dim_widget,
 	elide_text,
+	entity_avatar,
 	error_reporter,
 	exec_dialog,
 	font_px,
@@ -143,26 +143,12 @@ _RENAME_BUTTON_PX = 24
 #: секунд — компромисс между живостью и лишними запросами к БД.
 _ACTIVITY_POLL_MS = 5000
 
-#: Цвета подложки аватара-буквы (те же, что у логотипов сообществ).
-_AVATAR_COLORS = ("#e17076", "#eda86c", "#a695e7", "#7bc862", "#6ec9cb", "#65aadd", "#ee7aae")
 
 #: Подсказка, когда вход невозможен без ключа приложения (ADR-0018).
 _NO_API_KEY_HINT = (
 	"Ключ API Telegram не задан — вход пользователей невозможен. "
 	"Получите api_id и api_hash на my.telegram.org и сохраните: Настройки → Общие."
 )
-
-
-def letter_avatar(
-	parent: QWidget, seed: int, text: str, size: int = _CARD_LOGO_SIZE
-) -> AvatarWidget:
-	"""Аватар-буква на подложке: цвет по id, у одной записи всегда один."""
-	logo = AvatarWidget(parent)
-	logo.setRadius(size // 2)
-	logo.setText(text[:1].upper() or "?")
-	color = QColor(_AVATAR_COLORS[seed % len(_AVATAR_COLORS)])
-	logo.setBackgroundColor(color, color)
-	return logo
 
 
 def _action_button(parent: QWidget, label: str, primary: bool) -> QPushButton:
@@ -242,7 +228,7 @@ class _Card(CardWidget):
 		layout = QHBoxLayout(box)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(12)
-		layout.addWidget(letter_avatar(box, seed, title))
+		layout.addWidget(entity_avatar(box, seed, title, None, _CARD_LOGO_SIZE))
 		column = QVBoxLayout()
 		column.setSpacing(2)
 		title_label = StrongBodyLabel(box)

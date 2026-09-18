@@ -31,7 +31,7 @@ from pxcontrol.engine.services.publish_queue import (
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
-	community_logo,
+	entity_avatar,
 	font_px,
 	format_local,
 	noop,
@@ -137,7 +137,7 @@ def post_leading(
 	канал», метка — на «когда».
 	"""
 	return [
-		community_logo(parent, community_id, community_title, avatar_path, LOGO_SIZE),
+		entity_avatar(parent, community_id, community_title, avatar_path, LOGO_SIZE),
 		slot_chip(when, parent),
 	]
 

@@ -57,8 +57,8 @@ from pxcontrol.ui.pages.common import (
 	FlowGrid,
 	TitleEditor,
 	clear_layout,
-	community_logo,
 	elide_text,
+	entity_avatar,
 	error_reporter,
 	page_layout,
 	section_header,
@@ -108,7 +108,6 @@ from pxcontrol.ui.pages.user_state import (
 	user_subtitle,
 	window_tile_caption,
 )
-from pxcontrol.ui.pages.users import letter_avatar
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +318,7 @@ class UserPage(ScrollArea):
 		row.setAlignment(Qt.AlignmentFlag.AlignTop)
 		title_text = subject_title(subject)
 		row.addWidget(
-			letter_avatar(box, subject.id, title_text, _HEADER_LOGO_SIZE),
+			entity_avatar(box, subject.id, title_text, None, _HEADER_LOGO_SIZE),
 			alignment=Qt.AlignmentFlag.AlignTop,
 		)
 		column = QVBoxLayout()
@@ -520,7 +519,7 @@ class UserPage(ScrollArea):
 		layout = QHBoxLayout(card)
 		layout.setContentsMargins(*density.spacing().card_margins)
 		layout.setSpacing(12)
-		layout.addWidget(community_logo(card, community.id, community.title, None, _ROW_LOGO_SIZE))
+		layout.addWidget(entity_avatar(card, community.id, community.title, None, _ROW_LOGO_SIZE))
 		column = QVBoxLayout()
 		column.setSpacing(2)
 		title = StrongBodyLabel(card)

@@ -77,9 +77,9 @@ from pxcontrol.ui.pages.common import (
 	bot_caption,
 	clear_layout,
 	community_kind_caption,
-	community_logo,
 	confirm_delete,
 	elide_text,
+	entity_avatar,
 	error_reporter,
 	exec_dialog,
 	format_local,
@@ -818,7 +818,7 @@ class CommunityPage(ScrollArea):
 		row.setAlignment(Qt.AlignmentFlag.AlignTop)
 		avatar = self._stats.avatar_path if self._stats is not None else None
 		row.addWidget(
-			community_logo(box, community.id, community.title, avatar, _HEADER_LOGO_SIZE),
+			entity_avatar(box, community.id, community.title, avatar, _HEADER_LOGO_SIZE),
 			alignment=Qt.AlignmentFlag.AlignTop,
 		)
 		column = QVBoxLayout()

@@ -31,7 +31,6 @@ from pxcontrol.engine.services.publish_route import poll_blocker
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import (
-	BOT_MAX_FILE_BYTES,
 	ForumTopicInfo,
 	LinkPreview,
 	MediaKind,
@@ -55,7 +54,7 @@ from pxcontrol.ui.pages.common import (
 	visible_topics,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, markup_state
-from pxcontrol.ui.pages.media_picker import MediaPicker
+from pxcontrol.ui.pages.media_picker import MediaPicker, over_bot_limit
 from pxcontrol.ui.pages.poll_editor import PollEditor
 from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
@@ -190,16 +189,6 @@ class QueueItemEditor(QWidget):
 		self._markup_card.body.addWidget(self._markup)
 		layout.addWidget(self._markup_card)
 
-	def _media_over_bot_limit(self) -> bool:
-		"""Хоть один файл элемента не по силам боту (от этого зависят кнопки)."""
-		for file in self._media.files():
-			try:
-				if Path(file.path).stat().st_size > BOT_MAX_FILE_BYTES:
-					return True
-			except OSError:
-				continue
-		return False
-
 	def _refresh_markup(self) -> None:
 		"""Приводит блок кнопок и предел текста к состоянию формы.
 
@@ -220,7 +209,7 @@ class QueueItemEditor(QWidget):
 			scheduled=not self._when_row.is_now(),
 			has_markup=markup is not None,
 			markup_first=self._markup.markup_first(),
-			over_bot_limit=self._media_over_bot_limit(),
+			over_bot_limit=over_bot_limit(self._media.files()),
 			poll=self._kind is MediaKind.POLL,
 		)
 		self._markup.set_mode_available(state.mode_available)
