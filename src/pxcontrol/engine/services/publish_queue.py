@@ -286,7 +286,6 @@ class PublishQueue:
 			sleep=lambda seconds: self._sleep(seconds),
 		)
 		self._sleep: Callable[[float], Coroutine[Any, Any, None]] = self._wait_stop
-		# элементы, ушедшие догоном: им положена пауза перед следующим
 		# задача передачи активного элемента — единственное, что можно
 		# рвать отменой: подготовка ходит в БД и обрываться не должна
 		self._transmit: asyncio.Task[PublishOutcome] | None = None

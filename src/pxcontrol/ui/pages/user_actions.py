@@ -29,6 +29,8 @@ from pxcontrol.ui.pages.common import (
 	show_success,
 )
 from pxcontrol.ui.pages.user_state import (
+	BotAction,
+	UserAction,
 	UserState,
 	delete_bot_text,
 	delete_user_text,
@@ -39,6 +41,42 @@ Done = Callable[[], None]
 
 
 # --- пользователь -----------------------------------------------------------------------
+
+
+#: Как часто дашборд и страница аккаунта перечитывают снимок активности,
+#: пока видимы. Пять секунд: строка «за 24 ч» и живая пометка должны
+#: шевелиться на глазах, но чаще — зря будить движок.
+ACTIVITY_POLL_MS = 5000
+
+
+def run_user_action(
+	worker: EngineWorker, owner: QWidget, action: UserAction, account: TgAccountDto, done: Done
+) -> None:
+	"""Выполняет действие над пользователем (вход, пауза, возобновление).
+
+	Разбор «какое действие — какая операция» общий для дашборда
+	и страницы аккаунта: обе предлагают один набор (``user_actions``),
+	и расходиться им нельзя — иначе с двух экранов одна кнопка делала бы
+	разное. Различаются они только тем, что делать после (``done``).
+	"""
+	if action is UserAction.LOGIN:
+		start_login(worker, owner, account, done)
+	elif action is UserAction.PAUSE:
+		set_user_paused(worker, owner, account, True, done)
+	elif action is UserAction.RESUME:
+		set_user_paused(worker, owner, account, False, done)
+
+
+def run_bot_action(
+	worker: EngineWorker, owner: QWidget, action: BotAction, bot: BotDto, done: Done
+) -> None:
+	"""Выполняет действие над ботом (диагностика, пауза, возобновление)."""
+	if action is BotAction.WHEREABOUTS:
+		diagnose_bot(worker, owner, bot)
+	elif action is BotAction.PAUSE:
+		set_bot_paused(worker, owner, bot, True, done)
+	elif action is BotAction.RESUME:
+		set_bot_paused(worker, owner, bot, False, done)
 
 
 def set_user_paused(

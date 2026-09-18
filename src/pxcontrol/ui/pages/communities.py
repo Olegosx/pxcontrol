@@ -18,9 +18,7 @@
 
 from __future__ import annotations
 
-import html
 import logging
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -78,6 +76,7 @@ from pxcontrol.ui.pages.common import (
 	FlowGrid,
 	QueueCounts,
 	account_caption,
+	bold_numbers,
 	bot_caption,
 	clear_layout,
 	dim_widget,
@@ -192,18 +191,6 @@ def metrics_text(
 	scheduled_count = stats.scheduled_count if stats is not None else None
 	scheduled = "нет данных" if scheduled_count is None else f"{scheduled_count} отложено"
 	return MetricsText(queue, scheduled)
-
-
-_NUMBER_RE = re.compile(r"\d[\d\u202f]*")
-
-
-def bold_numbers(text: str) -> str:
-	"""Размечает числа в тексте полужирным (rich text для ``BodyLabel``).
-
-	Макет карточки: «**5** к отправке · **2** ждут». Числа с узким
-	неразрывным пробелом (``format_count``) считаются одним числом.
-	"""
-	return _NUMBER_RE.sub(lambda m: f"<b>{m.group(0)}</b>", html.escape(text))
 
 
 def grid_columns(width: int, card_min: int = CARD_MIN_WIDTH, spacing: int = GRID_SPACING) -> int:

@@ -73,14 +73,13 @@ from pxcontrol.ui.pages.community_overview import (
 	period_caption,
 )
 from pxcontrol.ui.pages.user_actions import (
+	ACTIVITY_POLL_MS,
 	delete_bot,
 	delete_user,
-	diagnose_bot,
+	run_bot_action,
+	run_user_action,
 	save_bot_label,
 	save_user_label,
-	set_bot_paused,
-	set_user_paused,
-	start_login,
 )
 from pxcontrol.ui.pages.user_state import (
 	BOT_ACTION_LABELS,
@@ -118,9 +117,6 @@ _HEADER_LOGO_SIZE = 56
 _TILE_MIN_WIDTH = 180
 _CHART_MIN_WIDTH = 340
 _CARD_SPACING = 10
-
-#: Период опроса активности, пока страница видна (ADR-0030).
-_ACTIVITY_POLL_MS = 5000
 
 #: Логотип в строке сообщества.
 _ROW_LOGO_SIZE = 28
@@ -280,7 +276,7 @@ class UserPage(ScrollArea):
 		self._build()
 		self._render_header()
 		self._timer = QTimer(self)
-		self._timer.setInterval(_ACTIVITY_POLL_MS)
+		self._timer.setInterval(ACTIVITY_POLL_MS)
 		self._timer.timeout.connect(self._poll_activity)
 
 	@property
@@ -542,20 +538,10 @@ class UserPage(ScrollArea):
 		self.changed.emit()
 
 	def _run_user_action(self, action: UserAction, account: TgAccountDto) -> None:
-		if action is UserAction.LOGIN:
-			start_login(self._worker, self, account, self._after_change)
-		elif action is UserAction.PAUSE:
-			set_user_paused(self._worker, self, account, True, self._after_change)
-		elif action is UserAction.RESUME:
-			set_user_paused(self._worker, self, account, False, self._after_change)
+		run_user_action(self._worker, self, action, account, self._after_change)
 
 	def _run_bot_action(self, action: BotAction, bot: BotDto) -> None:
-		if action is BotAction.WHEREABOUTS:
-			diagnose_bot(self._worker, self, bot)
-		elif action is BotAction.PAUSE:
-			set_bot_paused(self._worker, self, bot, True, self._after_change)
-		elif action is BotAction.RESUME:
-			set_bot_paused(self._worker, self, bot, False, self._after_change)
+		run_bot_action(self._worker, self, action, bot, self._after_change)
 
 	def _on_delete(self) -> None:
 		subject = self._subject

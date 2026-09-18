@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
@@ -43,7 +43,7 @@ from pxcontrol.engine.telegram.rich_text import (
 	TextStyle,
 )
 from pxcontrol.engine.telegram.types import known_scheme
-from pxcontrol.ui.pages.common import ErrorLabel, exec_dialog
+from pxcontrol.ui.pages.common import ErrorLabel, bind, exec_dialog
 
 #: Свойства формата под стили, которых у Qt нет. Значения начинаются
 #: от ``UserProperty``: пространство до него принадлежит Qt.
@@ -272,7 +272,7 @@ class RichPostEdit(QWidget):
 			button = ToolButton(self)
 			button.setText(label)
 			button.setToolTip(tip)
-			button.clicked.connect(_bind_style(self.apply_style, style))
+			button.clicked.connect(bind(self.apply_style, style))
 			self._tools.addWidget(button)
 		clear = ToolButton(self)
 		clear.setText("✕")
@@ -283,7 +283,7 @@ class RichPostEdit(QWidget):
 		for style, key in _SHORTCUTS.items():
 			shortcut = QShortcut(QKeySequence(key), self.edit)
 			shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-			shortcut.activated.connect(_bind_style(self.apply_style, style))
+			shortcut.activated.connect(bind(self.apply_style, style))
 
 	# --- работа со стилями ---------------------------------------------------
 
@@ -360,12 +360,3 @@ class RichPostEdit(QWidget):
 def _has_style(fmt: QTextCharFormat, style: TextStyle) -> bool:
 	"""Стоит ли стиль на куске под курсором."""
 	return any(item[0] is style for item in styles_of(fmt))
-
-
-def _bind_style(action: Callable[[TextStyle], None], style: TextStyle) -> Callable[[], None]:
-	"""Ранняя привязка стиля к обработчику (как ``common.bind``)."""
-
-	def handler() -> None:
-		action(style)
-
-	return handler

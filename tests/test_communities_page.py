@@ -15,13 +15,12 @@ from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.telegram.types import CommunityKind
-from pxcontrol.ui.pages.common import QueueCounts, format_count, plural
+from pxcontrol.ui.pages.common import QueueCounts, bold_numbers, format_count, plural
 from pxcontrol.ui.pages.communities import (
 	VIEW_LIST,
 	VIEW_TILES,
 	Row,
 	TableColumn,
-	bold_numbers,
 	grid_columns,
 	matches_search,
 	metrics_text,

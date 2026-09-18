@@ -59,6 +59,7 @@ from pxcontrol.ui.pages.common import (
 	FormDialog,
 	TitleEditor,
 	WarningLabel,
+	bold_numbers,
 	clear_layout,
 	dim_widget,
 	elide_text,
@@ -75,16 +76,14 @@ from pxcontrol.ui.pages.common import (
 	show_success,
 	tinted,
 )
-from pxcontrol.ui.pages.communities import bold_numbers
 from pxcontrol.ui.pages.user_actions import (
+	ACTIVITY_POLL_MS,
 	delete_bot,
 	delete_user,
-	diagnose_bot,
+	run_bot_action,
+	run_user_action,
 	save_bot_label,
 	save_user_label,
-	set_bot_paused,
-	set_user_paused,
-	start_login,
 )
 from pxcontrol.ui.pages.user_state import (
 	BOT_ACTION_LABELS,
@@ -137,12 +136,6 @@ _SEARCH_WIDTH = 200
 
 #: Карандаш правки заголовка — компактный, вровень со строкой текста.
 _RENAME_BUTTON_PX = 24
-
-#: Период опроса активности, пока страница видна (ADR-0030): живая
-#: пометка меняется каждую секунду, числа за сутки — редко; пять
-#: секунд — компромисс между живостью и лишними запросами к БД.
-_ACTIVITY_POLL_MS = 5000
-
 
 #: Подсказка, когда вход невозможен без ключа приложения (ADR-0018).
 _NO_API_KEY_HINT = (
@@ -394,7 +387,7 @@ class UsersPage(ScrollArea):
 		self._build()
 		# опрос активности — только пока страница видна (см. showEvent)
 		self._activity_timer = QTimer(self)
-		self._activity_timer.setInterval(_ACTIVITY_POLL_MS)
+		self._activity_timer.setInterval(ACTIVITY_POLL_MS)
 		self._activity_timer.timeout.connect(self._poll_activity)
 
 	def _build(self) -> None:
@@ -634,12 +627,7 @@ class UsersPage(ScrollArea):
 	# --- действия пользователя (общие с страницей аккаунта — user_actions) ------------
 
 	def _run_user_action(self, action: UserAction, account: TgAccountDto) -> None:
-		if action is UserAction.LOGIN:
-			start_login(self._worker, self, account, self.reload)
-		elif action is UserAction.PAUSE:
-			set_user_paused(self._worker, self, account, True, self.reload)
-		elif action is UserAction.RESUME:
-			set_user_paused(self._worker, self, account, False, self.reload)
+		run_user_action(self._worker, self, action, account, self.reload)
 
 	def _rename_user(self, account: TgAccountDto, label: str) -> None:
 		save_user_label(self._worker, self, account, label, self.reload)
@@ -682,12 +670,7 @@ class UsersPage(ScrollArea):
 	# --- действия бота -----------------------------------------------------------------
 
 	def _run_bot_action(self, action: BotAction, bot: BotDto) -> None:
-		if action is BotAction.WHEREABOUTS:
-			diagnose_bot(self._worker, self, bot)
-		elif action is BotAction.PAUSE:
-			set_bot_paused(self._worker, self, bot, True, self.reload)
-		elif action is BotAction.RESUME:
-			set_bot_paused(self._worker, self, bot, False, self.reload)
+		run_bot_action(self._worker, self, action, bot, self.reload)
 
 	def _rename_bot(self, bot: BotDto, label: str) -> None:
 		save_bot_label(self._worker, self, bot, label, self.reload)

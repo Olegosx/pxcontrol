@@ -546,7 +546,7 @@ class MarkupsService:
 			if message_id is not None:
 				await self.remember_post(promise.id, message_id)
 		if message_id is None:
-			await self._miss(promise, "вышедший пост не опознан")
+			await self.fail(promise.id, "вышедший пост не опознан")
 			return False
 		try:
 			await self._gateway.bot_edit_markup(bot, chat_id, message_id, promise.markup)  # type: ignore[union-attr]
@@ -564,7 +564,7 @@ class MarkupsService:
 			)
 			return False
 		except Exception as exc:  # noqa: BLE001 — исход обещания, а не дозора
-			await self._miss(promise, user_message(exc))
+			await self.fail(promise.id, user_message(exc))
 			return False
 		await self.drop(promise.id)
 		logger.info(
@@ -611,10 +611,6 @@ class MarkupsService:
 				)
 				return None
 			return community.tg_chat_id, account_id, BotRef(bot.id, bot.token)
-
-	async def _miss(self, promise: PromisedMarkupDto, reason: str) -> None:
-		"""Записывает неудачную попытку; срок обещания проверит проход."""
-		await self.fail(promise.id, reason)
 
 	@staticmethod
 	def _dto(row: PromisedMarkup) -> PromisedMarkupDto | None:

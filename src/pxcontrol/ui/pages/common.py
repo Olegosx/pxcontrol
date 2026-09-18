@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -502,6 +504,21 @@ def queue_counts(items: list[Any]) -> dict[int, QueueCounts]:
 			)
 		counts[item.community_id] = current
 	return counts
+
+
+_NUMBER_RE = re.compile(r"\d[\d\u202f]*")
+
+
+def bold_numbers(text: str) -> str:
+	"""Размечает числа в тексте полужирным (rich text для ``BodyLabel``).
+
+	Макет карточки: «**5** к отправке · **2** ждут». Числа с узким
+	неразрывным пробелом (``format_count``) считаются одним числом.
+	Живёт рядом с остальным форматированием чисел: карточки сообществ
+	и карточки исполнителей пользуются им одинаково, и раздел
+	«Пользователи и боты» тянул ради него весь модуль чужого дашборда.
+	"""
+	return _NUMBER_RE.sub(lambda m: f"<b>{m.group(0)}</b>", html.escape(text))
 
 
 def plural(count: int, one: str, few: str, many: str) -> str:
