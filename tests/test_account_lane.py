@@ -253,19 +253,19 @@ async def test_lane_records_operations_with_outcome_and_live_state() -> None:
 	"""Каждое выполненное тело — запись: вид, интервал, исход; живое состояние честное."""
 	from datetime import UTC, datetime, timedelta
 
-	from pxcontrol.engine.telegram.lane import OperationRecord, Outcome
+	from pxcontrol.engine.telegram.lane import OperationLog, Outcome
 
 	clock = _Clock()
 	first = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 	moments = [first + timedelta(seconds=i) for i in range(10)]
-	records: list[OperationRecord] = []
+	log = OperationLog()
 	lane = AccountLane(
 		LaneOwner(OwnerKind.BOT, 7),
 		0.0,
 		clock=clock,
 		sleep=clock.sleep,
 		wall_clock=lambda: moments.pop(0),
-		record=records.append,
+		log=log,
 	)
 	assert lane.live_state().busy_kind is None
 	async with lane.slot(TelegramPriority.PUBLISH):
@@ -277,6 +277,7 @@ async def test_lane_records_operations_with_outcome_and_live_state() -> None:
 	with pytest.raises(TelegramFloodError):
 		async with lane.slot(TelegramPriority.MAINTENANCE):
 			raise TelegramFloodError("подождите", retry_after_s=40)
+	records = log.drain()
 	assert [(r.kind, r.outcome, r.wait_s) for r in records] == [
 		(TelegramPriority.PUBLISH, Outcome.OK, 0),
 		(TelegramPriority.BACKGROUND, Outcome.ERROR, 0),
@@ -288,17 +289,17 @@ async def test_lane_records_operations_with_outcome_and_live_state() -> None:
 	with pytest.raises(TelegramFloodError):
 		async with lane.slot(TelegramPriority.PUBLISH):
 			pass
-	assert len(records) == 3
+	assert len(log) == 0
 	assert lane.live_state().frozen_for_s == pytest.approx(40.0)
 	assert lane.live_state().busy_kind is None
 
 
 async def test_lane_records_cancelled_operation() -> None:
 	"""Обрыв загрузки человеком — исход «отменено», не ошибка."""
-	from pxcontrol.engine.telegram.lane import OperationRecord, Outcome
+	from pxcontrol.engine.telegram.lane import OperationLog, Outcome
 
-	records: list[OperationRecord] = []
-	lane = AccountLane(LaneOwner(OwnerKind.USER, 1), 0.0, record=records.append)
+	log = OperationLog()
+	lane = AccountLane(LaneOwner(OwnerKind.USER, 1), 0.0, log=log)
 	started = asyncio.Event()
 
 	async def upload() -> None:
@@ -312,7 +313,7 @@ async def test_lane_records_cancelled_operation() -> None:
 	task.cancel()
 	with pytest.raises(asyncio.CancelledError):
 		await task
-	assert [r.outcome for r in records] == [Outcome.CANCELLED]
+	assert [r.outcome for r in log.drain()] == [Outcome.CANCELLED]
 	assert lane.live_state().busy_kind is None
 
 
@@ -338,3 +339,46 @@ async def test_live_state_counts_waiting() -> None:
 	release.set()
 	await asyncio.gather(holder, *waiters)
 	assert lane.live_state().waiting == 0
+
+
+async def test_lane_keeps_writing_after_log_drained() -> None:
+	"""Дорожка пишет в журнал и после выемки — иначе учёт замолкает навсегда.
+
+	Замок на дефект, из-за которого приложение показывало исполнителям
+	ноль операций при круглосуточной работе: журнал был обычным списком,
+	выемка подменяла его новым, а дорожки оставались у прежнего — того,
+	которого больше никто не читал. Первая выемка делала каждую
+	созданную до неё дорожку немой до перезапуска приложения.
+	"""
+	from pxcontrol.engine.telegram.lane import OperationLog
+
+	log = OperationLog()
+	lane = AccountLane(LaneOwner(OwnerKind.USER, 1), 0.0, log=log)
+	for _ in range(3):
+		async with lane.slot(TelegramPriority.PUBLISH):
+			pass
+		assert len(log.drain()) == 1, "операция после выемки обязана попасть в журнал"
+
+
+async def test_operation_log_drains_in_place_and_caps_capacity() -> None:
+	"""Выемка опустошает журнал на месте; переполнение вытесняет старьё."""
+	from datetime import UTC, datetime
+
+	from pxcontrol.engine.telegram.lane import OperationLog, OperationRecord, Outcome
+
+	def _record(number: int) -> OperationRecord:
+		moment = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
+		return OperationRecord(
+			LaneOwner(OwnerKind.BOT, number), TelegramPriority.PUBLISH, moment, moment, Outcome.OK
+		)
+
+	log = OperationLog(capacity=3)
+	for number in range(5):
+		log.record(_record(number))
+	# вытеснены самые старые, а не самые свежие: свежие ещё нужны
+	assert [r.owner.id for r in log.drain()] == [2, 3, 4]
+	assert len(log) == 0, "выемка опустошает журнал"
+	# возврат неудавшейся пачки: записи встают вперёд свежих
+	log.record(_record(9))
+	log.restore([_record(7), _record(8)])
+	assert [r.owner.id for r in log.drain()] == [7, 8, 9]

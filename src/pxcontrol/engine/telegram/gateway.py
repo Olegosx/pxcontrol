@@ -44,6 +44,7 @@ from pxcontrol.engine.telegram.lane import (
 	AccountLane,
 	LaneLiveState,
 	LaneOwner,
+	OperationLog,
 	OperationRecord,
 	OwnerKind,
 	TelegramPriority,
@@ -95,8 +96,11 @@ class TelegramGateway:
 		# у ботов свои дорожки (ADR-0030), без зазора, с той же заморозкой
 		self._lanes: dict[LaneOwner, AccountLane] = {}
 		# записи о выполненных операциях (ADR-0030): дорожки складывают
-		# их сюда, сервис активности забирает пачкой (drain_operations)
-		self._operations: list[OperationRecord] = []
+		# их сюда, сервис активности забирает пачкой (drain_operations).
+		# Журнал — объект, а не список: дорожка получает его один раз
+		# и на всю жизнь, поэтому хранилище записей обязано переживать
+		# выемки (OperationLog: выемка опустошает на месте)
+		self._log = OperationLog()
 		# приостановленные человеком аккаунты (ADR-0029): транспорта у них
 		# нет, а любая операция получает отказ с причиной «приостановлен»,
 		# а не «войдите» — иначе человек шёл бы входить в аккаунт, который
@@ -193,22 +197,22 @@ class TelegramGateway:
 		lane = self._lanes.get(owner)
 		if lane is None:
 			interval = BOT_MIN_INTERVAL_S if owner.kind is OwnerKind.BOT else DEFAULT_MIN_INTERVAL_S
-			lane = AccountLane(owner, interval, record=self._operations.append)
+			lane = AccountLane(owner, interval, log=self._log)
 			self._lanes[owner] = lane
 		return lane
 
 	def drain_operations(self) -> list[OperationRecord]:
-		"""Забирает накопленные записи операций (буфер очищается).
+		"""Забирает накопленные записи операций (журнал опустошается).
 
 		Единственный читатель — сервис активности (ADR-0030): пишет их
-		в БД пачкой; шлюз о хранилище не знает.
+		в БД пачкой; шлюз о хранилище не знает. Дорожки продолжают
+		писать в тот же журнал — выемка его не подменяет.
 		"""
-		records, self._operations = self._operations, []
-		return records
+		return self._log.drain()
 
 	def restore_operations(self, records: Sequence[OperationRecord]) -> None:
-		"""Возвращает записи в буфер (сброс в БД не удался) — вперёд свежих."""
-		self._operations[:0] = list(records)
+		"""Возвращает записи в журнал (сброс в БД не удался) — вперёд свежих."""
+		self._log.restore(records)
 
 	def live_states(self) -> dict[LaneOwner, LaneLiveState]:
 		"""Живое состояние всех дорожек — снимок для показа (ADR-0030)."""

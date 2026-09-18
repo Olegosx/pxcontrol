@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 
@@ -275,3 +276,63 @@ async def test_history_reads_only_owner_rows(db: Database) -> None:
 	assert history.operations == 1 and sum(history.hours) == 1
 	assert history.busy_days[-1].value == 10
 	assert (await service.history(bot, _NOW)).kinds == (Share("background", 1),)
+
+
+async def test_snapshot_keeps_last_operation_beyond_window(db: Database) -> None:
+	"""«Последняя операция» — по всей истории, а не по окну недели.
+
+	Окно показа отвечает на «сколько работал за неделю», а справка —
+	на «когда работал вообще»: исполнитель, замолчавший девять дней
+	назад, должен видеть свою дату, а не «ещё не было».
+	"""
+	user, _bot = await _owners(db)
+	gateway = _FakeGateway()
+	service = ActivityService(db, gateway)
+	old = -9 * 24 * 3600
+	gateway.buffer = [_record(user, old, old + 5, TelegramPriority.PUBLISH)]
+	await service.flush()
+	snapshot = await service.snapshot(_NOW)
+	assert snapshot[user].last_week.operations == 0, "в окно недели операция не попала"
+	assert snapshot[user].last_operation_at == _at(old + 5)
+
+
+async def test_flush_returns_batch_to_buffer_when_cancelled(db: Database) -> None:
+	"""Отмена задачи не должна уносить пачку: она уже изъята из буфера."""
+	user, _bot = await _owners(db)
+
+	class _CancellingDb:
+		"""База, чья сессия обрывается отменой (остановка движка на полпути)."""
+
+		def session_factory(self) -> object:
+			raise asyncio.CancelledError
+
+	gateway = _FakeGateway()
+	service = ActivityService(_CancellingDb(), gateway)  # type: ignore[arg-type]
+	records = [_record(user, -100, -90, TelegramPriority.PUBLISH)]
+	gateway.buffer = list(records)
+	with pytest.raises(asyncio.CancelledError):
+		await service.flush()
+	assert gateway.buffer == records, "пачка вернулась в буфер, а не пропала"
+
+
+async def test_service_counts_operations_of_live_gateway(db: Database) -> None:
+	"""Круг через настоящий шлюз: операции доходят до базы и после сброса.
+
+	Подставной шлюз тестов повторяет ожидаемое поведение своими руками
+	и потому не замечает, если настоящий его не выполняет. Именно так
+	дефект «учёт замолкает после первой выемки» и жил: сервис был
+	проверен, шлюз — нет.
+	"""
+	from pxcontrol.engine.telegram.gateway import TelegramGateway
+	from pxcontrol.engine.telegram.lane import TelegramPriority as Priority
+
+	user, _bot = await _owners(db)
+	gateway = TelegramGateway()
+	service = ActivityService(db, gateway)
+	for _ in range(3):
+		async with gateway._lane(user).slot(Priority.PUBLISH):  # noqa: SLF001 — дорожка изнутри
+			pass
+		assert await service.flush() == 1, "каждая операция доходит до базы"
+	snapshot = await service.snapshot()
+	assert snapshot[user].last_day.operations == 3
+	await gateway.stop()

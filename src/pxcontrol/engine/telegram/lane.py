@@ -26,7 +26,7 @@ import itertools
 import logging
 import math
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -104,6 +104,92 @@ class OperationRecord:
 	wait_s: int = 0
 
 
+#: Предел вместимости журнала операций. Штатно журнал живёт секунды —
+#: учёт активности забирает его раз в 10 с (ADR-0030); предел нужен
+#: единственному случаю: хранилище отказывает подряд, пачка за пачкой
+#: возвращается обратно, и без предела журнал рос бы в памяти без края
+#: и молча. Десять тысяч записей — это часы работы даже при десятке
+#: сообществ, то есть с запасом переживаемый обрыв.
+LOG_CAPACITY = 10_000
+
+
+class OperationLog:
+	"""Журнал выполненных операций: пишут дорожки, забирает учёт (ADR-0030).
+
+	Список записей **принадлежит журналу** и наружу не отдаётся:
+	:meth:`drain` опустошает его на месте, а не подменяет новым. Это
+	не мелочь стиля, а инвариант: дорожки держат ссылку на журнал
+	надолго (всю жизнь аккаунта), и стоит читателю подменить список —
+	пишущие остаются у прежнего, которого никто больше не читает.
+	Именно так учёт и терял всё, кроме первых секунд работы: ошибка
+	была невидима, потому что правило «не подменять» нигде не жило,
+	кроме головы автора. Теперь оно живёт в типе — списка снаружи
+	просто нет.
+
+	Переполнение (см. :data:`LOG_CAPACITY`) вытесняет самые старые
+	записи и сообщает об этом в журнал приложения: потеря названа,
+	а не случается молча.
+	"""
+
+	def __init__(self, capacity: int = LOG_CAPACITY) -> None:
+		"""Args:
+		capacity: сколько записей журнал держит, прежде чем вытеснять
+			самые старые (не меньше одной).
+		"""
+		self._items: list[OperationRecord] = []
+		self._capacity = max(1, capacity)
+		#: вытеснено с прошлой выемки — счётчик эпизода переполнения
+		self._dropped = 0
+
+	def __len__(self) -> int:
+		"""Сколько записей ждут выемки."""
+		return len(self._items)
+
+	def record(self, record: OperationRecord) -> None:
+		"""Принимает запись о завершённой операции (зовёт дорожка)."""
+		self._items.append(record)
+		self._trim()
+
+	def drain(self) -> list[OperationRecord]:
+		"""Забирает накопленные записи, опустошая журнал на месте.
+
+		Returns:
+			Записи в порядке появления (журнал остаётся пустым).
+		"""
+		items = list(self._items)
+		self._items.clear()
+		if self._dropped:
+			logger.warning(
+				"Учёт активности: %d записей вытеснено переполнением журнала.", self._dropped
+			)
+			self._dropped = 0
+		return items
+
+	def restore(self, records: Sequence[OperationRecord]) -> None:
+		"""Возвращает записи в журнал вперёд свежих (сброс в БД не удался)."""
+		self._items[:0] = list(records)
+		self._trim()
+
+	def _trim(self) -> None:
+		"""Держит вместимость, вытесняя самые старые записи.
+
+		Первое вытеснение эпизода сообщается сразу — иначе о потере
+		узнали бы только при следующей удачной выемке, а её может
+		и не случиться.
+		"""
+		excess = len(self._items) - self._capacity
+		if excess <= 0:
+			return
+		del self._items[:excess]
+		if not self._dropped:
+			logger.warning(
+				"Учёт активности: журнал переполнен (%d записей) — вытесняю самые старые. "
+				"Похоже, сброс в базу не проходит.",
+				self._capacity,
+			)
+		self._dropped += excess
+
+
 @dataclass(frozen=True)
 class LaneLiveState:
 	"""Живое состояние дорожки — снимок для показа (ADR-0030).
@@ -159,7 +245,7 @@ class AccountLane:
 		clock: Callable[[], float] = time.monotonic,
 		sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 		wall_clock: Callable[[], datetime] | None = None,
-		record: Callable[[OperationRecord], None] | None = None,
+		log: OperationLog | None = None,
 	) -> None:
 		"""Args:
 		owner: владелец дорожки — для записей активности и сообщений в логе.
@@ -169,15 +255,17 @@ class AccountLane:
 		sleep: способ подождать (подменяется в тестах).
 		wall_clock: настенное время для записей активности (ADR-0030);
 			None — текущее UTC.
-		record: куда отдавать запись о каждой завершённой операции;
-			None — учёт не ведётся.
+		log: журнал, принимающий запись о каждой завершённой операции;
+			None — учёт не ведётся. Именно журнал, а не произвольный
+			колбэк: дорожка держит эту ссылку всю свою жизнь, и хранилище
+			записей обязано переживать выемки (см. :class:`OperationLog`).
 		"""
 		self._owner = owner
 		self._min_interval_s = min_interval_s
 		self._clock = clock
 		self._sleep = sleep
 		self._wall_clock = wall_clock or (lambda: datetime.now(UTC))
-		self._record = record
+		self._log = log
 		self._busy = False
 		# ожидающие: (приоритет, номер по порядку, обещание разбудить).
 		# Номер — и разрешение ничьих внутри приоритета (кто раньше встал,
@@ -284,8 +372,8 @@ class AccountLane:
 			# поэтому залпа сразу после неё быть не должно
 			self._last_at = self._clock()
 			self._busy_kind, self._busy_since = None, None
-			if self._record is not None:
-				self._record(
+			if self._log is not None:
+				self._log.record(
 					OperationRecord(
 						self._owner, priority, started, self._wall_clock(), outcome, wait_s
 					)

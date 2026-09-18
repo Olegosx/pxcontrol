@@ -1525,6 +1525,13 @@ async def test_gateway_bot_lane_freezes_after_retry_after(monkeypatch: pytest.Mo
 		(LaneOwner(OwnerKind.BOT, 2), Outcome.OK, 0),
 	]
 	assert gateway.drain_operations() == [], "буфер очищен"
+	# замок: выемка не должна делать дорожку немой. Пока журнал шлюза был
+	# списком, выемка подменяла его новым, а дорожки оставались у прежнего —
+	# и учёт показывал ноль операций у исполнителя, работавшего сутками
+	assert await gateway.bot_send_text(calm, "-1002", "четыре") == 1
+	assert [r.owner for r in gateway.drain_operations()] == [LaneOwner(OwnerKind.BOT, 2)], (
+		"операция после выемки обязана попасть в журнал"
+	)
 	live = gateway.live_states()
 	assert live[LaneOwner(OwnerKind.BOT, 1)].frozen_for_s > 0
 	assert live[LaneOwner(OwnerKind.BOT, 2)].busy_kind is None
