@@ -273,9 +273,47 @@ def test_slot_color_is_stable_and_distinct() -> None:
 	assert len(slot_color("18:00")) == 2
 
 
+def test_slot_colors_never_collide() -> None:
+	"""Разные слоты — разные цвета: совпадений нет по построению.
+
+	Замок на прежнее устройство: цвет брался хешем подписи по палитре
+	из восьми цветов, и на 24 часах слоты неизбежно окрашивались
+	одинаково — какие именно, решала контрольная сумма.
+	"""
+	labels = [f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in range(0, 60, 5)]
+	colors = {slot_color(label) for label in labels}
+	assert len(colors) == len(labels)
+	# соседние часы стоят в списке рядом (очередь отсортирована по времени)
+	# и потому обязаны различаться заметно, а не на оттенок
+	assert slot_color("09:00") != slot_color("10:00") != slot_color("11:00")
+
+
+def test_slot_colors_stay_readable_on_both_themes() -> None:
+	"""Каждый цвет читается на своём фоне: контраст не ниже нормы AA.
+
+	Светлота метки подобрана под контраст, а не задана числом, — иначе
+	жёлтые слоты оказывались бы заметно бледнее синих (замер до правки:
+	худший случай 2.3 при норме 4.5).
+	"""
+	from pxcontrol.ui.pages.common import _SLOT_BG_DARK, _SLOT_BG_LIGHT, _contrast
+
+	def rgb(value: str) -> tuple[float, float, float]:
+		raw = value.lstrip("#")
+		return (int(raw[0:2], 16) / 255, int(raw[2:4], 16) / 255, int(raw[4:6], 16) / 255)
+
+	for hour in range(24):
+		for minute in (0, 30, 59):
+			light, dark = slot_color(f"{hour:02d}:{minute:02d}")
+			assert _contrast(rgb(light), _SLOT_BG_LIGHT) >= 4.5
+			assert _contrast(rgb(dark), _SLOT_BG_DARK) >= 4.5
+
+
 def test_slot_color_of_now_is_neutral() -> None:
 	"""У поста «сейчас» слота нет — метка не претендует на цвет расписания."""
 	assert slot_color(SLOT_NOW) not in {slot_color(f"{hour:02d}:00") for hour in range(24)}
+	# и всё, что не разобралось как время, ведёт себя так же
+	assert slot_color("завтра") == slot_color(SLOT_NOW)
+	assert slot_color("99:99") == slot_color(SLOT_NOW)
 
 
 def test_queue_slots_lists_now_first_then_times() -> None:

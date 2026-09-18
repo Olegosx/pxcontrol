@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import colorsys
 import html
 import re
-import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from functools import partial
+from functools import lru_cache, partial
 from typing import Any, Generic, TypeVar
 
 from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
@@ -1192,19 +1192,92 @@ def entity_avatar(
 #: Метка поста, у которого времени публикации нет (уйдёт сразу).
 SLOT_NOW = "сейчас"
 
-#: Палитра слотов времени: пары «светлая тема, тёмная тема». Цвет нужен,
-#: чтобы посты одного времени публикации узнавались в списке одним
-#: взглядом, поэтому тона взяты разнотонные, а не оттенки одного.
-_SLOT_COLORS = (
-	("#0f6cbd", "#62abf5"),  # синий
-	("#0f7b6c", "#5fd3bc"),  # бирюзовый
-	("#8a5a00", "#f0b429"),  # янтарный
-	("#8b2f8b", "#e08ce0"),  # пурпурный
-	("#0b6a0b", "#6ccb6c"),  # зелёный
-	("#a4262c", "#ff8a8a"),  # красный
-	("#5b5fc7", "#a6a9f5"),  # индиго
-	("#b3541e", "#ff9a62"),  # оранжевый
-)
+#: Шаг раскладки часов по цветовому кругу. Семь взаимно просто с 24,
+#: поэтому час → тон — соответствие без совпадений, но **соседние часы
+#: оказываются на разных сторонах круга** (09:00 синий, 10:00 малиновый,
+#: 11:00 жёлтый). Это и нужно: в очереди посты отсортированы по времени,
+#: то есть рядом всегда стоят соседние часы — их и важнее всего различать.
+#: Плавная радуга «по ходу суток» давала бы между соседями 15°, а такие
+#: тона в списке сливаются.
+_SLOT_HUE_STRIDE = 7
+
+#: Насколько тон уезжает внутри часа (градусы на полный час): 12:00
+#: и 12:30 — родственные, но различимые. Разницу внутри часа делят
+#: между собой сдвиг тона и глубина: одной глубины не хватало —
+#: к 40-й минуте метка выцветала почти в белый.
+_SLOT_MINUTE_DRIFT = 18.0
+
+#: Насыщенность метки: на светлом фоне глубже, на тёмном мягче.
+#: К концу часа она растёт: полутон делается светлее, а светлый цвет
+#: без добавки насыщенности выцветает в белый и теряет свой тон.
+_SLOT_SATURATION_LIGHT = 0.80
+_SLOT_SATURATION_DARK = 0.62
+_SLOT_SATURATION_GAIN = 0.16
+
+#: Требуемый контраст метки к фону карточки — им задаётся светлота.
+#: Задавать светлоту числом нельзя: при одной и той же светлоте жёлтый
+#: и синий читаются совершенно по-разному (замер 18.09.2026: худший
+#: случай давал 2.3 при норме AA 4.5). Нижняя граница — для ровного часа,
+#: верхняя — для 59-й минуты: так минуты внутри часа и дают полутон,
+#: не рискуя читаемостью.
+_SLOT_CONTRAST_MIN = 4.8
+_SLOT_CONTRAST_MAX = 6.4
+
+#: Фон карточки: белый в светлой теме (худший случай для тёмного текста)
+#: и #2b2b2b в тёмной — снято с настоящей карточки QFluentWidgets.
+_SLOT_BG_LIGHT = (1.0, 1.0, 1.0)
+_SLOT_BG_DARK = (0x2B / 255, 0x2B / 255, 0x2B / 255)
+
+
+def _relative_luminance(color: tuple[float, float, float]) -> float:
+	"""Относительная яркость цвета по WCAG 2.1 (каналы 0..1)."""
+
+	def channel(value: float) -> float:
+		return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+	red, green, blue = (channel(part) for part in color)
+	return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _contrast(color: tuple[float, float, float], background: tuple[float, float, float]) -> float:
+	"""Контраст цвета к фону по WCAG (1..21; 4.5 — норма для текста)."""
+	first, second = _relative_luminance(color), _relative_luminance(background)
+	return (max(first, second) + 0.05) / (min(first, second) + 0.05)
+
+
+def _tone(hue: float, saturation: float, target: float, *, light: bool) -> str:
+	"""Цвет нужного тона, чья светлота даёт требуемый контраст к фону.
+
+	Контраст монотонен по светлоте (на белом фоне падает, на тёмном
+	растёт), поэтому светлота ищется делением отрезка пополам —
+	два десятка шагов дают точность, которой глазу с запасом хватает.
+
+	Returns:
+		Цвет в виде ``#rrggbb``.
+	"""
+	background = _SLOT_BG_LIGHT if light else _SLOT_BG_DARK
+	low, high = (0.05, 0.60) if light else (0.40, 0.95)
+	for _ in range(24):
+		middle = (low + high) / 2
+		reached = _contrast(colorsys.hls_to_rgb(hue / 360, middle, saturation), background)
+		too_pale = reached < target
+		if light:
+			low, high = (low, middle) if too_pale else (middle, high)
+		else:
+			low, high = (middle, high) if too_pale else (low, middle)
+	red, green, blue = colorsys.hls_to_rgb(hue / 360, (low + high) / 2, saturation)
+	return f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+
+
+def _slot_minutes(label: str) -> tuple[int, int] | None:
+	"""Разбирает метку «ЧЧ:ММ» (None — это не время)."""
+	hours, _, minutes = label.partition(":")
+	if not hours.isdigit() or not minutes.isdigit():
+		return None
+	hour, minute = int(hours), int(minutes)
+	if not (0 <= hour < 24 and 0 <= minute < 60):
+		return None
+	return hour, minute
 
 
 def slot_label(when: datetime | None) -> str:
@@ -1218,19 +1291,41 @@ def slot_label(when: datetime | None) -> str:
 	return when.astimezone().strftime("%H:%M")
 
 
+@lru_cache(maxsize=256)
 def slot_color(label: str) -> tuple[str, str]:
 	"""Цвет метки слота: пара «светлая тема, тёмная тема».
 
-	Цвет выводится из самой метки, поэтому один и тот же слот всегда
-	выглядит одинаково — и в разных каналах, и после перезапуска.
-	Берётся контрольная сумма, а не встроенный ``hash``: тот
-	рандомизируется между запусками, и цвета прыгали бы от запуска
-	к запуску. У поста «сейчас» слота нет — он получает приглушённый
-	цвет подписи.
+	Цвет **выводится из самого времени**: час задаёт тон (24 часа —
+	24 тона по кругу, шаг :data:`_SLOT_HUE_STRIDE` разводит соседние
+	часы по разным сторонам круга), минуты — полутон того же тона.
+	Поэтому один и тот же слот всегда выглядит одинаково — в разных
+	каналах, в разных списках и после перезапуска, — а разные слоты
+	никогда не совпадают.
+
+	Прежде цвет брался хешем подписи по палитре из восьми цветов: на
+	24 часа совпадения были неизбежны, и какие именно слоты сольются,
+	решала контрольная сумма, а не смысл.
+
+	Светлота не задана числом, а подобрана под контраст к фону карточки
+	(:func:`_tone`) — иначе жёлтые слоты оказывались бы заметно бледнее
+	синих. У поста «сейчас» слота нет: он получает приглушённый цвет
+	подписи.
+
+	Результат кэшируется: слотов немного, а метку красят при каждой
+	перерисовке списка карточек.
 	"""
-	if label == SLOT_NOW:
+	parsed = _slot_minutes(label)
+	if parsed is None:  # «сейчас» и всё, что не время
 		return DIM_TEXT
-	return _SLOT_COLORS[zlib.crc32(label.encode("utf-8")) % len(_SLOT_COLORS)]
+	hour, minute = parsed
+	part = minute / 60
+	hue = ((hour * _SLOT_HUE_STRIDE) % 24) * (360 / 24) + part * _SLOT_MINUTE_DRIFT
+	target = _SLOT_CONTRAST_MIN + (_SLOT_CONTRAST_MAX - _SLOT_CONTRAST_MIN) * part
+	gain = _SLOT_SATURATION_GAIN * part
+	return (
+		_tone(hue % 360, min(1.0, _SLOT_SATURATION_LIGHT + gain), target, light=True),
+		_tone(hue % 360, min(1.0, _SLOT_SATURATION_DARK + gain), target, light=False),
+	)
 
 
 # --- вкладки страниц ---------------------------------------------------------------
