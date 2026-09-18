@@ -102,7 +102,6 @@ from pxcontrol.ui.pages.user_state import (
 	matches_bot_search,
 	matches_user_search,
 	participation_text,
-	premium_text,
 	primary_user_action,
 	state_badge,
 	user_actions,
@@ -315,11 +314,9 @@ class UserCard(_Card):
 			rename_placeholder=USER_LABEL_PLACEHOLDER,
 			on_rename=partial(on_rename, account),
 		)
-		texts = [participation_text(account)]
-		premium = premium_text(account)
-		if premium is not None:
-			texts.append(premium)
-		self.add_info(texts, state_badge(self, user_state(account)))
+		# подписка Premium здесь не словом: её несёт звезда в подстрочнике
+		# (PREMIUM_MARK), а словами она названа на странице аккаунта
+		self.add_info([participation_text(account)], state_badge(self, user_state(account)))
 		self._live_shown = live_shown(user_state(account))
 		buttons: list[QPushButton] = []
 		for action in user_actions(account):

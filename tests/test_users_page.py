@@ -11,6 +11,7 @@ from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.activity import HISTORY_DAYS, HOURS_DAYS
 from pxcontrol.engine.telegram.types import USERBOT_PREMIUM_MAX_FILE_BYTES, limit_gb
 from pxcontrol.ui.pages.user_state import (
+	PREMIUM_MARK,
 	BotAction,
 	BotState,
 	UserAction,
@@ -24,9 +25,9 @@ from pxcontrol.ui.pages.user_state import (
 	matches_bot_search,
 	matches_user_search,
 	participation_text,
-	premium_text,
 	primary_user_action,
 	user_actions,
+	user_reference_rows,
 	user_state,
 	user_subtitle,
 	users_summary,
@@ -135,11 +136,18 @@ def test_participation_texts() -> None:
 	assert bot_participation_text(_bot(publisher_of=5)) == "публикатор в 5 сообществах"
 
 
-def test_premium_text_names_file_limit() -> None:
-	assert premium_text(_account()) is None
-	assert premium_text(_account(premium=True)) == (
-		f"Premium · файлы до {limit_gb(USERBOT_PREMIUM_MAX_FILE_BYTES)} ГБ"
-	)
+def test_premium_marked_by_star_before_username() -> None:
+	"""Подписка в подстрочнике — звезда перед @именем, а не слово.
+
+	Словами она названа только на странице аккаунта (в справке) — там
+	же и объясняется, что значит звезда на карточке.
+	"""
+	assert user_subtitle(_account(premium=True)) == f"{PREMIUM_MARK} @lara · +7900"
+	assert not user_subtitle(_account()).startswith(PREMIUM_MARK)
+	# @имени нет — звезда всё равно первая, перед тем, что осталось
+	assert user_subtitle(_account(username=None, premium=True)) == f"{PREMIUM_MARK} +7900"
+	premium_row = dict(user_reference_rows(_account(premium=True), None))["Premium"]
+	assert premium_row == f"да · файлы до {limit_gb(USERBOT_PREMIUM_MAX_FILE_BYTES)} ГБ"
 
 
 # --- сводка и поиск ------------------------------------------------------------------

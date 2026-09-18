@@ -168,11 +168,21 @@ def primary_user_action(action: UserAction) -> bool:
 	return action in (UserAction.LOGIN, UserAction.RESUME)
 
 
+#: Пометка подписки Premium в подстрочнике — звезда перед @именем.
+#: Знаком, а не словом: подписка — постоянное свойство аккаунта, и в
+#: строке из трёх частей слово «Premium» весило бы столько же, сколько
+#: имя и телефон. Что она значит, объясняет страница аккаунта — там
+#: подписка названа словами вместе с пределом файла.
+PREMIUM_MARK = "★"
+
+
 def user_subtitle(account: TgAccountDto) -> str:
-	"""Подстрочник карточки: «@имя · Имя Фамилия · телефон».
+	"""Подстрочник карточки: «★ @имя · Имя Фамилия · телефон».
 
 	Части, совпадающие с заголовком (отображаемым именем), не повторяются
 	строкой ниже; телефон есть всегда — он обязателен при создании.
+	Звезда в начале — подписка Premium (:data:`PREMIUM_MARK`); без неё
+	строка начинается с @имени.
 	"""
 	full_name = " ".join(part for part in (account.first_name, account.last_name) if part)
 	parts: list[str] = []
@@ -181,7 +191,8 @@ def user_subtitle(account: TgAccountDto) -> str:
 	if full_name and full_name != account.display:
 		parts.append(full_name)
 	parts.append(account.phone or "без телефона")
-	return " · ".join(parts)
+	subtitle = " · ".join(parts)
+	return f"{PREMIUM_MARK} {subtitle}" if account.premium else subtitle
 
 
 def bot_subtitle(bot: BotDto) -> str:
@@ -206,13 +217,6 @@ def bot_participation_text(bot: BotDto) -> str:
 		return "не назначен публикатором"
 	count = bot.publisher_of
 	return f"публикатор в {count} {plural(count, 'сообществе', 'сообществах', 'сообществах')}"
-
-
-def premium_text(account: TgAccountDto) -> str | None:
-	"""Пометка Premium с лимитом файла; None — подписки нет (или не подключён)."""
-	if not account.premium:
-		return None
-	return f"Premium · файлы до {limit_gb(USERBOT_PREMIUM_MAX_FILE_BYTES)} ГБ"
 
 
 @dataclass(frozen=True)
