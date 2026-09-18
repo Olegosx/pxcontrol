@@ -142,7 +142,14 @@ def community_capabilities(community: Community) -> PublishCapabilities:
 
 
 def publisher_paused(community: Community) -> bool:
-	"""Есть ли у сообщества приостановленный публикатор (ADR-0029)."""
+	"""Есть ли у сообщества **приостановленный** публикатор (ADR-0029).
+
+	Не путать с одноимённым свойством DTO сообщества: там вопрос другой —
+	«публиковать некому именно из-за паузы», и оно ложно, пока есть хоть
+	один действующий публикатор. Здесь — просто «среди назначенных есть
+	приостановленный», и зовут это только из ветки «публиковать некем»,
+	чтобы отличить «нет публикатора» от «публикатор на паузе».
+	"""
 	bot = community.bot
 	account = community.default_account
 	return (bot is not None and bot.paused) or (account is not None and account.paused)

@@ -554,7 +554,7 @@ class _QueueTab(QWidget):
 			subtitle=lambda item: queue_subtitle(item, with_community=False),
 			transform=self._only_this_community,
 			on_refreshed=self._on_refreshed,
-			# зритель: завершёнными владеет панель страницы «Публикация»
+			# зритель: завершёнными владеет наблюдатель главного окна (ADR-0032)
 			dismiss_finished=False,
 			editable=lambda item: item.status in EDITABLE_STATUSES,
 			fill_body=self._fill_editor,

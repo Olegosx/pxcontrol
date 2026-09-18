@@ -219,7 +219,7 @@ class QueueView(QWidget):
 			subtitle=queue_subtitle,
 			transform=self._apply_view,
 			on_refreshed=self._update_summary,
-			# зритель: завершёнными владеет панель страницы «Публикация»,
+			# зритель: завершёнными владеет наблюдатель главного окна (ADR-0032),
 			# иначе две панели наперегонки снимали бы элементы
 			dismiss_finished=False,
 			editable=lambda item: item.status in EDITABLE_STATUSES,
