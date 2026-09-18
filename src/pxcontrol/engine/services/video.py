@@ -42,7 +42,12 @@ from pxcontrol.engine.video.constants import (
 	DEFAULT_RESOLUTION,
 	preview_path,
 )
-from pxcontrol.engine.video.ffmpeg import FfmpegSource, ffmpeg_source
+from pxcontrol.engine.video.ffmpeg import (
+	FfmpegError,
+	FfmpegFailure,
+	FfmpegSource,
+	ffmpeg_source,
+)
 from pxcontrol.engine.video.frames import extract_candidates
 from pxcontrol.engine.video.pipeline import ProgressCallback
 from pxcontrol.engine.video.probe import (
@@ -58,6 +63,17 @@ logger = logging.getLogger(__name__)
 
 class VideoError(EngineError):
 	"""Ошибка подготовки видео (с понятным человеку текстом)."""
+
+
+class AudioLayoutError(VideoError):
+	"""Звук исходника не сводится к стерео автоподбором ffmpeg.
+
+	Так выглядит повреждённый звук: декодер читает мусор и объявляет
+	раскладку каналов, свести которую нечем. Отдельный класс нужен
+	очереди обработки: этот отказ лечится повтором с явной матрицей
+	микширования (``ProcessingOptions.safe_audio``), а не сообщением
+	человеку.
+	"""
 
 
 #: Целевая доля лимита Telegram: 1 % запаса на контейнер и колебания
@@ -886,6 +902,7 @@ class VideoService:
 		intro_source: str | None = None,
 		on_progress: ProgressCallback | None = None,
 		extra_subdir: str = "",
+		safe_audio: bool = False,
 	) -> str:
 		"""Готовит видео по переданным параметрам; возвращает путь к результату.
 
@@ -898,19 +915,31 @@ class VideoService:
 		этого запуска (выбор кадра из кандидатов). ``extra_subdir`` —
 		подпапка внутри подпапки пресета: пакетная обработка (ADR-0014)
 		складывает результаты пакета в его собственную папку.
+		``safe_audio`` сводит каналы звука явной матрицей вместо
+		автоподбора ffmpeg — это повтор после отказа звукового пути,
+		а не выбор человека (см. :class:`AudioLayoutError`).
 
 		Raises:
+			AudioLayoutError: Звук исходника не свёлся — повтор
+				с ``safe_audio`` имеет смысл.
 			VideoError: Файл/ffmpeg не найдены или обработка упала.
 		"""
 		await self.ensure_ready([source_path])
 		source = Path(source_path)
 		# сборка включает создание папки результата (диск) — вне цикла
 		options = await asyncio.to_thread(
-			self._build_options, source, fields, intro_source, extra_subdir
+			self._build_options, source, fields, intro_source, extra_subdir, safe_audio
 		)
 		logger.info("Обработка видео: %s (параметры «%s»)…", source.name, fields.name)
 		try:
 			await asyncio.to_thread(self._processor, options, on_progress)
+		except FfmpegError as exc:
+			# вид отказа ffmpeg назвал сам: звуковой путь лечится повтором,
+			# и очередь должна отличать его от прочих сбоев по классу,
+			# а не по тексту (текст сокращён для человека)
+			if exc.reason is FfmpegFailure.AUDIO_LAYOUT:
+				raise AudioLayoutError(f"Обработка не удалась: {exc}") from exc
+			raise VideoError(f"Обработка не удалась: {exc}") from exc
 		except (RuntimeError, ValueError, OSError) as exc:
 			# OSError — диск полон, права, сетевой диск: доменный текст
 			# вместо «внутренней ошибки» в карточке очереди
@@ -1039,6 +1068,7 @@ class VideoService:
 		fields: PresetFields,
 		intro_source: str | None = None,
 		extra_subdir: str = "",
+		safe_audio: bool = False,
 	) -> ProcessingOptions:
 		"""Собирает параметры обработки из переданных полей."""
 		out_dir = video_base_dir(self._settings, VIDEO_PROCESSED_DIR) / sanitize_subdir(
@@ -1070,5 +1100,6 @@ class VideoService:
 			output=str(output),
 			ffmpeg_bin=self._ffmpeg(),
 			ffprobe_bin=ffprobe_bin_for(self._ffmpeg()),
+			safe_audio=safe_audio,
 			**pipeline_fields,
 		)

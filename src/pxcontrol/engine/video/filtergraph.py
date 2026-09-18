@@ -212,16 +212,52 @@ def _fade_filters(fade_in: float, fade_out: float, duration: float) -> str:
 	return ",".join(parts)
 
 
+def _safe_audio_map(channels: int) -> str:
+	"""Явная матрица микширования звука под число каналов исходника.
+
+	Нужна, когда раскладку каналов свести нечем: повреждённый звук
+	заставляет декодер объявлять невозможные раскладки («34 канала»),
+	и автоподбор пересчёта каналов у ffmpeg не настраивается —
+	кодирование обрывается посреди работы. Явная матрица ничего
+	не ищет, поэтому переживает и бредовую раскладку, и смену
+	раскладки посреди потока.
+
+	Моно разбирается отдельно: у стереоматрицы второй канал взялся бы
+	из несуществующего — ffmpeg подставил бы тишину, и весь звук ушёл
+	бы в левый канал (проверено живьём).
+
+	Args:
+		channels: число каналов исходника (0 — ffprobe не назвал).
+
+	Returns:
+		Фильтр ``pan`` для начала звуковой цепочки.
+	"""
+	if channels == 1:
+		return "pan=mono|c0=c0"
+	return "pan=stereo|c0=c0|c1=c1"
+
+
 def _audio_chains(
-	has_intro: bool, hold: float, fade_in: float, fade_out: float, duration: float
+	has_intro: bool,
+	hold: float,
+	fade_in: float,
+	fade_out: float,
+	duration: float,
+	safe_audio: bool = False,
+	audio_channels: int = 0,
 ) -> tuple[list[str], str]:
-	"""Цепочки звука: задержка под заставку и затухание на краях.
+	"""Цепочки звука: защита раскладки, задержка под заставку, затухания.
 
 	Затухание в начале стартует там, где начинается звук: при заставке
 	дорожка сдвинута на ``hold`` (тишина adelay), и afade с нуля отыграл
 	бы по тишине. Затухание в конце — к концу итоговой длительности.
+
+	``safe_audio`` ставит явную матрицу микширования первым звеном —
+	до задержки и затуханий: она должна встретить звук раньше, чем
+	его коснётся что-то ещё. Вид матрицы выбирается по числу каналов
+	исходника (``audio_channels``).
 	"""
-	filters = []
+	filters = [_safe_audio_map(audio_channels)] if safe_audio else []
 	if has_intro:
 		filters.append(f"adelay={int(round(hold * 1000))}:all=1")
 	if fade_in > 0:
@@ -251,6 +287,8 @@ def build_filter_complex(
 	has_audio: bool,
 	fade_in: float,
 	fade_out: float,
+	safe_audio: bool = False,
+	audio_channels: int = 0,
 ) -> FilterGraph:
 	"""Собирает граф фильтров из участков и возвращает метки потоков для -map.
 
@@ -272,6 +310,10 @@ def build_filter_complex(
 		has_audio: переносить ли звук.
 		fade_in: затухание в начале — появление из чёрного (сек; 0 — нет).
 		fade_out: затухание в конце — уход в чёрное (сек; 0 — нет).
+		safe_audio: свести каналы явной матрицей вместо автоподбора
+			ffmpeg (спасает повреждённый звук; см. ``_safe_audio_map``).
+		audio_channels: число каналов исходника — от него зависит вид
+			матрицы; нужно только при ``safe_audio``.
 
 	Returns:
 		FilterGraph со строкой -filter_complex и метками видео/звука.
@@ -298,6 +340,8 @@ def build_filter_complex(
 		video_label = "[vfinal]"
 	audio_label: str | None = None
 	if has_audio:
-		audio_chains, audio_label = _audio_chains(has_intro, hold, fade_in, fade_out, duration)
+		audio_chains, audio_label = _audio_chains(
+			has_intro, hold, fade_in, fade_out, duration, safe_audio, audio_channels
+		)
 		chains += audio_chains
 	return FilterGraph(";".join(chains), video_label, audio_label)

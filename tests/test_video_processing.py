@@ -826,6 +826,23 @@ def test_probe_skips_attached_pic_stream(monkeypatch: pytest.MonkeyPatch) -> Non
 	assert (info.width, info.height, info.fps) == (1920, 1080, 30.0)
 
 
+def test_probe_reads_audio_channels(monkeypatch: pytest.MonkeyPatch) -> None:
+	"""Каналы первой звуковой дорожки читаются; их отсутствие — не ошибка."""
+	from pxcontrol.engine.video import probe
+
+	video = {"codec_type": "video", "width": 640, "height": 360, "avg_frame_rate": "25/1"}
+	cases = [
+		([video, {"codec_type": "audio", "channels": 2}], 2),
+		([video, {"codec_type": "audio", "channels": "1"}], 1),  # ffprobe отдаёт и строкой
+		([video, {"codec_type": "audio"}], 0),  # поток есть, каналы не названы
+		([video], 0),  # звука нет вовсе
+	]
+	for streams, expected in cases:
+		data = {"streams": streams, "format": {"duration": "10.0"}}
+		monkeypatch.setattr(probe, "_run_ffprobe", lambda _p, _b, d=data: d)
+		assert probe.probe_video("x.mp4").audio_channels == expected, streams
+
+
 def test_ffprobe_bin_for_keeps_dir_and_suffix() -> None:
 	"""ffprobe ищется рядом с ffmpeg (с расширением), в PATH — только по имени."""
 	from pxcontrol.engine.video.probe import ffprobe_bin_for
@@ -878,3 +895,83 @@ def test_intro_source_protocol_locked_across_modules() -> None:
 			continue
 		moment = resolve_timestamp(source, INFO)  # неизвестный вид упал бы
 		assert 0.0 <= moment <= INFO.duration
+
+
+# --- повреждённый звук исходника ---------------------------------------------
+
+
+#: Кусок настоящего журнала ffmpeg с отказом звукового пути: битый звук
+#: заставил декодер объявить 34 канала, и пересчёт каналов не настроился.
+_AUDIO_LAYOUT_LOG = """
+[h264 @ 0x1] Invalid NAL unit size (-43108467 > 33147).
+[auto_aresample_3 @ 0x2] [SWR @ 0x3] Rematrix is needed between 34 channels
+ and stereo but there is not enough information to do it
+[auto_aresample_3 @ 0x2] Failed to configure output pad on auto_aresample_3
+[fc#0 @ 0x4] Error reinitializing filters!
+[fc#0 @ 0x4] Task finished with error code: -22 (Invalid argument)
+[libx264 @ 0x5] kb/s:8054.01
+Conversion failed!
+"""
+
+
+def test_safe_audio_adds_explicit_channel_map() -> None:
+	"""Защита звука ставит явную матрицу; обычный прогон её не трогает."""
+	guarded = _build(has_audio=True, safe_audio=True)
+	assert "pan=stereo|c0=c0|c1=c1" in guarded.filter_complex
+	assert guarded.audio_label == "[aout]"
+	plain = _build(has_audio=True)
+	assert "pan=" not in plain.filter_complex
+
+
+def test_safe_audio_map_matches_source_channels() -> None:
+	"""У моно своя матрица: стереоматрица увела бы весь звук влево.
+
+	Второй канал у моно взять неоткуда, ffmpeg подставляет тишину —
+	проверено живьём, поэтому вид матрицы выбирается по исходнику.
+	"""
+	mono = _build(has_audio=True, safe_audio=True, audio_channels=1)
+	assert "pan=mono|c0=c0" in mono.filter_complex
+	stereo = _build(has_audio=True, safe_audio=True, audio_channels=2)
+	assert "pan=stereo|c0=c0|c1=c1" in stereo.filter_complex
+	# ffprobe промолчал о каналах — считаем звук как минимум стерео
+	unknown = _build(has_audio=True, safe_audio=True, audio_channels=0)
+	assert "pan=stereo|c0=c0|c1=c1" in unknown.filter_complex
+
+
+def test_safe_audio_map_goes_first_in_chain() -> None:
+	"""Матрица встречает звук раньше задержки и затуханий.
+
+	Порядок важен: adelay и afade работают с уже сведённым звуком,
+	иначе они первыми упрутся в невозможную раскладку каналов.
+	"""
+	graph = _build(has_audio=True, safe_audio=True, still_index=1, hold=2.0, fade_in=1.0)
+	chain = next(part for part in graph.filter_complex.split(";") if "pan=" in part)
+	assert chain.index("pan=") < chain.index("adelay=")
+	assert chain.index("pan=") < chain.index("afade=")
+
+
+def test_classify_failure_knows_audio_layout() -> None:
+	"""Отказ звукового пути распознаётся по журналу, прочие сбои — нет."""
+	from pxcontrol.engine.video.ffmpeg import FfmpegFailure, classify_failure
+
+	assert classify_failure(_AUDIO_LAYOUT_LOG) is FfmpegFailure.AUDIO_LAYOUT
+	# кодировщик отказал в раскладке ещё до пересчёта — тот же вид отказа
+	assert (
+		classify_failure('[aac @ 0x1] Unsupported channel layout "34 channels"')
+		is FfmpegFailure.AUDIO_LAYOUT
+	)
+	assert classify_failure("Error opening input file: No such file or directory") is None
+	assert classify_failure("") is None
+
+
+def test_failed_run_carries_failure_reason(tmp_path: Path) -> None:
+	"""run_streaming доносит вид отказа, а не только текст для человека."""
+	from pxcontrol.engine.video.ffmpeg import FfmpegError, FfmpegFailure, run_streaming
+
+	cmd = _fake_ffmpeg(
+		tmp_path,
+		f"import sys\nsys.stderr.write({_AUDIO_LAYOUT_LOG!r})\nsys.exit(1)\n",
+	)
+	with pytest.raises(FfmpegError) as caught:
+		run_streaming(cmd, "тест", total_seconds=1.0, on_progress=None)
+	assert caught.value.reason is FfmpegFailure.AUDIO_LAYOUT

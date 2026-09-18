@@ -12,6 +12,7 @@ import queue
 import subprocess
 import threading
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
 from typing import IO
 
@@ -33,6 +34,60 @@ _ERROR_TAIL_CHARS = 400
 
 #: Признаки строки с причиной ошибки в журнале ffmpeg.
 _ERROR_MARKERS = ("error", "invalid", "no such", "not found", "denied", "failed")
+
+
+class FfmpegFailure(StrEnum):
+	"""Вид отказа ffmpeg, распознанный по журналу.
+
+	Нужен вызывающему, чтобы отличать отказы, с которыми можно что-то
+	сделать, от прочих: текст ошибки для такого решения не годится —
+	он сокращён для человека.
+	"""
+
+	#: Звук исходника не сводится к стерео: раскладка каналов либо
+	#: неизвестна, либо не по зубам кодировщику. Так выглядит битый
+	#: звук — декодер читает мусор и объявляет невозможные раскладки
+	#: («34 канала»), а пересчёт каналов настроиться не может.
+	#: Лечится явной матрицей микширования (``safe_audio``).
+	AUDIO_LAYOUT = "audio_layout"
+
+
+#: Приметы отказа звукового пути в журнале. Первые две — из настоящего
+#: сбоя на битом ролике (пересчёт каналов не настроился посреди
+#: кодирования), третья — отказ кодировщика принять такую раскладку.
+_AUDIO_LAYOUT_MARKERS = (
+	"rematrix is needed",
+	"failed to configure output pad on auto_aresample",
+	"unsupported channel layout",
+)
+
+
+def classify_failure(stderr: str) -> FfmpegFailure | None:
+	"""Определяет вид отказа по журналу ffmpeg.
+
+	Args:
+		stderr: полный журнал процесса (не сокращённая сводка).
+
+	Returns:
+		Вид отказа или None, если ни одна примета не совпала.
+	"""
+	lowered = stderr.lower()
+	if any(marker in lowered for marker in _AUDIO_LAYOUT_MARKERS):
+		return FfmpegFailure.AUDIO_LAYOUT
+	return None
+
+
+class FfmpegError(RuntimeError):
+	"""Ненулевой код возврата ffmpeg: текст для человека и вид отказа.
+
+	Наследник :class:`RuntimeError` намеренно: прежние обработчики
+	ловят ошибки конвейера именно им, и появление вида отказа
+	ничего для них не меняет.
+	"""
+
+	def __init__(self, message: str, reason: FfmpegFailure | None = None) -> None:
+		super().__init__(message)
+		self.reason = reason
 
 
 def _error_summary(stderr: str) -> str:
@@ -108,7 +163,10 @@ def run_tool(cmd: list[str], what: str, timeout: float | None = None) -> str:
 			what,
 			result.stderr.strip(),
 		)
-		raise RuntimeError(f"{tool} ({what}) завершился с ошибкой: {_error_summary(result.stderr)}")
+		raise FfmpegError(
+			f"{tool} ({what}) завершился с ошибкой: {_error_summary(result.stderr)}",
+			classify_failure(result.stderr),
+		)
 	return result.stdout
 
 
@@ -182,7 +240,9 @@ def run_streaming(
 			stderr.strip(),
 		)
 		summary = _error_summary(stderr) or "журнал ffmpeg недоступен"
-		raise RuntimeError(f"ffmpeg ({what}) завершился с ошибкой: {summary}")
+		raise FfmpegError(
+			f"ffmpeg ({what}) завершился с ошибкой: {summary}", classify_failure(stderr)
+		)
 
 
 #: Период «пустого» вызова колбэка прогресса при молчании ffmpeg (секунды).

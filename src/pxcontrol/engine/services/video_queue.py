@@ -37,14 +37,21 @@ from pathlib import Path
 
 from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
 from pxcontrol.engine.services.video import (
+	AudioLayoutError,
 	IntroSourceKind,
 	PresetFields,
 	VideoError,
 	VideoService,
 	parse_intro_source,
 )
+from pxcontrol.engine.video.pipeline import ProgressCallback
 
 logger = logging.getLogger(__name__)
+
+#: Пометка карточки о повторе с защищённым звуком. Живёт и после успеха:
+#: человек должен знать, что звук этого файла собран грубой матрицей,
+#: а сам исходник повреждён.
+_SAFE_AUDIO_NOTE = "звук исходника повреждён — собран с защитой"
 
 
 @dataclass(frozen=True)
@@ -291,13 +298,22 @@ class ProcessingQueue:
 
 		try:
 			fields = await self._fit_bitrate(job)
-			job.output_path = await self._video.prepare(
-				job.request.source_path,
-				fields,
-				intro_source=job.request.intro_source,
-				on_progress=_on_progress,
-				extra_subdir=job.request.batch_subdir,
-			)
+			try:
+				job.output_path = await self._prepare(job, fields, _on_progress)
+			except AudioLayoutError:
+				# звук исходника повреждён: ffmpeg не смог настроить
+				# пересчёт каналов и бросил работу посреди кодирования.
+				# Вторая (и последняя) попытка идёт с явной матрицей —
+				# ролик докодируется до конца, но дефекты битых мест
+				# в картинке и звуке из итога никуда не денутся
+				logger.warning(
+					"Обработка id=%s (%s): звук не свёлся — повтор с защитой звука.",
+					job.id,
+					Path(job.request.source_path).name,
+				)
+				job.note = " · ".join(text for text in (job.note, _SAFE_AUDIO_NOTE) if text)
+				job.progress = 0.0
+				job.output_path = await self._prepare(job, fields, _on_progress, safe_audio=True)
 		except JobCancelled:
 			# кадр отменённого элемента больше не нужен: повтора не будет
 			await self._drop_stashed_frame(job)
@@ -305,6 +321,29 @@ class ProcessingQueue:
 		# успех: копия выбранного кадра сделала своё дело (у элемента
 		# с ошибкой она остаётся — её ждёт повтор)
 		await self._drop_stashed_frame(job)
+
+	async def _prepare(
+		self,
+		job: _VideoJob,
+		fields: PresetFields,
+		on_progress: ProgressCallback,
+		*,
+		safe_audio: bool = False,
+	) -> str:
+		"""Одна попытка обработки файла: заявка задания → сервис видео.
+
+		Отдельный метод, потому что попыток бывает две: вторая — с явной
+		матрицей микширования после отказа звукового пути, и отличаться
+		они должны ровно одним параметром.
+		"""
+		return await self._video.prepare(
+			job.request.source_path,
+			fields,
+			intro_source=job.request.intro_source,
+			on_progress=on_progress,
+			extra_subdir=job.request.batch_subdir,
+			safe_audio=safe_audio,
+		)
 
 	async def _fit_bitrate(self, job: _VideoJob) -> PresetFields:
 		"""Вписывает исходник больше лимита Telegram в лимит (ADR-0014).

@@ -39,6 +39,9 @@ class VideoInfo:
 		fps: кадровая частота (кадров в секунду).
 		has_audio: есть ли в файле звуковая дорожка.
 		bitrate_kbps: битрейт видеопотока в кбит/с (None — ffprobe не отдал).
+		audio_channels: число каналов первой звуковой дорожки (0 — звука
+			нет или ffprobe его не назвал). Нужно защищённому звуковому
+			пути: матрица микширования у моно и у стерео разная.
 	"""
 
 	width: int
@@ -47,6 +50,25 @@ class VideoInfo:
 	fps: float
 	has_audio: bool
 	bitrate_kbps: int | None = None
+	audio_channels: int = 0
+
+
+def _audio_channels(streams: list[dict[str, Any]]) -> int:
+	"""Число каналов первой звуковой дорожки (0 — нет звука или не указано).
+
+	Берётся первая дорожка: с ней и работает конвейер (метка ``0:a:0``).
+	Отсутствие поля не ошибка — ffprobe молчит о нём для потоков,
+	которые не смог разобрать; вызывающий трактует 0 как «неизвестно».
+	"""
+	audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+	if audio is None:
+		return 0
+	# str() перед int(): ffprobe отдаёт числа то числом, то строкой —
+	# так же читается битрейт (см. _parse_bitrate_kbps)
+	try:
+		return max(0, int(str(audio.get("channels", 0))))
+	except (TypeError, ValueError):
+		return 0
 
 
 def trimmed_info(info: VideoInfo, trim_start: float, trim_end: float) -> VideoInfo:
@@ -195,4 +217,5 @@ def probe_video(path: str, ffprobe_bin: str = "ffprobe") -> VideoInfo:
 		fps=fps,
 		has_audio=any(s.get("codec_type") == "audio" for s in streams),
 		bitrate_kbps=_parse_bitrate_kbps(video, fmt),
+		audio_channels=_audio_channels(streams),
 	)

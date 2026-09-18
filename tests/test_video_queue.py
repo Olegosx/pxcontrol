@@ -22,6 +22,7 @@ from pxcontrol.engine.services.video_queue import (
 	ProcessingRequest,
 )
 from pxcontrol.engine.video import ProcessingOptions
+from pxcontrol.engine.video.ffmpeg import FfmpegError, FfmpegFailure
 from tests.conftest import FakeProcessor
 
 FIELDS = PresetFields(name="Тест", subdir="паб")
@@ -351,3 +352,74 @@ async def test_state_reflects_busyness(db: Database, env: Path) -> None:
 	processor.release.set()
 	await _wait_status(queue, item_id, JobStatus.DONE)
 	assert all(item.status.finished() for item in await queue.state())
+
+
+# --- повреждённый звук исходника ---------------------------------------------
+
+
+class _AudioLayoutOnce(FakeProcessor):
+	"""ffmpeg, который падает на звуке, пока не включена защита.
+
+	Так ведёт себя битый исходник: автоподбор пересчёта каналов
+	не настраивается, а явная матрица (``safe_audio``) проходит.
+	"""
+
+	def __call__(self, options: ProcessingOptions, on_progress: object = None) -> None:
+		if not options.safe_audio:
+			self.calls.append(options)
+			raise FfmpegError(
+				"ffmpeg (обработка видео) завершился с ошибкой: Rematrix is needed",
+				FfmpegFailure.AUDIO_LAYOUT,
+			)
+		super().__call__(options, on_progress)
+
+
+async def test_audio_layout_failure_retries_with_safe_audio(db: Database, env: Path) -> None:
+	"""Отказ звукового пути даёт вторую попытку с защитой — файл готов."""
+	processor = _AudioLayoutOnce()
+	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=processor))
+	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
+	await _wait_status(queue, item_id, JobStatus.DONE)
+
+	assert [options.safe_audio for options in processor.calls] == [False, True]
+	item = next(item for item in await queue.state() if item.id == item_id)
+	# пометка переживает успех: человек должен знать, что исходник битый,
+	# а звук собран грубой матрицей
+	assert item.note is not None and "звук исходника повреждён" in item.note
+	assert item.error is None
+
+
+async def test_audio_layout_failure_gives_up_after_second_attempt(db: Database, env: Path) -> None:
+	"""Если защита не спасла — обычная ошибка, третьей попытки нет."""
+	calls: list[bool] = []
+
+	class _AlwaysFails(FakeProcessor):
+		def __call__(self, options: ProcessingOptions, on_progress: object = None) -> None:
+			calls.append(options.safe_audio)
+			raise FfmpegError(
+				"ffmpeg (обработка видео) завершился с ошибкой: Rematrix is needed",
+				FfmpegFailure.AUDIO_LAYOUT,
+			)
+
+	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=_AlwaysFails()))
+	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
+	await _wait_status(queue, item_id, JobStatus.ERROR)
+
+	assert calls == [False, True]
+	item = next(item for item in await queue.state() if item.id == item_id)
+	assert item.error is not None and "Обработка не удалась" in item.error
+
+
+async def test_other_failures_are_not_retried(db: Database, env: Path) -> None:
+	"""Прочие сбои ffmpeg повтора не получают — попытка одна."""
+	calls: list[bool] = []
+
+	class _Broken(FakeProcessor):
+		def __call__(self, options: ProcessingOptions, on_progress: object = None) -> None:
+			calls.append(options.safe_audio)
+			raise FfmpegError("ffmpeg (обработка видео) завершился с ошибкой: тест")
+
+	queue = ProcessingQueue(VideoService(db, "ffmpeg", processor=_Broken()))
+	item_id = await queue.enqueue(ProcessingRequest(str(env), FIELDS))
+	await _wait_status(queue, item_id, JobStatus.ERROR)
+	assert calls == [False]

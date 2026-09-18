@@ -90,6 +90,11 @@ class ProcessingOptions:
 	meta_comment: str | None
 	ffmpeg_bin: str = "ffmpeg"
 	ffprobe_bin: str = "ffprobe"
+	# защищённый звуковой путь: каналы сводятся явной матрицей вместо
+	# автоподбора ffmpeg. Флаг ставит не человек и не пресет, а повтор
+	# после отказа звукового пути (см. ProcessingQueue) — обычные ролики
+	# идут прежней дорогой с правильным сведением многоканального звука
+	safe_audio: bool = False
 
 
 def _drop_leftovers(*paths: str | None) -> None:
@@ -256,6 +261,8 @@ def _run_main(
 		has_audio=has_audio,
 		fade_in=opts.fade_in,
 		fade_out=opts.fade_out,
+		safe_audio=opts.safe_audio,
+		audio_channels=info.audio_channels,
 	)
 	cmd = _assemble_command(
 		opts.ffmpeg_bin,

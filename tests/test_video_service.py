@@ -495,6 +495,56 @@ async def test_prepare_wraps_processor_errors(
 		await service.prepare(str(source), PresetFields(name="Пустой"))
 
 
+async def test_prepare_marks_audio_layout_failure(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Отказ звукового пути отличается классом ошибки, прочие — нет.
+
+	Очередь решает по классу, а не по тексту: текст сокращён для
+	человека и причину назвать не обязан.
+	"""
+	from pxcontrol.engine.services.video import AudioLayoutError
+	from pxcontrol.engine.video.ffmpeg import FfmpegError, FfmpegFailure
+
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
+	source = tmp_path / "src.mp4"
+	source.write_bytes(b"src")
+	reason: list[FfmpegFailure | None] = [FfmpegFailure.AUDIO_LAYOUT]
+
+	def _boom(_options: ProcessingOptions, _on_progress: object = None) -> None:
+		raise FfmpegError("ffmpeg (обработка видео) завершился с ошибкой: тест", reason[0])
+
+	service = VideoService(db, "ffmpeg", processor=_boom)
+	with pytest.raises(AudioLayoutError):
+		await service.prepare(str(source), PresetFields(name="Пустой"))
+
+	reason[0] = None  # тот же сбой без распознанного вида — обычная ошибка
+	with pytest.raises(VideoError) as caught:
+		await service.prepare(str(source), PresetFields(name="Пустой"))
+	assert not isinstance(caught.value, AudioLayoutError)
+
+
+async def test_prepare_passes_safe_audio_to_pipeline(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Защита звука доезжает до конвейера параметром, а не полем пресета."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
+	)
+	monkeypatch.setattr("pxcontrol.engine.services.video.media_dir", lambda: tmp_path / "media")
+	source = tmp_path / "src.mp4"
+	source.write_bytes(b"src")
+	processor = FakeProcessor()
+	service = VideoService(db, "ffmpeg", processor=processor)
+
+	await service.prepare(str(source), PresetFields(name="Т"))
+	await service.prepare(str(source), PresetFields(name="Т"), safe_audio=True)
+	assert [options.safe_audio for options in processor.calls] == [False, True]
+
+
 # --- рекомендация битрейта -------------------------------------------------
 
 
@@ -826,5 +876,12 @@ def test_preset_fields_reach_the_pipeline_by_name() -> None:
 	preset = {field.name for field in fields(PresetFields)} - _PRESET_ONLY_FIELDS
 	pipeline = {field.name for field in fields(ProcessingOptions)}
 	assert preset <= pipeline, f"поля пресета без места в конвейере: {preset - pipeline}"
-	# у конвейера сверх пресета — только то, что добавляет сервис
-	assert pipeline - preset == {"input", "output", "ffmpeg_bin", "ffprobe_bin"}
+	# у конвейера сверх пресета — только то, что добавляет сервис:
+	# пути, бинари и защита звука (её ставит повтор очереди, а не человек)
+	assert pipeline - preset == {
+		"input",
+		"output",
+		"ffmpeg_bin",
+		"ffprobe_bin",
+		"safe_audio",
+	}
