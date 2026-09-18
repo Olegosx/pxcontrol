@@ -93,19 +93,19 @@ class _MaintenancePort(Protocol):
 
 	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo: ...
 
-	async def service_messages_page(
+	async def userbot_service_messages_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
 	) -> ServiceMessagesPage: ...
 
-	async def delete_messages(
+	async def userbot_delete_messages(
 		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> int: ...
 
-	async def participants_page(
+	async def userbot_participants_page(
 		self, account_id: int, chat_id: str, offset: int, limit: int
 	) -> ParticipantsPage: ...
 
-	async def kick_participant(
+	async def userbot_kick_participant(
 		self, account_id: int, chat_id: str, account: DeletedAccount
 	) -> int | None: ...
 
@@ -609,7 +609,7 @@ class MaintenanceService:
 		try:
 			while scanned < job.depth:
 				self._check_stop(job)
-				page = await self._gateway.service_messages_page(
+				page = await self._gateway.userbot_service_messages_page(
 					job.account_id,
 					job.community.tg_chat_id,
 					offset_id,
@@ -626,7 +626,7 @@ class MaintenanceService:
 						batch = batch[:room]
 						limited = True
 					if batch:
-						gone = await self._gateway.delete_messages(
+						gone = await self._gateway.userbot_delete_messages(
 							job.account_id, job.community.tg_chat_id, batch
 						)
 						deleted += gone
@@ -682,7 +682,7 @@ class MaintenanceService:
 		try:
 			while True:
 				self._check_stop(job)
-				page = await self._gateway.participants_page(
+				page = await self._gateway.userbot_participants_page(
 					job.account_id, job.community.tg_chat_id, offset, MEMBERS_PAGE_SIZE
 				)
 				scanned += page.scanned
@@ -695,7 +695,7 @@ class MaintenanceService:
 							break
 						self._check_stop(job)
 						try:
-							service_id = await self._gateway.kick_participant(
+							service_id = await self._gateway.userbot_kick_participant(
 								job.account_id, job.community.tg_chat_id, account
 							)
 						except UserbotAccessError as exc:
@@ -780,7 +780,7 @@ class MaintenanceService:
 		left = 0
 		for start in range(0, len(ids), DELETE_BATCH_SIZE):
 			batch = ids[start : start + DELETE_BATCH_SIZE]
-			gone = await self._gateway.delete_messages(
+			gone = await self._gateway.userbot_delete_messages(
 				job.account_id, job.community.tg_chat_id, batch
 			)
 			left += len(batch) - gone

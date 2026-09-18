@@ -171,10 +171,10 @@ class _FakeGateway:
 		self.albums.append((chat_id, list(files), caption))  # type: ignore[arg-type]
 		return 44
 
-	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
+	async def userbot_get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
 		return list(self.topics)
 
-	async def publish(
+	async def userbot_publish(
 		self, account_id: int, chat_id: str, post: OutgoingPost, on_progress: object
 	) -> int:
 		if not self.userbot_ok:
@@ -219,13 +219,13 @@ class _FakeGateway:
 			raise UserbotMessageGoneError("Этого поста в Telegram уже нет.")
 		self.post_edits.append((account_id, chat_id, message_id, text))
 
-	async def delete_messages(
+	async def userbot_delete_messages(
 		self, account_id: int, chat_id: str, message_ids: list[int], priority: object = None
 	) -> int:
 		self.deleted.append((account_id, chat_id, list(message_ids)))
 		return self.delete_result
 
-	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+	async def userbot_get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		return [
 			ScheduledMessage(
 				id=501,
@@ -234,13 +234,13 @@ class _FakeGateway:
 			)
 		]
 
-	async def get_scheduled_message(
+	async def userbot_get_scheduled_message(
 		self, account_id: int, chat_id: str, message_id: int
 	) -> ScheduledMessage | None:
 		self.scheduled_reads.append((account_id, chat_id, message_id))
 		return self.scheduled_by_id.get(message_id)
 
-	async def edit_scheduled(
+	async def userbot_edit_scheduled(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -254,12 +254,14 @@ class _FakeGateway:
 		self.scheduled_edits.append((account_id, chat_id, message_id, text, when))
 		self.scheduled_entities.append(entities)
 
-	async def send_scheduled_now(
+	async def userbot_send_scheduled_now(
 		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> None:
 		self.scheduled_sent.append((account_id, chat_id, tuple(message_ids)))
 
-	async def delete_scheduled(self, account_id: int, chat_id: str, message_ids: list[int]) -> None:
+	async def userbot_delete_scheduled(
+		self, account_id: int, chat_id: str, message_ids: list[int]
+	) -> None:
 		if self.scheduled_gone:
 			raise UserbotMessageGoneError("Этой записи в Telegram уже нет.")
 		self.scheduled_deleted.append((account_id, chat_id, tuple(message_ids)))
@@ -638,10 +640,12 @@ async def test_list_scheduled_isolates_community_failure(db: Database) -> None:
 	"""Ошибка одного канала не роняет список: канал пропускается."""
 
 	class _FlakyGateway(_FakeGateway):
-		async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+		async def userbot_get_scheduled(
+			self, account_id: int, chat_id: str
+		) -> list[ScheduledMessage]:
 			if chat_id == "-1001":
 				raise UserbotUnavailableError("Telegram просит подождать 5 с.")
-			return await super().get_scheduled(account_id, chat_id)
+			return await super().userbot_get_scheduled(account_id, chat_id)
 
 	service = PostsService(db, _FlakyGateway())
 	await _add_community(db)  # tg_chat_id="-1001" — упадёт
@@ -905,7 +909,9 @@ async def test_list_scheduled_isolates_flooded_account(db: Database) -> None:
 			super().__init__()
 			self.flooded_id = flooded_id
 
-		async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+		async def userbot_get_scheduled(
+			self, account_id: int, chat_id: str
+		) -> list[ScheduledMessage]:
 			if account_id == self.flooded_id:
 				raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
 			return [ScheduledMessage(id=1, text="жив", scheduled_at=datetime.now(UTC))]
@@ -1016,7 +1022,7 @@ class _PerAccountGateway(_FakeGateway):
 		self.polled: list[int] = []
 		self.flooded_accounts: set[int] = set()
 
-	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+	async def userbot_get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		self.polled.append(account_id)
 		if account_id in self.flooded_accounts:
 			raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)

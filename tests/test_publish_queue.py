@@ -57,7 +57,7 @@ class _SlowGateway:
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return False
 
-	async def publish(
+	async def userbot_publish(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -377,7 +377,7 @@ async def test_unexpected_error_shown_collapsed(db: Database, make_queue: QueueF
 	async def _boom(*_args: object, **_kwargs: object) -> None:
 		raise RuntimeError(dump)
 
-	gateway.publish = _boom  # type: ignore[method-assign]
+	gateway.userbot_publish = _boom  # type: ignore[method-assign]
 	item_id = await queue.enqueue(PostDraft(community_id, text="x"))
 	failed = await _wait_status(queue, item_id, JobStatus.ERROR)
 	assert failed.error is not None
@@ -456,12 +456,12 @@ class _SlotGateway(_SlowGateway):
 		self.scheduled: list[datetime] = []
 		self.slots_full_once = False  # разовая гонка SCHEDULE_TOO_MUCH
 
-	async def get_scheduled(self, account_id: int, chat_id: str) -> list[object]:
+	async def userbot_get_scheduled(self, account_id: int, chat_id: str) -> list[object]:
 		from types import SimpleNamespace
 
 		return [SimpleNamespace(scheduled_at=moment) for moment in self.scheduled]
 
-	async def publish(
+	async def userbot_publish(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -471,7 +471,7 @@ class _SlotGateway(_SlowGateway):
 		if self.slots_full_once:
 			self.slots_full_once = False
 			raise UserbotScheduleFullError("Все слоты отложенных сообщений канала заняты.")
-		await super().publish(account_id, chat_id, post, on_progress)
+		await super().userbot_publish(account_id, chat_id, post, on_progress)
 
 
 def _future(minutes: int) -> datetime:
@@ -771,7 +771,7 @@ class _FloodOnceGateway(_SlowGateway):
 		self.seconds = seconds
 		self.flooded = False
 
-	async def publish(
+	async def userbot_publish(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -783,7 +783,7 @@ class _FloodOnceGateway(_SlowGateway):
 			raise TelegramFloodError(
 				f"Telegram просит подождать {self.seconds} с.", retry_after_s=self.seconds
 			)
-		await super().publish(account_id, chat_id, post, on_progress)
+		await super().userbot_publish(account_id, chat_id, post, on_progress)
 
 
 async def test_flood_waits_and_retries_instead_of_error(
@@ -886,7 +886,7 @@ class _FloodOnReadGateway(_SlotGateway):
 		self.flooded_accounts = flooded_accounts
 		self.read_calls = 0
 
-	async def get_scheduled(self, account_id: int, chat_id: str) -> list[object]:
+	async def userbot_get_scheduled(self, account_id: int, chat_id: str) -> list[object]:
 		self.read_calls += 1
 		if self.flooded_accounts is None or account_id in self.flooded_accounts:
 			raise TelegramFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
@@ -1452,7 +1452,7 @@ async def test_network_drop_makes_posts_wait_not_fail(
 	offline = True
 
 	class _OfflineGateway(_SlowGateway):
-		async def publish(
+		async def userbot_publish(
 			self,
 			account_id: int,
 			chat_id: str,
@@ -1461,7 +1461,7 @@ async def test_network_drop_makes_posts_wait_not_fail(
 		) -> None:
 			if offline:
 				raise UserbotNotConnectedError("Нет связи с Telegram.")
-			await super().publish(account_id, chat_id, post, on_progress)
+			await super().userbot_publish(account_id, chat_id, post, on_progress)
 
 	gateway = _OfflineGateway()
 	gateway.release.set()

@@ -122,7 +122,9 @@ class _StatsGateway(Protocol):
 
 	async def userbot_avatar(self, account_id: int, chat_id: str, target: str) -> str | None: ...
 
-	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
+	async def userbot_get_scheduled(
+		self, account_id: int, chat_id: str
+	) -> list[ScheduledMessage]: ...
 
 	async def userbot_history_marks(
 		self, account_id: int, chat_id: str, *, with_created: bool
@@ -585,7 +587,7 @@ class CommunityStatsService:
 			update["can_view_stats"] = stats.can_view_stats
 			if stats.linked_chat_id is not None:
 				update["linked_chat_id"] = stats.linked_chat_id
-			scheduled = await self._gateway.get_scheduled(account_id, chat_id)
+			scheduled = await self._gateway.userbot_get_scheduled(account_id, chat_id)
 			update["scheduled_count"] = len(scheduled)
 			avatar_changed, avatar_path = await self._refresh_avatar(account_id, community)
 			if avatar_changed:

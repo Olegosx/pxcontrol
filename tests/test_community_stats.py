@@ -81,7 +81,7 @@ class _FakeStatsGateway:
 		Path(target).write_bytes(b"jpg")
 		return target
 
-	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+	async def userbot_get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		self._check(account_id)
 		return [
 			ScheduledMessage(

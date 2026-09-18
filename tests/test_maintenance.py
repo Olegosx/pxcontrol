@@ -70,7 +70,7 @@ class _FakeGateway:
 			can_ban=self.can_ban,
 		)
 
-	async def service_messages_page(
+	async def userbot_service_messages_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
 	) -> ServiceMessagesPage:
 		self.requested.append(offset_id)
@@ -80,18 +80,20 @@ class _FakeGateway:
 			)
 		return self.pages.pop(0)
 
-	async def delete_messages(self, account_id: int, chat_id: str, message_ids: list[int]) -> int:
+	async def userbot_delete_messages(
+		self, account_id: int, chat_id: str, message_ids: list[int]
+	) -> int:
 		self.deleted.append(list(message_ids))
 		return sum(1 for message_id in message_ids if message_id not in self.undeletable)
 
-	async def participants_page(
+	async def userbot_participants_page(
 		self, account_id: int, chat_id: str, offset: int, limit: int
 	) -> ParticipantsPage:
 		if not self.member_pages:
 			return ParticipantsPage(deleted=[], scanned=0, next_offset=None, total=0)
 		return self.member_pages.pop(0)
 
-	async def kick_participant(
+	async def userbot_kick_participant(
 		self, account_id: int, chat_id: str, account: DeletedAccount
 	) -> int | None:
 		self.kicked.append(account.user_id)
@@ -367,7 +369,7 @@ async def test_flood_stops_the_pass(db: Database) -> None:
 	"""Флуд-лимит прекращает проход: настойчивость удлиняет срок (ADR-0017)."""
 
 	class _FloodingGateway(_FakeGateway):
-		async def service_messages_page(
+		async def userbot_service_messages_page(
 			self, account_id: int, chat_id: str, offset_id: int, limit: int
 		) -> ServiceMessagesPage:
 			raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
@@ -388,7 +390,7 @@ async def test_cancel_stops_between_pages(db: Database) -> None:
 	release = asyncio.Event()
 
 	class _SlowGateway(_FakeGateway):
-		async def service_messages_page(
+		async def userbot_service_messages_page(
 			self, account_id: int, chat_id: str, offset_id: int, limit: int
 		) -> ServiceMessagesPage:
 			self.requested.append(offset_id)
@@ -440,7 +442,7 @@ async def test_interrupted_clean_leaves_a_trace_in_the_log(
 	release = asyncio.Event()
 
 	class _SlowGateway(_FakeGateway):
-		async def service_messages_page(
+		async def userbot_service_messages_page(
 			self, account_id: int, chat_id: str, offset_id: int, limit: int
 		) -> ServiceMessagesPage:
 			self.requested.append(offset_id)
@@ -686,7 +688,7 @@ async def test_deleting_community_stops_its_maintenance(db: Database) -> None:
 	release = asyncio.Event()
 
 	class _SlowGateway(_FakeGateway):
-		async def service_messages_page(
+		async def userbot_service_messages_page(
 			self, account_id: int, chat_id: str, offset_id: int, limit: int
 		) -> ServiceMessagesPage:
 			self.requested.append(offset_id)
@@ -720,12 +722,12 @@ async def test_clean_members_skips_account_telegram_refuses(db: Database) -> Non
 	"""
 
 	class _PickyGateway(_FakeGateway):
-		async def kick_participant(
+		async def userbot_kick_participant(
 			self, account_id: int, chat_id: str, account: DeletedAccount
 		) -> int | None:
 			if account.user_id == 12:
 				raise UserbotAccessError("Этого участника исключить нельзя.")
-			return await super().kick_participant(account_id, chat_id, account)
+			return await super().userbot_kick_participant(account_id, chat_id, account)
 
 	gateway = _PickyGateway(
 		member_pages=[_members(deleted=[11, 12, 13], scanned=10, next_offset=None, total=10)]

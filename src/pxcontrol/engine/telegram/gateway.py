@@ -312,18 +312,14 @@ class TelegramGateway:
 
 	# --- запасной путь: Bot API ------------------------------------------------
 	#
-	# Правило имён: методы бот-пути начинаются с ``bot_``. Прежде часть
-	# из них звалась без пометки (``send_text``, ``check_community``),
-	# и по вызову в сервисе нельзя было понять, основной это путь или
-	# запасной — при том что у них разные лимиты и разные возможности.
-	#
-	# У методов основного пути (userbot, ADR-0011) единого правила пока
-	# нет: часть носит префикс ``userbot_``, часть зовётся без пометки
-	# (``publish``, ``get_scheduled``, ``delete_messages``). Оба порядка
-	# связны — явный префикс у обоих путей или «нет ``bot_`` — значит
-	# публикатор», — и выбор между ними за владельцем; суффиксов
-	# не осталось (было ``check_community_userbot``), они не годятся
-	# ни при одном из них.
+	# Правило имён (доведено 18.09.2026): путь назван префиксом у обоих —
+	# ``bot_`` и ``userbot_``. Так вызов в сервисе сам говорит, кто везёт
+	# операцию, а это не мелочь: у путей разные лимиты, разные
+	# возможности и разная цена отказа. Прежде часть бот-методов звалась
+	# без пометки (``send_text``, ``check_community``), а userbot-методы
+	# были вперемешку — половина с префиксом, половина без, один
+	# с суффиксом. Имена транспортов при этом не меняются: внутри
+	# ``mtproto.py`` префикс был бы лишним, там весь модуль — userbot.
 	# Адрес операции — BotRef (id + токен): по id ведутся дорожка
 	# и учёт активности бота (ADR-0030).
 
@@ -476,7 +472,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
 			return await transport.check_community(chat_ref)
 
-	async def publish(
+	async def userbot_publish(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -506,7 +502,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.PUBLISH) as transport:
 			return await transport.publish(chat_id, post, on_progress)
 
-	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
+	async def userbot_get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
 		"""Читает темы форума аккаунтом сообщества (только userbot, ADR-0021).
 
 		Raises:
@@ -616,7 +612,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
 			await transport.edit_post(chat_id, message_id, text, entities)
 
-	async def service_messages_page(
+	async def userbot_service_messages_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int
 	) -> ServiceMessagesPage:
 		"""Читает страницу истории сообщества, отбирая служебные записи.
@@ -634,7 +630,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.service_messages_page(chat_id, offset_id, limit)
 
-	async def delete_messages(
+	async def userbot_delete_messages(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -660,7 +656,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, priority) as transport:
 			return await transport.delete_messages(chat_id, message_ids)
 
-	async def participants_page(
+	async def userbot_participants_page(
 		self, account_id: int, chat_id: str, offset: int, limit: int
 	) -> ParticipantsPage:
 		"""Читает страницу участников, отбирая удалённые аккаунты (ADR-0026).
@@ -674,7 +670,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.participants_page(chat_id, offset, limit)
 
-	async def kick_participant(
+	async def userbot_kick_participant(
 		self, account_id: int, chat_id: str, account: DeletedAccount
 	) -> int | None:
 		"""Исключает участника; отдаёт id служебной записи об этом.
@@ -691,7 +687,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.kick_participant(chat_id, account)
 
-	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
+	async def userbot_get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]:
 		"""Читает отложенные записи канала из Telegram (его аккаунтом).
 
 		Raises:
@@ -705,7 +701,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.BACKGROUND) as transport:
 			return await transport.get_scheduled(chat_id)
 
-	async def get_scheduled_message(
+	async def userbot_get_scheduled_message(
 		self, account_id: int, chat_id: str, message_id: int
 	) -> ScheduledMessage | None:
 		"""Читает одну отложенную запись целиком (None — её уже нет).
@@ -721,7 +717,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
 			return await transport.get_scheduled_message(chat_id, message_id)
 
-	async def edit_scheduled(
+	async def userbot_edit_scheduled(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -745,7 +741,7 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
 			await transport.edit_scheduled(chat_id, message_id, text, when, entities)
 
-	async def send_scheduled_now(
+	async def userbot_send_scheduled_now(
 		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> None:
 		"""Публикует отложенные записи немедленно.
@@ -759,7 +755,9 @@ class TelegramGateway:
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
 			await transport.send_scheduled_now(chat_id, message_ids)
 
-	async def delete_scheduled(self, account_id: int, chat_id: str, message_ids: list[int]) -> None:
+	async def userbot_delete_scheduled(
+		self, account_id: int, chat_id: str, message_ids: list[int]
+	) -> None:
 		"""Удаляет отложенные записи, не публикуя.
 
 		Raises:

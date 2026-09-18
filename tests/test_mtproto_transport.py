@@ -504,7 +504,7 @@ async def test_activate_userbot_pool_per_account() -> None:
 	await gateway.deactivate_userbot(20)
 	assert clients[1].connected is False
 	with pytest.raises(UserbotNotConnectedError, match="войдите"):
-		await gateway.publish(20, "-1001", OutgoingPost(text="x"))
+		await gateway.userbot_publish(20, "-1001", OutgoingPost(text="x"))
 	await gateway.stop()
 	assert clients[2].connected is False  # остановка гасит весь пул
 
@@ -825,19 +825,19 @@ async def test_gateway_flood_freezes_whole_account() -> None:
 	await gateway.activate_userbot(20, 1, "h", "s2")
 
 	with pytest.raises(UserbotFloodError) as first:
-		await gateway.publish(10, "-1001", OutgoingPost(text="раз"))
+		await gateway.userbot_publish(10, "-1001", OutgoingPost(text="раз"))
 	assert first.value.retry_after_s == 45
 	requests_after_flood = flooding.requests
 
 	# вторая попытка тем же аккаунтом — отказ без обращения к Telegram
 	with pytest.raises(UserbotFloodError) as second:
-		await gateway.get_scheduled(10, "-1001")
+		await gateway.userbot_get_scheduled(10, "-1001")
 	assert second.value.retry_after_s <= 45
 	assert isinstance(second.value, UserbotUnavailableError)  # прежние ветки узнают
 	assert flooding.requests == requests_after_flood  # клиента не потревожили
 
 	# соседний аккаунт не страдает: лимит пер-аккаунтный (ADR-0019)
-	await gateway.publish(20, "-1002", OutgoingPost(text="два"))
+	await gateway.userbot_publish(20, "-1002", OutgoingPost(text="два"))
 	assert len(calm.sent) == 1
 	await gateway.stop()
 
@@ -1465,7 +1465,7 @@ async def test_gateway_paused_account_refuses_without_network() -> None:
 	assert gateway.userbot_paused(10)
 	assert client.connected is False, "транспорт закрыт"
 	with pytest.raises(UserbotPausedError, match="возобновите") as refused:
-		await gateway.publish(10, "-1001", OutgoingPost(text="раз"))
+		await gateway.userbot_publish(10, "-1001", OutgoingPost(text="раз"))
 	assert isinstance(refused.value, UserbotNotConnectedError)
 	assert client.sent == []
 	assert gateway.userbot_premium(10) is False
@@ -1473,7 +1473,7 @@ async def test_gateway_paused_account_refuses_without_network() -> None:
 	gateway.resume_userbot(10)
 	assert not gateway.userbot_paused(10)
 	await gateway.activate_userbot(10, 1, "h", "s1")
-	await gateway.publish(10, "-1001", OutgoingPost(text="два"))
+	await gateway.userbot_publish(10, "-1001", OutgoingPost(text="два"))
 	assert len(client.sent) == 1
 	# удаление снимает пометку: id может достаться следующей записи
 	await gateway.pause_userbot(10)

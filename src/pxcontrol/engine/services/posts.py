@@ -542,9 +542,11 @@ class _PostPort(Protocol):
 		markup: PostMarkup | None = None,
 	) -> int: ...
 
-	async def get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]: ...
+	async def userbot_get_forum_topics(
+		self, account_id: int, chat_id: str
+	) -> list[ForumTopicInfo]: ...
 
-	async def publish(
+	async def userbot_publish(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -595,7 +597,7 @@ class _PostPort(Protocol):
 		entities: tuple[TextEntity, ...] = (),
 	) -> None: ...
 
-	async def delete_messages(
+	async def userbot_delete_messages(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -603,13 +605,15 @@ class _PostPort(Protocol):
 		priority: TelegramPriority = ...,
 	) -> int: ...
 
-	async def get_scheduled(self, account_id: int, chat_id: str) -> list[ScheduledMessage]: ...
+	async def userbot_get_scheduled(
+		self, account_id: int, chat_id: str
+	) -> list[ScheduledMessage]: ...
 
-	async def get_scheduled_message(
+	async def userbot_get_scheduled_message(
 		self, account_id: int, chat_id: str, message_id: int
 	) -> ScheduledMessage | None: ...
 
-	async def edit_scheduled(
+	async def userbot_edit_scheduled(
 		self,
 		account_id: int,
 		chat_id: str,
@@ -619,11 +623,11 @@ class _PostPort(Protocol):
 		entities: tuple[TextEntity, ...] = (),
 	) -> None: ...
 
-	async def send_scheduled_now(
+	async def userbot_send_scheduled_now(
 		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> None: ...
 
-	async def delete_scheduled(
+	async def userbot_delete_scheduled(
 		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> None: ...
 
@@ -1575,7 +1579,7 @@ class PostsService:
 				when=draft.when,
 				topic_id=draft.topic_id,
 			)
-			return await self._gateway.publish(
+			return await self._gateway.userbot_publish(
 				community.default_tg_account_id, community.tg_chat_id, post, on_progress
 			)
 
@@ -1649,7 +1653,7 @@ class PostsService:
 				f"Темы «{community.title}» может прочитать только userbot — "
 				"привяжите аккаунт на странице сообщества → «Участники…»."
 			)
-		return await self._gateway.get_forum_topics(
+		return await self._gateway.userbot_get_forum_topics(
 			community.default_tg_account_id, community.tg_chat_id
 		)
 
@@ -2143,7 +2147,9 @@ class PostsService:
 				continue
 			for account_id in self._scheduled_readers(community):
 				try:
-					messages = await self._gateway.get_scheduled(account_id, community.tg_chat_id)
+					messages = await self._gateway.userbot_get_scheduled(
+						account_id, community.tg_chat_id
+					)
 				except TelegramFloodError as exc:
 					# флуд-лимит действует на аккаунт целиком, и помнит об этом
 					# дорожка аккаунта (ADR-0024): остальные его сообщества
@@ -2421,7 +2427,7 @@ class PostsService:
 		community = await self._get_community(ref.community_id)
 		account_id = self._published_reader(community)
 		targets = sorted(set(ids) | {ref.message_id})
-		deleted = await self._gateway.delete_messages(
+		deleted = await self._gateway.userbot_delete_messages(
 			account_id,
 			community.tg_chat_id,
 			targets,
@@ -2507,7 +2513,7 @@ class PostsService:
 		community = await self._get_community(community_id)
 		if community.default_tg_account_id is None:
 			return []
-		messages = await self._gateway.get_scheduled(
+		messages = await self._gateway.userbot_get_scheduled(
 			community.default_tg_account_id, community.tg_chat_id
 		)
 		return [message.scheduled_at for message in messages]
@@ -2569,7 +2575,7 @@ class PostsService:
 		"""
 		community = await self._get_community(ref.community_id)
 		message = await self._scheduled_call(
-			self._gateway.get_scheduled_message(
+			self._gateway.userbot_get_scheduled_message(
 				ref.account_id, community.tg_chat_id, ref.message_id
 			)
 		)
@@ -2630,7 +2636,7 @@ class PostsService:
 		check_schedule_ahead(when)
 		community = await self._get_community(draft.ref.community_id)
 		await self._scheduled_call(
-			self._gateway.edit_scheduled(
+			self._gateway.userbot_edit_scheduled(
 				draft.ref.account_id,
 				community.tg_chat_id,
 				draft.ref.message_id,
@@ -2657,7 +2663,9 @@ class PostsService:
 		"""
 		community = await self._get_community(ref.community_id)
 		await self._scheduled_call(
-			self._gateway.send_scheduled_now(ref.account_id, community.tg_chat_id, [ref.message_id])
+			self._gateway.userbot_send_scheduled_now(
+				ref.account_id, community.tg_chat_id, [ref.message_id]
+			)
 		)
 		# пост выходит сейчас — обещание должно стать «пора» (у вышедшего
 		# поста будет новый номер, дозор опознает его по тексту)
@@ -2674,7 +2682,9 @@ class PostsService:
 		"""
 		community = await self._get_community(ref.community_id)
 		await self._scheduled_call(
-			self._gateway.delete_scheduled(ref.account_id, community.tg_chat_id, [ref.message_id])
+			self._gateway.userbot_delete_scheduled(
+				ref.account_id, community.tg_chat_id, [ref.message_id]
+			)
 		)
 		# записи больше нет — обещанным кнопкам некуда ехать
 		if self._markup_gone is not None:
