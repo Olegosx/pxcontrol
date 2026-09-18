@@ -251,6 +251,26 @@ def _preview_options(preview: LinkPreview | None) -> Any:
 	)
 
 
+@asynccontextmanager
+async def _bot_client(token: str) -> AsyncIterator[Bot]:
+	"""Клиент Bot API на время одной операции — и гарантированное закрытие.
+
+	Bot API работает по токену на операцию, постоянного соединения
+	у него нет (ADR-0007): клиент создаётся, делает своё и закрывается.
+	Связка «создать → try → finally: закрыть» была написана в каждой
+	из девяти операций; забытый ``finally`` в новой утекал бы
+	соединением, и ни одного следа в журнале это бы не оставило.
+
+	Raises:
+		InvalidBotTokenError: Строка не похожа на токен бота.
+	"""
+	bot = _make_bot(token)
+	try:
+		yield bot
+	finally:
+		await bot.session.close()
+
+
 def _make_bot(token: str) -> Bot:
 	"""Создаёт клиента Bot API с доменной ошибкой на битом токене.
 
@@ -407,19 +427,18 @@ async def edit_markup(token: str, chat_id: str, message_id: int, markup: PostMar
 			изменять сообщения, пост не найден, разметка не годится).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	bot = _make_bot(token)
-	try:
-		async with _bot_errors(
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors(
 			"У бота нет права изменять сообщения в этом сообществе.",
 			"Telegram отклонил правку клавиатуры.",
-		):
-			await bot.edit_message_reply_markup(
-				chat_id=_chat_id(chat_id),
-				message_id=message_id,
-				reply_markup=to_reply_markup(markup),
-			)
-	finally:
-		await bot.session.close()
+		),
+	):
+		await bot.edit_message_reply_markup(
+			chat_id=_chat_id(chat_id),
+			message_id=message_id,
+			reply_markup=to_reply_markup(markup),
+		)
 
 
 async def send_media(
@@ -448,53 +467,52 @@ async def send_media(
 	"""
 	from aiogram.types import FSInputFile
 
-	bot = _make_bot(token)
 	file = FSInputFile(path)
 	text = post_html(caption, entities) if caption else None
 	mode = "HTML"
 	keyboard = to_reply_markup(markup)
-	try:
-		async with _bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."):
-			if kind is MediaKind.PHOTO:
-				message = await bot.send_photo(
-					_chat_id(chat_id),
-					file,
-					caption=text,
-					parse_mode=mode,
-					reply_markup=keyboard,
-					message_thread_id=topic_id,
-				)
-			elif kind is MediaKind.VIDEO:
-				message = await bot.send_video(
-					_chat_id(chat_id),
-					file,
-					caption=text,
-					parse_mode=mode,
-					reply_markup=keyboard,
-					supports_streaming=True,
-					message_thread_id=topic_id,
-				)
-			elif kind is MediaKind.AUDIO:
-				message = await bot.send_audio(
-					_chat_id(chat_id),
-					file,
-					caption=text,
-					parse_mode=mode,
-					reply_markup=keyboard,
-					message_thread_id=topic_id,
-				)
-			else:
-				message = await bot.send_document(
-					_chat_id(chat_id),
-					file,
-					caption=text,
-					parse_mode=mode,
-					reply_markup=keyboard,
-					message_thread_id=topic_id,
-				)
-			return int(message.message_id)
-	finally:
-		await bot.session.close()
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."),
+	):
+		if kind is MediaKind.PHOTO:
+			message = await bot.send_photo(
+				_chat_id(chat_id),
+				file,
+				caption=text,
+				parse_mode=mode,
+				reply_markup=keyboard,
+				message_thread_id=topic_id,
+			)
+		elif kind is MediaKind.VIDEO:
+			message = await bot.send_video(
+				_chat_id(chat_id),
+				file,
+				caption=text,
+				parse_mode=mode,
+				reply_markup=keyboard,
+				supports_streaming=True,
+				message_thread_id=topic_id,
+			)
+		elif kind is MediaKind.AUDIO:
+			message = await bot.send_audio(
+				_chat_id(chat_id),
+				file,
+				caption=text,
+				parse_mode=mode,
+				reply_markup=keyboard,
+				message_thread_id=topic_id,
+			)
+		else:
+			message = await bot.send_document(
+				_chat_id(chat_id),
+				file,
+				caption=text,
+				parse_mode=mode,
+				reply_markup=keyboard,
+				message_thread_id=topic_id,
+			)
+		return int(message.message_id)
 
 
 async def send_album(
@@ -534,7 +552,6 @@ async def send_album(
 		MediaKind.AUDIO: InputMediaAudio,
 		MediaKind.DOCUMENT: InputMediaDocument,
 	}
-	bot = _make_bot(token)
 	text = post_html(caption, entities) if caption else None
 	group = [
 		builders[kind](
@@ -545,14 +562,12 @@ async def send_album(
 		)
 		for index, (kind, path) in enumerate(files)
 	]
-	try:
-		async with _bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."):
-			messages = await bot.send_media_group(
-				_chat_id(chat_id), group, message_thread_id=topic_id
-			)
-			return int(messages[0].message_id)
-	finally:
-		await bot.session.close()
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."),
+	):
+		messages = await bot.send_media_group(_chat_id(chat_id), group, message_thread_id=topic_id)
+		return int(messages[0].message_id)
 
 
 async def send_poll(
@@ -580,24 +595,23 @@ async def send_poll(
 	"""
 	from aiogram.types import InputPollOption
 
-	bot = _make_bot(token)
-	try:
-		async with _bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."):
-			message = await bot.send_poll(
-				_chat_id(chat_id),
-				question=poll.question,
-				options=[InputPollOption(text=option) for option in poll.options],
-				is_anonymous=poll.anonymous,
-				type="quiz" if poll.quiz else "regular",
-				allows_multiple_answers=poll.multiple,
-				correct_option_id=poll.correct_option if poll.quiz else None,
-				explanation=poll.explanation or None,
-				message_thread_id=topic_id,
-				reply_markup=to_reply_markup(markup),
-			)
-			return int(message.message_id)
-	finally:
-		await bot.session.close()
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."),
+	):
+		message = await bot.send_poll(
+			_chat_id(chat_id),
+			question=poll.question,
+			options=[InputPollOption(text=option) for option in poll.options],
+			is_anonymous=poll.anonymous,
+			type="quiz" if poll.quiz else "regular",
+			allows_multiple_answers=poll.multiple,
+			correct_option_id=poll.correct_option if poll.quiz else None,
+			explanation=poll.explanation or None,
+			message_thread_id=topic_id,
+			reply_markup=to_reply_markup(markup),
+		)
+		return int(message.message_id)
 
 
 async def send_text(
@@ -622,20 +636,19 @@ async def send_text(
 		BotError: Telegram отклонил отправку (нет прав и т.п.).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	bot = _make_bot(token)
-	try:
-		async with _bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."):
-			message = await bot.send_message(
-				_chat_id(chat_id),
-				post_html(text, entities),
-				parse_mode="HTML",
-				message_thread_id=topic_id,
-				reply_markup=to_reply_markup(markup),
-				link_preview_options=_preview_options(preview),
-			)
-			return int(message.message_id)
-	finally:
-		await bot.session.close()
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors("Бот не может писать в сообщество.", "Telegram отклонил отправку."),
+	):
+		message = await bot.send_message(
+			_chat_id(chat_id),
+			post_html(text, entities),
+			parse_mode="HTML",
+			message_thread_id=topic_id,
+			reply_markup=to_reply_markup(markup),
+			link_preview_options=_preview_options(preview),
+		)
+		return int(message.message_id)
 
 
 def describe_update(update: Any) -> str | None:
@@ -680,23 +693,19 @@ async def get_bot_events(token: str) -> list[str]:
 	"""
 	from aiogram.exceptions import TelegramConflictError
 
-	bot = _make_bot(token)
-	try:
-		async with _bot_errors(
-			"Telegram отклонил запрос событий.", "Telegram отклонил запрос событий."
-		):
-			try:
-				# timeout=1 — короткий long-poll: диагностике нужен снимок,
-				# не ожидание
-				updates = await bot.get_updates(timeout=1)
-			except TelegramConflictError as exc:
-				# точный совет ценнее запасной ветки единого маппера
-				raise BotError(
-					"События недоступны: у бота включён вебхук или его "
-					"опрашивает другое приложение."
-				) from exc
-	finally:
-		await bot.session.close()
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors("Telegram отклонил запрос событий.", "Telegram отклонил запрос событий."),
+	):
+		try:
+			# timeout=1 — короткий long-poll: диагностике нужен снимок,
+			# не ожидание
+			updates = await bot.get_updates(timeout=1)
+		except TelegramConflictError as exc:
+			# точный совет ценнее запасной ветки единого маппера
+			raise BotError(
+				"События недоступны: у бота включён вебхук или его опрашивает другое приложение."
+			) from exc
 	return [line for update in updates if (line := describe_update(update))]
 
 
@@ -718,33 +727,32 @@ async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 	"""
 	ref = normalize_chat_ref(chat_ref)
 	logger.info("Проверка сообщества: ввод %r распознан как %r.", chat_ref, ref)
-	bot = _make_bot(token)
-	try:
-		async with _bot_errors(
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors(
 			"Бот не добавлен в сообщество — добавьте его (в канал — администратором).",
 			"Канал или группа не найдены — проверьте @имя или ID; приватное "
 			"сообщество видно боту только после добавления его участником.",
-		):
-			chat = await bot.get_chat(ref)
-			kind = community_kind_from_chat_type(str(chat.type))
-			me = await bot.get_me()
-			member = await bot.get_chat_member(chat.id, me.id)
-			if kind is CommunityKind.CHANNEL:
-				ensure_bot_can_post(member)
-			else:
-				ensure_bot_can_send_in_group(member, chat.permissions)
-			return CommunityInfo(
-				str(chat.id),
-				chat.title or str(ref),
-				chat.username,
-				kind=kind,
-				forum=bool(chat.is_forum),
-				# право правки не требуется для подключения — оно решает
-				# только, доступны ли кнопки поверх поста публикателя
-				can_edit=bot_can_edit_messages(member),
-			)
-	finally:
-		await bot.session.close()
+		),
+	):
+		chat = await bot.get_chat(ref)
+		kind = community_kind_from_chat_type(str(chat.type))
+		me = await bot.get_me()
+		member = await bot.get_chat_member(chat.id, me.id)
+		if kind is CommunityKind.CHANNEL:
+			ensure_bot_can_post(member)
+		else:
+			ensure_bot_can_send_in_group(member, chat.permissions)
+		return CommunityInfo(
+			str(chat.id),
+			chat.title or str(ref),
+			chat.username,
+			kind=kind,
+			forum=bool(chat.is_forum),
+			# право правки не требуется для подключения — оно решает
+			# только, доступны ли кнопки поверх поста публикателя
+			can_edit=bot_can_edit_messages(member),
+		)
 
 
 async def get_community_stats(token: str, chat_id: str) -> CommunityStatsInfo:
@@ -761,23 +769,22 @@ async def get_community_stats(token: str, chat_id: str) -> CommunityStatsInfo:
 		BotError: Бот не видит сообщество или запрос отклонён.
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	bot = _make_bot(token)
-	try:
-		async with _bot_errors(
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors(
 			"Бот не видит сообщество — его могли исключить.",
 			"Telegram отклонил запрос сведений о сообществе.",
-		):
-			numeric = _chat_id(chat_id)
-			chat = await bot.get_chat(numeric)
-			count = await bot.get_chat_member_count(numeric)
-			linked = getattr(chat, "linked_chat_id", None)
-			return CommunityStatsInfo(
-				participants=count,
-				online=None,
-				linked_chat_id=str(linked) if linked is not None else None,
-			)
-	finally:
-		await bot.session.close()
+		),
+	):
+		numeric = _chat_id(chat_id)
+		chat = await bot.get_chat(numeric)
+		count = await bot.get_chat_member_count(numeric)
+		linked = getattr(chat, "linked_chat_id", None)
+		return CommunityStatsInfo(
+			participants=count,
+			online=None,
+			linked_chat_id=str(linked) if linked is not None else None,
+		)
 
 
 async def check_token(token: str) -> str:
@@ -790,11 +797,8 @@ async def check_token(token: str) -> str:
 			не случается — запасные ветки единого маппера).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
-	bot = _make_bot(token)
-	try:
+	async with _bot_client(token) as bot:
 		text = "Telegram отклонил запрос getMe."
 		async with _bot_errors(text, text):
 			me = await bot.get_me()
 			return me.username or me.first_name
-	finally:
-		await bot.session.close()
