@@ -197,7 +197,7 @@ class PollEditor(QWidget):
 		"""Добавляет пустой вариант (до предела Telegram)."""
 		if len(self._options) >= MAX_POLL_OPTIONS:
 			return
-		self._rebuild([*self._values(), ""], self._correct.checkedId())
+		self._rebuild([*self._values(), ""], self._correct_option())
 		self.changed.emit()
 
 	def _drop_option(self, index: int) -> None:
@@ -213,6 +213,17 @@ class PollEditor(QWidget):
 			correct -= 1
 		self._rebuild(values, correct if correct >= 0 else None)
 		self.changed.emit()
+
+	def _correct_option(self) -> int | None:
+		"""Отмеченный правильный ответ или None, если не отмечен.
+
+		``QButtonGroup`` отвечает −1, когда не отмечен никто, а
+		``_rebuild`` принимает «номер или None»: передавать туда −1
+		значило бы врать контракту — работало это лишь потому, что
+		с номером варианта −1 всё равно не совпадает.
+		"""
+		checked = self._correct.checkedId()
+		return checked if checked >= 0 else None
 
 	def _values(self) -> list[str]:
 		"""Тексты вариантов как они набраны сейчас."""
@@ -263,7 +274,7 @@ class PollEditor(QWidget):
 			self._multiple.blockSignals(True)
 			self._multiple.setChecked(False)
 			self._multiple.blockSignals(False)
-		self._rebuild(self._values(), self._correct.checkedId())
+		self._rebuild(self._values(), self._correct_option())
 		self.changed.emit()
 
 	def _on_changed(self) -> None:

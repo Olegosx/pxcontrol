@@ -68,6 +68,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.services.schedule_plan import parse_hhmm
 from pxcontrol.engine.services.video import video_dialog_filter
 from pxcontrol.engine.telegram.types import (
@@ -482,12 +483,11 @@ class QueueCounts:
 	errors: int = 0
 
 
-def queue_counts(items: list[Any]) -> dict[int, QueueCounts]:
+def queue_counts(items: list[QueueItemDto]) -> dict[int, QueueCounts]:
 	"""Считает сводку очереди по сообществам (чистая функция).
 
 	Правило показа — предметное (ADR-0016), поэтому живёт отдельно
 	от вёрстки и закрыто тестом: в вёрстке его проверить нечем.
-	Элементы — ``QueueItemDto`` (поля ``community_id`` и ``status``).
 	"""
 	counts: dict[int, QueueCounts] = {}
 	for item in items:

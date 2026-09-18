@@ -1353,9 +1353,7 @@ class MtprotoTransport:
 		client, entity = await self._client_and_entity(chat_id)
 		async with _mtproto_errors():
 			stats, dc = await _fetch_stats(client, entity)
-			sender = await client._borrow_exported_sender(dc) if dc is not None else None  # noqa: SLF001 — приём самого Telethon
-			try:
-				send = sender.send if sender is not None else client
+			async with _stats_sender(client, dc) as send:
 				growth = await _graph(send, getattr(stats, "growth_graph", None), "growth_graph")
 				# у канала ряд подписок/отписок — followers_graph, у группы — members_graph
 				flow = await _graph(
@@ -1376,9 +1374,6 @@ class MtprotoTransport:
 					field: await _graph(send, _first_attr(stats, attrs), field)
 					for field, attrs in _SHARE_GRAPHS.items()
 				}
-			finally:
-				if sender is not None:
-					await client._return_exported_sender(sender)  # noqa: SLF001
 		return _analytics_from(stats, growth, flow, hours, daily_graphs, share_graphs)
 
 	async def history_marks(self, chat_id: str, *, with_created: bool) -> HistoryMarks:
@@ -1934,9 +1929,32 @@ async def _fetch_stats(client: Any, entity: Any) -> tuple[Any, int | None]:
 			return await client(request), None
 		except StatsMigrateError as exc:
 			dc = exc.dc
+	async with _stats_sender(client, dc) as send:
+		return await send(request), dc
+
+
+@asynccontextmanager
+async def _stats_sender(client: Any, dc: int | None) -> AsyncIterator[Any]:
+	"""Канал в дата-центр статистики на время работы — и его возврат.
+
+	Статистика живёт не в домашнем дата-центре аккаунта: Telethon
+	отвечает на запрос ошибкой миграции, и дальше нужен одолженный канал
+	(``_borrow_exported_sender`` — приём самой библиотеки, другого входа
+	у неё нет). Одолженное надо вернуть, и связка «одолжить → try →
+	finally: вернуть» была написана дважды. Это единственное место,
+	где приложение трогает внутренности Telethon, — держать его в одной
+	точке важнее обычного: при обновлении библиотеки чинить придётся
+	здесь, а не в двух местах.
+
+	``dc is None`` — миграции не было, канал не нужен: отдаём самого
+	клиента, вызывающий обращается к нему так же.
+	"""
+	if dc is None:
+		yield client
+		return
 	sender = await client._borrow_exported_sender(dc)  # noqa: SLF001 — приём самого Telethon
 	try:
-		return await sender.send(request), dc
+		yield sender.send
 	finally:
 		await client._return_exported_sender(sender)  # noqa: SLF001
 

@@ -65,10 +65,13 @@ def logs_to_tmp(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
 	from pxcontrol import logging_config
 
 	original = logging_config.setup_logging
-	log_dir = tmp_path_factory.mktemp("logs")
+	tmp_log_dir = tmp_path_factory.mktemp("logs")
 
-	def _to_tmp(level: str = "INFO", directory: Path | None = None) -> Path:
-		return original(level, directory or log_dir)
+	def _to_tmp(level: str = "INFO", log_dir: Path | None = None) -> Path:
+		# имя параметра — как у настоящей setup_logging: подмена должна
+		# принимать и вызов по имени, иначе первый же такой вызов упал бы
+		# TypeError далеко от причины
+		return original(level, log_dir or tmp_log_dir)
 
 	logging_config.setup_logging = _to_tmp  # type: ignore[assignment]
 	import pxcontrol.app as app_module
