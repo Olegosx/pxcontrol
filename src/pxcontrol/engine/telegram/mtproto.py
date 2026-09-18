@@ -20,7 +20,7 @@ from typing import Any
 
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
-from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
+from pxcontrol.engine.telegram.refs import CHANNEL_ID_PREFIX, normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
 from pxcontrol.engine.telegram.stats_graph import (
 	GraphSeries,
@@ -1327,7 +1327,7 @@ class MtprotoTransport:
 			can_view_stats=bool(getattr(full, "can_view_stats", False)),
 			# Telethon отдаёт голый id канала; в приложении сообщества
 			# ходят в формате Bot API (-100…) — так связь найдётся по БД
-			linked_chat_id=f"-100{linked}" if linked else None,
+			linked_chat_id=f"{CHANNEL_ID_PREFIX}{linked}" if linked else None,
 		)
 
 	async def community_analytics(self, chat_id: str) -> CommunityAnalytics:

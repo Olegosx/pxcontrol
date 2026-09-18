@@ -80,7 +80,7 @@ class SchedulePlan:
 	kind: PlanKind
 	at: tuple[int, int] | None = None
 	every_days: int = 1
-	every_hours: int = 3
+	every_hours: int = DEFAULT_HOURS_STEP
 	start: datetime | None = None
 	start_date: date | None = None
 	community_times: tuple[str, ...] = ()

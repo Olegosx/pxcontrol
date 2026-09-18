@@ -44,6 +44,7 @@ from pxcontrol.engine.services.settings import PUBLISH_TIMES, TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
+	limit_mb,
 	text_length_limit,
 )
 from pxcontrol.ui import density
@@ -452,7 +453,7 @@ class BatchStagePage(StagePage):
 		elif community.capabilities.bot:
 			self._caps_hint.setText(
 				"Публикация через бота: только «сейчас» (для отложенных нужен "
-				"userbot-админ), файлы до 50 МБ."
+				f"userbot-админ), файлы до {limit_mb(BOT_MAX_FILE_BYTES)} МБ."
 			)
 		else:
 			self._caps_hint.setText(

@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
+from pxcontrol.engine.services.activity import HISTORY_DAYS, HOURS_DAYS
+from pxcontrol.engine.telegram.types import USERBOT_PREMIUM_MAX_FILE_BYTES, limit_gb
 from pxcontrol.ui.pages.user_state import (
 	BotAction,
 	BotState,
@@ -135,7 +137,9 @@ def test_participation_texts() -> None:
 
 def test_premium_text_names_file_limit() -> None:
 	assert premium_text(_account()) is None
-	assert premium_text(_account(premium=True)) == "Premium · файлы до 4 ГБ"
+	assert premium_text(_account(premium=True)) == (
+		f"Premium · файлы до {limit_gb(USERBOT_PREMIUM_MAX_FILE_BYTES)} ГБ"
+	)
 
 
 # --- сводка и поиск ------------------------------------------------------------------
@@ -250,7 +254,7 @@ def test_reference_rows_and_route_key() -> None:
 		last,
 	)
 	assert dict(user_reference_rows(_account(premium=True), activity))["Premium"] == (
-		"да · файлы до 4 ГБ"
+		f"да · файлы до {limit_gb(USERBOT_PREMIUM_MAX_FILE_BYTES)} ГБ"
 	)
 	assert dict(user_reference_rows(_account(), activity))["Последняя операция"] != "ещё не было"
 	bot_rows = dict(bot_reference_rows(_bot(paused=True, publisher_of=1), None))
@@ -285,10 +289,10 @@ def test_kind_rows_captions_and_memberships() -> None:
 	assert hours_caption((0,) * 24) == ""
 	hours = [0] * 24
 	hours[21] = 48
-	assert hours_caption(tuple(hours)) == "за 7 дней · пик 21:00 — 48 операций"
+	assert hours_caption(tuple(hours)) == f"за {HOURS_DAYS} дней · пик 21:00 — 48 операций"
 	assert busy_days_caption(()) == ""
 	points = (DayPoint(date(2026, 9, 14), 3600), DayPoint(date(2026, 9, 15), 720))
-	assert busy_days_caption(points) == "30 дней · всего 1 ч 12 мин"
+	assert busy_days_caption(points) == f"{HISTORY_DAYS} дней · всего 1 ч 12 мин"
 	community = CommunityDto(
 		id=1,
 		title="Чат",

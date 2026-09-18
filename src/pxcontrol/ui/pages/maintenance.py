@@ -164,6 +164,8 @@ class MaintenancePanel(QWidget):
 		layout.setSpacing(spacing.row_spacing)
 		self._segments = SegmentedWidget(self)
 		self._pages = QStackedWidget(self)
+		#: ключ раздела → его страница: связь явная, а не по номеру в стопке
+		self._by_key: dict[str, QWidget] = {}
 		layout.addWidget(self._segments)
 		layout.addWidget(self._pages, stretch=1)
 		self._add_page("service", "Служебные записи", self._service_page())
@@ -190,11 +192,19 @@ class MaintenancePanel(QWidget):
 	def _add_page(self, key: str, title: str, page: QWidget) -> None:
 		"""Добавляет раздел: сегмент сверху и страницу в стопке."""
 		self._pages.addWidget(page)
+		self._by_key[key] = page
 		self._segments.addItem(routeKey=key, text=title, onClick=lambda: self._show(key))
 
 	def _show(self, key: str) -> None:
-		"""Показывает страницу раздела."""
-		self._pages.setCurrentIndex(0 if key == "service" else 1)
+		"""Показывает страницу раздела.
+
+		По ключу, а не по номеру в стопке: связь «ключ → позиция» была
+		неявной, и третий раздел (или перестановка двух нынешних) молча
+		показывал бы не ту страницу.
+		"""
+		page = self._by_key.get(key)
+		if page is not None:
+			self._pages.setCurrentWidget(page)
 
 	def _on_segment(self, key: str) -> None:
 		"""Смена сегмента — смена страницы."""

@@ -20,7 +20,13 @@ from PySide6.QtWidgets import QWidget
 from qfluentwidgets import InfoBadge, InfoLevel
 
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
-from pxcontrol.engine.services.activity import LiveDto, OwnerActivityDto, WindowStats
+from pxcontrol.engine.services.activity import (
+	HISTORY_DAYS,
+	HOURS_DAYS,
+	LiveDto,
+	OwnerActivityDto,
+	WindowStats,
+)
 from pxcontrol.engine.services.communities import AccountMembershipDto, CommunityDto
 from pxcontrol.engine.telegram.lane import LaneOwner, TelegramPriority
 from pxcontrol.engine.telegram.types import (
@@ -396,7 +402,12 @@ def user_reference_rows(
 		("Состояние", USER_STATE_TEXT[user_state(account)]),
 		("@имя", f"@{account.username}" if account.username else "не задано"),
 		("Телефон", account.phone or "не указан"),
-		("Premium", "да · файлы до 4 ГБ" if account.premium else "нет"),
+		(
+			"Premium",
+			f"да · файлы до {limit_gb(USERBOT_PREMIUM_MAX_FILE_BYTES)} ГБ"
+			if account.premium
+			else "нет",
+		),
 		("Сообщества", participation_text(account)),
 		("Последняя операция", format_local(last) if last is not None else "ещё не было"),
 	]
@@ -427,21 +438,28 @@ def window_tile_caption(stats: WindowStats) -> str:
 
 
 def hours_caption(hours: tuple[int, ...]) -> str:
-	"""«за 7 дней · пик 21:00 — 48 операций»; без операций — пусто."""
+	"""«за N дней · пик 21:00 — 48 операций»; без операций — пусто.
+
+	Горизонт — из движка (:data:`HOURS_DAYS`): подпись обязана называть
+	то окно, по которому график построен.
+	"""
 	if not hours or sum(hours) == 0:
 		return ""
 	peak = max(range(24), key=lambda h: hours[h])
 	count = hours[peak]
 	word = plural(count, "операция", "операции", "операций")
-	return f"за 7 дней · пик {peak:02d}:00 — {count} {word}"
+	return f"за {HOURS_DAYS} дней · пик {peak:02d}:00 — {count} {word}"
 
 
 def busy_days_caption(points: tuple[DayPoint, ...]) -> str:
-	"""«30 дней · всего 3 ч 12 мин»; без занятости — пусто."""
+	"""«N дней · всего 3 ч 12 мин»; без занятости — пусто.
+
+	Горизонт — из движка (:data:`HISTORY_DAYS`).
+	"""
 	total = sum(point.value for point in points)
 	if total <= 0:
 		return ""
-	return f"30 дней · всего {short_duration(total)}"
+	return f"{HISTORY_DAYS} дней · всего {short_duration(total)}"
 
 
 def membership_caption(membership: AccountMembershipDto) -> str:

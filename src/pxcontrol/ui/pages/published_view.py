@@ -342,7 +342,10 @@ class PublishedView(QWidget):
 		а не по остатку из семи файлов.
 		"""
 		album = (
-			f" Это альбом: удалятся все {item.album_size} записи поста." if item.is_album else ""
+			f" Это альбом: удалятся все {item.album_size} "
+			f"{plural(item.album_size, 'запись', 'записи', 'записей')} поста."
+			if item.is_album
+			else ""
 		)
 		if not confirm_delete(
 			self,
