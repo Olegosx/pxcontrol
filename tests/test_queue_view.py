@@ -369,3 +369,24 @@ def test_queue_counts_splits_planned_waiting_and_errors() -> None:
 	assert counts[10] == QueueCounts(planned=3, waiting=1, errors=1)
 	assert counts[20] == QueueCounts(planned=1, waiting=0, errors=0)
 	assert queue_counts([]) == {}
+
+
+def test_file_view_hidden_while_sending() -> None:
+	"""У отправляющегося поста кнопки просмотра файла нет.
+
+	Переименование применяется подготовкой публикации до загрузки,
+	и путь на карточке с этого мгновения указывает на несуществующее
+	имя: кнопка открывала бы «файл не найден». У ждущих и у ошибок она
+	остаётся — там путь верен, а для ждущего это единственный способ
+	увидеть, что уйдёт (файл уже уехал из «Готовых видео»).
+	"""
+	from pxcontrol.ui.pages.queue_panel import file_view_shown, queue_signature
+
+	assert not file_view_shown(JobStatus.RUNNING)
+	for status in (JobStatus.PENDING, JobStatus.WAITING, JobStatus.ERROR):
+		assert file_view_shown(status)
+	# статус входит в отпечаток карточки — иначе кнопка не исчезла бы
+	# в момент начала отправки: карточка не перерисовалась бы
+	waiting = _item(1, when_minutes=600, status=JobStatus.PENDING)
+	sending = _item(1, when_minutes=600, status=JobStatus.RUNNING)
+	assert queue_signature(waiting) != queue_signature(sending)

@@ -30,6 +30,23 @@ from pxcontrol.ui.pages.common import bind, error_reporter, list_button, open_in
 from pxcontrol.ui.queue_watcher import QueueWatcher
 
 
+def file_view_shown(status: JobStatus) -> bool:
+	"""Показывать ли кнопку просмотра вложения на карточке очереди.
+
+	У отправляющегося поста — нет. Переименование файла применяется
+	подготовкой публикации (``prepare_publish``) **до** загрузки,
+	и с этого мгновения путь, который несёт карточка, указывает
+	на несуществующее имя: кнопка открыла бы «файл не найден». Пока
+	пост ждёт, путь верен и кнопка полезна — это единственный способ
+	увидеть, что именно уйдёт (файл уже уехал из «Готовых видео»).
+
+	У элемента с ошибкой кнопка остаётся: до переименования доходит
+	не всякая неудачная попытка, а если дошла — просмотр честно скажет,
+	что файла по этому пути нет.
+	"""
+	return not status.active()
+
+
 def queue_signature(item: Any) -> tuple[Any, ...]:
 	"""Отпечаток элемента очереди — по нему решается обновление его карточки.
 
@@ -218,7 +235,7 @@ class QueuePanel:
 		"""Кнопки шапки под текущий статус элемента."""
 		widgets: list[QWidget] = []
 		media_path = getattr(item, "media_path", None)
-		if media_path:
+		if media_path and file_view_shown(item.status):
 			# та же кнопка, что у карточек файлов на «Видео» и в пакете
 			play = TransparentToolButton(FluentIcon.PLAY, parent)
 			play.setToolTip("Посмотреть файл (системный плеер)")
