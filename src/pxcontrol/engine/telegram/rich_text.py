@@ -27,14 +27,9 @@ from enum import StrEnum
 from typing import Any
 
 from pxcontrol.engine.errors import EngineError
-from pxcontrol.engine.telegram.types import telegram_text_length
+from pxcontrol.engine.telegram.types import known_scheme, telegram_text_length
 
 logger = logging.getLogger(__name__)
-
-#: Схемы адресов, которые Telegram принимает у ссылки в тексте. Как
-#: и у кнопки-ссылки (``markup.ALLOWED_URL_SCHEMES``), отсекаем сами:
-#: сервер отвечает на прочие невнятной ошибкой разбора сущностей.
-ALLOWED_URL_SCHEMES = ("https://", "http://", "tg://")
 
 
 class RichTextError(EngineError):
@@ -133,7 +128,7 @@ def validate_rich_text(rich: RichText) -> None:
 				"Разметка выходит за границы текста — вероятно, текст правили "
 				"мимо формы. Снимите оформление и наложите заново."
 			)
-		if entity.style in _NEEDS_URL and not _known_scheme(entity.value):
+		if entity.style in _NEEDS_URL and not known_scheme(entity.value):
 			raise RichTextError(
 				f"Ссылка «{entity.value or '—'}» не годится: Telegram принимает "
 				"адреса, начинающиеся с https://, http:// или tg://."
@@ -145,11 +140,6 @@ def validate_rich_text(rich: RichText) -> None:
 					"разметку не примет."
 				)
 		seen[entity.style].append((entity.offset, entity.length))
-
-
-def _known_scheme(url: str) -> bool:
-	"""Начинается ли адрес со схемы, которую принимает Telegram."""
-	return url.startswith(ALLOWED_URL_SCHEMES)
 
 
 #: Как выглядит ссылка в тексте без разметки: до пробела или конца строки.

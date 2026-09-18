@@ -26,7 +26,7 @@ from enum import StrEnum
 from typing import Any
 
 from pxcontrol.engine.errors import EngineError
-from pxcontrol.engine.telegram.types import telegram_text_length
+from pxcontrol.engine.telegram.types import known_scheme, telegram_text_length
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +43,6 @@ BUTTON_TEXT_LIMIT = 128
 #: предел клавиатуры, который сервер проверяет сам и отказывает явно
 #: (ошибка ``BUTTON_COPY_TEXT_INVALID``).
 COPY_TEXT_LIMIT = 256
-
-#: Схемы адресов, которые Telegram принимает у кнопки-ссылки. Прочие
-#: он отвергает ошибкой ``BUTTON_URL_INVALID``, поэтому отсекаем сами —
-#: с понятным текстом вместо «Telegram отклонил операцию».
-ALLOWED_URL_SCHEMES = ("https://", "http://", "tg://")
 
 
 class MarkupError(EngineError):
@@ -149,7 +144,7 @@ def _validate_button(button: PostButton, row_number: int) -> None:
 			f"У кнопки не задано значение ({where}): нужен адрес ссылки или текст для копирования."
 		)
 	if button.kind is ButtonKind.LINK:
-		if not value.lower().startswith(ALLOWED_URL_SCHEMES):
+		if not known_scheme(value):
 			raise MarkupError(
 				f"Адрес кнопки должен начинаться с https://, http:// или tg:// ({where})."
 			)

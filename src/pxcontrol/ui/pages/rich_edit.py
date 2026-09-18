@@ -38,11 +38,11 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, LineEdit, MessageBoxBase, TextEdit, ToolButton
 
 from pxcontrol.engine.telegram.rich_text import (
-	ALLOWED_URL_SCHEMES,
 	RichText,
 	TextEntity,
 	TextStyle,
 )
+from pxcontrol.engine.telegram.types import known_scheme
 from pxcontrol.ui.pages.common import ErrorLabel, exec_dialog
 
 #: Свойства формата под стили, которых у Qt нет. Значения начинаются
@@ -230,7 +230,7 @@ class _LinkDialog(MessageBoxBase):
 		"""Не пускает адрес, который Telegram всё равно отвергнет."""
 		if not self.url():
 			return self._error.fail("Укажите адрес — иначе ссылку ставить не на что.")
-		if not self.url().startswith(ALLOWED_URL_SCHEMES):
+		if not known_scheme(self.url()):
 			return self._error.fail(
 				"Telegram принимает адреса, начинающиеся с https://, http:// или tg://."
 			)

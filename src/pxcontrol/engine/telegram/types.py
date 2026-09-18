@@ -87,6 +87,22 @@ def text_length_limit(premium: bool, with_media: bool) -> int:
 	return TEXT_LENGTH_LIMIT_PREMIUM if premium else TEXT_LENGTH_LIMIT
 
 
+#: Схемы адресов, которые Telegram принимает у ссылки — и в тексте,
+#: и под кнопкой. Отсекаем сами: на прочие сервер отвечает невнятной
+#: ошибкой разбора. Одна точка на оба случая — пока их было две,
+#: они разошлись: «HTTPS://…» кнопка принимала, а ссылка в тексте нет.
+ALLOWED_URL_SCHEMES = ("https://", "http://", "tg://")
+
+
+def known_scheme(url: str) -> bool:
+	"""Начинается ли адрес со схемы, которую принимает Telegram.
+
+	Регистр схемы не важен: «HTTPS://» — тот же адрес, и отказывать
+	в нём человеку не за что.
+	"""
+	return url.lower().startswith(ALLOWED_URL_SCHEMES)
+
+
 def telegram_text_length(text: str) -> int:
 	"""Длина текста в кодовых единицах UTF-16.
 

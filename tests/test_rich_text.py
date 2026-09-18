@@ -167,6 +167,21 @@ def test_post_html_never_parses_separators() -> None:
 	assert post_html("жирный", (_bold(0, 6),)) == "<b>жирный</b>"
 
 
+def test_link_scheme_rule_is_one_for_buttons_and_text() -> None:
+	"""Схема адреса проверяется одним правилом — и регистр ей не важен.
+
+	Пока правило было записано дважды, копии разошлись: «HTTPS://…»
+	кнопка принимала, а та же ссылка в тексте отвергалась.
+	"""
+	from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup, validate_markup
+
+	upper = "HTTPS://example.com"
+	validate_markup(PostMarkup(((PostButton(ButtonKind.LINK, "Смотреть", upper),),)))
+	validate_rich_text(RichText("текст", (TextEntity(TextStyle.LINK, 0, 5, upper),)))
+	with pytest.raises(RichTextError, match="не годится"):
+		validate_rich_text(RichText("текст", (TextEntity(TextStyle.LINK, 0, 5, "ftp://x"),)))
+
+
 def test_first_link_prefers_signed_links() -> None:
 	"""Превью строится по первой ссылке: подписанная важнее голой."""
 	from pxcontrol.engine.telegram.rich_text import first_link
