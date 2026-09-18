@@ -41,8 +41,10 @@ from pxcontrol.ui.pages.community_state import (
 	CardState,
 	action_available,
 	audience_word,
+	bot_member_text,
 	card_actions,
 	card_state,
+	executors_count,
 	header_state_text,
 	state_badge_text,
 	subtitle_text,
@@ -398,3 +400,23 @@ def test_card_state_publisher_paused_between_errors_and_no_publisher() -> None:
 	]
 	ordered = sort_rows(rows, TableColumn.STATE, descending=False)
 	assert [row.community.id for row in ordered] == [2, 1, 3]
+
+
+# --- вкладка «Участники»: исполнители сообщества ----------------------------------
+
+
+def test_executors_count_adds_bot_to_pool() -> None:
+	"""Число на вкладке считает и пул аккаунтов, и бота: список-то общий."""
+	from dataclasses import replace
+
+	pool = replace(_community(userbot=True, bot=False), members_count=2)
+	assert executors_count(pool) == 2
+	assert executors_count(replace(pool, bot_id=7, bot_label="бот")) == 3
+	# сообщество без исполнителей вовсе
+	assert executors_count(replace(_community(userbot=False), members_count=0)) == 0
+
+
+def test_bot_member_text_names_assigned_bot() -> None:
+	"""Строка раздела «Боты»: назначенный — по названию, иначе честное «не назначен»."""
+	assert bot_member_text(_community(bot=True)) == "бот — публикатор"
+	assert bot_member_text(_community(bot=False)) == "Бот не назначен"

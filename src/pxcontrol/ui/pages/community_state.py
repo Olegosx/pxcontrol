@@ -182,3 +182,29 @@ def subtitle_text(community: CommunityDto, participants: int | None) -> str:
 def community_queue_counts(items: list[QueueItemDto], community_id: int) -> QueueCounts:
 	"""Сводка очереди одного сообщества (для шапки страницы и вкладки)."""
 	return queue_counts(items).get(community_id, QueueCounts())
+
+
+# --- вкладка «Участники»: исполнители сообщества ----------------------------------
+
+
+def executors_count(community: CommunityDto) -> int:
+	"""Сколько исполнителей у сообщества: пул userbot-аккаунтов и бот.
+
+	Число на вкладке «Участники». Бот считается наравне с людьми:
+	в списке он теперь стоит рядом с ними, и счёт, который его
+	не видит, противоречил бы самому списку.
+	"""
+	return community.members_count + (1 if community.bot_id is not None else 0)
+
+
+def bot_member_text(community: CommunityDto) -> str:
+	"""Строка бота в разделе «Боты»: назначенный — с названием.
+
+	Устроена как строка пользователя («Вася — админ»): имя, тире, роль.
+	Слово «бот» в роль не входит намеренно — раздел уже называется
+	«Боты», и у бота с названием «Публикатор» вышло бы заикание
+	«Публикатор — бот-публикатор».
+	"""
+	if community.bot_id is None:
+		return "Бот не назначен"
+	return f"{community.bot_label} — публикатор"

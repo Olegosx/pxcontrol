@@ -10,10 +10,13 @@
   поста в карточке (та же ``QueuePanel``, что на «Публикации»);
 - **Отложено** — отложенные записи сообщества из Telegram (как
   экран «Отложено», но по одному сообществу);
-- **Участники** — пул userbot-аккаунтов (тело диалога «Участники…»);
+- **Участники** — исполнители сообщества (тело диалога «Участники…»):
+  пул userbot-аккаунтов с ролями и публикатором по умолчанию и бот
+  сообщества, назначаемый и отвязываемый здесь же;
 - **Обслуживание** — уборка (тело окна обслуживания);
-- **Настройки** — активность, публикаторы, пресет и времена, проверка
-  доступов, удаление.
+- **Настройки** — активность, пресет и времена, проверка доступов,
+  удаление. Публикаторов здесь нет намеренно: всё, кто публикует, —
+  на вкладке «Участники», одним местом.
 
 Тела вкладок строятся лениво, при первом открытии: панели очередей
 опрашивают движок, и десяток страниц сообществ не должен опрашивать
@@ -96,7 +99,9 @@ from pxcontrol.ui.pages.common import (
 from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
 	MAINTENANCE_UNAVAILABLE,
+	bot_member_text,
 	community_queue_counts,
+	executors_count,
 	header_state_text,
 	state_badge,
 	subtitle_text,
@@ -209,33 +214,51 @@ def usable_accounts(accounts: list[TgAccountDto]) -> list[TgAccountDto]:
 	return [account for account in accounts if account.logged_in and not account.paused]
 
 
-class _AssignBotDialog(MessageBoxBase):
-	"""Выбор бота для назначения каналу."""
+def usable_bots(bots: list[BotDto]) -> list[BotDto]:
+	"""Боты, которых можно назначить сообществу: не приостановленные.
 
-	def __init__(self, bots: list[BotDto], parent: QWidget) -> None:
-		super().__init__(parent)
-		self.viewLayout.addWidget(SubtitleLabel("Назначить бота", self))
-		self.viewLayout.addWidget(
-			BodyLabel(
-				"Каналу бот нужен администратором с правом публиковать;\nгруппе — участником.",
-				self,
-			)
-		)
-		self._combo: DtoComboBox[BotDto] = DtoComboBox(self)
-		self._combo.set_items(bots, label=lambda bot: bot_caption(bot.label, bot.username))
-		self.viewLayout.addWidget(self._combo)
-		self.yesButton.setText("Назначить")
-		self.cancelButton.setText("Отмена")
-		self.widget.setMinimumWidth(420)
+	Причина та же, что у аккаунтов: к приостановленному (ADR-0029)
+	зонд прав не пойдёт.
+	"""
+	return [bot for bot in bots if not bot.paused]
 
-	def bot_id(self) -> int | None:
-		"""Идентификатор выбранного бота (None — ботов нет)."""
-		bot = self._combo.selected()
-		return bot.id if bot is not None else None
+
+def read_executors(
+	worker: EngineWorker,
+	parent: QWidget,
+	ready: Callable[[list[TgAccountDto], list[BotDto]], None],
+	on_error: Callable[[str], None],
+) -> None:
+	"""Читает кандидатов вкладки «Участники»: аккаунты, затем ботов.
+
+	Два чтения подряд, а не одно: у движка это разные сервисы, и заводить
+	ради экрана общий метод «дай всех исполнителей» значило бы смешивать
+	в движке то, что в нём разделено (ADR-0029).
+	"""
+	run_in_engine(
+		worker,
+		worker.engine.accounts.list_tg_accounts(),
+		parent,
+		lambda accounts: run_in_engine(
+			worker,
+			worker.engine.accounts.list_bots(),
+			parent,
+			lambda bots: ready(usable_accounts(accounts), usable_bots(bots)),
+			on_error,
+		),
+		on_error,
+	)
 
 
 class MembersPanel(QWidget):
-	"""Участники сообщества (ADR-0022): роли, умолчание, состав.
+	"""Исполнители сообщества: пул userbot-аккаунтов (ADR-0022) и бот.
+
+	Два раздела одного списка. **Пользователи** — пул сообщества
+	с ролями и публикатором по умолчанию: состав хранится таблицей
+	членств. **Боты** — один бот сообщества (`communities.bot_id`),
+	запасной путь публикации и единственный, кто умеет кнопки под
+	постом (ADR-0031); своей строки в членствах у него нет и не нужно —
+	ссылка на бота у сообщества одна.
 
 	Живой список: операции выполняются сразу (движком), список
 	перечитывается после каждой, а владелец узнаёт об изменении
@@ -250,20 +273,23 @@ class MembersPanel(QWidget):
 		worker: EngineWorker,
 		community: CommunityDto,
 		accounts: list[TgAccountDto],
+		bots: list[BotDto],
 		parent: QWidget,
 	) -> None:
-		"""``accounts`` — вошедшие userbot-аккаунты (кандидаты)."""
+		"""``accounts`` и ``bots`` — вошедшие аккаунты и активные боты (кандидаты)."""
 		super().__init__(parent)
 		self._worker = worker
 		self._community = community
 		self._accounts = accounts
+		self._bots = bots
 		self._show_error = error_reporter(self)
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(density.spacing().row_spacing)
+		layout.addWidget(section_header(self, "Пользователи"))
 		layout.addWidget(
-			BodyLabel(
-				"Публикует аккаунт по умолчанию; остальные — пул сообщества.\n"
+			CaptionLabel(
+				"Публикует аккаунт по умолчанию; остальные — пул сообщества. "
 				"Каналу нужен админ с правом публиковать, группе — участник.",
 				self,
 			)
@@ -277,9 +303,22 @@ class MembersPanel(QWidget):
 		add_button.clicked.connect(self._on_add)
 		add_row.addWidget(add_button)
 		layout.addLayout(add_row)
+		layout.addWidget(section_header(self, "Боты"))
+		layout.addWidget(
+			CaptionLabel(
+				"Запасной путь публикации: файлы до 50 МБ, только «сейчас». "
+				"Кнопки под постом ставит только бот.",
+				self,
+			)
+		)
+		self._bot_box = QVBoxLayout()
+		self._bot_box.setContentsMargins(0, 0, 0, 0)
+		self._bot_box.setSpacing(density.spacing().list_spacing)
+		layout.addLayout(self._bot_box)
 		self._error = ErrorLabel(self)
 		layout.addWidget(self._error)
 		self._members: list[MemberDto] = []
+		self._show_bot()
 		self.reload()
 
 	def reload(self) -> None:
@@ -325,6 +364,71 @@ class MembersPanel(QWidget):
 		remove.clicked.connect(bind(self._on_remove, member))
 		row.addWidget(remove)
 		return box
+
+	def _show_bot(self) -> None:
+		"""Перестраивает раздел «Боты»: назначенный бот или выбор кандидата."""
+		clear_layout(self._bot_box)
+		box = QWidget(self)
+		row = QHBoxLayout(box)
+		row.setContentsMargins(0, 0, 0, 0)
+		if self._community.bot_id is not None:
+			row.addWidget(BodyLabel(bot_member_text(self._community), box))
+			row.addStretch()
+			unassign = PushButton("Отвязать", box)
+			unassign.clicked.connect(self._on_unassign_bot)
+			row.addWidget(unassign)
+			self._bot_box.addWidget(box)
+			return
+		# бота нет: строка выбора — та же механика, что у пользователей
+		self._bot_combo: DtoComboBox[BotDto] = DtoComboBox(box)
+		self._bot_combo.set_items(
+			self._bots, label=lambda bot: bot_caption(bot.label, bot.username), key=lambda b: b.id
+		)
+		row.addWidget(self._bot_combo, stretch=1)
+		assign = PushButton("Назначить", box)
+		assign.clicked.connect(self._on_assign_bot)
+		row.addWidget(assign)
+		self._bot_box.addWidget(box)
+
+	def _on_assign_bot(self) -> None:
+		"""Назначает выбранного бота — с проверкой его прав живым зондом."""
+		bot = self._bot_combo.selected()
+		if bot is None:
+			self._error.fail(
+				"Нет активных ботов — добавьте или возобновите: «Пользователи и боты»."
+			)
+			return
+		self._error.succeed()
+		show_info(self, "Проверка", "Проверяю права бота…")
+		run_in_engine(
+			self._worker,
+			self._worker.engine.communities.assign_bot(self._community.id, bot.id),
+			self,
+			self._after_bot_change,
+			self._show_error,
+		)
+
+	def _on_unassign_bot(self) -> None:
+		if not confirm_delete(
+			self,
+			f"Отвязать бота от «{self._community.title}»? "
+			"Кнопки под постами станут недоступны, запасного пути публикации не останется.",
+			accept_text="Отвязать",
+		):
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.communities.unassign_bot(self._community.id),
+			self,
+			self._after_bot_change,
+			self._show_error,
+		)
+
+	def _after_bot_change(self, community: CommunityDto) -> None:
+		"""Бот назначен или отвязан: свежий снимок сообщества — в раздел."""
+		self._community = community
+		self._show_bot()
+		self.changed.emit()
 
 	def _after_change(self, members: list[MemberDto]) -> None:
 		"""Операция прошла: перерисовать и сообщить владельцу."""
@@ -391,10 +495,11 @@ class _MembersDialog(WorkDialog):
 		worker: EngineWorker,
 		community: CommunityDto,
 		accounts: list[TgAccountDto],
+		bots: list[BotDto],
 		parent: QWidget,
 	) -> None:
-		super().__init__(f"Участники — {community.title}", parent, size=(560, 520))
-		self.content.addWidget(MembersPanel(worker, community, accounts, self), stretch=1)
+		super().__init__(f"Участники — {community.title}", parent, size=(560, 600))
+		self.content.addWidget(MembersPanel(worker, community, accounts, bots, self), stretch=1)
 		self.add_close_button("Готово")
 
 
@@ -404,25 +509,19 @@ def open_members(
 	parent: QWidget,
 	on_closed: Callable[[], None],
 ) -> None:
-	"""Открывает диалог участников сообщества (ADR-0022).
+	"""Открывает диалог исполнителей сообщества (ADR-0022).
 
 	Точка входа для кнопки «Назначить публикатора» на дашборде.
-	Кандидаты — вошедшие userbot-аккаунты, их список читается из движка
-	перед показом; ``on_closed`` зовётся после закрытия — вызывающий
-	перечитывает своё состояние.
+	Кандидаты — вошедшие userbot-аккаунты и активные боты, оба списка
+	читаются из движка перед показом; ``on_closed`` зовётся после
+	закрытия — вызывающий перечитывает своё состояние.
 	"""
 
-	def _open(accounts: list[TgAccountDto]) -> None:
-		exec_dialog(_MembersDialog(worker, community, usable_accounts(accounts), parent.window()))
+	def _open(accounts: list[TgAccountDto], bots: list[BotDto]) -> None:
+		exec_dialog(_MembersDialog(worker, community, accounts, bots, parent.window()))
 		on_closed()
 
-	run_in_engine(
-		worker,
-		worker.engine.accounts.list_tg_accounts(),
-		parent,
-		_open,
-		error_reporter(parent),
-	)
+	read_executors(worker, parent, _open, error_reporter(parent))
 
 
 class _CommunityPrefsDialog(MessageBoxBase):
@@ -881,7 +980,7 @@ class CommunityPage(ScrollArea):
 		counts = {
 			TAB_QUEUE: self._counts.planned + self._counts.errors,
 			TAB_SCHEDULED: self._scheduled_count,
-			TAB_MEMBERS: self._community.members_count,
+			TAB_MEMBERS: executors_count(self._community),
 		}
 		for key, item in self._tab_items.items():
 			item.set_count(counts.get(key), active=key == self._current_tab)
@@ -952,19 +1051,13 @@ class CommunityPage(ScrollArea):
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.addWidget(CaptionLabel("Читаю аккаунты…", holder))
 
-		def mount(accounts: list[TgAccountDto]) -> None:
+		def mount(accounts: list[TgAccountDto], bots: list[BotDto]) -> None:
 			clear_layout(layout)
-			panel = MembersPanel(self._worker, self._community, usable_accounts(accounts), holder)
+			panel = MembersPanel(self._worker, self._community, accounts, bots, holder)
 			panel.changed.connect(self._refresh)
 			layout.addWidget(panel, stretch=1)
 
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.list_tg_accounts(),
-			self,
-			mount,
-			self._show_error,
-		)
+		read_executors(self._worker, self, mount, self._show_error)
 		return holder
 
 	def _maintenance_tab(self) -> QWidget:
@@ -1046,8 +1139,6 @@ class CommunityPage(ScrollArea):
 		rows = self._settings_rows
 		clear_layout(rows)
 		rows.addWidget(self._enabled_row())
-		rows.addWidget(self._userbot_row())
-		rows.addWidget(self._bot_row())
 		rows.addWidget(self._prefs_row())
 		rows.addWidget(self._recheck_row())
 		rows.addSpacing(density.spacing().row_spacing)
@@ -1084,33 +1175,6 @@ class CommunityPage(ScrollArea):
 		return self._action_row(
 			"Активность", [switch], "Участвует в публикации и в опросе расписания"
 		)
-
-	def _userbot_row(self) -> QWidget:
-		"""Публикатор userbot: умолчание, роль, прочие участники."""
-		community = self._community
-		if community.default_account_label:
-			role = f" ({role_caption(community.default_role)})" if community.default_role else ""
-			text = f"Публикатор — {community.default_account_label}{role}, userbot"
-		else:
-			text = "Userbot-публикатор не выбран"
-		extras = max(community.members_count - (1 if community.default_account_id else 0), 0)
-		hint = f"Ещё в пуле сообщества: {extras}" if extras else "Пул userbot-аккаунтов сообщества"
-		members = PushButton("Участники", self)
-		members.setToolTip("Роли и публикатор по умолчанию — вкладка «Участники»")
-		members.clicked.connect(partial(self._segments.setCurrentItem, TAB_MEMBERS))
-		return self._action_row(text, [members], hint)
-
-	def _bot_row(self) -> QWidget:
-		"""Бот-публикатор: запасной путь (до 50 МБ, только «сейчас»)."""
-		community = self._community
-		hint = "Запасной путь: файлы до 50 МБ, только «сейчас»"
-		if community.bot_id is None:
-			action = PushButton("Назначить бота…", self)
-			action.clicked.connect(self._on_assign_bot)
-			return self._action_row("Бот-публикатор не назначен", [action], hint)
-		action = PushButton("Отвязать бота", self)
-		action.clicked.connect(self._on_unassign_bot)
-		return self._action_row(f"Бот-публикатор: {community.bot_label}", [action], hint)
 
 	def _prefs_row(self) -> QWidget:
 		"""Настройки публикации: пресет видео и времена."""
@@ -1264,62 +1328,6 @@ class CommunityPage(ScrollArea):
 		show_success(self, "Готово", f"Настройки «{self._community.title}» сохранены.")
 
 	# --- бот ---------------------------------------------------------------------
-
-	def _on_assign_bot(self) -> None:
-		"""Открывает выбор бота для назначения."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.accounts.list_bots(),
-			self,
-			self._open_assign_dialog,
-			self._show_error,
-		)
-
-	def _open_assign_dialog(self, bots: list[BotDto]) -> None:
-		"""Диалог выбора бота; после выбора — проверка его прав.
-
-		Приостановленные боты (ADR-0029) не предлагаются: зонд прав
-		к ним не пойдёт.
-		"""
-		bots = [bot for bot in bots if not bot.paused]
-		if not bots:
-			self._show_error(
-				"Нет активных ботов — добавьте или возобновите: «Пользователи и боты»."
-			)
-			return
-		dialog = _AssignBotDialog(bots, self.window())
-		if not exec_dialog(dialog):
-			return
-		bot_id = dialog.bot_id()
-		if bot_id is None:
-			return
-		show_info(self, "Проверка", "Проверяю права бота…")
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.assign_bot(self._community.id, bot_id),
-			self,
-			self._on_publisher_changed,
-			self._show_error,
-		)
-
-	def _on_unassign_bot(self) -> None:
-		if not confirm_delete(
-			self,
-			f"Отвязать бота от «{self._community.title}»?",
-			accept_text="Отвязать",
-		):
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.unassign_bot(self._community.id),
-			self,
-			self._on_publisher_changed,
-			self._show_error,
-		)
-
-	def _on_publisher_changed(self, community: CommunityDto) -> None:
-		show_success(self, "Готово", community.title)
-		self._refresh()
 
 	# --- удаление ----------------------------------------------------------------
 
