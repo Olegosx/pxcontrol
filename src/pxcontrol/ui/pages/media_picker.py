@@ -25,7 +25,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, LineEdit, PushButton
+from qfluentwidgets import BodyLabel, CaptionLabel, PushButton
 
 from pxcontrol.engine.services.posts import MAX_ALBUM_FILES, MediaFile
 from pxcontrol.engine.telegram.types import MediaKind
@@ -200,8 +200,3 @@ class MediaPicker(QWidget):
 		self._note.setText(album_note(count))
 		self._rename_box.setVisible(count == 1)
 		self.changed.emit()
-
-	@property
-	def rename_edit(self) -> LineEdit:
-		"""Поле имени — форме нужно его чистить при смене файла."""
-		return self._rename_edit

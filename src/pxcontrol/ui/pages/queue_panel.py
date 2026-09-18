@@ -174,10 +174,6 @@ class QueuePanel:
 		"""Есть ли незавершённое в очереди (включая ждущих)."""
 		return self._watcher.busy()
 
-	def active(self) -> bool:
-		"""Идёт ли работа прямо сейчас (загрузка или обработка)."""
-		return self._watcher.active()
-
 	def refresh_leading(self) -> None:
 		"""Перерисовывает начала шапок всех карточек (приехали аватары)."""
 		self._list.refresh_leading()

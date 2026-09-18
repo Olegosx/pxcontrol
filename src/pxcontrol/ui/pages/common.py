@@ -16,9 +16,6 @@ from PySide6.QtGui import (
 	QFont,
 	QKeyEvent,
 	QMouseEvent,
-	QPainter,
-	QPainterPath,
-	QPixmap,
 	QResizeEvent,
 )
 from PySide6.QtWidgets import (
@@ -1149,29 +1146,6 @@ class DtoComboBox(ComboBox, Generic[_T]):
 #: Цвета подложки логотипа-заглушки (когда аватара нет): по кругу,
 #: чтобы соседние сообщества различались с одного взгляда.
 _LOGO_COLORS = ("#e17076", "#eda86c", "#a695e7", "#7bc862", "#6ec9cb", "#65aadd", "#ee7aae")
-
-
-def round_pixmap(path: str, size: int) -> QPixmap | None:
-	"""Круглая миниатюра из файла (None — файл не читается)."""
-	source = QPixmap(path)
-	if source.isNull():
-		return None
-	scaled = source.scaled(
-		size,
-		size,
-		Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-		Qt.TransformationMode.SmoothTransformation,
-	)
-	rounded = QPixmap(size, size)
-	rounded.fill(Qt.GlobalColor.transparent)
-	painter = QPainter(rounded)
-	painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-	clip = QPainterPath()
-	clip.addEllipse(0, 0, size, size)
-	painter.setClipPath(clip)
-	painter.drawPixmap(0, 0, scaled)
-	painter.end()
-	return rounded
 
 
 def community_logo(

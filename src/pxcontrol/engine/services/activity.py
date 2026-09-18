@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Protocol
 
@@ -84,22 +84,18 @@ class WindowStats:
 
 	Attributes:
 		operations: сколько операций завершилось в окне (по концу).
-		by_kind: из них по видам (имя ``TelegramPriority`` → число).
 		busy_s: секунды занятости — сумма пересечений операций с окном,
 			включая идущую сейчас.
 		window_s: длина окна — для доли занятости.
 		errors: операций с ошибкой.
 		floods: флуд-лимитов.
-		flood_wait_s: суммарный срок, названный Telegram при них.
 	"""
 
 	operations: int = 0
-	by_kind: dict[str, int] = field(default_factory=dict)
 	busy_s: float = 0.0
 	window_s: int = 0
 	errors: int = 0
 	floods: int = 0
-	flood_wait_s: int = 0
 
 	@property
 	def busy_share(self) -> float:
@@ -177,33 +173,28 @@ def window_stats(
 	входит от своего начала до ``now``, в число операций — нет.
 	"""
 	operations = 0
-	by_kind: dict[str, int] = {}
 	busy = 0.0
-	errors = floods = wait = 0
+	errors = floods = 0
 	for item in intervals:
 		overlap = (min(item.finished_at, now) - max(item.started_at, window_start)).total_seconds()
 		if overlap > 0:
 			busy += overlap
 		if window_start <= item.finished_at <= now:
 			operations += 1
-			by_kind[item.kind] = by_kind.get(item.kind, 0) + 1
 			if item.outcome == Outcome.ERROR:
 				errors += 1
 			elif item.outcome == Outcome.FLOOD:
 				floods += 1
-				wait += item.wait_s
 	if live is not None and live.busy_since is not None:
 		running = (now - max(live.busy_since, window_start)).total_seconds()
 		if running > 0:
 			busy += running
 	return WindowStats(
 		operations=operations,
-		by_kind=by_kind,
 		busy_s=busy,
 		window_s=int((now - window_start).total_seconds()),
 		errors=errors,
 		floods=floods,
-		flood_wait_s=wait,
 	)
 
 

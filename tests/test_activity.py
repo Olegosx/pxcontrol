@@ -83,10 +83,9 @@ def test_window_clips_intervals_and_counts_by_end() -> None:
 	]
 	stats = window_stats(intervals, window_start, _NOW)
 	assert stats.operations == 4
-	assert stats.by_kind == {"publish": 1, "background": 1, "maintenance": 2}
 	assert stats.busy_s == 600 + 60 + 30 + 10 + 1
 	assert stats.window_s == 3600
-	assert (stats.errors, stats.floods, stats.flood_wait_s) == (1, 1, 25)
+	assert (stats.errors, stats.floods) == (1, 1)
 	assert 0 < stats.busy_share < 1
 
 

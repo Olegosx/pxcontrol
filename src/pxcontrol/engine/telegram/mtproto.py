@@ -740,16 +740,6 @@ def _scheduled_from(message: Any) -> ScheduledMessage:
 	)
 
 
-def _can_delete_messages(perms: Any) -> bool:
-	"""Может ли аккаунт удалять чужие сообщения (право админа).
-
-	Владельцу можно всё; администратору — только при праве
-	``delete_messages``. Роль сама по себе его не гарантирует
-	(ADR-0026), поэтому обслуживание спрашивает именно это.
-	"""
-	return has_admin_right(perms, "delete_messages")
-
-
 def _service_message_id(produced: Any) -> int | None:
 	"""Идентификатор служебной записи из ответа Telethon на исключение.
 
@@ -774,15 +764,6 @@ def _service_message_id(produced: Any) -> int | None:
 		return max(ids) if ids else None
 	message_id = getattr(produced, "id", None)
 	return int(message_id) if message_id is not None else None
-
-
-def _can_ban_users(perms: Any) -> bool:
-	"""Может ли аккаунт исключать участников (право админа).
-
-	Чистка удалённых аккаунтов — это исключение участников, и права
-	на неё у роли «админ» может не быть (ADR-0026).
-	"""
-	return has_admin_right(perms, "ban_users")
 
 
 def _peer_id(chat_id: str) -> int:
@@ -1270,9 +1251,10 @@ class MtprotoTransport:
 			forum=bool(getattr(entity, "forum", False)),
 			# роль — бесплатный побочный продукт зонда (ADR-0022)
 			role=UserbotRole.ADMIN if perms.is_admin else UserbotRole.MEMBER,
-			# права, нужные обслуживанию, — тоже (ADR-0026)
-			can_delete=_can_delete_messages(perms),
-			can_ban=_can_ban_users(perms),
+			# права, нужные обслуживанию, — тоже (ADR-0026). Спрашиваем
+			# именно право, а не роль: у администратора его может не быть
+			can_delete=has_admin_right(perms, "delete_messages"),
+			can_ban=has_admin_right(perms, "ban_users"),
 		)
 
 	async def get_forum_topics(self, chat_id: str) -> list[ForumTopicInfo]:

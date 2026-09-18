@@ -112,11 +112,6 @@ class RichText:
 		return telegram_text_length(self.text)
 
 
-def plain(text: str) -> RichText:
-	"""Обычный текст без разметки — общая точка вместо ``RichText(text)``."""
-	return RichText(text)
-
-
 def validate_rich_text(rich: RichText) -> None:
 	"""Проверяет разметку до отправки.
 
