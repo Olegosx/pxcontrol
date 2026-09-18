@@ -46,7 +46,6 @@ from pxcontrol.engine.services.settings import (
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
-from pxcontrol.engine.telegram.lane import TelegramPriority
 from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.poll import PollDraft, validate_poll
@@ -610,11 +609,7 @@ class _PostPort(Protocol):
 	) -> None: ...
 
 	async def userbot_delete_messages(
-		self,
-		account_id: int,
-		chat_id: str,
-		message_ids: list[int],
-		priority: TelegramPriority = ...,
+		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> int: ...
 
 	async def userbot_get_scheduled(
@@ -2450,10 +2445,7 @@ class PostsService:
 		account_id = self._published_reader(community)
 		targets = sorted(set(ids) | {ref.message_id})
 		deleted = await self._gateway.userbot_delete_messages(
-			account_id,
-			community.tg_chat_id,
-			targets,
-			priority=TelegramPriority.INTERACTIVE,
+			account_id, community.tg_chat_id, targets
 		)
 		if not deleted:
 			raise PostError(

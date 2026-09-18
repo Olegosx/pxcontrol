@@ -631,11 +631,7 @@ class TelegramGateway:
 			return await transport.service_messages_page(chat_id, offset_id, limit)
 
 	async def userbot_delete_messages(
-		self,
-		account_id: int,
-		chat_id: str,
-		message_ids: list[int],
-		priority: TelegramPriority = TelegramPriority.MAINTENANCE,
+		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> int:
 		"""Удаляет сообщения сообщества; возвращает число удалённых.
 
@@ -643,9 +639,12 @@ class TelegramGateway:
 		записи бывают защищёнными), считается пропущенной — 0 удалённых,
 		без ошибки (ADR-0026).
 
-		``priority`` — место в очереди дорожки: обслуживание идёт своим
-		темпом (умолчание), а удаление поста человеком с экрана
-		«Опубликовано» ждать наравне с уборкой не должно.
+		Место в очереди дорожки назначает шлюз, как и всем операциям
+		(ADR-0024, п. 3), и оно одно на всех: удаление встаёт в общую
+		очередь аккаунта независимо от того, кто отдал команду — уборка
+		или человек с экрана «Опубликовано». Прежде у метода был
+		параметр приоритета ради второго случая; исключение из правила
+		того не стоило.
 
 		Raises:
 			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
@@ -653,7 +652,7 @@ class TelegramGateway:
 			UserbotFloodError: Флуд-лимит — обход прекращается.
 			UserbotUnavailableError: Прочие отказы Telegram.
 		"""
-		async with self._userbot_slot(account_id, priority) as transport:
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.delete_messages(chat_id, message_ids)
 
 	async def userbot_participants_page(

@@ -220,7 +220,7 @@ class _FakeGateway:
 		self.post_edits.append((account_id, chat_id, message_id, text))
 
 	async def userbot_delete_messages(
-		self, account_id: int, chat_id: str, message_ids: list[int], priority: object = None
+		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> int:
 		self.deleted.append((account_id, chat_id, list(message_ids)))
 		return self.delete_result
