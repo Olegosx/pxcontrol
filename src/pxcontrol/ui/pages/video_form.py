@@ -3,6 +3,9 @@
 Самостоятельный виджет без знания о странице: заполняется пресетом
 (:meth:`PresetForm.fill`), правится свободно, текущее состояние отдаёт
 :meth:`PresetForm.fields`. Контракт со страницей — только ``PresetFields``.
+Форма тяжёлая (130 виджетов, около 9 МБ памяти в компоновке — замер
+19.09.2026), поэтому страница держит две: шаблон и общий редактор
+карточек файлов; у самих карточек — только снимок ``PresetFields``.
 Сворачиваемая карточка ``CollapsibleCard`` жила здесь до третьего
 пользователя — теперь она в ``common`` (аудит 05.09).
 """
@@ -105,6 +108,24 @@ _INTRO_SOURCES = [
 def _fmt_num(value: float) -> str:
 	"""Число для сводки: без хвостовых нулей, запятая по-русски."""
 	return f"{value:g}".replace(".", ",")
+
+
+def apply_bitrate_advice(current_kbps: int | None, suggested: bool, mbps: float) -> int | None:
+	"""Правило автоподстановки рекомендованного битрейта (без Qt).
+
+	Поле свободно, если оно пустое (None — «как в оригинале») или его
+	значение подставила прежняя рекомендация (рекомендация нового файла
+	обновляет рекомендацию старого). Заполненное рукой или пресетом
+	значение не трогается; ручной ноль снова освобождает поле. Правило
+	одно на форму и на снимок параметров файла (страница «Видео» держит
+	параметры карточек снимками и правит их в общем редакторе).
+
+	Returns:
+		Новое значение в кбит/с — или None, если поле занято.
+	"""
+	if current_kbps is not None and not suggested:
+		return None
+	return int(round(mbps * 1000))
 
 
 class PresetForm(QWidget):
@@ -577,11 +598,25 @@ class PresetForm(QWidget):
 		Returns:
 			True, если значение подставлено.
 		"""
-		if float(self._bitrate.value()) > 0 and not self._bitrate_suggested:
+		kbps = apply_bitrate_advice(self._bitrate_kbps(), self._bitrate_suggested, mbps)
+		if kbps is None:
 			return False
-		self._set_bitrate_programmatically(mbps)
+		self._set_bitrate_programmatically(kbps / 1000)
 		self._bitrate_suggested = True
 		return True
+
+	def bitrate_suggested(self) -> bool:
+		"""Подставлен ли битрейт в поле автоматически (а не рукой или пресетом)."""
+		return self._bitrate_suggested
+
+	def set_bitrate_suggested(self, suggested: bool) -> None:
+		"""Восстанавливает признак автоподстановки после :meth:`fill`.
+
+		Заполнение пишет в поле битрейта и снимает признак (как любая
+		правка не через подстановку), а у снимка параметров файла признак
+		свой — общий редактор страницы «Видео» возвращает его сюда.
+		"""
+		self._bitrate_suggested = suggested
 
 	def _set_bitrate_programmatically(self, mbps: float) -> None:
 		"""Пишет значение в поле, не снимая пометку «автоподстановка»."""

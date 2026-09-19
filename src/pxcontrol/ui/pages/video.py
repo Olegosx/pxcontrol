@@ -3,10 +3,13 @@
 Источник — две равнозначные кнопки: «Добавить файл…» (каждый выбор
 добавляет карточку в список) и «Добавить папку…» (диалог сканирования
 :mod:`video_batch`; отмеченные становятся карточками пакета). У каждого
-файла — своя карточка параметров, заполненная из карточки-шаблона
-«[Параметры пресета]» (под строкой пресета) в момент добавления;
-шаблон правится всегда и служит пресетам («загрузчик»: выбор пресета
-заполняет шаблон, сохранение — по явным кнопкам). «Обработать все»
+файла — своя карточка со **снимком** параметров (``PresetFields``),
+взятым из карточки-шаблона «[Параметры пресета]» (под строкой пресета)
+в момент добавления; правятся параметры в одном общем редакторе
+(:class:`_EntryEditor`), который встаёт в тело раскрытой карточки —
+поэтому раскрыта одна карточка за раз. Шаблон правится всегда и служит
+пресетам («загрузчик»: выбор пресета заполняет шаблон, сохранение —
+по явным кнопкам). «Обработать все»
 ставит в очередь движка (ADR-0014) весь список, «Обработать» — файлы,
 отмеченные чекбоксами в шапках карточек (единственный файл в списке —
 и без галочки); каждый — со своими параметрами; карточки очереди видны
@@ -17,6 +20,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
@@ -87,7 +92,7 @@ from pxcontrol.ui.pages.common import (
 from pxcontrol.ui.pages.frame_picker import FramePickerDialog
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.video_batch import BatchScanDialog
-from pxcontrol.ui.pages.video_form import PresetForm
+from pxcontrol.ui.pages.video_form import PresetForm, apply_bitrate_advice
 
 #: Имя «пресета» в имени файла результата, когда пресет не выбран.
 _MANUAL_NAME = "ручные"
@@ -101,46 +106,50 @@ class _AbortRun(Exception):  # noqa: N818 — служебный сигнал, �
 
 
 class _FileEntry:
-	"""Карточка файла в списке подготовки: шапка + свои параметры.
+	"""Карточка файла в списке подготовки: шапка и снимок параметров.
 
-	Шапка — имя и размер файла, пометки (пакет, авто-битрейт), чекбокс
-	«обрабатывать» (по умолчанию выключен: на обработку уходят только
-	отмеченные) и кнопки «посмотреть» / «убрать из списка»; тело —
-	собственная панель параметров (:class:`PresetForm`), заполненная
-	из шаблона в момент добавления и правимая независимо.
+	Шапка — имя и размер файла, пометки (пакет, авто-битрейт, апскейл),
+	чекбокс «обрабатывать» (по умолчанию выключен: на обработку уходят
+	только отмеченные) и кнопки «посмотреть» / «убрать из списка». Тело
+	пустое: параметры файла живут снимком :attr:`fields`, а правятся
+	в общем редакторе страницы (:class:`_EntryEditor`), который встаёт
+	в тело на время раскрытия карточки. Своя форма у каждого файла
+	стоила бы около 9 МБ памяти на карточку (замер 19.09.2026: 130
+	виджетов на форму) — пакет из двух сотен файлов съедал бы гигабайты.
 	"""
 
 	def __init__(
 		self,
-		page: VideoPage,
+		parent: QWidget,
 		path: str,
 		size_bytes: int,
 		batch: str,
-		preset_name: str,
+		fields: PresetFields,
+		on_remove: Callable[[_FileEntry], None],
 	) -> None:
+		"""``fields`` — снимок шаблона на момент добавления; его ``name`` —
+		имя пресета (или «ручные»), оно уходит в имя файла результата.
+		``on_remove`` — что делать по кнопке «убрать из списка»."""
 		self.path = path
 		self.batch = batch  # подпапка пакета («» — одиночное добавление)
-		self.preset_name = preset_name  # имя параметров на момент добавления
+		self.fields = fields  # параметры обработки этого файла
+		self.bitrate_suggested = False  # битрейт в снимке подставлен рекомендацией
 		self.advice_note = ""  # пометка авто-битрейта (после совета движка)
 		# размеры кадра исходника: у пакета приезжают со сканированием,
 		# у одиночного файла — с подсказкой движка; None — ещё не знаем
 		self.source_frame: tuple[int, int] | None = None
 		self.scale_note = ""  # пометка об апскейле (зависит и от ступени)
 		trailing = file_action_buttons(
-			page,
+			parent,
 			path,
-			bind(page._remove_entry, self),  # noqa: SLF001 — карточка живёт у страницы
+			bind(on_remove, self),
 			remove_tip="Убрать из списка (файл на диске не трогается)",
 		)
 		# чекбокс выбора — слева, перед названием (клик не сворачивает карточку)
-		self.check = CheckBox("", page)
+		self.check = CheckBox("", parent)
 		self.check.setToolTip("Отправить файл на обработку («Обработать» берёт отмеченные)")
 		title = f"{Path(path).name} — {human_size(size_bytes)}"
-		self.card = CollapsibleCard(title, page, trailing=trailing, leading=self.check)
-		self.form = PresetForm(page)
-		# смена ступени разрешения меняет вердикт об апскейле
-		self.form.resolution_changed.connect(bind(page._refresh_scale_note, self))  # noqa: SLF001
-		self.card.body.addWidget(self.form)
+		self.card = CollapsibleCard(title, parent, trailing=trailing, leading=self.check)
 		self.refresh_summary()
 
 	def refresh_summary(self) -> None:
@@ -153,6 +162,99 @@ class _FileEntry:
 		if self.advice_note:
 			parts.append(self.advice_note)
 		self.card.set_summary(" · ".join(parts))
+
+
+class _EntryEditor:
+	"""Единственная форма параметров на все карточки файлов страницы.
+
+	Раскрытая карточка получает форму в тело, заполненную своим снимком;
+	сворачивание, раскрытие другой карточки, удаление карточки и чтение
+	параметров при постановке возвращают состояние формы в снимок. Форма
+	одна — поэтому раскрыта одна карточка за раз: раскрытие следующей
+	сворачивает предыдущую. Все обращения страницы к параметрам файла
+	идут через редактор: он один знает, где сейчас правда — в форме
+	(карточка раскрыта) или в снимке.
+	"""
+
+	def __init__(self, page: QWidget) -> None:
+		self._page = page
+		self.form = PresetForm(page)
+		self.form.hide()
+		self._entry: _FileEntry | None = None
+
+	@property
+	def editing(self) -> _FileEntry | None:
+		"""Карточка, в которой сейчас стоит форма (None — форма спрятана)."""
+		return self._entry
+
+	def attach(self, entry: _FileEntry) -> None:
+		"""Ставит форму в тело карточки, заполнив её снимком файла.
+
+		Прежняя карточка (если была) получает снимок обратно и сворачивается.
+		"""
+		if self._entry is entry:
+			return
+		previous = self._entry
+		self.detach()
+		if previous is not None:
+			previous.card.set_expanded(False)
+		# карточка назначается до заполнения: сигналы формы (смена ступени)
+		# приходят на страницу уже во время fill и должны найти адресата
+		self._entry = entry
+		self.form.fill(entry.fields)
+		# fill пишет в поле битрейта и снимает признак автоподстановки —
+		# у файла он свой и переживает раскрытие
+		self.form.set_bitrate_suggested(entry.bitrate_suggested)
+		self.form.set_scale_note(entry.scale_note)
+		entry.card.body.addWidget(self.form)
+		self.form.show()
+
+	def detach(self) -> None:
+		"""Возвращает состояние формы в снимок карточки и прячет форму."""
+		entry = self._entry
+		if entry is None:
+			return
+		self._entry = None
+		entry.fields = self.form.fields(entry.fields.name)
+		entry.bitrate_suggested = self.form.bitrate_suggested()
+		entry.card.body.removeWidget(self.form)
+		# форма — страницы, не карточки: карточку удалят, форма останется
+		self.form.setParent(self._page)
+		self.form.hide()
+
+	def release(self, entry: _FileEntry) -> None:
+		"""Карточка уходит из списка: форма возвращается странице."""
+		if self._entry is entry:
+			self.detach()
+
+	def fields_of(self, entry: _FileEntry) -> PresetFields:
+		"""Параметры файла: живые из формы у раскрытой карточки, иначе снимок."""
+		if self._entry is entry:
+			return self.form.fields(entry.fields.name)
+		return entry.fields
+
+	def suggest_bitrate(self, entry: _FileEntry, mbps: float) -> bool:
+		"""Подставляет рекомендованный битрейт файлу — в форму или в снимок.
+
+		Правило одно (:func:`apply_bitrate_advice`): свободное поле
+		заполняется, занятое рукой или пресетом — нет.
+
+		Returns:
+			True, если значение подставлено.
+		"""
+		if self._entry is entry:
+			return self.form.suggest_bitrate(mbps)
+		kbps = apply_bitrate_advice(entry.fields.video_bitrate_kbps, entry.bitrate_suggested, mbps)
+		if kbps is None:
+			return False
+		entry.fields = replace(entry.fields, video_bitrate_kbps=kbps)
+		entry.bitrate_suggested = True
+		return True
+
+	def set_scale_note(self, entry: _FileEntry, note: str) -> None:
+		"""Предупреждение об апскейле — в форму, если карточка раскрыта."""
+		if self._entry is entry:
+			self.form.set_scale_note(note)
 
 
 class VideoPage(ScrollArea):
@@ -179,6 +281,9 @@ class VideoPage(ScrollArea):
 		self._entries: list[_FileEntry] = []  # карточки файлов к обработке
 		self._processed_checks: list[tuple[CheckBox, VideoFile]] = []
 		self._processed_dir = ""  # папка текущего списка готовых видео
+		# общий редактор параметров карточек файлов (см. _EntryEditor)
+		self._editor = _EntryEditor(self)
+		self._editor.form.resolution_changed.connect(self._on_editor_resolution)
 		self._build()
 		self._reload_presets()
 
@@ -603,19 +708,13 @@ class VideoPage(ScrollArea):
 			except OSError:
 				self._show_error(f"Файл не читается: {path}")
 				return False
-		preset = self._preset_combo.selected()
-		entry = _FileEntry(
-			self,
-			path,
-			size_bytes,
-			batch,
-			preset.name if preset else _MANUAL_NAME,
-		)
-		entry.form.fill(self._template_fields())
+		fields = self._template_fields()
+		entry = _FileEntry(self, path, size_bytes, batch, fields, self._remove_entry)
+		# раскрытие карточки ставит в неё общий редактор, сворачивание — убирает
+		entry.card.expanded_changed.connect(partial(self._on_entry_expanded, entry))
 		self._entries.append(entry)
 		self._files_box.addWidget(entry.card)
 		self._update_empty_hint()
-		fields = entry.form.fields("")
 		# подсказки вспомогательные: сбой не мешает добавлению файла
 		if frame is not None:
 			# размеры уже есть — спрашиваем движок только о битрейте
@@ -652,7 +751,7 @@ class VideoPage(ScrollArea):
 		"""Совет битрейта пришёл — подставляем в параметры карточки файла."""
 		if advice is None or entry not in self._entries:
 			return  # файл в лимите или карточку уже убрали
-		if entry.form.suggest_bitrate(advice.mbps):
+		if self._editor.suggest_bitrate(entry, advice.mbps):
 			entry.advice_note = (
 				f"больше лимита {advice.limit_gb} ГБ — качество {advice.mbps:g} Мбит/с"
 			)
@@ -668,14 +767,27 @@ class VideoPage(ScrollArea):
 		if entry not in self._entries:
 			return
 		note = ""
-		target = entry.form.fields("").target_resolution
+		target = self._editor.fields_of(entry).target_resolution
 		if entry.source_frame is not None and is_upscale(*entry.source_frame, target):
 			width, height = entry.source_frame
 			out_width, out_height = scaled_size(width, height, target)
 			note = f"апскейл: {width}×{height} → {out_width}×{out_height}"
 		entry.scale_note = note
-		entry.form.set_scale_note(note)
+		self._editor.set_scale_note(entry, note)
 		entry.refresh_summary()
+
+	def _on_entry_expanded(self, entry: _FileEntry, expanded: bool) -> None:
+		"""Раскрытие карточки ставит в неё общий редактор, сворачивание — убирает."""
+		if expanded:
+			self._editor.attach(entry)
+		elif self._editor.editing is entry:
+			self._editor.detach()
+
+	def _on_editor_resolution(self) -> None:
+		"""Смена ступени в редакторе — пересчёт пометки у раскрытой карточки."""
+		entry = self._editor.editing
+		if entry is not None:
+			self._refresh_scale_note(entry)
 
 	def _remove_entry(self, entry: _FileEntry) -> None:
 		"""Убирает карточку файла из списка (сам файл не трогается)."""
@@ -686,6 +798,7 @@ class VideoPage(ScrollArea):
 		for entry in entries:
 			if entry in self._entries:
 				self._entries.remove(entry)
+				self._editor.release(entry)  # форма — страницы, а не карточки
 				entry.card.deleteLater()
 		self._update_empty_hint()
 
@@ -743,7 +856,7 @@ class VideoPage(ScrollArea):
 		requests: list[ProcessingRequest] = []
 		submitted: list[_FileEntry] = []
 		for entry in entries:
-			fields = entry.form.fields(entry.preset_name)
+			fields = self._editor.fields_of(entry)
 			kind, _value = parse_intro_source(fields.intro_source)
 			if not (kind is IntroSourceKind.RANDOM_CHOICE and (fields.intro or fields.cover)):
 				requests.append(ProcessingRequest(entry.path, fields, batch_subdir=entry.batch))
