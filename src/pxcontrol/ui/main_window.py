@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QByteArray
+from PySide6.QtCore import QByteArray, QEvent, QObject, QTimer
 from PySide6.QtGui import QCloseEvent
-from qfluentwidgets import FluentIcon, FluentWindow, MessageBox, NavigationItemPosition
+from PySide6.QtWidgets import QWidget
+from qfluentwidgets import (
+	FluentIcon,
+	FluentWindow,
+	MessageBox,
+	NavigationItemPosition,
+	NavigationTreeWidget,
+)
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
@@ -38,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 class MainWindow(FluentWindow):
 	"""Окно с боковой навигацией. К движку обращается через `EngineWorker`."""
+
+	#: Панель навигации: её ресайз чинит высоту веток подменю. Поле
+	#: объявлено на классе, потому что фильтр событий срабатывает уже
+	#: в конструкторе базового окна — до сборки навигации.
+	_nav_panel: QWidget | None = None
 
 	def __init__(self, worker: EngineWorker) -> None:
 		super().__init__()
@@ -71,7 +83,16 @@ class MainWindow(FluentWindow):
 			logger.warning("Состояние окна не восстановлено: запись повреждена.", exc_info=True)
 
 	def _build_navigation(self) -> None:
-		"""Наполняет боковую навигацию разделами приложения."""
+		"""Наполняет боковую навигацию разделами приложения.
+
+		Здесь же чинится высота веток подменю при смене ширины панели —
+		см. :meth:`_fix_branch_sizes`.
+		"""
+		# ширину панели меняют и кнопкой-«бутербродом», и размером окна;
+		# сигнала об этом библиотека шлёт не всегда (только при сворачивании),
+		# поэтому ловим сам ресайз панели — см. _fix_branch_sizes
+		self._nav_panel = self.navigationInterface.panel
+		self._nav_panel.installEventFilter(self)
 		# пользователи и боты — над сообществами (ADR-0029): без них
 		# подключать сообщества нечем, порядок разделов — порядок настройки
 		self._users_page = UsersPage(self._worker, self)
@@ -100,6 +121,48 @@ class MainWindow(FluentWindow):
 			"Настройки",
 			NavigationItemPosition.BOTTOM,
 		)
+
+	def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 — API Qt
+		"""Следит за шириной панели навигации, чтобы чинить ветки подменю.
+
+		Панель меняет размер при разворачивании, сворачивании и смене
+		ширины окна; каждый такой переход сбрасывает высоту веток
+		(см. :meth:`_fix_branch_sizes`). Событие не перехватывается —
+		панель обрабатывает его как обычно.
+		"""
+		if watched is self._nav_panel and event.type() == QEvent.Type.Resize:
+			# отложенно: библиотека доводит новый режим до пунктов уже
+			# после ресайза, и чинить размер раньше неё бессмысленно
+			QTimer.singleShot(0, self._fix_branch_sizes)
+		return bool(super().eventFilter(watched, event))
+
+	def _fix_branch_sizes(self) -> None:
+		"""Возвращает раскрытым веткам подменю высоту по их содержимому.
+
+		Обход дефекта QFluentWidgets 1.11.3: при смене ширины панели она
+		назначает каждому пункту ``setFixedSize(ширина, 36)``
+		(``NavigationWidget.setCompacted``) — высота в одну строку. Для
+		обычного пункта это верно, а ветка подменю на этом теряет место
+		под своих детей: они остаются в её компоновке и налезают друг
+		на друга и на заголовок ветки.
+
+		Лечится пересчётом по подсказке компоновки — той самой, которой
+		библиотека пользуется сама при раскрытии ветки. Свёрнутую ветку
+		и ветку без детей трогать незачем: у них высота и есть одна
+		строка.
+		"""
+		for branch in self._branches():
+			if branch is not None and branch.isExpanded and branch.treeChildren:
+				branch.setFixedSize(branch.sizeHint())
+
+	def _branches(self) -> list[NavigationTreeWidget | None]:
+		"""Ветки подменю навигации (могут ещё не существовать при сборке)."""
+		keys = (
+			self._users_page.objectName(),
+			self._communities_page.objectName(),
+			SECTION_ROUTE_KEY,
+		)
+		return [self.navigationInterface.widget(key) for key in keys]
 
 	def _build_publish_section(self) -> None:
 		"""Раздел «Публикация»: ветка подменю по стадиям жизни поста (ADR-0032).

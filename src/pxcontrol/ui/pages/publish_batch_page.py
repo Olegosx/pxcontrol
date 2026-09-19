@@ -126,6 +126,12 @@ class BatchStagePage(StagePage):
 		self._error = ErrorLabel(body)
 		layout.addWidget(self._error)
 		self._build_send(layout)
+		# растяжка снизу — обязательная, а не косметическая: без неё
+		# лишнюю высоту экрана забирают подписи с переносом слов
+		# (подсказка возможностей, строка источника), и форма
+		# расползается пустотами. Вес нулевой: когда пакет собран,
+		# место достаётся списку черновиков (он со stretch=1)
+		layout.addStretch()
 		self.mount(body)
 		self._community.restore_last()
 		self._render_source()

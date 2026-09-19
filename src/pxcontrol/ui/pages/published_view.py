@@ -158,6 +158,10 @@ class PublishedView(QWidget):
 		box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(box)
 		self._build_footer(layout)
+		# растяжка снизу: без неё лишнюю высоту экрана забирают подписи
+		# с переносом слов, и список расползается пустотами
+		layout.addStretch()
+
 		self._list = CardList(
 			self,
 			box,

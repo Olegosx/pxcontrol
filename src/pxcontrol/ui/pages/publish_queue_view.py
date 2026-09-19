@@ -205,6 +205,10 @@ class QueueView(QWidget):
 		layout.addLayout(box)
 		self._pager = PagerRow(self, self._step)
 		layout.addLayout(self._pager.layout)
+		# растяжка снизу: без неё лишнюю высоту экрана забирают подписи
+		# с переносом слов, и список расползается пустотами
+		layout.addStretch()
+
 		self._panel = QueuePanel(
 			worker,
 			self,
