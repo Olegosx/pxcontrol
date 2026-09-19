@@ -14,7 +14,6 @@ logs/
 media/
 cache/
 _misc/
-.claude/
 
 # --- python/окружение ---
 __pycache__/
