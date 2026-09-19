@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import StrEnum
+from typing import Any
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QVBoxLayout, QWidget
@@ -137,6 +138,18 @@ def post_leading(
 	]
 
 
+def post_leading_signature(
+	community_id: int, when: object, avatar_path: str | None
+) -> tuple[Any, ...]:
+	"""Отпечаток начала шапки поста: от чего зависят логотип и метка слота.
+
+	Путь аватара приходит из кэша статистики страницы, а не из элемента:
+	приехал кэш — начало шапки пересобирается только у карточек, где
+	картинка появилась или сменилась.
+	"""
+	return (community_id, when, avatar_path)
+
+
 def queue_leading(item: QueueItemDto, parent: QWidget, avatar_path: str | None) -> list[QWidget]:
 	"""Начало шапки карточки очереди: логотип сообщества и метка слота."""
 	return post_leading(item.community_id, item.community_title, item.when, parent, avatar_path)
@@ -223,6 +236,9 @@ class QueueView(QWidget):
 			leading=lambda item, parent: queue_leading(
 				item, parent, self._avatars.get(item.community_id)
 			),
+			leading_signature=lambda item: post_leading_signature(
+				item.community_id, item.when, self._avatars.get(item.community_id)
+			),
 			active=False,  # присоединится, когда экран станет виден
 		)
 		run_in_engine(
@@ -250,9 +266,9 @@ class QueueView(QWidget):
 		self._panel.refresh()
 
 	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
-		"""Раскладывает аватары сообществ и перерисовывает шапки карточек."""
+		"""Раскладывает аватары сообществ; шапки пересоберутся по отпечатку."""
 		self._avatars = {item.community_id: item.avatar_path for item in stats}
-		self._panel.refresh_leading()
+		self._panel.refresh()
 
 	def _fill_editor(self, item_id: int, body: QVBoxLayout, collapse: Callable[[], None]) -> None:
 		"""Наполняет раскрытую карточку формой правки (ADR-0016, п. 7)."""

@@ -12,6 +12,15 @@
 чему угодно в любом элементе, — это мигало на сотне карточек и делало
 невозможной правку прямо в карточке: форма с набранным текстом умирала
 от того, что у соседнего поста сменился статус.
+
+Точечность доведена до частей карточки (аудит 19.09.2026): заголовок
+и сводка обновляются на месте всегда, а начало шапки (логотип, метка
+слота) и правый край (кнопки, светофор, полоса) пересобираются только
+когда меняется **их собственный отпечаток** — владелец задаёт его
+крючками ``leading_signature`` и ``actions_signature``. Смена пометки
+или текста ошибки у поста не трогает аватар, а приезд аватаров
+из кэша статистики пересобирает начало шапки только у тех карточек,
+где картинка появилась или сменилась.
 """
 
 from __future__ import annotations
@@ -108,8 +117,9 @@ class ListCard:
 	"""Карточка элемента списка: шапка с действиями и тело для правки.
 
 	Живёт столько же, сколько элемент в списке, и обновляется точечно:
-	заголовок, сводка и кнопки меняются на месте, а тело (форма правки)
-	при этом не пересоздаётся.
+	заголовок и сводка меняются на месте, начало шапки и кнопки
+	пересобираются только по своим отпечаткам, полоса прогресса двигается
+	только при новом значении, а тело (форма правки) не пересоздаётся.
 	"""
 
 	def __init__(self, owner: CardList, item: Any) -> None:
@@ -126,6 +136,12 @@ class ListCard:
 		self._bar: ProgressBar | None = None
 		self._filled = False  # тело уже наполнено формой правки
 		self._compact = owner.compact
+		# отпечатки частей шапки: часть пересобирается при расхождении
+		self._leading_signature: tuple[Any, ...] | None = None
+		self._actions_signature: tuple[Any, ...] | None = None
+		# последний переданный прогресс: повтор того же значения — не работа
+		self._progress: tuple[float, str] | None = None
+		self._progress_known = False
 		self.widget = CollapsibleCard(
 			owner.title(item),
 			owner.page,
@@ -138,9 +154,12 @@ class ListCard:
 		self.update(item)
 
 	def update(self, item: Any) -> None:
-		"""Приводит карточку к новому снимку элемента."""
+		"""Приводит карточку к новому снимку элемента.
+
+		Заголовок и сводка — на месте; начало шапки и правый край —
+		только если сменился их отпечаток (крючки владельца).
+		"""
 		self._item = item
-		self.refresh_leading()
 		self.widget.set_title(self._owner.title(item))
 		self.widget.set_summary(self._owner.subtitle(item), alert=self._owner.alert_of(item))
 		editable = self._owner.can_edit(item)
@@ -148,26 +167,34 @@ class ListCard:
 		if not editable:
 			# элемент больше не правится: форма в теле уже не про него
 			self._reset_body()
-		self._fill_actions(item)
+		leading_signature = self._owner.leading_signature(item)
+		if leading_signature != self._leading_signature:
+			self._leading_signature = leading_signature
+			self._fill_leading(item)
+		actions_signature = self._owner.actions_signature(item)
+		if actions_signature != self._actions_signature:
+			self._actions_signature = actions_signature
+			self._fill_actions(item)
 		self.set_progress(self._owner.progress_of(item))
 
-	def refresh_leading(self) -> None:
-		"""Перерисовывает начало шапки (логотип сообщества, метка слота).
-
-		Отдельно от :meth:`update`: аватары приезжают из кэша статистики
-		позже списка, и к этому моменту снимок элемента не менялся —
-		обновлять карточку целиком было бы не с чего.
-		"""
+	def _fill_leading(self, item: Any) -> None:
+		"""Пересобирает начало шапки (логотип сообщества, метка слота)."""
 		clear_layout(self._leading_box)
-		for widget in self._owner.leading_widgets(self._item, self._leading):
+		for widget in self._owner.leading_widgets(item, self._leading):
 			self._leading_box.addWidget(widget)
 
 	def set_progress(self, progress: tuple[float, str] | None) -> None:
 		"""Двигает полосу прогресса (без пересборки карточки).
 
 		В компактном режиме полоса — под названием (рисует карточка),
-		иначе — в шапке; None прячет её.
+		иначе — в шапке; None прячет её. То же значение подряд ничего
+		не делает: у ждущих элементов прогресса нет, и прятать полосу
+		на каждый снимок незачем.
 		"""
+		if self._progress_known and progress == self._progress:
+			return
+		self._progress = progress
+		self._progress_known = True
 		if self._compact:
 			if progress is None:
 				self.widget.set_progress(None)
@@ -211,7 +238,11 @@ class ListCard:
 		self._owner.fill_body(self._item, self.widget.body, self.collapse)
 
 	def _fill_actions(self, item: Any) -> None:
-		"""Пересобирает правый край шапки: полоса прогресса и кнопки."""
+		"""Пересобирает правый край шапки: полоса прогресса и кнопки.
+
+		Зовётся только при смене отпечатка правого края (у очереди —
+		статус: набор кнопок и светофор от него и зависят).
+		"""
 		clear_layout(self._actions_box)
 		self._bar = None
 		progress = self._owner.progress_of(item)
@@ -246,7 +277,9 @@ class CardList:
 		key: KeyFn = default_key,
 		title: Callable[[Any], str] = default_title,
 		leading: WidgetsFn | None = None,
+		leading_signature: SignatureFn | None = None,
 		actions: WidgetsFn | None = None,
+		actions_signature: SignatureFn | None = None,
 		progress: ProgressFn | None = None,
 		alert: Callable[[Any], bool] | None = None,
 		editable: Callable[[Any], bool] | None = None,
@@ -258,12 +291,20 @@ class CardList:
 		page: виджет-владелец (родитель карточек и плашек ошибок).
 		box: компоновка, в которую список складывает карточки.
 		subtitle: подпись карточки для элемента.
-		signature: отпечаток элемента — по нему решается обновление.
+		signature: отпечаток элемента — по нему решается обновление
+			карточки (заголовок, сводка, раскрываемость).
 		key: ключ элемента (устойчив между снимками).
 		title: заголовок карточки элемента (у файла на «Видео» — имя
 			файла; у элементов очереди и записей — их ``title``).
 		leading: виджеты в начале шапки (логотип сообщества, метка слота).
+		leading_signature: отпечаток начала шапки — всё, от чего зависят
+			его виджеты (время слота, путь аватара из кэша страницы);
+			меняется он — начало шапки пересобирается. Без него начало
+			пересобирается при любом изменении ``signature``.
 		actions: кнопки правого края шапки под текущее состояние элемента.
+		actions_signature: отпечаток правого края (у очереди — статус
+			и наличие вложения); без него правый край пересобирается
+			при любом изменении ``signature``.
 		progress: доля и подпись прогресса элемента; None — прогресса нет.
 		alert: подсветить сводку как тревожную (компактный режим:
 			ошибка красит подпись и рамку).
@@ -290,7 +331,9 @@ class CardList:
 		self._box = box
 		self._signature = signature
 		self._leading = leading
+		self._leading_signature = leading_signature
 		self._actions = actions
+		self._actions_signature = actions_signature
 		self._progress = progress
 		self._alert = alert
 		self._editable = editable
@@ -299,6 +342,9 @@ class CardList:
 		self._show_error = error_reporter(page)
 		self._cards: dict[Hashable, ListCard] = {}
 		self._signatures: dict[Hashable, tuple[Any, ...]] = {}
+		#: ключи карточек в порядке компоновки — зеркало ``box``, чтобы
+		#: выравнивать порядок без линейного ``indexOf`` на каждую карточку
+		self._order: list[Hashable] = []
 
 	# --- крючки владельца (читают карточки) ------------------------------------
 
@@ -315,9 +361,30 @@ class CardList:
 		"""Виджеты начала шапки карточки (крючок владельца)."""
 		return [] if self._leading is None else self._leading(item, parent)
 
+	def leading_signature(self, item: Any) -> tuple[Any, ...]:
+		"""Отпечаток начала шапки (крючок владельца; иначе — отпечаток элемента)."""
+		if self._leading_signature is None:
+			return self._signature(item)
+		return self._leading_signature(item)
+
 	def action_widgets(self, item: Any, parent: QWidget) -> list[QWidget]:
 		"""Кнопки правого края шапки (крючок владельца)."""
 		return [] if self._actions is None else self._actions(item, parent)
+
+	def actions_signature(self, item: Any) -> tuple[Any, ...]:
+		"""Отпечаток правого края (крючок владельца; иначе — отпечаток элемента)."""
+		if self._actions_signature is None:
+			return self._signature(item)
+		return self._actions_signature(item)
+
+	def _full_signature(self, item: Any) -> tuple[Any, ...]:
+		"""Отпечаток карточки целиком: элемент и обе части шапки.
+
+		Начало шапки может зависеть не от элемента, а от кэша страницы
+		(аватары приезжают позже списка) — без частей в общем отпечатке
+		:func:`plan_cards` не увидел бы, что карточку пора обновить.
+		"""
+		return (self._signature(item), self.leading_signature(item), self.actions_signature(item))
 
 	def progress_of(self, item: Any) -> tuple[float, str] | None:
 		"""Прогресс элемента (крючок владельца)."""
@@ -331,7 +398,7 @@ class CardList:
 
 	def sync(self, shown: Sequence[Any]) -> None:
 		"""Приводит список карточек к снимку, трогая только изменившееся."""
-		plan = plan_cards(shown, self._signatures, key=self.key, signature=self._signature)
+		plan = plan_cards(shown, self._signatures, key=self.key, signature=self._full_signature)
 		by_key = {self.key(item): item for item in shown}
 		for item_key in plan.removed:
 			self._drop_card(item_key)
@@ -339,24 +406,29 @@ class CardList:
 			card = ListCard(self, by_key[item_key])
 			self._cards[item_key] = card
 			self._box.addWidget(card.widget)
+			self._order.append(item_key)
 		for item_key in plan.changed:
 			self._cards[item_key].update(by_key[item_key])
-		self._signatures = {self.key(item): self._signature(item) for item in shown}
-		for index, item_key in enumerate(plan.order):
-			widget = self._cards[item_key].widget
-			if self._box.indexOf(widget) != index:
-				self._box.insertWidget(index, widget)
+		self._signatures = {self.key(item): self._full_signature(item) for item in shown}
+		self._reorder(plan.order)
 		for item in shown:  # прогресс — без пересборки карточек
 			self._cards[self.key(item)].set_progress(self.progress_of(item))
 
-	def refresh_leading(self) -> None:
-		"""Перерисовывает начала шапок всех карточек.
+	def _reorder(self, order: list[Hashable]) -> None:
+		"""Выравнивает порядок карточек в компоновке по целевому.
 
-		Зовётся, когда изменилось не состояние списка, а то, из чего
-		рисуется шапка: приехали аватары сообществ из кэша статистики.
+		Сравнивается зеркало компоновки, а не сама компоновка: при
+		совпадении (обычный случай) это один проход без обращений к Qt,
+		переставляется только то, что стоит не на месте.
 		"""
-		for card in self._cards.values():
-			card.refresh_leading()
+		if self._order == order:
+			return
+		for index, item_key in enumerate(order):
+			if self._order[index] == item_key:
+				continue
+			self._box.insertWidget(index, self._cards[item_key].widget)
+			self._order.remove(item_key)
+			self._order.insert(index, item_key)
 
 	def _drop_card(self, item_key: Hashable) -> None:
 		"""Убирает карточку элемента, покинувшего показ.
@@ -368,6 +440,7 @@ class CardList:
 		self._signatures.pop(item_key, None)
 		if card is None:
 			return
+		self._order.remove(item_key)
 		if card.editing():
 			self._show_error(self._lost_edit_text)
 		self._box.removeWidget(card.widget)

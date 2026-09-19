@@ -83,6 +83,7 @@ from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
 from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
+	post_leading_signature,
 	queue_leading,
 	queue_subtitle,
 )
@@ -322,6 +323,9 @@ class PublishPage(StagePage):
 			leading=lambda item, parent: queue_leading(
 				item, parent, self._avatars.get(item.community_id)
 			),
+			leading_signature=lambda item: post_leading_signature(
+				item.community_id, item.when, self._avatars.get(item.community_id)
+			),
 			active=False,  # присоединится, когда экран станет виден
 		)
 
@@ -359,9 +363,9 @@ class PublishPage(StagePage):
 			self.select_community(community_id)
 
 	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
-		"""Раскладывает аватары сообществ и перерисовывает шапки карточек."""
+		"""Раскладывает аватары сообществ; шапки пересоберутся по отпечатку."""
 		self._avatars = {item.community_id: item.avatar_path for item in stats}
-		self._queue.refresh_leading()
+		self._queue.refresh()
 
 	def _reload_communities(self) -> None:
 		"""Просит свежий список сообществ и аватары для шапок очереди."""

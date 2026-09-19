@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import lru_cache, partial
+from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
@@ -16,6 +17,7 @@ from PySide6.QtGui import (
 	QColor,
 	QDesktopServices,
 	QFont,
+	QImage,
 	QKeyEvent,
 	QMouseEvent,
 	QResizeEvent,
@@ -1165,6 +1167,34 @@ class DtoComboBox(ComboBox, Generic[_T]):
 _LOGO_COLORS = ("#e17076", "#eda86c", "#a695e7", "#7bc862", "#6ec9cb", "#65aadd", "#ee7aae")
 
 
+#: Сколько картинок аватаров держать прочитанными (сообществ и исполнителей
+#: в приложении десятки; ключ — путь и время изменения файла).
+_AVATAR_CACHE_SIZE = 256
+
+
+@lru_cache(maxsize=_AVATAR_CACHE_SIZE)
+def _avatar_image(path: str, mtime_ns: int) -> QImage:
+	"""Читает картинку аватара с диска — один раз на путь и версию файла."""
+	del mtime_ns  # часть ключа: сменился файл — прочитать заново
+	return QImage(path)
+
+
+def avatar_image(path: str) -> QImage | None:
+	"""Картинка аватара из кэша по пути; None — файла нет или он не картинка.
+
+	Кэш статистики перезаписывает файл при смене аватара сообщества —
+	ключ кэша включает время изменения, поэтому новая картинка
+	подхватывается сама, а неизменная не перечитывается: прежде каждая
+	карточка очереди читала файл с диска при каждой пересборке шапки.
+	"""
+	try:
+		stamp = Path(path).stat().st_mtime_ns
+	except OSError:
+		return None  # файл исчез из кэша — карточка покажет букву
+	image = _avatar_image(path, stamp)
+	return None if image.isNull() else image
+
+
 def entity_avatar(
 	parent: QWidget, seed: int, title: str, avatar_path: str | None, size: int
 ) -> AvatarWidget:
@@ -1177,14 +1207,17 @@ def entity_avatar(
 	а не случайный: у одной и той же записи он всегда один.
 	Виджет — штатный ``AvatarWidget`` библиотеки: картинку он кадрирует
 	по кругу сам, без неё рисует первую букву текста на подложке.
+	Картинка отдаётся готовым ``QImage`` из кэша (:func:`avatar_image`),
+	чтобы файл не читался при каждой сборке шапки.
 	"""
 	logo = AvatarWidget(parent)
 	logo.setRadius(size // 2)
 	logo.setText(title[:1].upper() or "?")
 	color = QColor(_LOGO_COLORS[seed % len(_LOGO_COLORS)])
 	logo.setBackgroundColor(color, color)
-	if avatar_path:
-		logo.setImage(avatar_path)
+	image = avatar_image(avatar_path) if avatar_path else None
+	if image is not None:
+		logo.setImage(image)
 		logo.setRadius(size // 2)
 	return logo
 

@@ -169,6 +169,8 @@ class PublishedView(QWidget):
 			signature=published_signature,
 			key=lambda item: item.message_id,
 			actions=self._actions,
+			# «Открыть» есть только у поста со ссылкой — от этого и зависит правый край
+			actions_signature=lambda item: (bool(item.link),),
 			# правка — прямо в карточке, как у очереди и отложенных:
 			# текст меняет публикатор, кнопки — бот (ADR-0032, подача A4)
 			editable=lambda _item: True,

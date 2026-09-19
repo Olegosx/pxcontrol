@@ -150,6 +150,16 @@ def queue_signature(item: Any) -> tuple[Any, ...]:
 	)
 
 
+def actions_signature(item: Any) -> tuple[Any, ...]:
+	"""Отпечаток правого края карточки очереди: от чего зависят кнопки.
+
+	Набор кнопок и светофор — от статуса; кнопка просмотра — от наличия
+	вложения (и того же статуса). Смена пометки, текста ошибки или
+	времени кнопок не меняет — и правый край не пересобирается.
+	"""
+	return (item.status, getattr(item, "media_path", None) is not None)
+
+
 class QueuePanel:
 	"""Панель очереди движка: карточки, прогресс, действия.
 
@@ -186,6 +196,7 @@ class QueuePanel:
 		editable: Callable[[Any], bool] | None = None,
 		fill_body: Callable[[int, QVBoxLayout, Callable[[], None]], None] | None = None,
 		leading: Callable[[Any, QWidget], list[QWidget]] | None = None,
+		leading_signature: Callable[[Any], tuple[Any, ...]] | None = None,
 		compact: bool = False,
 		active: bool = True,
 	) -> None:
@@ -216,6 +227,9 @@ class QueuePanel:
 			слота времени) — получает элемент и родителя. Что именно
 			показывать, решает владелец панели: очередь обработки видео
 			крючок не передаёт, и её шапки начинаются с названия.
+		leading_signature: отпечаток начала шапки — всё, от чего зависят
+			его виджеты (время слота, путь аватара из кэша страницы):
+			начало пересобирается только при его смене.
 		compact: карточки по макету страницы сообщества — подпись под
 			названием, кнопки-обводки 28, полоса прогресса под названием,
 			ошибка красит подпись и рамку.
@@ -237,7 +251,9 @@ class QueuePanel:
 			subtitle=subtitle,
 			signature=queue_signature,
 			leading=leading,
+			leading_signature=leading_signature,
 			actions=self._actions,
+			actions_signature=actions_signature,
 			progress=_progress_of,
 			# в компактном режиме ошибка красит подпись и рамку
 			alert=lambda item: compact and item.status is JobStatus.ERROR,
@@ -272,10 +288,6 @@ class QueuePanel:
 	def busy(self) -> bool:
 		"""Есть ли незавершённое в очереди (включая ждущих)."""
 		return self._watcher.busy()
-
-	def refresh_leading(self) -> None:
-		"""Перерисовывает начала шапок всех карточек (приехали аватары)."""
-		self._list.refresh_leading()
 
 	def poll(self) -> None:
 		"""Запрашивает свежий снимок очереди (после постановки: карточка сразу)."""

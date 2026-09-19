@@ -37,7 +37,7 @@ from pxcontrol.ui.pages.list_view import (
 	step_page,
 	summary_text,
 )
-from pxcontrol.ui.pages.publish_queue_view import post_leading
+from pxcontrol.ui.pages.publish_queue_view import post_leading, post_leading_signature
 from pxcontrol.ui.pages.scheduled_panel import (
 	SCHEDULED_WORDS,
 	ScheduledPanel,
@@ -111,6 +111,9 @@ class ScheduledView(QWidget):
 				parent,
 				self._avatars.get(item.community_id),
 			),
+			leading_signature=lambda item: post_leading_signature(
+				item.community_id, item.scheduled_at, self._avatars.get(item.community_id)
+			),
 		)
 		run_in_engine(
 			worker, worker.engine.community_stats.snapshot(), self, self._apply_avatars, noop
@@ -132,8 +135,9 @@ class ScheduledView(QWidget):
 		self._panel.refresh_view()
 
 	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
+		"""Раскладывает аватары сообществ; шапки пересоберутся по отпечатку."""
 		self._avatars = {item.community_id: item.avatar_path for item in stats}
-		self._panel.refresh_leading()
+		self._panel.refresh_view()
 
 	def _on_loaded(self, scheduled: ScheduledList) -> None:
 		self._status.setText(unread_text(scheduled.unread))

@@ -444,6 +444,8 @@ class VideoPage(ScrollArea):
 			signature=processed_signature,
 			key=lambda item: item.path,
 			actions=self._processed_actions,
+			# кнопки и чекбокс у всех строк одни — правый край не пересобирается
+			actions_signature=lambda _item: (),
 			compact=True,
 		)
 		# итог и перелистывание — общие с очередью и отложенными

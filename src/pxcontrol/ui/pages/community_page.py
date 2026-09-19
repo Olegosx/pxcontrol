@@ -659,6 +659,7 @@ class _QueueTab(QWidget):
 			editable=lambda item: item.status in EDITABLE_STATUSES,
 			fill_body=self._fill_editor,
 			leading=self._leading,
+			leading_signature=lambda item: (item.when,),  # только метка слота
 			compact=True,
 			active=False,  # присоединит страница, когда вкладка станет видна
 		)
@@ -771,6 +772,7 @@ class _ScheduledTab(QWidget):
 			on_loaded=self._on_loaded,
 			# только метка слота — логотип сообщества здесь лишний
 			leading=lambda item, parent: [slot_chip(item.scheduled_at, parent, compact=True)],
+			leading_signature=lambda item: (item.scheduled_at,),
 			compact=True,
 		)
 

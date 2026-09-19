@@ -189,6 +189,7 @@ class ScheduledPanel:
 		on_loaded: Callable[[ScheduledList], None] | None = None,
 		on_refreshed: Callable[[list[ScheduledPostDto]], None] | None = None,
 		leading: Callable[[ScheduledPostDto, QWidget], list[QWidget]] | None = None,
+		leading_signature: Callable[[ScheduledPostDto], tuple[Any, ...]] | None = None,
 		compact: bool = False,
 	) -> None:
 		"""Args:
@@ -204,6 +205,8 @@ class ScheduledPanel:
 		on_loaded: обход кончился — полный список и непрочитанные сообщества.
 		on_refreshed: список перерисован — что показано (после ``transform``).
 		leading: виджеты в начале шапки (логотип сообщества, метка слота).
+		leading_signature: отпечаток начала шапки (момент, путь аватара):
+			начало пересобирается только при его смене.
 		compact: карточки по макету страницы сообщества.
 		"""
 		self._worker = worker
@@ -228,7 +231,10 @@ class ScheduledPanel:
 			signature=scheduled_signature,
 			key=scheduled_key,
 			leading=leading,
+			leading_signature=leading_signature,
 			actions=self._actions,
+			# «Сейчас» и «Удалить» есть у любой записи — правый край постоянен
+			actions_signature=lambda _item: (),
 			editable=lambda _item: True,
 			fill_body=self._fill_editor,
 			compact=compact,
@@ -287,10 +293,6 @@ class ScheduledPanel:
 		self._list.sync(shown)
 		if self._on_refreshed is not None:
 			self._on_refreshed(shown)
-
-	def refresh_leading(self) -> None:
-		"""Перерисовывает начала шапок (приехали аватары сообществ)."""
-		self._list.refresh_leading()
 
 	def _show_all(self, scheduled: ScheduledList) -> None:
 		self._loading = False
