@@ -371,8 +371,9 @@ def test_queue_subtitle_without_community_for_community_page() -> None:
 		progress=0.0,
 		error=None,
 	)
-	assert queue_subtitle(item) == "Кино в HD · публикация: сейчас · в очереди"
-	assert queue_subtitle(item, with_community=False) == "публикация: сейчас · в очереди"
+	# состояние несёт светофор в строке действий, подпись его не дублирует
+	assert queue_subtitle(item) == "Кино в HD · публикация: сейчас"
+	assert queue_subtitle(item, with_community=False) == "публикация: сейчас"
 
 
 # --- приостановленный публикатор (ADR-0029) ------------------------------------------

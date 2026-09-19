@@ -17,16 +17,31 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
-from qfluentwidgets import FluentIcon, PushButton, TransparentToolButton
+from qfluentwidgets import (
+	DotInfoBadge,
+	FluentIcon,
+	InfoLevel,
+	PushButton,
+	TransparentToolButton,
+)
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
+from pxcontrol.engine.telegram.types import TELEGRAM_MAX_SCHEDULED
 from pxcontrol.ui.pages.card_list import CardList
-from pxcontrol.ui.pages.common import bind, error_reporter, list_button, open_in_system
+from pxcontrol.ui.pages.common import (
+	WARNING_TEXT,
+	bind,
+	error_reporter,
+	list_button,
+	open_in_system,
+)
 from pxcontrol.ui.queue_watcher import QueueWatcher
 
 
@@ -45,6 +60,71 @@ def file_view_shown(status: JobStatus) -> bool:
 	что файла по этому пути нет.
 	"""
 	return not status.active()
+
+
+class SendLight(StrEnum):
+	"""Светофор карточки очереди: можно ли прямо сейчас отправить пост."""
+
+	GREEN = "green"  # отправка возможна — пост уйдёт в свой черёд
+	YELLOW = "yellow"  # свободного слота отложек у канала нет, пост ждёт
+	RED = "red"  # отправка не удалась
+
+
+#: Подсказка к кружку: цвет без объяснения — ребус.
+SEND_LIGHT_HINTS = {
+	SendLight.GREEN: "Отправка возможна — пост уйдёт в свой черёд",
+	SendLight.YELLOW: (
+		f"Нет свободного слота отложенных: у канала их {TELEGRAM_MAX_SCHEDULED}. "
+		"Пост ждёт, пока слот освободится"
+	),
+	SendLight.RED: "Отправить не удалось — причина в подписи карточки",
+}
+
+
+def send_light(status: JobStatus) -> SendLight | None:
+	"""Цвет светофора по состоянию элемента (None — кружка нет).
+
+	Светофор отвечает на один вопрос: **есть ли сейчас возможность
+	отправить пост в Telegram**. Поэтому зелёный — и у поста «сейчас»
+	(слот ему не нужен вовсе), и у отложенного, чей слот уже получен;
+	жёлтый — только у ждущего слота (ADR-0016); красный — у ошибки.
+
+	У завершённого задания кружка нет: отправлять уже нечего, а зелёный
+	читался бы как «можно отправить».
+	"""
+	if status is JobStatus.ERROR:
+		return SendLight.RED
+	if status is JobStatus.WAITING:
+		return SendLight.YELLOW
+	if status.finished():
+		return None
+	return SendLight.GREEN
+
+
+#: Поперечник кружка, пиксели. Библиотечные четыре — это точка-пометка
+#: на углу значка, а здесь кружок несёт смысл сам по себе и стоит
+#: в ряду кнопок: незаметный индикатор бесполезен ровно так же, как
+#: строка мелким шрифтом, которую он заменил.
+_LIGHT_DOT_PX = 12
+
+
+def light_dot(light: SendLight, parent: QWidget) -> DotInfoBadge:
+	"""Кружок светофора — штатный ``DotInfoBadge`` (ADR-0023, п. 5).
+
+	Зелёный и красный берутся пресетами уровня, жёлтый — парой цветов
+	проекта: у библиотечного ``WARNING`` кружок в тёмной теме почти
+	белый и жёлтым не читается. Размер задаётся своим API виджета
+	(он рисует круг по своему прямоугольнику), лист стилей библиотеки
+	при этом не трогается.
+	"""
+	if light is SendLight.YELLOW:
+		dot = DotInfoBadge.custom(QColor(WARNING_TEXT[0]), QColor(WARNING_TEXT[1]), parent)
+	else:
+		level = InfoLevel.ERROR if light is SendLight.RED else InfoLevel.SUCCESS
+		dot = DotInfoBadge(parent, level)
+	dot.setFixedSize(_LIGHT_DOT_PX, _LIGHT_DOT_PX)
+	dot.setToolTip(SEND_LIGHT_HINTS[light])
+	return dot
 
 
 def queue_signature(item: Any) -> tuple[Any, ...]:
@@ -251,6 +331,9 @@ class QueuePanel:
 			action = self._button("Отмена", parent)
 			action.clicked.connect(bind(self.cancel, item.id))
 		widgets.append(action)
+		light = send_light(item.status)
+		if light is not None:
+			widgets.append(light_dot(light, parent))
 		return widgets
 
 	def _button(self, text: str, parent: QWidget) -> QPushButton:

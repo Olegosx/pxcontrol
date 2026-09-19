@@ -85,19 +85,13 @@ def queue_subtitle(item: QueueItemDto, *, with_community: bool = True) -> str:
 	как пользователь вводил его в форме.
 	"""
 	when_text = "сейчас" if item.when is None else format_local(item.when)
-	if item.status is JobStatus.RUNNING:
-		status = "отправляется"
-	elif item.status is JobStatus.ERROR:
-		status = f"ошибка: {item.error}"
-	elif item.status is JobStatus.WAITING:
-		# лимит Telegram — 100 отложек на канал (ADR-0016). Приписки
-		# «уйдёт при запущенном приложении» здесь нет намеренно: она
-		# повторялась в каждой строке списка, ничего не добавляя
-		# к следующей; само ограничение — в ADR-0016, п. 8
-		status = "ждёт слота отложек"
-	else:
-		status = "в очереди"
-	subtitle = f"публикация: {when_text} · {status}"
+	# состояние несёт светофор в строке действий (`send_light`), а словами
+	# говорится только то, чего цветом не скажешь: причина ошибки. «В очереди»
+	# и «ждёт слота отложек» отсюда убраны — первое видно по самому факту
+	# карточки в очереди, второе теперь жёлтый кружок; «отправляется» живёт
+	# в строке прогресса, где оно и уместно вместе с процентами
+	status = f"ошибка: {item.error}" if item.status is JobStatus.ERROR else None
+	subtitle = f"публикация: {when_text}" + (f" · {status}" if status else "")
 	if with_community:
 		subtitle = f"{item.community_title} · {subtitle}"
 	if item.note:

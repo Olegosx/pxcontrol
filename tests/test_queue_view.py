@@ -13,7 +13,7 @@ from typing import Any
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.ui.pages.card_list import plan_cards
-from pxcontrol.ui.pages.common import SLOT_NOW, slot_color, slot_label
+from pxcontrol.ui.pages.common import SLOT_NOW, format_local, slot_color, slot_label
 from pxcontrol.ui.pages.list_view import list_slots, paginate
 from pxcontrol.ui.pages.list_view import summary_text as list_summary
 from pxcontrol.ui.pages.publish_queue_view import (
@@ -21,6 +21,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
 	QueueSort,
 	apply_view,
+	queue_subtitle,
 )
 from pxcontrol.ui.pages.queue_panel import queue_signature as card_signature
 
@@ -390,3 +391,34 @@ def test_file_view_hidden_while_sending() -> None:
 	waiting = _item(1, when_minutes=600, status=JobStatus.PENDING)
 	sending = _item(1, when_minutes=600, status=JobStatus.RUNNING)
 	assert queue_signature(waiting) != queue_signature(sending)
+
+
+def test_send_light_answers_can_we_send_now() -> None:
+	"""Светофор: зелёный — отправка возможна, жёлтый — нет слота, красный — ошибка.
+
+	Вопрос у кружка один — есть ли сейчас возможность отправить пост
+	в Telegram. Поэтому зелёный и у поста «сейчас» (слот ему не нужен),
+	и у отложенного, чей слот уже получен.
+	"""
+	from pxcontrol.ui.pages.queue_panel import SEND_LIGHT_HINTS, SendLight, send_light
+
+	assert send_light(JobStatus.WAITING) is SendLight.YELLOW
+	assert send_light(JobStatus.ERROR) is SendLight.RED
+	assert send_light(JobStatus.PENDING) is send_light(JobStatus.RUNNING) is SendLight.GREEN
+	# завершённому отправлять нечего — кружка нет
+	assert send_light(JobStatus.DONE) is None
+	assert send_light(JobStatus.CANCELLED) is None
+	# у каждого цвета есть объяснение: кружок без подсказки — ребус
+	assert set(SEND_LIGHT_HINTS) == set(SendLight)
+
+
+def test_queue_subtitle_says_only_what_color_cannot() -> None:
+	"""Подпись не дублирует светофор: из состояний остаётся только причина ошибки."""
+	waiting = _item(1, when_minutes=600, status=JobStatus.WAITING)
+	assert queue_subtitle(waiting, with_community=False) == (
+		f"публикация: {format_local(waiting.when)}"
+	)
+	sending = _item(2, when_minutes=None, status=JobStatus.RUNNING)
+	assert queue_subtitle(sending, with_community=False) == "публикация: сейчас"
+	failed = _item(3, when_minutes=None, status=JobStatus.ERROR)
+	assert queue_subtitle(failed, with_community=False) == "публикация: сейчас · ошибка: сбой"
