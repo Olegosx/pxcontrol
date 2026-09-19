@@ -51,6 +51,11 @@ def default_key(item: Any) -> Hashable:
 	return key
 
 
+def default_title(item: Any) -> str:
+	"""Заголовок по умолчанию — ``title`` элемента."""
+	return str(item.title)
+
+
 @dataclass(frozen=True)
 class CardPlan:
 	"""Что сделать с карточками, чтобы список совпал со снимком.
@@ -122,7 +127,7 @@ class ListCard:
 		self._filled = False  # тело уже наполнено формой правки
 		self._compact = owner.compact
 		self.widget = CollapsibleCard(
-			item.title,
+			owner.title(item),
 			owner.page,
 			trailing=self._actions,
 			leading=self._leading,
@@ -136,7 +141,7 @@ class ListCard:
 		"""Приводит карточку к новому снимку элемента."""
 		self._item = item
 		self.refresh_leading()
-		self.widget.set_title(item.title)
+		self.widget.set_title(self._owner.title(item))
 		self.widget.set_summary(self._owner.subtitle(item), alert=self._owner.alert_of(item))
 		editable = self._owner.can_edit(item)
 		self.widget.set_expandable(editable)
@@ -225,9 +230,10 @@ class ListCard:
 class CardList:
 	"""Список карточек: точечное обновление по снимку, раскрытие, шапки.
 
-	Контракт элемента: ``title`` (заголовок карточки) и ключ
-	(``key``, по умолчанию ``id``). Всё остальное владелец задаёт
-	крючками — список не читает у элемента ничего сверх этого.
+	Контракт элемента — только ключ (``key``, по умолчанию ``id``)
+	и заголовок (``title``, по умолчанию поле ``title`` элемента).
+	Всё остальное владелец задаёт крючками — список не читает
+	у элемента ничего сверх этого.
 	"""
 
 	def __init__(
@@ -238,6 +244,7 @@ class CardList:
 		subtitle: Callable[[Any], str],
 		signature: SignatureFn,
 		key: KeyFn = default_key,
+		title: Callable[[Any], str] = default_title,
 		leading: WidgetsFn | None = None,
 		actions: WidgetsFn | None = None,
 		progress: ProgressFn | None = None,
@@ -253,6 +260,8 @@ class CardList:
 		subtitle: подпись карточки для элемента.
 		signature: отпечаток элемента — по нему решается обновление.
 		key: ключ элемента (устойчив между снимками).
+		title: заголовок карточки элемента (у файла на «Видео» — имя
+			файла; у элементов очереди и записей — их ``title``).
 		leading: виджеты в начале шапки (логотип сообщества, метка слота).
 		actions: кнопки правого края шапки под текущее состояние элемента.
 		progress: доля и подпись прогресса элемента; None — прогресса нет.
@@ -276,6 +285,8 @@ class CardList:
 		self.subtitle = subtitle
 		#: ключ элемента (читают карточки).
 		self.key = key
+		#: заголовок карточки элемента (читают карточки).
+		self.title = title
 		self._box = box
 		self._signature = signature
 		self._leading = leading

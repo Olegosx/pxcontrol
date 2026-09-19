@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QShowEvent
@@ -37,6 +38,7 @@ from qfluentwidgets import (
 	PushButton,
 	ScrollArea,
 	SubtitleLabel,
+	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
@@ -65,13 +67,13 @@ from pxcontrol.engine.services.video_queue import (
 from pxcontrol.engine.video.constants import is_upscale, scaled_size
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
+from pxcontrol.ui.pages.card_list import CardList
 from pxcontrol.ui.pages.common import (
 	CollapsibleCard,
 	DtoComboBox,
 	FormDialog,
 	bind,
 	checked_or_single,
-	clear_layout,
 	community_combo_label,
 	confirm_delete,
 	error_reporter,
@@ -84,12 +86,19 @@ from pxcontrol.ui.pages.common import (
 	page_layout,
 	pick_dir,
 	pick_file,
-	row_card,
 	show_info,
 	show_success,
 	show_warning,
 )
 from pxcontrol.ui.pages.frame_picker import FramePickerDialog
+from pxcontrol.ui.pages.list_view import (
+	ListPage,
+	ListWords,
+	PagerRow,
+	paginate,
+	step_page,
+	summary_text,
+)
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.video_batch import BatchScanDialog
 from pxcontrol.ui.pages.video_form import PresetForm, apply_bitrate_advice
@@ -99,6 +108,37 @@ _MANUAL_NAME = "ручные"
 
 #: Сколько ждать копирования выбранного кадра в папку очереди (сек).
 _STASH_TIMEOUT_S = 10.0
+
+#: Слова итоговой строки под списком готовых видео.
+PROCESSED_WORDS = ListWords(
+	empty="Готовых видео пока нет — обработайте исходник кнопкой выше.",
+	of_all="готовых видео",
+	within="в папке",
+)
+
+
+def processed_title(item: VideoFile) -> str:
+	"""Заголовок карточки готового видео: имя файла без подпапки.
+
+	Заголовок карточки однострочный и обрезается по ширине, поэтому
+	подпапка пакета («пакет/файл.mp4») уходит в подпись — там ей место
+	рядом с размером и датой.
+	"""
+	return Path(item.name).name
+
+
+def processed_subtitle(item: VideoFile) -> str:
+	"""Подпись карточки: подпапка (если файл в ней), размер, дата изменения."""
+	parts = [human_size(item.size_bytes), format_local(item.modified_at)]
+	subdir = Path(item.name).parent.as_posix()
+	if subdir != ".":
+		parts.insert(0, f"подпапка «{subdir}»")
+	return " · ".join(parts)
+
+
+def processed_signature(item: VideoFile) -> tuple[Any, ...]:
+	"""Отпечаток готового видео — всё, что показывает карточка."""
+	return (item.name, item.size_bytes, item.modified_at)
 
 
 class _AbortRun(Exception):  # noqa: N818 — служебный сигнал, не ошибка
@@ -279,7 +319,10 @@ class VideoPage(ScrollArea):
 		self._show_error = error_reporter(self)
 		self._session_done = 0  # готовых с последней итоговой плашки
 		self._entries: list[_FileEntry] = []  # карточки файлов к обработке
-		self._processed_checks: list[tuple[CheckBox, VideoFile]] = []
+		self._processed_items: list[VideoFile] = []  # вся подпапка результатов
+		self._processed_checked: set[str] = set()  # пути отмеченных к публикации
+		self._processed_page = 1
+		self._processed_view: ListPage[VideoFile] = paginate([], 1)
 		self._processed_dir = ""  # папка текущего списка готовых видео
 		# общий редактор параметров карточек файлов (см. _EntryEditor)
 		self._editor = _EntryEditor(self)
@@ -354,7 +397,14 @@ class VideoPage(ScrollArea):
 		)
 
 	def _build_processed_block(self, layout: QVBoxLayout) -> None:
-		"""Раздел готовых видео: папка результатов текущей подпапки."""
+		"""Раздел готовых видео: папка результатов текущей подпапки.
+
+		Список ведёт общий ``CardList``: снимок с диска приходит после
+		каждого готового файла и при каждом показе страницы, и карточки
+		меняются точечно по отпечатку, а не пересобираются все (190 строк
+		по 1,3 МБ на каждое завершённое задание — замер 19.09.2026).
+		Показ страницами, как у очереди и отложенных записей.
+		"""
 		layout.addSpacing(8)
 		layout.addWidget(SubtitleLabel("Готовые видео", self))
 		self._processed_hint = CaptionLabel("", self)
@@ -363,9 +413,22 @@ class VideoPage(ScrollArea):
 		self._result_box = QVBoxLayout()
 		self._result_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._result_box)
+		self._processed_list = CardList(
+			self,
+			self._result_box,
+			title=processed_title,
+			subtitle=processed_subtitle,
+			signature=processed_signature,
+			key=lambda item: item.path,
+			actions=self._processed_actions,
+			compact=True,
+		)
+		# итог и перелистывание — общие с очередью и отложенными
+		self._processed_pager = PagerRow(self, self._step_processed)
+		layout.addLayout(self._processed_pager.layout)
 		self._build_processed_actions(layout)
 		# список идёт за подпапкой: она задаёт папку, куда уйдёт результат
-		self._form.subdir_changed.connect(self._reload_processed)
+		self._form.subdir_changed.connect(self._on_subdir_changed)
 
 	def _build_processed_actions(self, layout: QVBoxLayout) -> None:
 		"""Кнопки массовой публикации под списком готовых видео."""
@@ -1018,53 +1081,67 @@ class VideoPage(ScrollArea):
 			self._show_error,
 		)
 
+	def _on_subdir_changed(self, _subdir: str) -> None:
+		"""Сменилась подпапка шаблона — другой список, листаем с начала."""
+		self._processed_page = 1
+		self._reload_processed()
+
 	def _show_processed(self, listing: ProcessedListing) -> None:
-		"""Показывает готовые видео карточками (новые — сверху)."""
+		"""Снимок папки получен: список и отметки — карточки меняются точечно."""
 		self._processed_hint.setText(f"Папка: {listing.directory}")
 		self._processed_dir = listing.directory  # старт диалога «Опубликовать папку…»
-		self._processed_checks = []
-		clear_layout(self._result_box)
-		has_items = bool(listing.items)
+		self._processed_items = list(listing.items)
+		# отметки исчезнувших файлов (уехали в опубликованные, удалены) снимаются
+		self._processed_checked &= {item.path for item in self._processed_items}
+		has_items = bool(self._processed_items)
 		self._publish_all_button.setEnabled(has_items)
 		self._publish_checked_button.setEnabled(has_items)
-		if not has_items:
-			self._result_box.addWidget(
-				CaptionLabel(
-					"Готовых видео пока нет — обработайте исходник кнопкой выше.",
-					self,
-				)
-			)
-			return
-		for item in listing.items:
-			self._result_box.addWidget(self._processed_card(item))
+		self._render_processed()
 
-	def _processed_card(self, item: VideoFile) -> QWidget:
-		"""Карточка готового видео: размер, дата и действия над файлом."""
-		open_btn = PushButton(FluentIcon.PLAY, "Открыть", self)
-		open_btn.clicked.connect(bind(open_in_system, item.path))
-		folder_btn = PushButton(FluentIcon.FOLDER, "Показать в папке", self)
-		folder_btn.clicked.connect(bind(open_in_system, str(Path(item.path).parent)))
-		publish_btn = PrimaryPushButton(FluentIcon.SEND, "Опубликовать…", self)
-		publish_btn.clicked.connect(bind(self._request_publish, item.path))
-		buttons = QWidget(self)
-		buttons_layout = QHBoxLayout(buttons)
-		buttons_layout.setContentsMargins(0, 0, 0, 0)
-		for button in (open_btn, folder_btn, publish_btn):
-			buttons_layout.addWidget(button)
-		# чекбокс — перед корзинкой (row_card добавляет её после trailing)
-		check = CheckBox("", buttons)
-		check.setToolTip("Отметить для «Опубликовать отмеченные»")
-		buttons_layout.addWidget(check)
-		self._processed_checks.append((check, item))
-		subtitle = f"{human_size(item.size_bytes)} · {format_local(item.modified_at)}"
-		card: QWidget = row_card(
-			self,
-			item.name,
-			subtitle,
-			trailing=buttons,
-			on_delete=bind(self._on_delete_processed, item),
+	def _render_processed(self) -> None:
+		"""Страница списка: карточки по отпечатку, итог и перелистывание."""
+		items = self._processed_items
+		self._processed_view = paginate(items, self._processed_page)
+		# зажатый номер возвращается: файлы под человеком могли исчезнуть
+		self._processed_page = self._processed_view.page
+		self._processed_list.sync(self._processed_view.items)
+		self._processed_pager.update(
+			self._processed_view, summary_text(self._processed_view, len(items), PROCESSED_WORDS)
 		)
-		return card
+
+	def _step_processed(self, delta: int) -> None:
+		"""Листает страницу готовых видео."""
+		self._processed_page = step_page(self._processed_page, delta, self._processed_view.pages)
+		self._render_processed()
+
+	def _processed_actions(self, item: VideoFile, parent: QWidget) -> list[QWidget]:
+		"""Правый край карточки: действия над файлом, отметка, удаление.
+
+		Отметка живёт у страницы множеством путей, а не в чекбоксе:
+		карточку могут обновить (сменился размер файла) или увести
+		на другую страницу — отмеченное не должно пропасть.
+		"""
+		open_btn = PushButton(FluentIcon.PLAY, "Открыть", parent)
+		open_btn.clicked.connect(bind(open_in_system, item.path))
+		folder_btn = PushButton(FluentIcon.FOLDER, "Показать в папке", parent)
+		folder_btn.clicked.connect(bind(open_in_system, str(Path(item.path).parent)))
+		publish_btn = PrimaryPushButton(FluentIcon.SEND, "Опубликовать…", parent)
+		publish_btn.clicked.connect(bind(self._request_publish, item.path))
+		check = CheckBox("", parent)
+		check.setToolTip("Отметить для «Опубликовать отмеченные»")
+		check.setChecked(item.path in self._processed_checked)
+		check.toggled.connect(partial(self._set_processed_checked, item.path))
+		delete = TransparentToolButton(FluentIcon.DELETE, parent)
+		delete.setToolTip("Удалить файл с диска (с подтверждением)")
+		delete.clicked.connect(bind(self._on_delete_processed, item))
+		return [open_btn, folder_btn, publish_btn, check, delete]
+
+	def _set_processed_checked(self, path: str, checked: bool) -> None:
+		"""Чекбокс карточки переключён — отметка в множестве страницы."""
+		if checked:
+			self._processed_checked.add(path)
+		else:
+			self._processed_checked.discard(path)
 
 	# --- массовая публикация готовых видео (ADR-0015) -------------------------------
 
@@ -1078,13 +1155,13 @@ class VideoPage(ScrollArea):
 		return community
 
 	def _publish_all_processed(self) -> None:
-		"""Все видео списка — пакетом на «Публикацию»."""
-		self._emit_publish_files([item for _check, item in self._processed_checks])
+		"""Все видео подпапки (все страницы) — пакетом на «Публикацию»."""
+		self._emit_publish_files(list(self._processed_items))
 
 	def _publish_checked_processed(self) -> None:
-		"""Отмеченные чекбоксами видео — пакетом на «Публикацию»."""
-		items = [item for _check, item in self._processed_checks]
-		checked = [item for check, item in self._processed_checks if check.isChecked()]
+		"""Отмеченные видео (на любой странице) — пакетом на «Публикацию»."""
+		items = list(self._processed_items)
+		checked = [item for item in items if item.path in self._processed_checked]
 		picked = checked_or_single(items, checked)
 		if picked is None:
 			self._show_error("Отметьте чекбоксами готовые видео для публикации.")
