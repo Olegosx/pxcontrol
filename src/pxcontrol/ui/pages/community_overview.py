@@ -755,7 +755,7 @@ class OverviewTab(OverviewCards):
 		if self._overview is not None:
 			self._render(self._overview)
 
-	def set_polling(self, active: bool) -> None:
+	def set_active(self, active: bool) -> None:
 		"""Показ вкладки перечитывает снимок из кэша (сети здесь нет)."""
 		if active:
 			self.reload()

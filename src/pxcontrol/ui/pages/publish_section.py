@@ -33,19 +33,22 @@ from pxcontrol.ui.pages.publish_stages import PublishStage
 from pxcontrol.ui.pages.published_view import PublishedView
 from pxcontrol.ui.pages.scheduled_view import ScheduledView
 from pxcontrol.ui.pages.stage_page import StagePage
+from pxcontrol.ui.queue_watcher import QueueWatcher, QueueWatchers
 
 
 class QueueStagePage(StagePage):
 	"""Экран «Очередь»: вся очередь отправки приложения (ADR-0016)."""
 
-	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
+	def __init__(
+		self, worker: EngineWorker, watcher: QueueWatcher, parent: QWidget | None = None
+	) -> None:
 		super().__init__(PublishStage.QUEUE, parent)
-		self._view = QueueView(worker, self)
+		self._view = QueueView(worker, watcher, self)
 		self.mount(self._view)
 
 	def set_active(self, active: bool) -> None:
-		"""Опрос очереди идёт, только пока экран виден."""
-		self._view.set_polling(active)
+		"""Карточки обновляются, только пока экран виден (ADR-0034)."""
+		self._view.set_active(active)
 
 	def show_filter(self, community_id: int | None, status: QueueFilter | None = None) -> None:
 		"""Ставит правило показа извне: сообщество и/или статус."""
@@ -97,18 +100,21 @@ class PublishSection:
 	def __init__(
 		self,
 		worker: EngineWorker,
+		watchers: QueueWatchers,
 		parent: QWidget,
 		switch: Callable[[QWidget], None],
 	) -> None:
 		"""Args:
 		worker: мост к движку.
+		watchers: наблюдатели очередей при главном окне (ADR-0034);
+			экранам раздела нужен наблюдатель очереди отправки.
 		parent: главное окно — родитель страниц раздела.
 		switch: показать страницу (``FluentWindow.switchTo``).
 		"""
 		self._switch = switch
-		self.new_post = PublishPage(worker, parent)
+		self.new_post = PublishPage(worker, watchers.publish, parent)
 		self.batch = BatchStagePage(worker, parent)
-		self.queue = QueueStagePage(worker, parent)
+		self.queue = QueueStagePage(worker, watchers.publish, parent)
 		self.scheduled = ScheduledStagePage(worker, parent)
 		self.published = PublishedStagePage(worker, parent)
 		self._pages: dict[PublishStage, QWidget] = {

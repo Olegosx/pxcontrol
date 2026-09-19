@@ -7,11 +7,13 @@
 к списку то, что есть только у очереди: статусы заданий, полосу
 прогресса и кнопки «Отмена» / «Повторить» / «Убрать».
 
-Опрос движка, снятие завершённых и признаки занятости живут не здесь,
-а в :class:`~pxcontrol.ui.queue_watcher.QueueWatcher`: показ и владение
-очередью — разные работы, и владелец не должен зависеть от того, открыт
-ли экран (ADR-0032). Панель держит свой наблюдатель и обращается к нему
-за снимком очереди и за действиями над заданием.
+Подписка на движок, снятие завершённых и признаки занятости живут
+не здесь, а в :class:`~pxcontrol.ui.queue_watcher.QueueWatcher`: показ
+и владение очередью — разные работы, и владелец не должен зависеть
+от того, открыт ли экран (ADR-0032). Наблюдатель один на очередь
+(ADR-0034), панель — его зритель: получает снимок из кэша, пока
+её экран виден (:meth:`QueuePanel.set_active`), и обращается к нему
+за действиями над заданием.
 """
 
 from __future__ import annotations
@@ -31,7 +33,6 @@ from qfluentwidgets import (
 	TransparentToolButton,
 )
 
-from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.telegram.types import TELEGRAM_MAX_SCHEDULED
 from pxcontrol.ui.pages.card_list import CardList
@@ -42,7 +43,7 @@ from pxcontrol.ui.pages.common import (
 	list_button,
 	open_in_system,
 )
-from pxcontrol.ui.queue_watcher import QueueWatcher
+from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher
 
 
 def file_view_shown(status: JobStatus) -> bool:
@@ -154,8 +155,9 @@ class QueuePanel:
 
 	Панель даёт точечное обновление карточек (общий список
 	:class:`CardList` — меняется только то, что изменилось) и кнопки
-	действий; опрос движка и реакцию на завершённые задания ведёт
-	её наблюдатель (:class:`~pxcontrol.ui.queue_watcher.QueueWatcher`).
+	действий; снимки очереди и снятие завершённых ведёт наблюдатель
+	очереди (:class:`~pxcontrol.ui.queue_watcher.QueueWatcher`), панель
+	присоединяется к нему зрителем.
 
 	Карточка элемента может раскрываться формой правки прямо в списке
 	(ADR-0016, п. 7): крючки ``editable`` и ``fill_body`` задаёт
@@ -172,47 +174,39 @@ class QueuePanel:
 
 	def __init__(
 		self,
-		worker: EngineWorker,
 		page: QWidget,
 		box: QVBoxLayout,
 		*,
-		service: Callable[[], Any],
+		watcher: QueueWatcher,
 		subtitle: Callable[[Any], str],
 		on_finished: Callable[[Any, bool], None] | None = None,
 		on_refreshed: Callable[[list[Any]], None] | None = None,
-		on_drained: Callable[[list[Any]], None] | None = None,
 		max_cards: int | None = None,
 		transform: Callable[[list[Any]], list[Any]] | None = None,
-		dismiss_finished: bool = True,
 		editable: Callable[[Any], bool] | None = None,
 		fill_body: Callable[[int, QVBoxLayout, Callable[[], None]], None] | None = None,
 		leading: Callable[[Any, QWidget], list[QWidget]] | None = None,
 		compact: bool = False,
+		active: bool = True,
 	) -> None:
 		"""Args:
-		worker: мост к движку.
-		page: страница-владелец (родитель карточек, таймера, плашек ошибок).
+		page: страница-владелец (родитель карточек и плашек ошибок).
 		box: компоновка, в которую панель складывает карточки.
-		service: провайдер сервиса очереди (``lambda: worker.engine.…``).
+		watcher: наблюдатель этой очереди (один на очередь, при главном
+			окне — ``QueueWatchers``); панель присоединяется к нему зрителем.
 		subtitle: подпись карточки для элемента.
-		on_finished: разовая реакция на завершённый элемент
-			(``True`` — готово, ``False`` — отменено) до снятия с показа.
+		on_finished: разовая реакция панели на завершённый элемент
+			(``True`` — готово, ``False`` — отменено) до снятия с показа;
+			доходит, пока панель активна.
 		on_refreshed: вызывается после каждого обновления со списком
 			показанных элементов (после ``transform``; сводка очереди,
 			при ``max_cards`` — место сказать «и ещё N»).
-		on_drained: вызывается с видимым остатком, когда занятость
-			кончилась (итоговая плашка вместо плашки на каждый файл).
 		max_cards: не больше стольких карточек на странице (None — все);
 			длинный хвост ждущих (ADR-0016) не раздувает страницу.
 		transform: правило показа — сортировка/фильтр видимого списка
 			(полный просмотр очереди); занятость считается до него,
-			по нефильтрованному списку. Смена правила отражается
-			следующим опросом — после неё зовите :meth:`poll`.
-		dismiss_finished: ``False`` — панель-зритель: завершёнными
-			владеет кто-то другой (у очереди отправки — наблюдатель
-			главного окна, ADR-0032), зритель их только показывает.
-			Два владельца над одной очередью наперегонки снимали бы
-			элементы — итоговые плашки при этом теряются.
+			по нефильтрованному списку. После смены правила зовите
+			:meth:`refresh` — снимок в кэше, в движок ходить незачем.
 		editable: можно ли раскрыть карточку элемента (правка). Без него
 			карточки не раскрываются вовсе.
 		fill_body: наполняет тело раскрытой карточки формой правки —
@@ -225,10 +219,13 @@ class QueuePanel:
 		compact: карточки по макету страницы сообщества — подпись под
 			названием, кнопки-обводки 28, полоса прогресса под названием,
 			ошибка красит подпись и рамку.
+		active: присоединиться к наблюдателю сразу (окно обслуживания,
+			вкладка); ``False`` — владелец присоединит при показе
+			(:meth:`set_active`).
 		"""
-		self._worker = worker
 		#: страница-владелец (нужна владельцам панели для плашек).
 		self.page = page
+		self._watcher = watcher
 		self._on_refreshed = on_refreshed
 		self._max_cards = max_cards
 		self._transform = transform
@@ -253,19 +250,24 @@ class QueuePanel:
 			compact=compact,
 			lost_edit_text="Пост покинул очередь — незаконченная правка не сохранена.",
 		)
-		self._watcher = QueueWatcher(
-			worker,
-			page,
-			service=service,
-			on_state=self._show,
-			on_finished=on_finished,
-			on_drained=on_drained,
-			dismiss_finished=dismiss_finished,
-		)
+		self._view = QueueView(on_state=self._show, on_finished=on_finished)
+		if active:
+			self.set_active(True)
 
-	def set_polling(self, active: bool) -> None:
-		"""Включает или приостанавливает опрос (панель на невидимом экране)."""
-		self._watcher.set_polling(active)
+	def set_active(self, active: bool) -> None:
+		"""Присоединяет панель к наблюдателю или отсоединяет (экран скрыт).
+
+		Присоединение сразу рисует последний снимок из кэша — человек
+		открыл экран и ждёт свежих карточек; движок при этом не трогается.
+		"""
+		if active:
+			self._watcher.attach(self.page, self._view)
+		else:
+			self._watcher.detach(self._view)
+
+	def refresh(self) -> None:
+		"""Перерисовывает карточки из кэша наблюдателя (листание, фильтр)."""
+		self._show(self._watcher.items)
 
 	def busy(self) -> bool:
 		"""Есть ли незавершённое в очереди (включая ждущих)."""
@@ -276,7 +278,7 @@ class QueuePanel:
 		self._list.refresh_leading()
 
 	def poll(self) -> None:
-		"""Запрашивает состояние очереди (после постановки и смены показа)."""
+		"""Запрашивает свежий снимок очереди (после постановки: карточка сразу)."""
 		self._watcher.poll()
 
 	def dismiss(self, item_id: int) -> None:

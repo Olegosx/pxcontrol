@@ -53,6 +53,7 @@ from pxcontrol.ui.pages.list_view import (
 )
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.queue_panel import QueuePanel
+from pxcontrol.ui.queue_watcher import QueueWatcher
 
 #: Слова итоговой строки под очередью.
 QUEUE_WORDS = ListWords(empty="Очередь пуста.", of_all="элементов очереди", within="в очереди")
@@ -177,18 +178,19 @@ def apply_view(
 class QueueView(QWidget):
 	"""Вся очередь отправки: живой список с сортировкой и фильтрами.
 
-	Опрос очереди идёт, только пока экран виден (:meth:`set_polling`);
+	Карточки обновляются, только пока экран виден (:meth:`set_active`);
 	правило показа ставится извне (:meth:`show_filter`) — с дашборда
 	сообществ плашкой ошибок (фильтр «ошибки») и кнопкой «Очередь»
 	карточки (фильтр по сообществу). Сообщество, которого в очереди нет,
 	фильтром не становится — показывается вся очередь.
 	"""
 
-	def __init__(self, worker: EngineWorker, parent: QWidget) -> None:
+	def __init__(self, worker: EngineWorker, watcher: QueueWatcher, parent: QWidget) -> None:
+		"""``watcher`` — наблюдатель очереди отправки при главном окне (ADR-0034)."""
 		super().__init__(parent)
 		self._worker = worker
 		# аватары сообществ из кэша статистики: карточки рисуют их
-		# в шапке, читать их на каждый опрос незачем
+		# в шапке, читать их на каждое обновление незачем
 		self._avatars: dict[int, str | None] = {}
 		self._total = 0
 		self._page = 1
@@ -210,23 +212,19 @@ class QueueView(QWidget):
 		layout.addStretch()
 
 		self._panel = QueuePanel(
-			worker,
 			self,
 			box,
-			service=lambda: worker.engine.publish_queue,
+			watcher=watcher,
 			subtitle=queue_subtitle,
 			transform=self._apply_view,
 			on_refreshed=self._update_summary,
-			# зритель: завершёнными владеет наблюдатель главного окна (ADR-0032),
-			# иначе две панели наперегонки снимали бы элементы
-			dismiss_finished=False,
 			editable=lambda item: item.status in EDITABLE_STATUSES,
 			fill_body=self._fill_editor,
 			leading=lambda item, parent: queue_leading(
 				item, parent, self._avatars.get(item.community_id)
 			),
+			active=False,  # присоединится, когда экран станет виден
 		)
-		self._panel.set_polling(False)  # включит экран, когда станет виден
 		run_in_engine(
 			worker,
 			worker.engine.community_stats.snapshot(),
@@ -236,9 +234,9 @@ class QueueView(QWidget):
 			noop,
 		)
 
-	def set_polling(self, active: bool) -> None:
-		"""Опрос очереди — только пока экран виден."""
-		self._panel.set_polling(active)
+	def set_active(self, active: bool) -> None:
+		"""Карточки обновляются, только пока экран виден."""
+		self._panel.set_active(active)
 
 	def show_filter(self, community_id: int | None, status: QueueFilter | None = None) -> None:
 		"""Ставит правило показа извне: сообщество и/или статус.
@@ -249,7 +247,7 @@ class QueueView(QWidget):
 			self._status_combo.setCurrentIndex(list(QueueFilter).index(status))
 		self._bar.want_community(community_id)
 		self._page = 1
-		self._panel.poll()
+		self._panel.refresh()
 
 	def _apply_avatars(self, stats: list[CommunityStatsDto]) -> None:
 		"""Раскладывает аватары сообществ и перерисовывает шапки карточек."""
@@ -280,14 +278,14 @@ class QueueView(QWidget):
 		return self._view.items
 
 	def _step(self, delta: int) -> None:
-		"""Листает страницу; показ обновляется сразу, не по таймеру."""
+		"""Листает страницу — из кэша наблюдателя, в движок не ходим."""
 		self._page = step_page(self._page, delta, self._view.pages)
-		self._panel.poll()
+		self._panel.refresh()
 
 	def _on_view_changed(self) -> None:
-		"""Правило показа сменилось: листаем с начала, следующий опрос его применит."""
+		"""Правило показа сменилось: листаем с начала и перерисовываем из кэша."""
 		self._page = 1  # набор изменился — листаем с начала
-		self._panel.poll()  # показ обновляется сразу, не по таймеру
+		self._panel.refresh()
 
 	def _update_summary(self, _shown: list[QueueItemDto]) -> None:
 		"""Итоговая строка и состояние перелистывания.

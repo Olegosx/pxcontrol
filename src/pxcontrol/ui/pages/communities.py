@@ -110,6 +110,7 @@ from pxcontrol.ui.pages.community_state import (
 	subtitle_text,
 )
 from pxcontrol.ui.pages.maintenance import open_maintenance
+from pxcontrol.ui.queue_watcher import QueueWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -762,10 +763,15 @@ class CommunitiesPage(ScrollArea):
 	queue_requested = Signal(int)
 	queue_errors_requested = Signal()
 
-	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
+	def __init__(
+		self, worker: EngineWorker, maintenance: QueueWatcher, parent: QWidget | None = None
+	) -> None:
+		"""``maintenance`` — наблюдатель очереди обслуживания при главном
+		окне (ADR-0034): его получает окно «Обслуживание» с карточки."""
 		super().__init__(parent)
 		self.setObjectName("communities")
 		self._worker = worker
+		self._maintenance = maintenance
 		self._show_error = error_reporter(self)
 		self._communities: list[CommunityDto] = []
 		self._queue_counts: dict[int, QueueCounts] = {}
@@ -1053,7 +1059,7 @@ class CommunitiesPage(ScrollArea):
 				self._show_error,
 			)
 		elif action is CardAction.MAINTENANCE:
-			open_maintenance(self._worker, community, self)
+			open_maintenance(self._worker, self._maintenance, community, self)
 
 	def _open_errors(self) -> None:
 		"""Плашка ошибок сводки: очередь отправки с фильтром «ошибки»."""

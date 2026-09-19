@@ -18,9 +18,10 @@
   удаление. Публикаторов здесь нет намеренно: всё, кто публикует, —
   на вкладке «Участники», одним местом.
 
-Тела вкладок строятся лениво, при первом открытии: панели очередей
-опрашивают движок, и десяток страниц сообществ не должен опрашивать
-его с невидимых вкладок. Сигнал ``changed`` уходит после каждой
+Тела вкладок строятся лениво, при первом открытии, а панели очередей
+присоединяются к наблюдателям главного окна только на время показа
+(ADR-0034): десяток страниц сообществ не должен перерисовывать карточки
+на невидимых вкладках. Сигнал ``changed`` уходит после каждой
 операции, меняющей данные, — главное окно по нему обновляет дашборд
 и подменю навигации.
 """
@@ -118,6 +119,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 )
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.scheduled_panel import ScheduledPanel, scheduled_subtitle
+from pxcontrol.ui.queue_watcher import QueueWatcher, QueueWatchers
 
 #: Размер логотипа в шапке страницы (пиксели).
 _HEADER_LOGO_SIZE = 48
@@ -606,7 +608,9 @@ class _QueueTab(QWidget):
 	#: «Вся очередь…» — экран «Очередь» раздела «Публикация» с фильтром.
 	view_all_requested = Signal()
 
-	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
+	def __init__(
+		self, worker: EngineWorker, watcher: QueueWatcher, community: CommunityDto, parent: QWidget
+	) -> None:
 		super().__init__(parent)
 		self._worker = worker
 		self._community = community
@@ -646,24 +650,22 @@ class _QueueTab(QWidget):
 		layout.addLayout(self._pager.layout)
 		layout.addStretch()
 		self._panel = QueuePanel(
-			worker,
 			self,
 			queue_box,
-			service=lambda: worker.engine.publish_queue,
+			watcher=watcher,
 			subtitle=lambda item: queue_subtitle(item, with_community=False),
 			transform=self._only_this_community,
 			on_refreshed=self._on_refreshed,
-			# зритель: завершёнными владеет наблюдатель главного окна (ADR-0032)
-			dismiss_finished=False,
 			editable=lambda item: item.status in EDITABLE_STATUSES,
 			fill_body=self._fill_editor,
 			leading=self._leading,
 			compact=True,
+			active=False,  # присоединит страница, когда вкладка станет видна
 		)
 
-	def set_polling(self, active: bool) -> None:
-		"""Опрос очереди — только пока вкладка видна."""
-		self._panel.set_polling(active)
+	def set_active(self, active: bool) -> None:
+		"""Карточки обновляются, только пока вкладка видна."""
+		self._panel.set_active(active)
 
 	def _render_header(self, count: int) -> None:
 		"""Заголовок-хайрлайн с числом и кнопками (перестраивается по числу)."""
@@ -688,9 +690,9 @@ class _QueueTab(QWidget):
 		return self._view.items
 
 	def _step(self, delta: int) -> None:
-		"""Листает страницу; показ обновляется сразу, не по таймеру."""
+		"""Листает страницу — из кэша наблюдателя, в движок не ходим."""
 		self._page = step_page(self._page, delta, self._view.pages)
-		self._panel.poll()
+		self._panel.refresh()
 
 	def _on_refreshed(self, _shown: list[QueueItemDto]) -> None:
 		"""После опроса: число в заголовке, кнопка повтора, пустое состояние, итог.
@@ -818,11 +820,19 @@ class CommunityPage(ScrollArea):
 	queue_requested = Signal(int)
 
 	def __init__(
-		self, worker: EngineWorker, community: CommunityDto, parent: QWidget | None = None
+		self,
+		worker: EngineWorker,
+		watchers: QueueWatchers,
+		community: CommunityDto,
+		parent: QWidget | None = None,
 	) -> None:
+		"""``watchers`` — наблюдатели очередей при главном окне (ADR-0034):
+		вкладке «Очередь» нужен наблюдатель отправки, «Обслуживанию» —
+		обслуживания."""
 		super().__init__(parent)
 		self.setObjectName(community_route_key(community.id))
 		self._worker = worker
+		self._watchers = watchers
 		self._community = community
 		self._show_error = error_reporter(self)
 		self._counts = QueueCounts()
@@ -868,14 +878,14 @@ class CommunityPage(ScrollArea):
 			body = self._tabs.pop(key, None)
 			if body is None:
 				continue
-			_set_polling(body, False)
+			_set_active(body, False)
 			self._body.removeWidget(body)
 			body.deleteLater()
 			if key == self._current_tab:
 				fresh = self._mount_tab(key)
 				self._body.addWidget(fresh)
 				fresh.show()
-				_set_polling(fresh, True)
+				_set_active(fresh, True)
 
 	# --- сборка -----------------------------------------------------------------
 
@@ -996,21 +1006,21 @@ class CommunityPage(ScrollArea):
 		self._render_tab_titles()  # пилюля активной вкладки — акцентом
 		body = self._mount_tab(key)
 		if previous is body:
-			_set_polling(body, True)
+			_set_active(body, True)
 			return
 		if previous is not None:
-			_set_polling(previous, False)
+			_set_active(previous, False)
 			self._body.removeWidget(previous)
 			previous.hide()
 		self._body.addWidget(body)
 		body.show()
-		_set_polling(body, True)
+		_set_active(body, True)
 
 	def _mount_tab(self, key: str) -> QWidget:
 		"""Тело вкладки: строится при первом обращении, дальше — из памяти.
 
 		Вне показа тело скрыто и в компоновке не участвует (ни в высоте,
-		ни в опросе движка); его состояние — набранный текст, страница
+		ни в обновлении карточек); его состояние — набранный текст, страница
 		очереди — переживает переключения.
 		"""
 		body = self._tabs.get(key)
@@ -1023,7 +1033,7 @@ class CommunityPage(ScrollArea):
 	def _build_tab(self, key: str) -> QWidget:
 		"""Фабрика тел вкладок."""
 		if key == TAB_QUEUE:
-			tab = _QueueTab(self._worker, self._community, self)
+			tab = _QueueTab(self._worker, self._watchers.publish, self._community, self)
 			tab.counts_changed.connect(self._on_queue_counts)
 			tab.view_all_requested.connect(lambda: self.queue_requested.emit(self._community.id))
 			return tab
@@ -1063,7 +1073,7 @@ class CommunityPage(ScrollArea):
 	def _maintenance_tab(self) -> QWidget:
 		"""Вкладка «Обслуживание»: панель или объяснение, почему нельзя."""
 		if self._community.userbot_assigned:
-			return MaintenancePanel(self._worker, self._community, self)
+			return MaintenancePanel(self._worker, self._watchers.maintenance, self._community, self)
 		box = QWidget(self)
 		layout = QVBoxLayout(box)
 		layout.setContentsMargins(0, 24, 0, 0)
@@ -1096,7 +1106,7 @@ class CommunityPage(ScrollArea):
 	# --- показ страницы: чтение кэшей ---------------------------------------------
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
-		"""Читает свежие снимки (очередь, статистика) и возобновляет опрос вкладки."""
+		"""Читает свежие снимки (очередь, статистика) и оживляет вкладку."""
 		super().showEvent(event)
 		run_in_engine(
 			self._worker,
@@ -1112,12 +1122,12 @@ class CommunityPage(ScrollArea):
 			self._on_stats,
 			self._show_error,
 		)
-		_set_polling(self._tabs.get(self._current_tab), True)
+		_set_active(self._tabs.get(self._current_tab), True)
 
 	def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 — API Qt
-		"""Невидимая страница движок не опрашивает."""
+		"""Невидимая страница карточки не обновляет и снимки не читает."""
 		super().hideEvent(event)
-		_set_polling(self._tabs.get(self._current_tab), False)
+		_set_active(self._tabs.get(self._current_tab), False)
 
 	def _on_queue_state(self, items: list[QueueItemDto]) -> None:
 		self._on_queue_counts(community_queue_counts(items, self._community.id))
@@ -1246,7 +1256,7 @@ class CommunityPage(ScrollArea):
 
 	def _on_open_maintenance(self) -> None:
 		"""Меню «…» → окно обслуживания (та же панель, что во вкладке)."""
-		open_maintenance(self._worker, self._community, self)
+		open_maintenance(self._worker, self._watchers.maintenance, self._community, self)
 
 	def _recheck(self) -> None:
 		"""Перепроверяет оба способа администрирования."""
@@ -1343,9 +1353,13 @@ class CommunityPage(ScrollArea):
 		)
 
 
-def _set_polling(tab: QWidget | None, active: bool) -> None:
-	"""Включает или выключает опрос движка у тела вкладки (если оно опрашивает)."""
-	setter = getattr(tab, "set_polling", None)
+def _set_active(tab: QWidget | None, active: bool) -> None:
+	"""Оживляет или усыпляет тело вкладки (если у него есть что оживлять).
+
+	Панели очередей присоединяются к наблюдателю и отсоединяются,
+	«Обзор» перечитывает свой снимок при показе.
+	"""
+	setter = getattr(tab, "set_active", None)
 	if callable(setter):
 		setter(active)
 

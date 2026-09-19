@@ -61,6 +61,7 @@ from pxcontrol.ui.pages.common import (
 	list_area,
 )
 from pxcontrol.ui.pages.queue_panel import QueuePanel
+from pxcontrol.ui.queue_watcher import QueueWatcher
 
 #: Человеческие названия видов служебных записей (ADR-0026).
 _KIND_TITLES = {
@@ -133,14 +134,18 @@ class MaintenancePanel(QWidget):
 	"""Тело обслуживания: сегменты разделов, их страницы и панель хода.
 
 	Один и тот же виджет живёт во вкладке страницы сообщества
-	и в рабочем окне с дашборда. Опрос панели хода работы владелец
-	включает и выключает через :meth:`set_polling` (невидимая вкладка
-	опрашивать движок не должна).
+	и в рабочем окне с дашборда. Панель хода работы — зритель
+	наблюдателя очереди обслуживания при главном окне (ADR-0034);
+	вкладка присоединяет и отсоединяет её через :meth:`set_active`
+	(невидимая вкладка карточки не обновляет), окно живёт присоединённым.
 	"""
 
-	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
+	def __init__(
+		self, worker: EngineWorker, watcher: QueueWatcher, community: CommunityDto, parent: QWidget
+	) -> None:
 		super().__init__(parent)
 		self._worker = worker
+		self._watcher = watcher
 		self._community = community
 		self._show_error = error_reporter(self)
 		self._boxes: dict[ServiceMessageKind, CheckBox] = {}
@@ -150,9 +155,9 @@ class MaintenancePanel(QWidget):
 		self._jobs: dict[int, BodyLabel] = {}
 		self._build()
 
-	def set_polling(self, active: bool) -> None:
-		"""Включает или приостанавливает опрос панели хода работы."""
-		self._panel.set_polling(active)
+	def set_active(self, active: bool) -> None:
+		"""Присоединяет панель хода работы к наблюдателю или отсоединяет."""
+		self._panel.set_active(active)
 
 	# --- каркас -------------------------------------------------------------------
 
@@ -177,10 +182,9 @@ class MaintenancePanel(QWidget):
 		queue_box.setSpacing(spacing.list_spacing)
 		layout.addLayout(queue_box)
 		self._panel = QueuePanel(
-			self._worker,
 			self,
 			queue_box,
-			service=lambda: self._worker.engine.maintenance,
+			watcher=self._watcher,
 			subtitle=self._job_subtitle,
 			on_finished=self._on_job_finished,
 			# задание с ошибкой очередь не покидает — до `on_finished`
@@ -492,11 +496,19 @@ class MaintenancePanel(QWidget):
 class MaintenanceDialog(WorkDialog):
 	"""Рабочее окно обслуживания (с дашборда): та же панель, что во вкладке."""
 
-	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
+	def __init__(
+		self, worker: EngineWorker, watcher: QueueWatcher, community: CommunityDto, parent: QWidget
+	) -> None:
 		super().__init__(f"Обслуживание · {community.title}", parent)
-		self.content.addWidget(MaintenancePanel(worker, community, self), stretch=1)
+		self.content.addWidget(MaintenancePanel(worker, watcher, community, self), stretch=1)
 
 
-def open_maintenance(worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
-	"""Открывает окно обслуживания сообщества."""
-	exec_dialog(MaintenanceDialog(worker, community, parent.window()))
+def open_maintenance(
+	worker: EngineWorker, watcher: QueueWatcher, community: CommunityDto, parent: QWidget
+) -> None:
+	"""Открывает окно обслуживания сообщества.
+
+	``watcher`` — наблюдатель очереди обслуживания при главном окне
+	(ADR-0034): окно и вкладка страницы сообщества смотрят на одну очередь.
+	"""
+	exec_dialog(MaintenanceDialog(worker, watcher, community, parent.window()))

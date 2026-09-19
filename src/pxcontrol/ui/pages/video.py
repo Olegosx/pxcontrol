@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QShowEvent
+from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
@@ -102,6 +102,7 @@ from pxcontrol.ui.pages.list_view import (
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.video_batch import BatchScanDialog
 from pxcontrol.ui.pages.video_form import PresetForm, apply_bitrate_advice
+from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher
 
 #: Имя «пресета» в имени файла результата, когда пресет не выбран.
 _MANUAL_NAME = "ручные"
@@ -312,10 +313,14 @@ class VideoPage(ScrollArea):
 	#: и id канала. Ловит главное окно → пакет на «Публикации».
 	publish_folder_requested = Signal(str, int)
 
-	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
+	def __init__(
+		self, worker: EngineWorker, watcher: QueueWatcher, parent: QWidget | None = None
+	) -> None:
+		"""``watcher`` — наблюдатель очереди обработки при главном окне (ADR-0034)."""
 		super().__init__(parent)
 		self.setObjectName("video")
 		self._worker = worker
+		self._watcher = watcher
 		self._show_error = error_reporter(self)
 		self._session_done = 0  # готовых с последней итоговой плашки
 		self._entries: list[_FileEntry] = []  # карточки файлов к обработке
@@ -334,11 +339,22 @@ class VideoPage(ScrollArea):
 		"""Обновляет каналы и готовые видео при каждом открытии страницы.
 
 		Список перечитывается с диска: файлы могли уехать в опубликованные
-		(после отправки поста) или измениться мимо приложения.
+		(после отправки поста) или измениться мимо приложения. Панель
+		очереди обработки присоединяется к наблюдателю на время показа.
 		"""
 		super().showEvent(event)
+		self._queue.set_active(True)
 		self._reload_communities()
 		self._reload_processed()
+
+	def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 — API Qt
+		"""Скрытая страница карточки очереди не обновляет.
+
+		Реакции на завершённые (перечитать готовые, итоговая плашка)
+		остаются: они у постоянного зрителя, а не у панели.
+		"""
+		super().hideEvent(event)
+		self._queue.set_active(False)
 
 	# --- сборка страницы ---------------------------------------------------------
 
@@ -378,22 +394,29 @@ class VideoPage(ScrollArea):
 		self._empty_hint.setVisible(not self._entries)
 
 	def _build_queue_block(self, layout: QVBoxLayout) -> None:
-		"""Панель очереди обработки: итоговая строка и карточки элементов."""
+		"""Панель очереди обработки: итоговая строка и карточки элементов.
+
+		Реакции страницы на исходы — перечитать готовые видео и показать
+		итоговую плашку — постоянный зритель наблюдателя (ADR-0034): они
+		нужны и при скрытой странице. Панель карточек — зритель на время
+		показа (см. ``showEvent`` / ``hideEvent``).
+		"""
 		self._queue_summary = CaptionLabel("", self)
 		self._queue_summary.hide()
 		layout.addWidget(self._queue_summary)
 		queue_box = QVBoxLayout()
 		queue_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(queue_box)
+		self._watcher.attach(
+			self, QueueView(on_finished=self._on_queue_finished, on_drained=self._notify_drained)
+		)
 		self._queue = QueuePanel(
-			self._worker,
 			self,
 			queue_box,
-			service=lambda: self._worker.engine.video_queue,
+			watcher=self._watcher,
 			subtitle=self._queue_subtitle,
-			on_finished=self._on_queue_finished,
 			on_refreshed=self._update_queue_summary,
-			on_drained=self._notify_drained,
+			active=False,  # присоединится при показе страницы
 		)
 
 	def _build_processed_block(self, layout: QVBoxLayout) -> None:
@@ -1001,10 +1024,6 @@ class VideoPage(ScrollArea):
 
 	# --- панель очереди обработки -------------------------------------------------
 
-	def queue_busy(self) -> bool:
-		"""Есть ли необработанное в очереди (для подтверждения выхода)."""
-		return self._queue.busy()
-
 	def _on_queue_finished(self, item: VideoItemDto, done: bool) -> None:
 		"""Учитывает завершённый элемент (плашки на каждый файл нет:
 		готовый файл — строка «Готовых видео», а не элемент очереди)."""
@@ -1017,7 +1036,7 @@ class VideoPage(ScrollArea):
 		"""Одна итоговая плашка, когда очередь доработала (вместо плашки
 		на каждый файл — пакет их наплодил бы десятками).
 
-		Родитель — окно: опрос живёт всегда, и завершение может прийти
+		Родитель — окно: зритель постоянный, и завершение может прийти
 		при скрытой странице — плашка на ней погасла бы незамеченной.
 		"""
 		errors = sum(1 for item in visible if item.status is JobStatus.ERROR)

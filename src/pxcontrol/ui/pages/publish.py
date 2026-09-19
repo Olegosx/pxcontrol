@@ -90,6 +90,7 @@ from pxcontrol.ui.pages.publish_stages import PublishStage
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
 from pxcontrol.ui.pages.stage_page import StagePage
+from pxcontrol.ui.queue_watcher import QueueWatcher
 
 #: Пределы, пока сообщество не ответило: базовые — они не обещают лишнего.
 _BASE_LIMITS = TextLimits(
@@ -126,9 +127,13 @@ class PublishPage(StagePage):
 	#: «Вся очередь…» — соседний экран раздела «Очередь».
 	queue_requested = Signal()
 
-	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
+	def __init__(
+		self, worker: EngineWorker, watcher: QueueWatcher, parent: QWidget | None = None
+	) -> None:
+		"""``watcher`` — наблюдатель очереди отправки при главном окне (ADR-0034)."""
 		super().__init__(PublishStage.NEW_POST, parent)
 		self._worker = worker
+		self._watcher = watcher
 		self._show_error = error_reporter(self)
 		# канал прошлой публикации: предвыбор после загрузки списка
 		self._kind = MediaKind.NONE
@@ -302,15 +307,11 @@ class PublishPage(StagePage):
 		queue_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(queue_box)
 		self._queue = QueuePanel(
-			self._worker,
 			self,
 			queue_box,
-			service=lambda: self._worker.engine.publish_queue,
+			watcher=self._watcher,
 			subtitle=queue_subtitle,
 			on_refreshed=self._update_queue_summary,
-			# зритель: завершёнными владеет наблюдатель главного окна
-			# (ADR-0032) — он же показывает плашку об исходе
-			dismiss_finished=False,
 			# длинный хвост ждущих слота (ADR-0016) не раздувает форму;
 			# всё целиком — на экране «Очередь»
 			max_cards=_QUEUE_MAX_CARDS,
@@ -321,6 +322,7 @@ class PublishPage(StagePage):
 			leading=lambda item, parent: queue_leading(
 				item, parent, self._avatars.get(item.community_id)
 			),
+			active=False,  # присоединится, когда экран станет виден
 		)
 
 	def _on_queue_view(self) -> None:
@@ -334,13 +336,13 @@ class PublishPage(StagePage):
 	# --- поведение -----------------------------------------------------------------
 
 	def set_active(self, active: bool) -> None:
-		"""Экран показан или скрыт: список каналов и опрос очереди.
+		"""Экран показан или скрыт: список каналов и карточки очереди.
 
-		Панель очереди под формой — зритель: завершёнными владеет
-		наблюдатель главного окна (ADR-0032). Но опрашивать движок
-		скрытой ей незачем — он уже опрашивается наблюдателем.
+		Панель очереди под формой — зритель наблюдателя главного окна
+		(ADR-0034): скрытая она карточки не обновляет, показанная берёт
+		снимок из кэша.
 		"""
-		self._queue.set_polling(active)
+		self._queue.set_active(active)
 		if active:
 			self._reload_communities()
 

@@ -38,7 +38,7 @@ from pxcontrol.ui.pages.settings import SettingsPage
 from pxcontrol.ui.pages.user_page import UserPage, subject_owner
 from pxcontrol.ui.pages.users import UsersPage
 from pxcontrol.ui.pages.video import VideoPage
-from pxcontrol.ui.queue_watcher import QueueWatcher
+from pxcontrol.ui.queue_watcher import QueueView, QueueWatchers
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,9 @@ class MainWindow(FluentWindow):
 		self.resize(1160, 800)
 		self.setMinimumSize(1000, 640)
 		self._restore_geometry()
+		# наблюдатели очередей — по одному на очередь, при окне (ADR-0034);
+		# страницы получают их зрителями, поэтому заводятся до навигации
+		self._watchers = QueueWatchers(worker, self)
 		self._build_navigation()
 		self._watch_publish_queue()
 
@@ -101,7 +104,7 @@ class MainWindow(FluentWindow):
 		self._user_pages: dict[LaneOwner, UserPage] = {}
 		self._users_page.users_changed.connect(self._sync_user_nav)
 		self._users_page.open_user.connect(self._open_user)
-		self._communities_page = CommunitiesPage(self._worker, self)
+		self._communities_page = CommunitiesPage(self._worker, self._watchers.maintenance, self)
 		self.addSubInterface(self._communities_page, FluentIcon.HOME, "Каналы и группы")
 		# подменю сообществ — живое: дашборд после каждой загрузки шлёт
 		# свежий список, окно приводит пункты и страницы в соответствие
@@ -111,7 +114,7 @@ class MainWindow(FluentWindow):
 		self._pending_community: int | None = None
 		self._communities_page.communities_changed.connect(self._sync_community_nav)
 		self._communities_page.open_community.connect(self._open_community)
-		self._video_page = VideoPage(self._worker, self)
+		self._video_page = VideoPage(self._worker, self._watchers.video, self)
 		self.addSubInterface(self._video_page, FluentIcon.VIDEO, "Видео")
 		self._build_publish_section()
 		# категории настроек (Общие, Аккаунты) — внутри самой страницы
@@ -171,7 +174,7 @@ class MainWindow(FluentWindow):
 		и прятать первую из них в корень значило бы соврать о пути поста.
 		Ветка сразу раскрыта — она и есть карта этого пути.
 		"""
-		self._publish = PublishSection(self._worker, self, self.switchTo)
+		self._publish = PublishSection(self._worker, self._watchers, self, self.switchTo)
 		self.navigationInterface.addItem(
 			routeKey=SECTION_ROUTE_KEY,
 			icon=SECTION_ICON,
@@ -195,20 +198,14 @@ class MainWindow(FluentWindow):
 		self._video_page.publish_folder_requested.connect(self._publish.show_batch_folder)
 
 	def _watch_publish_queue(self) -> None:
-		"""Заводит наблюдателя очереди отправки — владельца её завершённых.
+		"""Плашка об исходе поста — постоянный зритель очереди отправки.
 
-		Владелец один на приложение и не зависит от того, какой экран
-		открыт (ADR-0032): экраны стадий гасят свой опрос, когда их
-		не видно, а снимать завершённые задания и показывать исход
-		надо всегда. Он же отвечает на вопрос при закрытии окна —
-		идёт ли отправка прямо сейчас.
+		Исход показывается всегда, какой бы экран ни был открыт
+		(ADR-0032): экраны стадий отсоединяются от наблюдателя, когда
+		их не видно, а окно — нет. Само снятие завершённых ведёт
+		наблюдатель (ADR-0034), окну остаётся сказать человеку.
 		"""
-		self._queue_watcher = QueueWatcher(
-			self._worker,
-			self,
-			service=lambda: self._worker.engine.publish_queue,
-			on_finished=self._on_post_finished,
-		)
+		self._watchers.publish.attach(self, QueueView(on_finished=self._on_post_finished))
 
 	def _on_post_finished(self, item: QueueItemDto, done: bool) -> None:
 		"""Итоговая плашка поста, покинувшего очередь отправки."""
@@ -242,7 +239,7 @@ class MainWindow(FluentWindow):
 		for community in communities:
 			existing = self._community_pages.get(community.id)
 			if existing is None:
-				page = CommunityPage(self._worker, community, self)
+				page = CommunityPage(self._worker, self._watchers, community, self)
 				page.changed.connect(self._communities_page.reload)
 				page.publish_requested.connect(self._publish.show_new_post)
 				page.queue_requested.connect(self._publish.show_queue)
@@ -332,11 +329,11 @@ class MainWindow(FluentWindow):
 		остаются на диске: результат пишется атомарно).
 		"""
 		reasons = []
-		if self._queue_watcher.active():
+		if self._watchers.publish.active():
 			reasons.append(
 				"идёт отправка поста — загрузка оборвётся (пост уйдёт при следующем запуске)"
 			)
-		if self._video_page.queue_busy():
+		if self._watchers.video.busy():
 			reasons.append("в очереди обработки остались видео — при выходе они из неё пропадут")
 		if reasons:
 			text = "\n".join(f"— {reason};" for reason in reasons)
