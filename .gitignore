@@ -15,7 +15,6 @@ media/
 cache/
 _misc/
 .claude/
-CLAUDE.md
 
 # --- python/окружение ---
 __pycache__/
