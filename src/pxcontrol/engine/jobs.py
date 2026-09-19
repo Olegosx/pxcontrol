@@ -8,10 +8,12 @@
 шаг** и **каким ресурсом он ограничен**: кодирование упирается
 в процессор, обращения к Telegram — в дорожку аккаунта (ADR-0024).
 
-Этот модуль выражает общую часть — жизненный цикл, — и ничего не знает
-ни про ffmpeg, ни про Telegram. Конкретная очередь заводит свой подкласс
-:class:`Job` со своими полями, отдаёт каркасу исполнителя одного задания
-и строит из заданий свои снимки для интерфейса.
+Этот модуль выражает общую часть — жизненный цикл и **версию
+состояния** (ADR-0034: интерфейс узнаёт об изменениях подпиской,
+а не опросом), — и ничего не знает ни про ffmpeg, ни про Telegram.
+Конкретная очередь заводит свой подкласс :class:`Job` со своими полями,
+отдаёт каркасу исполнителя одного задания и строит из заданий свои
+снимки для интерфейса.
 
 Чего каркас сознательно **не** делает: не трактует предметные исключения
 (их переводит сам исполнитель), не хранит задания между запусками
@@ -123,24 +125,87 @@ class Job:
 
 	Конкретная очередь заводит подкласс со своими полями (заявка,
 	путь результата, черновик поста) — каркас о них не знает.
+
+	Статус, ошибка, пометка и предупреждение — **наблюдаемые** поля:
+	запись нового значения сообщает очереди, что её состояние изменилось
+	(:meth:`JobQueue.mark_changed`), и та поднимает версию для подписчиков
+	(ADR-0034). Сервисы пишут в эти поля напрямую в двух десятках мест —
+	учитывать каждое руками значило бы забыть следующее. Пишутся они
+	только в цикле событий движка. Доля выполнения (``progress``)
+	и флаг отмены — простые поля: их пишут из рабочих потоков, и в версию
+	они не входят — прогресс интерфейс читает опросом, пока идёт работа.
 	"""
 
 	def __init__(self, job_id: int) -> None:
 		self.id = job_id
-		self.status = JobStatus.PENDING
+		self._status = JobStatus.PENDING
 		self.progress = 0.0
-		self.error: str | None = None
+		self._error: str | None = None
 		#: пометка состояния для карточки (автоснижение битрейта,
 		#: пауза после флуд-лимита); None — нечего сказать. Живёт
 		#: столько же, сколько состояние: кончилось — снимается
-		self.note: str | None = None
+		self._note: str | None = None
 		#: предупреждение, которое состояние пережить обязано: исход
 		#: задания не удалось сохранить. Отдельным полем именно потому,
 		#: что у него другая жизнь — оно про задание целиком, а не про
 		#: его нынешнее состояние, и затирать его пометкой нельзя
-		self.warning: str | None = None
+		self._warning: str | None = None
 		#: отмену запросил человек — отличает её от остановки движка
 		self.cancel_requested = False
+		#: кому сообщать об изменении наблюдаемых полей (ставит очередь)
+		self._on_change: Callable[[], None] | None = None
+
+	def bind_changes(self, on_change: Callable[[], None]) -> None:
+		"""Подключает задание к очереди: изменения полей поднимают её версию."""
+		self._on_change = on_change
+
+	def _set_observed(self, name: str, value: object) -> None:
+		"""Пишет наблюдаемое поле; изменившееся значение сообщается очереди.
+
+		Запись того же значения — не изменение: повторные ``note = None``
+		при снятии пометки не должны будить интерфейс впустую.
+		"""
+		if getattr(self, name) == value:
+			return
+		setattr(self, name, value)
+		if self._on_change is not None:
+			self._on_change()
+
+	@property
+	def status(self) -> JobStatus:
+		"""Состояние задания (наблюдаемое)."""
+		return self._status
+
+	@status.setter
+	def status(self, value: JobStatus) -> None:
+		self._set_observed("_status", value)
+
+	@property
+	def error(self) -> str | None:
+		"""Текст ошибки для человека (наблюдаемое; None — ошибки нет)."""
+		return self._error
+
+	@error.setter
+	def error(self, value: str | None) -> None:
+		self._set_observed("_error", value)
+
+	@property
+	def note(self) -> str | None:
+		"""Пометка состояния для карточки (наблюдаемое)."""
+		return self._note
+
+	@note.setter
+	def note(self, value: str | None) -> None:
+		self._set_observed("_note", value)
+
+	@property
+	def warning(self) -> str | None:
+		"""Предупреждение о несохранённом исходе (наблюдаемое)."""
+		return self._warning
+
+	@warning.setter
+	def warning(self, value: str | None) -> None:
+		self._set_observed("_warning", value)
 
 	def card_note(self) -> str | None:
 		"""Подпись карточки: пометка состояния вместе с предупреждением.
@@ -224,6 +289,12 @@ class JobQueue(Generic[_J]):
 		self._shutdown_timeout_s = shutdown_timeout_s
 		self._jobs: list[_J] = []
 		self._next_id = 1
+		#: версия состояния очереди: растёт при смене состава и наблюдаемых
+		#: полей заданий; подписчики узнают о ней одним уведомлением
+		#: на итерацию цикла событий (ADR-0034)
+		self._version = 0
+		self._listeners: list[Callable[[int], None]] = []
+		self._notify_scheduled = False
 		self._worker: asyncio.Task[None] | None = None
 		#: номер задания, выполняющегося прямо сейчас (None — нет такого)
 		self._active_id: int | None = None
@@ -241,7 +312,9 @@ class JobQueue(Generic[_J]):
 
 	def add(self, job: _J) -> None:
 		"""Ставит готовое задание в хвост очереди (не запуская воркера)."""
+		job.bind_changes(self.mark_changed)
 		self._jobs.append(job)
+		self.mark_changed()
 
 	def all(self) -> list[_J]:
 		"""Задания в порядке постановки (снимок списка)."""
@@ -256,8 +329,68 @@ class JobQueue(Generic[_J]):
 
 	def remove(self, job: _J) -> None:
 		"""Убирает задание из очереди (снятие с показа, удаление канала)."""
-		with suppress(ValueError):
+		try:
 			self._jobs.remove(job)
+		except ValueError:
+			return  # уже снято — состояние не изменилось
+		self.mark_changed()
+
+	# --- версия состояния и подписка (ADR-0034) ------------------------------------
+
+	@property
+	def version(self) -> int:
+		"""Версия состояния очереди: другое число — снимок ``state()`` другой."""
+		return self._version
+
+	def subscribe(self, listener: Callable[[int], None]) -> None:
+		"""Подписывает на изменения: ``listener(version)`` в цикле событий движка.
+
+		Уведомления сливаются: сколько бы изменений ни случилось за одну
+		итерацию цикла (постановка пакета из ста заданий, переход статуса
+		с записью пометки), подписчик получает одно с итоговой версией.
+		Слушатель интерфейса — переправа моста (``ui_callback``): она
+		безопасна к вызову из потока движка и лишь ставит событие в очередь
+		потока интерфейса.
+		"""
+		self._listeners.append(listener)
+
+	def unsubscribe(self, listener: Callable[[int], None]) -> None:
+		"""Снимает подписку (незнакомый слушатель — не ошибка)."""
+		with suppress(ValueError):
+			self._listeners.remove(listener)
+
+	def mark_changed(self) -> None:
+		"""Поднимает версию и назначает уведомление подписчиков.
+
+		Зовётся каркасом (состав очереди, наблюдаемые поля заданий)
+		и сервисом — там, где снимок меняется без записи в задание
+		(правка черновика поста меняет заголовок и вложение карточки).
+		Вне работающего цикла событий (загрузка до старта, тесты)
+		версия растёт, а уведомлять некого и нечем.
+		"""
+		self._version += 1
+		if self._notify_scheduled or not self._listeners:
+			return
+		try:
+			loop = asyncio.get_running_loop()
+		except RuntimeError:
+			return
+		self._notify_scheduled = True
+		loop.call_soon(self._notify)
+
+	def _notify(self) -> None:
+		"""Одно уведомление на итерацию: слушателям — итоговая версия.
+
+		Сбой слушателя — его беда, не очереди: запись в журнал,
+		остальные слушатели получают своё.
+		"""
+		self._notify_scheduled = False
+		version = self._version
+		for listener in list(self._listeners):
+			try:
+				listener(version)
+			except Exception:  # noqa: BLE001 — сбой подписчика не роняет очередь
+				logger.exception("%s: подписчик на изменения упал.", self._name)
 
 	@property
 	def stopping(self) -> bool:

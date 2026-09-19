@@ -546,6 +546,10 @@ class PublishQueue:
 					# прежнее вложение больше не принадлежит очереди
 					await self._posts.unstash_from_queue(file.path)
 			item.draft = stashed
+			# черновик — не поле каркаса, а карточка показывает его заголовок,
+			# вложение и время: без явной пометки правка без смены статуса
+			# осталась бы для интерфейса невидимой (ADR-0034)
+			self._jobs.mark_changed()
 			item.status = status
 			item.progress = 0.0
 			item.error = None
@@ -642,6 +646,14 @@ class PublishQueue:
 		if item.status is JobStatus.ERROR:
 			await self._leave_queue(item)
 		self._jobs.remove(item)
+
+	async def subscribe(self, listener: Callable[[int], None]) -> None:
+		"""Подписывает интерфейс на изменения очереди (ADR-0034).
+
+		Корутина, а не метод: подписка ложится в цикл событий движка,
+		откуда и приходят уведомления. Снимок — ``state()``; прогресс загрузки в версию не входит.
+		"""
+		self._jobs.subscribe(listener)
 
 	async def state(self) -> list[QueueItemDto]:
 		"""Снимок очереди для интерфейса.

@@ -32,6 +32,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -259,6 +260,15 @@ class ProcessingQueue:
 			return
 		await self._drop_stashed_frame(job)
 		self._jobs.remove(job)
+
+	async def subscribe(self, listener: Callable[[int], None]) -> None:
+		"""Подписывает интерфейс на изменения очереди (ADR-0034).
+
+		Корутина, а не метод: подписка ложится в цикл событий движка,
+		откуда и приходят уведомления. Снимок — ``state()``; прогресс
+		кодирования в версию не входит.
+		"""
+		self._jobs.subscribe(listener)
 
 	async def state(self) -> list[VideoItemDto]:
 		"""Снимок очереди для интерфейса (в порядке постановки)."""

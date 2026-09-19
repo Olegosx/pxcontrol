@@ -53,6 +53,7 @@
 | [0031](0031-buttons-post-then-markup.md) | Кнопки под постом: публикует userbot, разметку дорисовывает бот | accepted |
 | [0032](0032-publishing-section-post-stages.md) | Раздел «Публикация»: подпункты по стадиям жизни поста | accepted |
 | [0033](0033-rich-text-entities.md) | Стилизованный текст поста: разметка сущностями, а не строкой | accepted |
+| [0034](0034-queue-change-notifications.md) | Уведомления об изменении очередей вместо опроса | accepted |
 
 ## Как добавить запись
 

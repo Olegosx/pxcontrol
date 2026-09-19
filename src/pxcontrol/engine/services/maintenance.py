@@ -452,6 +452,14 @@ class MaintenanceService:
 			)
 		)
 
+	async def subscribe(self, listener: Callable[[int], None]) -> None:
+		"""Подписывает интерфейс на изменения очереди (ADR-0034).
+
+		Корутина, а не метод: подписка ложится в цикл событий движка,
+		откуда и приходят уведомления. Снимок — ``state()``; доля просмотра в версию не входит.
+		"""
+		self._jobs.subscribe(listener)
+
 	async def state(self) -> list[MaintenanceItemDto]:
 		"""Снимок очереди обслуживания для интерфейса."""
 		return [job.dto() for job in self._jobs.all()]

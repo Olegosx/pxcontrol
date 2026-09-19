@@ -1068,6 +1068,24 @@ async def test_edit_fixes_failed_item_and_sends_it(db: Database, make_queue: Que
 	assert (await _statuses(queue))[item].error is None
 
 
+async def test_edit_bumps_queue_version(db: Database, make_queue: QueueFactory) -> None:
+	"""Правка черновика без смены статуса всё равно поднимает версию (ADR-0034).
+
+	Заголовок, вложение и время карточки берутся из черновика — не из полей
+	каркаса; без явной пометки интерфейс не узнал бы о правке.
+	"""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(PostDraft(community_id, text="было", when=_future(120)))
+	await _wait_status(queue, item, JobStatus.WAITING)
+	before = queue._jobs.version  # noqa: SLF001 — версия каркаса, интерфейсу отдаётся подпиской
+	await queue.edit(item, PostDraft(community_id, text="стало", when=_future(300)))
+	assert queue._jobs.version > before  # noqa: SLF001
+
+
 async def test_edit_keeps_row_in_sync_with_new_draft(
 	db: Database, make_queue: QueueFactory
 ) -> None:

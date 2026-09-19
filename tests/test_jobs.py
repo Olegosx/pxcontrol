@@ -537,3 +537,73 @@ async def test_periodic_task_survives_a_failed_pass_and_stops_fast() -> None:
 	await asyncio.wait_for(slow.shutdown(), timeout=1.0)
 	assert slow.stopping is True
 	await task.shutdown()
+
+
+# --- версия состояния и подписка (ADR-0034) ---------------------------------------
+
+
+def test_version_grows_on_composition_and_observed_fields() -> None:
+	"""Версия растёт от состава и наблюдаемых полей, но не от прогресса."""
+
+	async def execute(_job: _TestJob) -> None:  # pragma: no cover — не запускается
+		pass
+
+	queue = _queue(execute)
+	before = queue.version
+	job = _put(queue, "раз")
+	assert queue.version == before + 1  # постановка
+	job.status = JobStatus.RUNNING
+	assert queue.version == before + 2  # смена статуса
+	job.status = JobStatus.RUNNING
+	assert queue.version == before + 2  # то же значение — не изменение
+	job.note = "пауза"
+	job.error = "не вышло"
+	job.warning = "не сохранено"
+	assert queue.version == before + 5
+	job.progress = 0.5
+	assert queue.version == before + 5  # прогресс в версию не входит
+	queue.remove(job)
+	assert queue.version == before + 6
+	queue.remove(job)
+	assert queue.version == before + 6  # повторное снятие — не изменение
+
+
+async def test_listeners_get_one_notification_per_iteration() -> None:
+	"""Пакет изменений за одну итерацию цикла — одно уведомление с итоговой версией."""
+
+	async def execute(_job: _TestJob) -> None:  # pragma: no cover — не запускается
+		pass
+
+	queue = _queue(execute)
+	seen: list[int] = []
+	queue.subscribe(seen.append)
+	for label in ("раз", "два", "три"):
+		_put(queue, label)
+	assert seen == []  # уведомление — не раньше следующей итерации
+	await asyncio.sleep(0)
+	assert seen == [queue.version]
+	await asyncio.sleep(0)
+	assert seen == [queue.version]  # без новых изменений — тишина
+
+
+async def test_failing_listener_does_not_break_others() -> None:
+	"""Сбой одного подписчика не мешает остальным и не роняет очередь."""
+
+	async def execute(_job: _TestJob) -> None:  # pragma: no cover — не запускается
+		pass
+
+	queue = _queue(execute)
+	seen: list[int] = []
+
+	def broken(_version: int) -> None:
+		raise RuntimeError("подписчик сломан")
+
+	queue.subscribe(broken)
+	queue.subscribe(seen.append)
+	_put(queue, "раз")
+	await asyncio.sleep(0)
+	assert seen == [queue.version]
+	queue.unsubscribe(seen.append)
+	_put(queue, "два")
+	await asyncio.sleep(0)
+	assert seen == [queue.version - 1]  # после отписки уведомлений нет
