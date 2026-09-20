@@ -1743,6 +1743,30 @@ async def test_list_published_with_paused_publisher(db: Database) -> None:
 		await service.list_published(community_id)
 
 
+async def test_list_published_with_departed_publisher(db: Database) -> None:
+	"""Вышедший из сообщества публикатор (ADR-0035) ленту не читает.
+
+	Как и у отложек: обращение вернуло бы сырой отказ Telegram
+	вместо понятного «введите заново».
+	"""
+	service = PostsService(db, _FakeGateway())
+	community_id = await _add_community(db)
+	account_id = await _bound_account(db, community_id)
+	async with db.session_factory() as session:
+		row = (
+			await session.execute(
+				select(CommunityExecutor).where(
+					CommunityExecutor.community_id == community_id,
+					CommunityExecutor.tg_account_id == account_id,
+				)
+			)
+		).scalar_one()
+		row.status = ParticipantStatus.LEFT.value
+		await session.commit()
+	with pytest.raises(PostError, match="не состоит"):
+		await service.list_published(community_id)
+
+
 def _published(text: str = "текст поста", **kwargs: Any) -> PublishedMessage:
 	"""Вышедший пост, каким его отдаёт транспорт."""
 	return PublishedMessage(

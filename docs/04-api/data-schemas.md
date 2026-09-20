@@ -27,7 +27,7 @@ Pydantic не нужна, а неизменяемость защищает от 
 | Тип | Модуль | Роль |
 | --- | --- | --- |
 | `BotDto`, `TgAccountDto`, `TgApiDto`, `AiKeyDto` | `accounts.py` | аккаунты: боты (`paused`, `publisher_of`), userbot (`connected`, `paused`, `memberships`, `publisher_of` — ADR-0029), ключ API приложения (ADR-0018), ключи ИИ |
-| `CommunityDto`, `CommunityAccess` | `communities.py` | канал и итог перепроверки доступов; `default_account_paused`/`bot_paused` и вычисляемые `publisher_paused`, `publisher_incapable` (ADR-0029, ADR-0035; правила над строками пула — чистый `community_rights.py`); право бота править чужие посты — из снимка прав исполнителя (`community_capabilities`, ADR-0031) |
+| `CommunityDto`, `CommunityAccess` | `communities.py` | канал и итог перепроверки доступов; `default_account_paused`/`default_bot_paused` и вычисляемые `publisher_paused`, `publisher_incapable` (ADR-0029, ADR-0035; правила над строками пула — чистый `community_rights.py`); право бота править чужие посты — из снимка прав исполнителя (`community_capabilities`, ADR-0031) |
 | `OwnerActivityDto`, `WindowStats`, `LiveDto` | `activity.py` | активность владельца (ADR-0030): живое состояние дорожки и окна час / сутки / неделя — операции по видам, занятость, ошибки, флуд-лимиты |
 | `ActivityHistoryDto` | `activity.py` | история для графиков страницы аккаунта: часы суток, занятость и флуд-лимиты по дням, виды операций |
 | `AccountMembershipDto` | `communities.py` | сообщество глазами исполнителя: снимок, участие, признак публикатора (страница исполнителя) |

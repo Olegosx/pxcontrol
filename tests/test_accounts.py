@@ -506,6 +506,8 @@ async def test_bot_pause_and_publisher_counts(db: Database) -> None:
 					second.id, account_id=account.id, status=ParticipantStatus.MEMBER
 				),
 				community_executor(second.id, account_id=other.id, status=ParticipantStatus.MEMBER),
+				# вышедший остаётся в пуле строкой (ADR-0035), но «в сообществе» не считается
+				community_executor(first.id, account_id=other.id, status=ParticipantStatus.LEFT),
 			]
 		)
 		await session.commit()

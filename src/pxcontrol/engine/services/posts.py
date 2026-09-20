@@ -30,6 +30,7 @@ from pxcontrol.engine.services.community_rights import (
 	community_capabilities,
 	publisher_incapable,
 	publisher_paused,
+	publisher_row,
 )
 from pxcontrol.engine.services.publish_route import (
 	PublishRoute,
@@ -49,6 +50,7 @@ from pxcontrol.engine.services.settings import (
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
+from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.poll import PollDraft, validate_poll
@@ -2448,9 +2450,14 @@ class PostsService:
 	def _published_reader(community: Community) -> int:
 		"""Аккаунт, читающий ленту сообщества (публикатор по умолчанию).
 
+		Вышедший из сообщества публикатор (ADR-0035) не спрашивается —
+		как и у отложек: ленту он не увидит, а обращение стоило бы
+		места на дорожке и вернуло бы сырой отказ Telegram.
+
 		Raises:
-			PostError: Публикатора нет или он приостановлен — читать
-				ленту нечем, и притвориться пустой лентой нельзя.
+			PostError: Публикатора нет, он приостановлен или не состоит
+				в сообществе — читать ленту нечем, и притвориться пустой
+				лентой нельзя.
 		"""
 		account = community.default_account
 		if account is None:
@@ -2462,6 +2469,12 @@ class PostsService:
 			raise PostError(
 				f"Публикатор «{community.title}» приостановлен — ленту читать нечем. "
 				"Возобновите его в разделе «Пользователи и боты»."
+			)
+		row = publisher_row(community, OwnerKind.USER)
+		if row is None or not ParticipantStatus(row.status).in_community:
+			raise PostError(
+				f"Публикатор «{community.title}» не состоит в сообществе — ленту читать "
+				"нечем. Введите его заново на вкладке «Участники»."
 			)
 		return int(account.id)
 

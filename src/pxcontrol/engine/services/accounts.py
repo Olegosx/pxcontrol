@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.sql import ColumnElement
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import (
@@ -27,6 +28,7 @@ from pxcontrol.engine.db.models import (
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.security.secrets import SecretDecryptionError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotUnavailableError
+from pxcontrol.engine.telegram.rights import ParticipantStatus
 from pxcontrol.engine.telegram.types import BotRef, UserbotProfile
 
 logger = logging.getLogger(__name__)
@@ -121,15 +123,23 @@ def account_display(
 	return label or full_name or at_name or phone or "пользователь"
 
 
-async def _count_by(session: AsyncSession, column: InstrumentedAttribute[Any]) -> dict[int, int]:
+#: Участия, при которых аккаунт действительно состоит в сообществе:
+#: «в N сообществах» на карточке считает только их — вышедший и заявка
+#: остаются в пуле строкой (ADR-0035), но сообществом для аккаунта не являются.
+_PRESENT_STATUSES = tuple(status.value for status in ParticipantStatus if status.in_community)
+
+
+async def _count_by(
+	session: AsyncSession, column: InstrumentedAttribute[Any], *conditions: ColumnElement[bool]
+) -> dict[int, int]:
 	"""Число строк на каждое значение колонки-ссылки (NULL не считается).
 
 	Один групповой запрос на весь список вместо запроса на строку:
 	членства и назначения публикатором считаются так для всех аккаунтов
-	и ботов разом.
+	и ботов разом. ``conditions`` сужают, какие строки считать.
 	"""
 	rows = await session.execute(
-		select(column, func.count()).where(column.is_not(None)).group_by(column)
+		select(column, func.count()).where(column.is_not(None), *conditions).group_by(column)
 	)
 	return {int(key): int(count) for key, count in rows.tuples()}
 
@@ -421,7 +431,11 @@ class AccountsService:
 		"""
 		async with self._db.session_factory() as session:
 			rows = list((await session.execute(select(TgAccount).order_by(TgAccount.id))).scalars())
-			memberships = await _count_by(session, CommunityExecutor.tg_account_id)
+			memberships = await _count_by(
+				session,
+				CommunityExecutor.tg_account_id,
+				CommunityExecutor.status.in_(_PRESENT_STATUSES),
+			)
 			publisher_of = await _count_by(session, Community.default_tg_account_id)
 		return [
 			self._acc_dto(

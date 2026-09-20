@@ -323,8 +323,8 @@ class MaintenanceService:
 			Идентификатор задания очереди.
 
 		Raises:
-			MaintenanceError: Сообщество не найдено, у него нет
-				userbot-публикатора или глубина вне допустимых границ.
+			MaintenanceError: Сообщество не найдено, в пуле нет исполнителя,
+				способного читать историю, или глубина вне допустимых границ.
 		"""
 		_check_range("Глубина просмотра", depth, DEPTH_RANGE)
 		community, executor = await self._target(community_id, ExecutorAction.READ_HISTORY)
@@ -349,7 +349,7 @@ class MaintenanceService:
 	) -> int:
 		"""Ставит задание «удалить служебные записи выбранных видов».
 
-		Права проверяются здесь же, живым зондом: удалять чужие
+		Исполнитель подбирается по снимку прав (ADR-0035): удалять чужие
 		сообщения может только администратор с правом «удалять
 		сообщения», и роль сама по себе его не гарантирует.
 
@@ -357,10 +357,9 @@ class MaintenanceService:
 			Идентификатор задания очереди.
 
 		Raises:
-			MaintenanceError: Сообщество не найдено, нет публикатора,
-				не выбран ни один вид, границы негодны или у аккаунта
-				нет права удалять.
-			UserbotUnavailableError: Проверить права не удалось.
+			MaintenanceError: Сообщество не найдено, не выбран ни один вид,
+				границы негодны или в пуле нет исполнителя с правом удалять
+				чужие сообщения.
 		"""
 		chosen = selectable_kinds(kinds)
 		if not chosen:
@@ -392,7 +391,8 @@ class MaintenanceService:
 			Идентификатор задания очереди.
 
 		Raises:
-			MaintenanceError: Сообщество не найдено или нет публикатора.
+			MaintenanceError: Сообщество не найдено или в пуле нет
+				исполнителя, способного читать историю.
 		"""
 		community, executor = await self._target(community_id, ExecutorAction.READ_HISTORY)
 		return self._put(
@@ -426,9 +426,8 @@ class MaintenanceService:
 			Идентификатор задания очереди.
 
 		Raises:
-			MaintenanceError: Сообщество не найдено, нет публикатора,
-				потолок вне границ или у аккаунта нет права исключать.
-			UserbotUnavailableError: Проверить права не удалось.
+			MaintenanceError: Сообщество не найдено, потолок вне границ
+				или в пуле нет исполнителя с правом исключать.
 		"""
 		_check_range("Предел исключений за проход", limit, KICK_LIMIT_RANGE)
 		community, executor = await self._target(community_id, ExecutorAction.BAN)
