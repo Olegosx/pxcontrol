@@ -72,6 +72,26 @@ def test_sort_nearest_puts_now_first() -> None:
 	assert [item.id for item in shown] == [2, 3, 1]
 
 
+def test_sending_item_is_first_in_every_sort() -> None:
+	"""Отправляющийся — первым при любой сортировке, остальные — по её правилу.
+
+	Пост, дождавшийся слота последним, уходит с самой поздней датой:
+	по дате он стоял бы в самом низу, и карточку с полосой прогресса
+	в очереди из сотен не найти (живой случай 21.09.2026).
+	"""
+	items = [
+		_item(1, community="Яблоко", when_minutes=30),
+		_item(2, community="арбуз", when_minutes=999, status=JobStatus.RUNNING),
+		_item(3, community="арбуз", when_minutes=60, status=JobStatus.PENDING),
+	]
+	nearest = apply_view(items, QueueSort.NEAREST, QueueFilter.ALL, None)
+	assert [item.id for item in nearest] == [2, 1, 3]
+	by_community = apply_view(items, QueueSort.COMMUNITY, QueueFilter.ALL, None)
+	assert [item.id for item in by_community] == [2, 3, 1]
+	enqueued = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ALL, None)
+	assert [item.id for item in enqueued] == [2, 1, 3]
+
+
 def test_sort_enqueued_keeps_id_order() -> None:
 	"""«Порядок постановки»: по идентификатору, независимо от дат."""
 	items = [_item(2, when_minutes=30), _item(1, when_minutes=999)]
@@ -99,7 +119,7 @@ def test_status_and_community_filters() -> None:
 		_item(4, community="Б", community_id=2, status=JobStatus.ERROR),
 	]
 	sendable = apply_view(items, QueueSort.ENQUEUED, QueueFilter.SENDABLE, None)
-	assert [item.id for item in sendable] == [2, 3]
+	assert [item.id for item in sendable] == [3, 2], "отправляющийся — первым"
 	waiting = apply_view(items, QueueSort.ENQUEUED, QueueFilter.WAITING, None)
 	assert [item.id for item in waiting] == [1]
 	errors = apply_view(items, QueueSort.ENQUEUED, QueueFilter.ERRORS, None)

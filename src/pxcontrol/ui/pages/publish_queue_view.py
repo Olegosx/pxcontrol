@@ -164,6 +164,13 @@ def apply_view(
 ) -> list[QueueItemDto]:
 	"""Правило показа: фильтры по статусу, каналу и слоту, затем сортировка.
 
+	Отправляющийся элемент стоит первым при любой сортировке: это
+	единственная карточка, за которой человек следит (полоса прогресса),
+	а по дате в очереди из сотен постов она оказывалась где угодно —
+	пост, дождавшийся слота последним, уходит с самой поздней датой
+	и стоял в самом низу (живой случай 21.09.2026: карточку с полосой
+	не нашли среди 501).
+
 	Args:
 		items: видимые элементы очереди (без завершённых).
 		sort: порядок показа.
@@ -182,10 +189,13 @@ def apply_view(
 	elif status is QueueFilter.ERRORS:
 		items = [item for item in items if item.status is JobStatus.ERROR]
 	if sort is QueueSort.NEAREST:
-		return sort_nearest(items, lambda item: item.id)
-	if sort is QueueSort.COMMUNITY:
-		return sort_by_community(items, lambda item: item.id)
-	return sorted(items, key=lambda item: item.id)
+		ordered = sort_nearest(items, lambda item: item.id)
+	elif sort is QueueSort.COMMUNITY:
+		ordered = sort_by_community(items, lambda item: item.id)
+	else:
+		ordered = sorted(items, key=lambda item: item.id)
+	sending = [item for item in ordered if item.status.active()]
+	return sending + [item for item in ordered if not item.status.active()]
 
 
 class QueueView(QWidget):
