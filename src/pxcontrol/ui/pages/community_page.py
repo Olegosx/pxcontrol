@@ -119,7 +119,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 )
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.scheduled_panel import ScheduledPanel, scheduled_subtitle
-from pxcontrol.ui.queue_watcher import QueueWatcher, QueueWatchers
+from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher, QueueWatchers
 
 #: Размер логотипа в шапке страницы (пиксели).
 _HEADER_LOGO_SIZE = 48
@@ -847,6 +847,9 @@ class CommunityPage(ScrollArea):
 		self._build()
 		self._render_header()
 		self._render_settings()
+		# числа очереди в шапке — из кэша наблюдателя по его уведомлениям
+		# (ADR-0034): страница не запрашивает очередь при показе
+		watchers.publish.attach(self, QueueView(on_state=self._on_queue_state))
 
 	@property
 	def community_id(self) -> int:
@@ -1108,15 +1111,12 @@ class CommunityPage(ScrollArea):
 	# --- показ страницы: чтение кэшей ---------------------------------------------
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
-		"""Читает свежие снимки (очередь, статистика) и оживляет вкладку."""
+		"""Читает кэш статистики и оживляет вкладку.
+
+		Очередь не запрашивается: страница — постоянный зритель
+		наблюдателя, и числа шапки уже свежие.
+		"""
 		super().showEvent(event)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.publish_queue.state(),
-			self,
-			self._on_queue_state,
-			self._show_error,
-		)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.community_stats.snapshot(),

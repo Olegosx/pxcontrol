@@ -15,6 +15,11 @@
 
 Правила показа (состояние, набор действий, подписи, сводка, поиск) —
 чистые функции :mod:`user_state`, они тестируются без Qt.
+
+Обновление по отпечатку (аудит 19.09.2026): разделы появляются
+и исчезают целиком, карточка живёт, пока не сменился снимок её аккаунта
+(:mod:`dashboard`), сводка меняет числа на месте; строка активности
+и так обновлялась на месте раз в пять секунд.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QHideEvent, QShowEvent
@@ -55,12 +61,10 @@ from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	ACCENT_TEXT,
-	FlowGrid,
 	FormDialog,
 	TitleEditor,
 	WarningLabel,
 	bold_numbers,
-	clear_layout,
 	dim_widget,
 	elide_text,
 	entity_avatar,
@@ -71,11 +75,11 @@ from pxcontrol.ui.pages.common import (
 	page_layout,
 	plural,
 	require_filled,
-	section_header,
 	show_info,
 	show_success,
 	tinted,
 )
+from pxcontrol.ui.pages.dashboard import GridSection, SectionStack
 from pxcontrol.ui.pages.user_actions import (
 	ACTIVITY_POLL_MS,
 	delete_bot,
@@ -358,6 +362,72 @@ class BotCard(_Card):
 		self.add_actions(buttons)
 
 
+#: Ключи разделов дашборда в порядке показа.
+_USERS = "users"
+_BOTS = "bots"
+
+
+class _SummaryBar:
+	"""Строка сводки: пользователи, боты, без входа, приостановлено — числа на месте."""
+
+	def __init__(self, page: QWidget) -> None:
+		bar = SimpleCardWidget(page)
+		self.widget: QWidget = bar
+		layout = QHBoxLayout(bar)
+		layout.setContentsMargins(16, 6, 16, 6)
+		layout.setSpacing(12)
+		self._users = StrongBodyLabel("0", bar)
+		layout.addWidget(self._users)
+		self._users_tail = BodyLabel("", bar)
+		layout.addWidget(self._users_tail)
+		layout.addWidget(VerticalSeparator(bar))
+		self._bots = StrongBodyLabel("0", bar)
+		layout.addWidget(self._bots)
+		self._bots_tail = BodyLabel("", bar)
+		layout.addWidget(self._bots_tail)
+		self._login_separator = VerticalSeparator(bar)
+		layout.addWidget(self._login_separator)
+		self._login = self._badge(bar, InfoBadge.attension)
+		layout.addWidget(self._login)
+		self._paused_separator = VerticalSeparator(bar)
+		layout.addWidget(self._paused_separator)
+		self._paused = self._badge(bar, InfoBadge.info)
+		layout.addWidget(self._paused)
+		layout.addStretch()
+		bar.hide()
+
+	@staticmethod
+	def _badge(parent: QWidget, preset: Callable[..., InfoBadge]) -> InfoBadge:
+		"""Плашка сводки штатным пресетом: кегль и высота — по макету."""
+		badge = preset("", parent=parent)
+		badge.setFont(font_px(_ACTION_FONT_PX))
+		badge.setFixedHeight(_SUMMARY_BADGE_HEIGHT)
+		badge.setContentsMargins(8, 0, 8, 0)
+		return badge
+
+	def update(self, accounts: list[TgAccountDto], bots: list[BotDto]) -> None:
+		"""Показывает сводку по свежим спискам (без исполнителей — прячется)."""
+		if not accounts and not bots:
+			self.widget.hide()
+			return
+		totals = users_summary(accounts, bots)
+		self._users.setText(str(totals.users))
+		self._users_tail.setText(
+			plural(totals.users, "пользователь", "пользователя", "пользователей")
+		)
+		self._bots.setText(str(totals.bots))
+		self._bots_tail.setText(plural(totals.bots, "бот", "бота", "ботов"))
+		self._login_separator.setVisible(totals.not_logged_in > 0)
+		self._login.setVisible(totals.not_logged_in > 0)
+		if totals.not_logged_in:
+			self._login.setText(f"{totals.not_logged_in} без входа")
+		self._paused_separator.setVisible(totals.paused > 0)
+		self._paused.setVisible(totals.paused > 0)
+		if totals.paused:
+			self._paused.setText(f"{totals.paused} приостановлено")
+		self.widget.show()
+
+
 class UsersPage(ScrollArea):
 	"""Дашборд пользователей и ботов: шапка, сводка, два раздела карточек.
 
@@ -379,8 +449,8 @@ class UsersPage(ScrollArea):
 		self._api_key_set = True
 		self._query = ""
 		self._activity: dict[LaneOwner, OwnerActivityDto] = {}
-		self._user_cards: dict[int, UserCard] = {}
-		self._bot_cards: dict[int, BotCard] = {}
+		self._empty: QWidget | None = None
+		self._empty_searched: bool | None = None
 		self._build()
 		# опрос активности — только пока страница видна (см. showEvent)
 		self._activity_timer = QTimer(self)
@@ -407,14 +477,15 @@ class UsersPage(ScrollArea):
 		add_button.setMenu(menu)
 		header.addWidget(add_button)
 		layout.addLayout(header)
-		self._summary_box = QVBoxLayout()
-		layout.addLayout(self._summary_box)
+		self._summary = _SummaryBar(self)
+		layout.addWidget(self._summary.widget)
 		self._api_hint = WarningLabel(self)
 		self._api_hint.setWordWrap(True)
 		layout.addWidget(self._api_hint)
 		self._sections = QVBoxLayout()
 		self._sections.setSpacing(density.spacing().block_spacing)
 		layout.addLayout(self._sections)
+		self._stack: SectionStack[str] = SectionStack(self._sections, [_USERS, _BOTS])
 		layout.addStretch()
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
@@ -491,10 +562,13 @@ class UsersPage(ScrollArea):
 	def _apply_activity(self, activity: dict[LaneOwner, OwnerActivityDto]) -> None:
 		"""Обновляет строки активности у живых карточек."""
 		self._activity = activity
-		for account_id, card in self._user_cards.items():
-			card.set_activity(activity.get(LaneOwner(OwnerKind.USER, account_id)))
-		for bot_id, card in self._bot_cards.items():
-			card.set_activity(activity.get(LaneOwner(OwnerKind.BOT, bot_id)))
+		for key, kind in ((_USERS, OwnerKind.USER), (_BOTS, OwnerKind.BOT)):
+			section = self._stack.get(key)
+			if not isinstance(section, GridSection):
+				continue
+			for owner_id, card in section.cards.items():
+				if isinstance(card, _Card) and isinstance(owner_id, int):
+					card.set_activity(activity.get(LaneOwner(kind, owner_id)))
 
 	# --- отрисовка ---------------------------------------------------------------
 
@@ -504,99 +578,86 @@ class UsersPage(ScrollArea):
 		self._render_sections()
 
 	def _render(self) -> None:
-		self._render_summary()
+		self._summary.update(self._accounts, self._bots)
 		# подсказка о ключе — когда есть кому входить; без пользователей
 		# её несёт пустое состояние
 		show_hint = not self._api_key_set and bool(self._accounts)
 		self._api_hint.set_note(_NO_API_KEY_HINT if show_hint else "")
 		self._render_sections()
 
-	def _render_summary(self) -> None:
-		"""Строка сводки: пользователи, боты, приостановленные, без входа."""
-		clear_layout(self._summary_box)
-		if not self._accounts and not self._bots:
-			return
-		totals = users_summary(self._accounts, self._bots)
-		bar: QWidget = SimpleCardWidget(self)
-		layout = QHBoxLayout(bar)
-		layout.setContentsMargins(16, 6, 16, 6)
-		layout.setSpacing(12)
-		layout.addWidget(StrongBodyLabel(str(totals.users), bar))
-		layout.addWidget(
-			BodyLabel(plural(totals.users, "пользователь", "пользователя", "пользователей"), bar)
-		)
-		layout.addWidget(VerticalSeparator(bar))
-		layout.addWidget(StrongBodyLabel(str(totals.bots), bar))
-		layout.addWidget(BodyLabel(plural(totals.bots, "бот", "бота", "ботов"), bar))
-		if totals.not_logged_in:
-			layout.addWidget(VerticalSeparator(bar))
-			layout.addWidget(
-				self._summary_badge(bar, InfoBadge.attension, f"{totals.not_logged_in} без входа")
-			)
-		if totals.paused:
-			layout.addWidget(VerticalSeparator(bar))
-			layout.addWidget(
-				self._summary_badge(bar, InfoBadge.info, f"{totals.paused} приостановлено")
-			)
-		layout.addStretch()
-		self._summary_box.addWidget(bar)
-
-	@staticmethod
-	def _summary_badge(parent: QWidget, preset: Callable[..., InfoBadge], text: str) -> InfoBadge:
-		"""Плашка сводки штатным пресетом: кегль и высота — по макету."""
-		badge = preset(text, parent=parent)
-		badge.setFont(font_px(_ACTION_FONT_PX))
-		badge.setFixedHeight(_SUMMARY_BADGE_HEIGHT)
-		badge.setContentsMargins(8, 0, 8, 0)
-		return badge
-
 	def _render_sections(self) -> None:
-		"""Разделы «Пользователи» и «Боты» по текущему поиску."""
-		clear_layout(self._sections)
-		self._user_cards.clear()
-		self._bot_cards.clear()
-		if not self._accounts and not self._bots:
-			self._sections.addWidget(self._empty_state(searched=False))
-			return
+		"""Разделы «Пользователи» и «Боты» по текущему поиску.
+
+		Раздел появляется с первой карточкой и исчезает с последней;
+		карточка живёт, пока не сменился снимок её аккаунта; пустое
+		состояние заменяет разделы целиком.
+		"""
 		accounts = [a for a in self._accounts if matches_user_search(a, self._query)]
 		bots = [b for b in self._bots if matches_bot_search(b, self._query)]
 		if not accounts and not bots:
-			self._sections.addWidget(self._empty_state(searched=True))
+			self._stack.drop_all()
+			self._show_empty(searched=bool(self._accounts or self._bots))
 			return
+		self._hide_empty()
 		if accounts:
-			self._sections.addWidget(
-				section_header(self, "Пользователи", len(accounts), icon=FluentIcon.PEOPLE)
+			section = self._stack.ensure(
+				_USERS, partial(self._make_section, "Пользователи", FluentIcon.PEOPLE)
 			)
-			cards: list[QWidget] = []
-			for account in accounts:
-				card = UserCard(
-					account, self._run_user_action, self._delete_user, self._rename_user, self
+			if isinstance(section, GridSection):
+				section.sync(
+					accounts,
+					key=lambda account: account.id,
+					signature=lambda account: (account,),
+					make=self._make_user_card,
 				)
-				card.set_activity(self._activity.get(LaneOwner(OwnerKind.USER, account.id)))
-				card.clicked.connect(
-					partial(self.open_user.emit, LaneOwner(OwnerKind.USER, account.id))
-				)
-				self._user_cards[account.id] = card
-				cards.append(card)
-			self._sections.addWidget(
-				FlowGrid(cards, self, min_width=CARD_MIN_WIDTH, spacing=GRID_SPACING)
-			)
+		else:
+			self._stack.drop(_USERS)
 		if bots:
-			self._sections.addWidget(section_header(self, "Боты", len(bots), icon=FluentIcon.ROBOT))
-			bot_cards: list[QWidget] = []
-			for bot in bots:
-				bot_card = BotCard(
-					bot, self._run_bot_action, self._delete_bot, self._rename_bot, self
-				)
-				bot_card.set_activity(self._activity.get(LaneOwner(OwnerKind.BOT, bot.id)))
-				bot_card.clicked.connect(
-					partial(self.open_user.emit, LaneOwner(OwnerKind.BOT, bot.id))
-				)
-				self._bot_cards[bot.id] = bot_card
-				bot_cards.append(bot_card)
-			self._sections.addWidget(
-				FlowGrid(bot_cards, self, min_width=CARD_MIN_WIDTH, spacing=GRID_SPACING)
+			section = self._stack.ensure(
+				_BOTS, partial(self._make_section, "Боты", FluentIcon.ROBOT)
 			)
+			if isinstance(section, GridSection):
+				section.sync(
+					bots,
+					key=lambda bot: bot.id,
+					signature=lambda bot: (bot,),
+					make=self._make_bot_card,
+				)
+		else:
+			self._stack.drop(_BOTS)
+
+	def _make_section(self, title: str, icon: FluentIcon) -> GridSection[Any]:
+		return GridSection(self, title, icon, min_width=CARD_MIN_WIDTH, spacing=GRID_SPACING)
+
+	def _make_user_card(self, account: TgAccountDto) -> QWidget:
+		card = UserCard(account, self._run_user_action, self._delete_user, self._rename_user, self)
+		card.set_activity(self._activity.get(LaneOwner(OwnerKind.USER, account.id)))
+		card.clicked.connect(partial(self.open_user.emit, LaneOwner(OwnerKind.USER, account.id)))
+		return card
+
+	def _make_bot_card(self, bot: BotDto) -> QWidget:
+		card = BotCard(bot, self._run_bot_action, self._delete_bot, self._rename_bot, self)
+		card.set_activity(self._activity.get(LaneOwner(OwnerKind.BOT, bot.id)))
+		card.clicked.connect(partial(self.open_user.emit, LaneOwner(OwnerKind.BOT, bot.id)))
+		return card
+
+	def _show_empty(self, searched: bool) -> None:
+		"""Пустое состояние: никого нет или поиск ничего не нашёл."""
+		if self._empty is not None and self._empty_searched == searched:
+			return
+		self._hide_empty()
+		self._empty = self._empty_state(searched)
+		self._empty_searched = searched
+		self._sections.addWidget(self._empty)
+
+	def _hide_empty(self) -> None:
+		if self._empty is None:
+			return
+		self._sections.removeWidget(self._empty)
+		self._empty.setParent(None)
+		self._empty.deleteLater()
+		self._empty = None
+		self._empty_searched = None
 
 	def _empty_state(self, searched: bool) -> QWidget:
 		"""Пустое состояние: никого нет или поиск ничего не нашёл."""

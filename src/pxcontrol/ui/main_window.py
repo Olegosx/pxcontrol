@@ -104,7 +104,7 @@ class MainWindow(FluentWindow):
 		self._user_pages: dict[LaneOwner, UserPage] = {}
 		self._users_page.users_changed.connect(self._sync_user_nav)
 		self._users_page.open_user.connect(self._open_user)
-		self._communities_page = CommunitiesPage(self._worker, self._watchers.maintenance, self)
+		self._communities_page = CommunitiesPage(self._worker, self._watchers, self)
 		self.addSubInterface(self._communities_page, FluentIcon.HOME, "Каналы и группы")
 		# подменю сообществ — живое: дашборд после каждой загрузки шлёт
 		# свежий список, окно приводит пункты и страницы в соответствие

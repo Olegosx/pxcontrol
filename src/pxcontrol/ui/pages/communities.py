@@ -12,8 +12,14 @@
 что и страница сообщества, без нового кода в движке.
 
 Правила показа (состояние карточки, набор действий, тексты метрик,
-число колонок, сортировка таблицы, фильтр поиска) — чистые функции
-без Qt: они тестируются как обычный код.
+число колонок, сортировка таблицы, фильтр поиска, отпечаток строки) —
+чистые функции без Qt: они тестируются как обычный код.
+
+Обновление по отпечатку (аудит 19.09.2026): раздел появляется с первой
+строкой и исчезает с последней, карточка живёт, пока не сменился её
+отпечаток (:func:`row_signature`), сводка меняет числа на месте. Снимок
+очереди отправки страница не запрашивает — она постоянный зритель
+наблюдателя главного окна (ADR-0034), и числа очереди на карточках живые.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
+from typing import Any
 
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QShowEvent
@@ -73,7 +80,6 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
-	FlowGrid,
 	QueueCounts,
 	account_caption,
 	bold_numbers,
@@ -92,7 +98,6 @@ from pxcontrol.ui.pages.common import (
 	page_layout,
 	plural,
 	queue_counts,
-	section_header,
 	show_info,
 	show_success,
 )
@@ -109,8 +114,9 @@ from pxcontrol.ui.pages.community_state import (
 	state_badge_text,
 	subtitle_text,
 )
+from pxcontrol.ui.pages.dashboard import GridSection, Section, SectionHeader, SectionStack
 from pxcontrol.ui.pages.maintenance import open_maintenance
-from pxcontrol.ui.queue_watcher import QueueWatcher
+from pxcontrol.ui.queue_watcher import QueueView, QueueWatchers
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +263,24 @@ class Row:
 	community: CommunityDto
 	counts: QueueCounts
 	stats: CommunityStatsDto | None
+
+
+def row_signature(row: Row) -> tuple[Any, ...]:
+	"""Отпечаток строки дашборда — всё, что показывает карточка или строка таблицы.
+
+	Снимок сообщества и сводка очереди — целиком (неизменяемые
+	датаклассы сравниваются по значению); из кэша статистики — только
+	показываемое: подписчики, число отложенных, путь аватара. Момент
+	опроса статистики карточке не виден и в отпечаток не входит.
+	"""
+	stats = row.stats
+	return (
+		row.community,
+		row.counts,
+		stats.participants if stats is not None else None,
+		stats.scheduled_count if stats is not None else None,
+		stats.avatar_path if stats is not None else None,
+	)
 
 
 class TableColumn(StrEnum):
@@ -450,6 +474,13 @@ _TABLE_WIDTHS: tuple[int | None, ...] = (
 	_COLUMN_WIDTHS["queue"],
 	_COLUMN_WIDTHS["scheduled"],
 	_COLUMN_WIDTHS["state"],
+)
+
+
+#: Разделы дашборда по порядку: вид сообщества → заголовок и значок.
+_SECTIONS: tuple[tuple[CommunityKind, str, FluentIcon], ...] = (
+	(CommunityKind.CHANNEL, "Каналы", FluentIcon.CHAT),
+	(CommunityKind.GROUP, "Группы", FluentIcon.PEOPLE),
 )
 
 
@@ -739,6 +770,126 @@ class _ConnectDialog(MessageBoxBase):
 		return str(self._ref.text()).strip()
 
 
+# --- разделы и сводка, обновляемые на месте ------------------------------------------
+
+
+class _TableSection:
+	"""Раздел в виде списка: заголовок и таблица, пересобираемая по отпечатку строк.
+
+	Строка ``QTableWidget`` дешева, а построчная сверка таблицы
+	не окупилась бы: таблица собирается заново только когда сменился
+	отпечаток строк, их порядок или сортировка.
+	"""
+
+	def __init__(
+		self,
+		page: QWidget,
+		kind: CommunityKind,
+		title: str,
+		icon: FluentIcon,
+		*,
+		on_sort: Callable[[TableColumn], None],
+		on_open: Callable[[int], None],
+		on_action: Callable[[CardAction, CommunityDto], None],
+	) -> None:
+		self._page = page
+		self._kind = kind
+		self._on_sort = on_sort
+		self._on_open = on_open
+		self._on_action = on_action
+		self._header = SectionHeader(page, title, icon)
+		self._body = QWidget(page)
+		self._box = QVBoxLayout(self._body)
+		self._box.setContentsMargins(0, 0, 0, 0)
+		self._signature: tuple[Any, ...] | None = None
+
+	@property
+	def header(self) -> QWidget:
+		return self._header.widget
+
+	@property
+	def body(self) -> QWidget:
+		return self._body
+
+	def sync(self, rows: list[Row], sort: tuple[TableColumn, bool]) -> None:
+		"""Пересобирает таблицу, только если строки или сортировка изменились."""
+		self._header.set_count(len(rows))
+		signature = (tuple(row_signature(row) for row in rows), sort)
+		if signature == self._signature:
+			return
+		self._signature = signature
+		clear_layout(self._box)
+		self._box.addWidget(
+			_Table(
+				self._kind, rows, sort, self._on_sort, self._on_open, self._on_action, self._body
+			)
+		)
+
+
+class _SummaryBar:
+	"""Строка сводки над разделами: собирается один раз, числа меняются на месте.
+
+	``SimpleCardWidget`` (без реакции на наведение), числа —
+	``StrongBodyLabel``, подписи — ``BodyLabel``, между ними
+	``VerticalSeparator``; ошибки — кнопка (ведёт в очередь),
+	«без публикатора» — ``InfoBadge`` акцентом. Сегменты ошибок
+	и «без публикатора» показываются, только когда их числа ненулевые.
+	"""
+
+	def __init__(self, page: QWidget, on_errors: Callable[[], None]) -> None:
+		bar = SimpleCardWidget(page)
+		self.widget: QWidget = bar
+		layout = QHBoxLayout(bar)
+		layout.setContentsMargins(16, 6, 16, 6)
+		layout.setSpacing(12)
+		self._queued = StrongBodyLabel("0", bar)
+		layout.addWidget(self._queued)
+		layout.addWidget(BodyLabel("в очереди отправки", bar))
+		layout.addWidget(VerticalSeparator(bar))
+		self._enabled = StrongBodyLabel("0", bar)
+		layout.addWidget(self._enabled)
+		self._enabled_tail = BodyLabel("", bar)
+		layout.addWidget(self._enabled_tail)
+		self._errors_separator = VerticalSeparator(bar)
+		layout.addWidget(self._errors_separator)
+		self._errors = list_button("", bar, height=_SUMMARY_BADGE_HEIGHT)
+		self._errors.setToolTip("Элементы очереди отправки с ошибкой — открыть очередь")
+		self._errors.clicked.connect(on_errors)
+		layout.addWidget(self._errors)
+		self._publisher_separator = VerticalSeparator(bar)
+		layout.addWidget(self._publisher_separator)
+		self._badge = InfoBadge.attension("", parent=bar)
+		self._badge.setFont(font_px(_ACTION_FONT_PX))
+		self._badge.setFixedHeight(_SUMMARY_BADGE_HEIGHT)
+		self._badge.setContentsMargins(8, 0, 8, 0)
+		layout.addWidget(self._badge)
+		layout.addStretch()
+		bar.hide()
+
+	def update(self, communities: list[CommunityDto], counts: dict[int, QueueCounts]) -> None:
+		"""Показывает сводку по свежим данным (без сообществ — прячется)."""
+		if not communities:
+			self.widget.hide()
+			return
+		totals = summary_counts(communities, counts)
+		self._queued.setText(str(totals.queued))
+		self._enabled.setText(str(totals.enabled))
+		self._enabled_tail.setText(f"активных из {totals.total}")
+		errors = totals.errors > 0
+		self._errors_separator.setVisible(errors)
+		self._errors.setVisible(errors)
+		if errors:
+			self._errors.setText(
+				f"{totals.errors} {plural(totals.errors, 'ошибка', 'ошибки', 'ошибок')}"
+			)
+		without = totals.without_publisher > 0
+		self._publisher_separator.setVisible(without)
+		self._badge.setVisible(without)
+		if without:
+			self._badge.setText(f"{totals.without_publisher} без публикатора")
+		self.widget.show()
+
+
 # --- страница -------------------------------------------------------------------
 
 
@@ -764,16 +915,19 @@ class CommunitiesPage(ScrollArea):
 	queue_errors_requested = Signal()
 
 	def __init__(
-		self, worker: EngineWorker, maintenance: QueueWatcher, parent: QWidget | None = None
+		self, worker: EngineWorker, watchers: QueueWatchers, parent: QWidget | None = None
 	) -> None:
-		"""``maintenance`` — наблюдатель очереди обслуживания при главном
-		окне (ADR-0034): его получает окно «Обслуживание» с карточки."""
+		"""``watchers`` — наблюдатели очередей при главном окне (ADR-0034):
+		очередь отправки даёт числа карточек и сводки (страница — её
+		постоянный зритель), очередь обслуживания уходит окну
+		«Обслуживание» с карточки."""
 		super().__init__(parent)
 		self.setObjectName("communities")
 		self._worker = worker
-		self._maintenance = maintenance
+		self._watchers = watchers
 		self._show_error = error_reporter(self)
 		self._communities: list[CommunityDto] = []
+		self._loaded = False  # список сообществ уже прочитан хоть раз
 		self._queue_counts: dict[int, QueueCounts] = {}
 		self._stats_cache: dict[int, CommunityStatsDto] = {}
 		self._view = VIEW_TILES
@@ -781,7 +935,12 @@ class CommunitiesPage(ScrollArea):
 		self._sort: tuple[TableColumn, bool] = (TableColumn.TITLE, False)
 		# применение сохранённого вида не должно записывать его обратно
 		self._applying_view = False
+		self._empty: QWidget | None = None
+		self._empty_searched: bool | None = None
 		self._build()
+		# числа очереди — из кэша наблюдателя, по его уведомлениям: страница
+		# не запрашивает очередь при показе и видит её изменения живьём
+		watchers.publish.attach(self, QueueView(on_state=self._on_queue_items))
 		run_in_engine(
 			worker,
 			worker.engine.settings.get(UI_COMMUNITIES_VIEW),
@@ -817,12 +976,15 @@ class CommunitiesPage(ScrollArea):
 		connect_button.clicked.connect(self._on_connect)
 		header.addWidget(connect_button)
 		layout.addLayout(header)
-		self._summary_box = QVBoxLayout()
-		layout.addLayout(self._summary_box)
+		self._summary = _SummaryBar(self, self._open_errors)
+		layout.addWidget(self._summary.widget)
 		self._sections = QVBoxLayout()
 		# интервал блоков — из плотности (16 обычный, 10 компактный)
 		self._sections.setSpacing(density.spacing().block_spacing)
 		layout.addLayout(self._sections)
+		self._stack: SectionStack[CommunityKind] = SectionStack(
+			self._sections, [kind for kind, _title, _icon in _SECTIONS]
+		)
 		layout.addStretch()
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
@@ -834,7 +996,11 @@ class CommunitiesPage(ScrollArea):
 	# --- данные -----------------------------------------------------------------
 
 	def reload(self) -> None:
-		"""Перечитывает сообщества и очередь отправки из движка."""
+		"""Перечитывает сообщества и кэш статистики из движка.
+
+		Очередь отправки не запрашивается: её снимок лежит у наблюдателя
+		главного окна и приходит сюда по подписке (:meth:`_on_queue_items`).
+		"""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.list_communities(),
@@ -844,19 +1010,9 @@ class CommunitiesPage(ScrollArea):
 		)
 
 	def _on_communities_loaded(self, communities: list[CommunityDto]) -> None:
-		"""Список получен — вторым шагом состояние очереди отправки."""
+		"""Список получен — вторым шагом кэш статистики."""
 		self._communities = communities
-		run_in_engine(
-			self._worker,
-			self._worker.engine.publish_queue.state(),
-			self,
-			self._on_queue_loaded,
-			self._show_error,
-		)
-
-	def _on_queue_loaded(self, items: list[QueueItemDto]) -> None:
-		"""Очередь получена — считаем по сообществам план, слоты и ошибки."""
-		self._queue_counts = queue_counts(items)
+		self._loaded = True
 		run_in_engine(
 			self._worker,
 			self._worker.engine.community_stats.snapshot(),
@@ -864,6 +1020,15 @@ class CommunitiesPage(ScrollArea):
 			self._on_stats_loaded,
 			self._show_error,
 		)
+
+	def _on_queue_items(self, items: list[QueueItemDto]) -> None:
+		"""Снимок очереди от наблюдателя: перерисовка только при смене чисел."""
+		counts = queue_counts(items)
+		if counts == self._queue_counts:
+			return
+		self._queue_counts = counts
+		if self._loaded:
+			self._render()
 
 	def _on_stats_loaded(self, stats: list[CommunityStatsDto]) -> None:
 		"""Кэш статистики получен — рисуем и сообщаем главному окну.
@@ -888,7 +1053,7 @@ class CommunitiesPage(ScrollArea):
 		finally:
 			self._applying_view = False
 		self._view = view
-		self._render_sections()
+		self._rebuild_sections()
 
 	def _on_view_changed(self, route_key: str) -> None:
 		"""Переключатель: перестраиваются только тела разделов."""
@@ -896,7 +1061,7 @@ class CommunitiesPage(ScrollArea):
 		if self._applying_view or view == self._view:
 			return
 		self._view = view
-		self._render_sections()
+		self._rebuild_sections()
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.set(UI_COMMUNITIES_VIEW, view),
@@ -919,59 +1084,13 @@ class CommunitiesPage(ScrollArea):
 	# --- отрисовка ---------------------------------------------------------------
 
 	def _render(self) -> None:
-		"""Перерисовывает сводку и разделы."""
-		self._render_summary()
+		"""Приводит сводку и разделы к данным — по отпечаткам, а не с нуля."""
+		self._summary.update(self._communities, self._queue_counts)
 		self._render_sections()
 
-	def _render_summary(self) -> None:
-		"""Строка сводки: очередь, активные, ошибки, без публикатора.
-
-		``SimpleCardWidget`` (без реакции на наведение), числа —
-		``StrongBodyLabel``, подписи — ``BodyLabel``, между ними
-		``VerticalSeparator``; ошибки — кнопка (ведёт в очередь),
-		«без публикатора» — ``InfoBadge`` акцентом.
-		"""
-		clear_layout(self._summary_box)
-		if not self._communities:
-			return
-		totals = summary_counts(self._communities, self._queue_counts)
-		bar: QWidget = SimpleCardWidget(self)
-		layout = QHBoxLayout(bar)
-		layout.setContentsMargins(16, 6, 16, 6)
-		layout.setSpacing(12)
-		self._summary_segment(bar, layout, totals.queued, "в очереди отправки")
-		layout.addWidget(VerticalSeparator(bar))
-		self._summary_segment(bar, layout, totals.enabled, f"активных из {totals.total}")
-		if totals.errors:
-			layout.addWidget(VerticalSeparator(bar))
-			text = f"{totals.errors} {plural(totals.errors, 'ошибка', 'ошибки', 'ошибок')}"
-			errors = list_button(text, bar, height=_SUMMARY_BADGE_HEIGHT)
-			errors.setToolTip("Элементы очереди отправки с ошибкой — открыть очередь")
-			errors.clicked.connect(self._open_errors)
-			layout.addWidget(errors)
-		if totals.without_publisher:
-			layout.addWidget(VerticalSeparator(bar))
-			badge = InfoBadge.attension(f"{totals.without_publisher} без публикатора", parent=bar)
-			badge.setFont(font_px(_ACTION_FONT_PX))
-			badge.setFixedHeight(_SUMMARY_BADGE_HEIGHT)
-			badge.setContentsMargins(8, 0, 8, 0)
-			layout.addWidget(badge)
-		layout.addStretch()
-		self._summary_box.addWidget(bar)
-
-	@staticmethod
-	def _summary_segment(parent: QWidget, layout: QHBoxLayout, number: int, tail: str) -> None:
-		"""Сегмент сводки: число жирным и подпись прозой."""
-		layout.addWidget(StrongBodyLabel(str(number), parent))
-		layout.addWidget(BodyLabel(tail, parent))
-
-	def _render_sections(self) -> None:
-		"""Разделы «Каналы» и «Группы» по текущему поиску и виду."""
-		clear_layout(self._sections)
-		if not self._communities:
-			self._sections.addWidget(self._empty_state(searched=False))
-			return
-		rows = [
+	def _rows(self) -> list[Row]:
+		"""Строки показа по текущему поиску (сводку поиск не трогает)."""
+		return [
 			Row(
 				community,
 				self._queue_counts.get(community.id, QueueCounts()),
@@ -980,41 +1099,78 @@ class CommunitiesPage(ScrollArea):
 			for community in self._communities
 			if matches_search(community, self._query)
 		]
+
+	def _render_sections(self) -> None:
+		"""Разделы «Каналы» и «Группы» по текущему поиску и виду.
+
+		Раздел появляется с первой строкой и исчезает с последней;
+		карточка живёт, пока не сменился её отпечаток; пустое состояние
+		заменяет разделы целиком (сообществ нет или поиск ничего не нашёл).
+		"""
+		rows = self._rows()
 		if not rows:
-			self._sections.addWidget(self._empty_state(searched=True))
+			self._stack.drop_all()
+			self._show_empty(searched=bool(self._communities))
 			return
-		for kind, title, icon in (
-			(CommunityKind.CHANNEL, "Каналы", FluentIcon.CHAT),
-			(CommunityKind.GROUP, "Группы", FluentIcon.PEOPLE),
-		):
+		self._hide_empty()
+		for kind, title, icon in _SECTIONS:
 			section_rows = [row for row in rows if row.community.kind is kind]
 			if not section_rows:
-				continue  # пустой раздел не рисуется вовсе
-			self._sections.addWidget(self._section_header(title, icon, len(section_rows)))
-			self._sections.addWidget(self._section_body(kind, section_rows))
+				self._stack.drop(kind)
+				continue
+			section = self._stack.ensure(kind, partial(self._make_section, kind, title, icon))
+			if isinstance(section, _TableSection):
+				section.sync(section_rows, self._sort)
+			elif isinstance(section, GridSection):
+				section.sync(
+					section_rows,
+					key=lambda row: row.community.id,
+					signature=row_signature,
+					make=self._make_card,
+				)
 
-	def _section_header(self, title: str, icon: FluentIcon, count: int) -> QWidget:
-		"""Заголовок раздела: значок вида, подпись, число, хайрлайн."""
-		return section_header(self, title, count, icon=icon)
-
-	def _section_body(self, kind: CommunityKind, rows: list[Row]) -> QWidget:
-		"""Тело раздела: сетка карточек или таблица — по переключателю."""
+	def _make_section(self, kind: CommunityKind, title: str, icon: FluentIcon) -> Section:
+		"""Раздел под текущий вид: сетка карточек или таблица."""
 		if self._view == VIEW_LIST:
-			return _Table(
-				kind,
-				rows,
-				self._sort,
-				self._on_sort,
-				self.open_community.emit,
-				self._run_action,
+			return _TableSection(
 				self,
+				kind,
+				title,
+				icon,
+				on_sort=self._on_sort,
+				on_open=self.open_community.emit,
+				on_action=self._run_action,
 			)
-		cards: list[QWidget] = []
-		for row in rows:
-			card = CommunityCard(row, self._run_action, self)
-			card.clicked.connect(partial(self.open_community.emit, row.community.id))
-			cards.append(card)
-		return FlowGrid(cards, self, min_width=CARD_MIN_WIDTH, spacing=GRID_SPACING)
+		return GridSection(self, title, icon, min_width=CARD_MIN_WIDTH, spacing=GRID_SPACING)
+
+	def _make_card(self, row: Row) -> QWidget:
+		"""Карточка сообщества; клик мимо кнопок открывает его страницу."""
+		card = CommunityCard(row, self._run_action, self)
+		card.clicked.connect(partial(self.open_community.emit, row.community.id))
+		return card
+
+	def _rebuild_sections(self) -> None:
+		"""Смена вида: тела разделов другого типа — разделы собираются заново."""
+		self._stack.drop_all()
+		self._render_sections()
+
+	def _show_empty(self, searched: bool) -> None:
+		"""Пустое состояние: ничего не подключено или поиск ничего не нашёл."""
+		if self._empty is not None and self._empty_searched == searched:
+			return
+		self._hide_empty()
+		self._empty = self._empty_state(searched)
+		self._empty_searched = searched
+		self._sections.addWidget(self._empty)
+
+	def _hide_empty(self) -> None:
+		if self._empty is None:
+			return
+		self._sections.removeWidget(self._empty)
+		self._empty.setParent(None)
+		self._empty.deleteLater()
+		self._empty = None
+		self._empty_searched = None
 
 	def _empty_state(self, searched: bool) -> QWidget:
 		"""Пустое состояние: ничего не подключено или поиск ничего не нашёл."""
@@ -1059,7 +1215,7 @@ class CommunitiesPage(ScrollArea):
 				self._show_error,
 			)
 		elif action is CardAction.MAINTENANCE:
-			open_maintenance(self._worker, self._maintenance, community, self)
+			open_maintenance(self._worker, self._watchers.maintenance, community, self)
 
 	def _open_errors(self) -> None:
 		"""Плашка ошибок сводки: очередь отправки с фильтром «ошибки»."""
