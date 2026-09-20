@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
 from sqlalchemy import select
@@ -29,7 +30,8 @@ from pxcontrol.engine.services.publish_route import (
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import BotError
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
-from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind, UserbotRole
+from pxcontrol.engine.telegram.rights import ExecutorRights, ParticipantStatus
+from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
 
 logger = logging.getLogger(__name__)
 
@@ -48,20 +50,20 @@ _REF_LOADERS = (
 
 @dataclass(frozen=True)
 class AccountMembershipDto:
-	"""Сообщество глазами аккаунта: снимок, роль в нём и признак умолчания (ADR-0029)."""
+	"""Сообщество глазами аккаунта: снимок, участие в нём и признак умолчания (ADR-0029)."""
 
 	community: CommunityDto
-	role: UserbotRole
+	status: ParticipantStatus
 	is_default: bool
 
 
 @dataclass(frozen=True)
 class MemberDto:
-	"""Участник сообщества — userbot-аккаунт с ролью (ADR-0022)."""
+	"""Участник сообщества — userbot-аккаунт и его участие (ADR-0022, ADR-0035)."""
 
 	account_id: int
 	label: str
-	role: UserbotRole
+	status: ParticipantStatus
 	is_default: bool
 
 
@@ -103,7 +105,7 @@ class CommunityDto:
 	enabled: bool
 	default_account_id: int | None = None
 	default_account_label: str | None = None
-	default_role: UserbotRole | None = None
+	default_status: ParticipantStatus | None = None
 	members_count: int = 0
 	kind: CommunityKind = CommunityKind.CHANNEL
 	forum: bool = False
@@ -273,8 +275,7 @@ class CommunitiesService:
 		)
 		info = await self._gateway.userbot_check_community(account_id, chat_ref)
 		await self._sync_profile(account_id)
-		role = info.role or UserbotRole.MEMBER  # userbot-зонд всегда отдаёт роль
-		community = await self._store_community(info, bot_id=None, member=(account_id, role))
+		community = await self._store_community(info, bot_id=None, member=(account_id, info.rights))
 		logger.info(
 			"Подключён канал «%s» (userbot «%s»).", info.title, self._account_display(account)
 		)
@@ -312,8 +313,8 @@ class CommunitiesService:
 		if self._profile_sync is not None:
 			await self._profile_sync(account_id)
 
-	async def _find_userbot_publisher(self, chat_id: str) -> tuple[int, UserbotRole] | None:
-		"""Ищет аккаунт, способный публиковать (первый подходящий), с ролью.
+	async def _find_userbot_publisher(self, chat_id: str) -> tuple[int, ExecutorRights] | None:
+		"""Ищет аккаунт, способный публиковать (первый подходящий), со снимком прав.
 
 		Для попутного членства на бот-пути и перепроверки сообщества без
 		участников. Порядок — по id аккаунта; сбои проверок пропускаются;
@@ -334,7 +335,7 @@ class CommunitiesService:
 		for account_id in account_ids:
 			probe = await self._probe_userbot(account_id, chat_id)
 			if probe.ok is True and probe.info is not None:
-				return account_id, probe.info.role or UserbotRole.MEMBER
+				return account_id, probe.info.rights
 		return None
 
 	async def _store_community(
@@ -342,12 +343,12 @@ class CommunitiesService:
 		info: CommunityInfo,
 		*,
 		bot_id: int | None,
-		member: tuple[int, UserbotRole] | None,
+		member: tuple[int, ExecutorRights] | None,
 	) -> Community:
 		"""Сохраняет сообщество из проверенных данных, отклоняя дубликат.
 
 		Вид и признак форума берутся из проверки транспорта (ADR-0021).
-		``member`` — первый участник (id аккаунта, роль): он же становится
+		``member`` — первый участник (id аккаунта и снимок его прав): он же становится
 		публикатором по умолчанию (ADR-0022); None — без участников.
 
 		Raises:
@@ -366,15 +367,22 @@ class CommunitiesService:
 				kind=info.kind,
 				forum=info.forum,
 				bot_id=bot_id,
-				bot_can_edit=info.can_edit,
+				# право правки принадлежит паре «сообщество + бот» (ADR-0031):
+				# у userbot-подключения бота нет, и подтверждать нечего
+				bot_can_edit=info.rights.admin.edit_messages if bot_id is not None else False,
 				default_tg_account_id=member[0] if member else None,
 			)
 			session.add(community)
 			await session.flush()
 			if member is not None:
+				account_id, rights = member
 				session.add(
 					CommunityMember(
-						community_id=community.id, tg_account_id=member[0], role=member[1]
+						community_id=community.id,
+						tg_account_id=account_id,
+						status=rights.status,
+						rights=rights.to_payload(),
+						checked_at=datetime.now(UTC),
 					)
 				)
 			await session.commit()
@@ -421,9 +429,7 @@ class CommunitiesService:
 				userbot_ok = probe.ok
 				fresh_info = probe.info or fresh_info
 			if probe.ok is True and probe.info is not None:
-				await self._update_member_role(
-					community_id, account_id, probe.info.role or UserbotRole.MEMBER
-				)
+				await self._store_member_rights(community_id, account_id, probe.info.rights)
 			elif probe.ok is False:
 				await self._drop_member(
 					community_id, account_id, reason="подтверждённый отказ прав"
@@ -456,21 +462,34 @@ class CommunitiesService:
 		)
 		return CommunityAccess(dto, userbot_ok, bot_ok)
 
-	async def _update_member_role(
-		self, community_id: int, account_id: int, role: UserbotRole
+	async def _store_member_rights(
+		self, community_id: int, account_id: int, rights: ExecutorRights
 	) -> None:
-		"""Обновляет роль членства по подтверждённому зонду (ADR-0022)."""
+		"""Записывает снимок прав участника по подтверждённому зонду (ADR-0035).
+
+		Снимок пишется целиком при каждом подтверждённом ответе: он
+		изменчив, и «обновлять только при разнице» пришлось бы сравнивать
+		три десятка флагов ради экономии одной записи в локальную базу.
+		В журнал попадает смена участия — это и есть человекочитаемое
+		событие; перемена отдельных прав видна на странице сообщества.
+		"""
 		async with self._db.session_factory() as session:
 			member = await session.get(CommunityMember, (community_id, account_id))
-			if member is not None and member.role != role:
-				member.role = role
-				await session.commit()
-				logger.info(
-					"Роль аккаунта id=%s в сообществе id=%s: %s.",
-					account_id,
-					community_id,
-					role,
-				)
+			if member is None:
+				return
+			was = member.status
+			member.status = rights.status
+			member.rights = rights.to_payload()
+			member.checked_at = datetime.now(UTC)
+			await session.commit()
+		if was != rights.status:
+			logger.info(
+				"Участие аккаунта id=%s в сообществе id=%s: %s → %s.",
+				account_id,
+				community_id,
+				was,
+				rights.status,
+			)
 
 	async def _drop_member(self, community_id: int, account_id: int, *, reason: str) -> None:
 		"""Удаляет членство: по отказу Telegram или по воле человека.
@@ -500,14 +519,20 @@ class CommunitiesService:
 		)
 
 	async def _adopt_member(
-		self, community_id: int, member: tuple[int, UserbotRole], *, make_default: bool
+		self, community_id: int, member: tuple[int, ExecutorRights], *, make_default: bool
 	) -> None:
 		"""Добавляет найденного публикатора (авто-восстановление)."""
-		account_id, role = member
+		account_id, rights = member
 		async with self._db.session_factory() as session:
 			if await session.get(CommunityMember, (community_id, account_id)) is None:
 				session.add(
-					CommunityMember(community_id=community_id, tg_account_id=account_id, role=role)
+					CommunityMember(
+						community_id=community_id,
+						tg_account_id=account_id,
+						status=rights.status,
+						rights=rights.to_payload(),
+						checked_at=datetime.now(UTC),
+					)
 				)
 			community = await self._community_in_session(session, community_id)
 			if make_default and community.default_tg_account_id is None:
@@ -517,7 +542,7 @@ class CommunitiesService:
 			"Аккаунт id=%s принят участником сообщества id=%s (%s).",
 			account_id,
 			community_id,
-			role,
+			rights.status,
 		)
 
 	async def list_members(self, community_id: int) -> list[MemberDto]:
@@ -532,7 +557,7 @@ class CommunitiesService:
 				MemberDto(
 					account_id=member.tg_account_id,
 					label=self._account_display(member.tg_account),
-					role=UserbotRole(member.role),
+					status=ParticipantStatus(member.status),
 					is_default=member.tg_account_id == community.default_tg_account_id,
 				)
 				for member in sorted(community.members, key=lambda m: m.tg_account_id)
@@ -564,7 +589,7 @@ class CommunitiesService:
 						row.community,
 						enabled=enabled.get(row.community_id, COMMUNITY_ENABLED.default),
 					),
-					role=UserbotRole(row.role),
+					status=ParticipantStatus(row.status),
 					is_default=row.community.default_tg_account_id == account_id,
 				)
 				for row in rows
@@ -611,7 +636,7 @@ class CommunitiesService:
 		await self._sync_profile(account_id)
 		await self._adopt_member(
 			community_id,
-			(account_id, info.role or UserbotRole.MEMBER),
+			(account_id, info.rights),
 			make_default=not had_members,
 		)
 		await self._refresh_mutable(community_id, info)
@@ -731,7 +756,7 @@ class CommunitiesService:
 		расхождение с Telegram — предупреждение в лог (запись остаётся
 		прежней, владелец переподключит).
 
-		Право правки у бота (``can_edit``, ADR-0031) — тоже изменчивое,
+		Право бота править чужие сообщения (ADR-0031) — тоже изменчивое,
 		но приходит **только** с бот-зонда: userbot его не вычисляет
 		и всегда сообщает False (см. ``CommunityInfo``). Поэтому оно
 		обновляется лишь тогда, когда свежие данные принёс бот, — иначе
@@ -764,13 +789,14 @@ class CommunitiesService:
 				)
 				community.username = info.username
 				changed = True
-			if from_bot and community.bot_can_edit != info.can_edit:
+			can_edit = info.rights.admin.edit_messages
+			if from_bot and community.bot_can_edit != can_edit:
 				logger.info(
 					"Сообщество «%s»: право бота править сообщения → %s.",
 					info.title,
-					info.can_edit,
+					can_edit,
 				)
-				community.bot_can_edit = info.can_edit
+				community.bot_can_edit = can_edit
 				changed = True
 			if changed:
 				await session.commit()
@@ -853,9 +879,9 @@ class CommunitiesService:
 	def _dto(community: Community, enabled: bool = True) -> CommunityDto:
 		"""Снимок сообщества; связи должны быть подгружены (with_refs)."""
 		default = community.default_account
-		default_role = next(
+		default_status = next(
 			(
-				UserbotRole(member.role)
+				ParticipantStatus(member.status)
 				for member in community.members
 				if member.tg_account_id == community.default_tg_account_id
 			),
@@ -871,7 +897,7 @@ class CommunitiesService:
 			enabled,
 			community.default_tg_account_id,
 			CommunitiesService._account_display(default) if default is not None else None,
-			default_role=default_role,
+			default_status=default_status,
 			members_count=len(community.members),
 			kind=CommunityKind(community.kind),
 			forum=community.forum,

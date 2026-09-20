@@ -210,7 +210,7 @@ class TopicChoice:
 		"""Наполняет список тем с учётом роли публикатора (ADR-0022)."""
 		if self._choice.is_stale(community.id):
 			return
-		shown, closed = visible_topics(topics, community.default_role)
+		shown, closed = visible_topics(topics, community.default_status)
 		if closed:
 			self._hint.setText(closed_topics_hint(closed))
 		self._combo.set_items(shown, label=topic_label, key=lambda topic: topic.id)

@@ -254,14 +254,22 @@ class Community(TimestampMixin, Base):
 
 
 class CommunityMember(TimestampMixin, Base):
-	"""Членство userbot-аккаунта в сообществе (ADR-0022).
+	"""Членство userbot-аккаунта в сообществе (ADR-0022, ADR-0035).
 
 	Пул аккаунтов сообщества: публикует умолчание
 	(``Community.default_tg_account_id``), остальные — фундамент
-	будущего модуля соцактивности. Роль — снимок из зондов прав
-	(значения ``UserbotRole``), обновляется подключением, добавлением
-	участника и перепроверкой доступов. Членство живёт и умирает
-	вместе с сообществом и с аккаунтом (CASCADE с обеих сторон).
+	модуля соцактивности. Членство живёт и умирает вместе с сообществом
+	и с аккаунтом (CASCADE с обеих сторон).
+
+	Что известно о правах, описывают три поля (ADR-0035). ``status`` —
+	как аккаунт участвует (значения ``ParticipantStatus``; наследник
+	прежней роли ``admin``/``member``, которой было мало: «не состоит»
+	и «ограничен» — разные факты). ``rights`` — полный снимок прав
+	(формат — ``ExecutorRights.to_payload``); ``None`` значит «снимок
+	ещё не читался», и таким он остаётся у записей, переживших миграцию,
+	до первой перепроверки доступов. ``checked_at`` — когда зондировали.
+	Истина о правах живёт в Telegram: снимок стареет, и отказ сервера
+	остаётся последним словом (ADR-0022, п. 8).
 	"""
 
 	__tablename__ = "community_members"
@@ -272,7 +280,11 @@ class CommunityMember(TimestampMixin, Base):
 	tg_account_id: Mapped[int] = mapped_column(
 		ForeignKey("tg_accounts.id", ondelete="CASCADE"), primary_key=True
 	)
-	role: Mapped[str] = mapped_column(String(16))
+	# участие — значения ParticipantStatus (creator, admin, member…)
+	status: Mapped[str] = mapped_column(String(16))
+	# снимок прав, формат — ExecutorRights.to_payload; NULL — не читался
+	rights: Mapped[Any | None] = mapped_column(JSON, default=None)
+	checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 	tg_account: Mapped[TgAccount] = relationship()
 	# обратная сторона членства (страница аккаунта, ADR-0029): без

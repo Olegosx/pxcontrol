@@ -26,6 +26,12 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotFloodError,
 	service_message_kind,
 )
+from pxcontrol.engine.telegram.rights import (
+	ALL_MEMBER_RIGHTS,
+	AdminRights,
+	ExecutorRights,
+	ParticipantStatus,
+)
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	CommunityKind,
@@ -34,7 +40,6 @@ from pxcontrol.engine.telegram.types import (
 	ServiceMessageInfo,
 	ServiceMessageKind,
 	ServiceMessagesPage,
-	UserbotRole,
 )
 
 
@@ -65,9 +70,11 @@ class _FakeGateway:
 			title="Группа",
 			username=None,
 			kind=CommunityKind.GROUP,
-			role=UserbotRole.ADMIN,
-			can_delete=self.can_delete,
-			can_ban=self.can_ban,
+			rights=ExecutorRights(
+				ParticipantStatus.ADMIN,
+				AdminRights(delete_messages=self.can_delete, ban_users=self.can_ban),
+				ALL_MEMBER_RIGHTS,
+			),
 		)
 
 	async def userbot_service_messages_page(

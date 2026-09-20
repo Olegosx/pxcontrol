@@ -73,13 +73,13 @@ from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.services.schedule_plan import parse_hhmm
 from pxcontrol.engine.services.video import video_dialog_filter
+from pxcontrol.engine.telegram.rights import ParticipantStatus
 from pxcontrol.engine.telegram.types import (
 	GENERAL_TOPIC_ID,
 	TEXT_LENGTH_LIMIT,
 	CommunityKind,
 	ForumTopicInfo,
 	MediaKind,
-	UserbotRole,
 	telegram_text_length,
 )
 from pxcontrol.ui import density
@@ -176,7 +176,7 @@ def kind_file_filter(kind: MediaKind) -> str:
 
 
 def visible_topics(
-	topics: list[ForumTopicInfo], role: UserbotRole | None
+	topics: list[ForumTopicInfo], status: ParticipantStatus | None
 ) -> tuple[list[ForumTopicInfo], int]:
 	"""Темы, доступные для выбора, и число скрытых закрытых (ADR-0022).
 
@@ -188,7 +188,7 @@ def visible_topics(
 		Пара «темы для выбора, сколько закрытых скрыто».
 	"""
 	shown = [topic for topic in topics if topic.id != GENERAL_TOPIC_ID]
-	if role is UserbotRole.ADMIN:
+	if status is not None and status.administers:
 		return shown, 0
 	closed = sum(1 for topic in shown if topic.closed)
 	return [topic for topic in shown if not topic.closed], closed
@@ -307,9 +307,22 @@ def bot_caption(label: str, username: str | None) -> str:
 	return f"{label} (@{username or '—'})"
 
 
-def role_caption(role: UserbotRole) -> str:
-	"""Человеческая метка роли userbot-аккаунта (ADR-0022)."""
-	return "админ" if role is UserbotRole.ADMIN else "участник"
+#: Человеческие метки участия исполнителя (ADR-0035). Прежние две —
+#: «админ» и «участник» — остались как были: остальные значения Telegram
+#: различал и раньше, а приложение о них молчало.
+_STATUS_WORDS = {
+	ParticipantStatus.CREATOR: "владелец",
+	ParticipantStatus.ADMIN: "админ",
+	ParticipantStatus.MEMBER: "участник",
+	ParticipantStatus.RESTRICTED: "ограничен",
+	ParticipantStatus.LEFT: "не состоит",
+	ParticipantStatus.BANNED: "исключён",
+}
+
+
+def status_caption(status: ParticipantStatus) -> str:
+	"""Человеческая метка участия исполнителя в сообществе (ADR-0035)."""
+	return _STATUS_WORDS.get(status, str(status))
 
 
 def community_kind_caption(community: CommunityDto) -> str:

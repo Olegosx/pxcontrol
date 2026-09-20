@@ -21,6 +21,11 @@ from pxcontrol.engine.telegram.markup import ButtonKind, PostMarkup
 from pxcontrol.engine.telegram.poll import PollDraft
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
+from pxcontrol.engine.telegram.rights import (
+	ExecutorRights,
+	ParticipantStatus,
+	bot_rights,
+)
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityInfo,
@@ -316,68 +321,43 @@ def community_kind_from_chat_type(chat_type: str) -> CommunityKind:
 	raise BotError("Это личный чат — укажите канал или группу.")
 
 
-def ensure_bot_can_post(member: Any) -> None:
+def ensure_bot_can_post(rights: ExecutorRights) -> None:
 	"""Проверяет, что бот — администратор канала с правом публиковать.
+
+	Разбора ответа Telegram здесь больше нет: снимок прав складывает
+	одна точка (:mod:`pxcontrol.engine.telegram.rights`, ADR-0035),
+	а тут остаётся правило «чего хватает для публикации». Владелец
+	проходит по построению — в снимке ему выдано всё.
 
 	Raises:
 		BotError: Бот не админ или без права публикации.
 	"""
-	status = getattr(member, "status", "")
-	if status == "creator":
-		return
-	if status != "administrator":
+	if not rights.status.administers:
 		raise BotError("Бот не администратор канала — добавьте его администратором.")
-	if getattr(member, "can_post_messages", None) is not True:
+	if not rights.admin.post_messages:
 		raise BotError("У бота нет права публиковать сообщения в канале.")
 
 
-def bot_can_edit_messages(member: Any) -> bool:
-	"""Может ли бот править чужие сообщения в канале (ADR-0031).
-
-	Право ``can_edit_messages`` существует только у каналов; у владельца
-	оно есть всегда, у группы его не бывает вовсе (там каждый правит
-	только своё — проверено опытом). Отсутствие права не мешает
-	подключению сообщества: без него просто недоступен маршрут, в котором
-	бот дорисовывает кнопки к посту публикателя.
-
-	Args:
-		member: ответ ``getChatMember`` для самого бота.
-	"""
-	status = getattr(member, "status", "")
-	if status == "creator":
-		return True
-	return status == "administrator" and getattr(member, "can_edit_messages", None) is True
-
-
-def ensure_bot_can_send_in_group(member: Any, default_permissions: Any) -> None:
+def ensure_bot_can_send_in_group(rights: ExecutorRights) -> None:
 	"""Проверяет, что бот может писать в группе (ADR-0021).
 
 	В группах права ``post_messages`` нет: писать может любой участник,
-	которого не ограничили. Админам (и создателю) ограничения группы
-	не мешают; обычный участник упирается в общие права группы
-	(``chat.permissions``), ограниченный — ещё и в свои.
-
-	Args:
-		member: ответ ``getChatMember`` для самого бота.
-		default_permissions: общие права группы (``chat.permissions``).
+	которого не ограничили. Администраторам и владельцу ограничения
+	не мешают; остальным причину отказа называет статус — у ограниченного
+	это его личные ограничения, у обычного участника общие права группы.
 
 	Raises:
 		BotError: Бот не участник или не может писать.
 	"""
-	status = getattr(member, "status", "")
-	if status in ("creator", "administrator"):
+	if rights.status.administers:
 		return
-	if status == "restricted":
-		if getattr(member, "is_member", None) is not True:
-			raise BotError("Бот не участник группы — добавьте его в группу.")
-		if getattr(member, "can_send_messages", None) is not True:
-			raise BotError("Бот ограничен в отправке сообщений в этой группе.")
-	elif status != "member":
+	if not rights.status.in_community:
 		raise BotError("Бот не участник группы — добавьте его в группу.")
-	if getattr(default_permissions, "can_send_messages", None) is False:
-		raise BotError(
-			"В группе писать могут только администраторы — назначьте бота администратором."
-		)
+	if rights.allowed.send_plain:
+		return
+	if rights.status is ParticipantStatus.RESTRICTED:
+		raise BotError("Бот ограничен в отправке сообщений в этой группе.")
+	raise BotError("В группе писать могут только администраторы — назначьте бота администратором.")
 
 
 def to_reply_markup(markup: PostMarkup | None) -> Any | None:
@@ -739,19 +719,21 @@ async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 		kind = community_kind_from_chat_type(str(chat.type))
 		me = await bot.get_me()
 		member = await bot.get_chat_member(chat.id, me.id)
+		# снимок прав бота — из того же ответа (ADR-0035); в нём и право
+		# править чужие сообщения, от которого зависят кнопки поверх
+		# поста публикателя (ADR-0031): подключению оно не требуется
+		rights = bot_rights(member, chat.permissions)
 		if kind is CommunityKind.CHANNEL:
-			ensure_bot_can_post(member)
+			ensure_bot_can_post(rights)
 		else:
-			ensure_bot_can_send_in_group(member, chat.permissions)
+			ensure_bot_can_send_in_group(rights)
 		return CommunityInfo(
 			str(chat.id),
 			chat.title or str(ref),
 			chat.username,
 			kind=kind,
+			rights=rights,
 			forum=bool(chat.is_forum),
-			# право правки не требуется для подключения — оно решает
-			# только, доступны ли кнопки поверх поста публикателя
-			can_edit=bot_can_edit_messages(member),
 		)
 
 

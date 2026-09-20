@@ -238,7 +238,7 @@ class QueueItemEditor(QWidget):
 			self._topic_box.setVisible(False)
 			self._topic_hint.setText(topics_error)
 			return
-		shown, closed = visible_topics(topics, self._community.default_role)
+		shown, closed = visible_topics(topics, self._community.default_status)
 		self._topic_combo.set_items(shown, label=topic_label, key=lambda topic: topic.id)
 		if closed:
 			self._topic_hint.setText(closed_topics_hint(closed))

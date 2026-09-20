@@ -35,7 +35,12 @@ from pxcontrol.engine.telegram.types import (
 	Share,
 	limit_gb,
 )
-from pxcontrol.ui.pages.common import community_kind_caption, format_local, plural, role_caption
+from pxcontrol.ui.pages.common import (
+	community_kind_caption,
+	format_local,
+	plural,
+	status_caption,
+)
 
 
 class UserState(StrEnum):
@@ -469,7 +474,7 @@ def busy_days_caption(points: tuple[DayPoint, ...]) -> str:
 def membership_caption(membership: AccountMembershipDto) -> str:
 	"""Подстрочник строки сообщества на странице пользователя."""
 	community = membership.community
-	parts = [community_kind_caption(community), role_caption(membership.role)]
+	parts = [community_kind_caption(community), status_caption(membership.status)]
 	if membership.is_default:
 		parts.append("публикатор по умолчанию")
 	if not community.enabled:

@@ -6,7 +6,8 @@ from datetime import UTC, date, datetime, timedelta
 
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_overview import CommunityOverviewDto, SeriesSource
-from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, NamedSeries, Share, UserbotRole
+from pxcontrol.engine.telegram.rights import ParticipantStatus
+from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, NamedSeries, Share
 from pxcontrol.ui.pages.common import ACCENT_TEXT, DIM_TEXT, ERROR_TEXT
 from pxcontrol.ui.pages.community_overview import (
 	axis_dates,
@@ -42,7 +43,7 @@ def _community(**overrides: object) -> CommunityDto:
 		"enabled": True,
 		"default_account_id": 3,
 		"default_account_label": "Олег К.",
-		"default_role": UserbotRole.MEMBER,
+		"default_status": ParticipantStatus.MEMBER,
 		"kind": CommunityKind.GROUP,
 		"forum": False,
 	}

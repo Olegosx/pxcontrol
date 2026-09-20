@@ -275,7 +275,8 @@ def test_kind_rows_captions_and_memberships() -> None:
 
 	from pxcontrol.engine.services.activity import WindowStats
 	from pxcontrol.engine.services.communities import AccountMembershipDto, CommunityDto
-	from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, Share, UserbotRole
+	from pxcontrol.engine.telegram.rights import ParticipantStatus
+	from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, Share
 	from pxcontrol.ui.pages.user_state import (
 		bot_community_caption,
 		busy_days_caption,
@@ -312,7 +313,7 @@ def test_kind_rows_captions_and_memberships() -> None:
 		default_account_id=3,
 		kind=CommunityKind.GROUP,
 	)
-	membership = AccountMembershipDto(community, UserbotRole.ADMIN, True)
+	membership = AccountMembershipDto(community, ParticipantStatus.ADMIN, True)
 	assert membership_caption(membership) == (
 		"Группа · админ · публикатор по умолчанию · выключено"
 	)

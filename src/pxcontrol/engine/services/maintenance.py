@@ -33,6 +33,7 @@ from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
 from pxcontrol.engine.services.communities import CommunitiesService, CommunityDto
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
+from pxcontrol.engine.telegram.rights import ExecutorRights
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	DeletedAccount,
@@ -363,7 +364,7 @@ class MaintenanceService:
 		_check_range("Предел удаления за проход", delete_limit, DELETE_LIMIT_RANGE)
 		community, account_id = await self._target(community_id)
 		rights = await self._rights(community, account_id)
-		if not rights.can_delete:
+		if not rights.admin.delete_messages:
 			raise MaintenanceError(
 				f"У публикатора «{community.title}» нет права удалять сообщения — "
 				"выдайте аккаунту право «Удаление сообщений» в настройках "
@@ -434,7 +435,7 @@ class MaintenanceService:
 		_check_range("Предел исключений за проход", limit, KICK_LIMIT_RANGE)
 		community, account_id = await self._target(community_id)
 		rights = await self._rights(community, account_id)
-		if not rights.can_ban:
+		if not rights.admin.ban_users:
 			raise MaintenanceError(
 				f"У публикатора «{community.title}» нет права исключать участников — "
 				"выдайте аккаунту право «Блокировка пользователей» в настройках "
@@ -448,7 +449,7 @@ class MaintenanceService:
 				target=MaintenanceTarget.DELETED_ACCOUNTS,
 				clean=True,
 				limit=limit,
-				can_delete=rights.can_delete,
+				can_delete=rights.admin.delete_messages,
 			)
 		)
 
@@ -561,16 +562,19 @@ class MaintenanceService:
 			)
 		return community, community.default_account_id
 
-	async def _rights(self, community: CommunityDto, account_id: int) -> CommunityInfo:
-		"""Живой зонд прав аккаунта в сообществе.
+	async def _rights(self, community: CommunityDto, account_id: int) -> ExecutorRights:
+		"""Живой зонд прав аккаунта в сообществе (ADR-0035).
 
 		Права меняются в Telegram без нашего ведома, а начинать проход,
-		который упрётся в отказ на первой же пачке, незачем.
+		который упрётся в отказ на первой же пачке, незачем. Снимок
+		складывает сам транспорт — здесь спрашивается конкретное право,
+		а не роль: у администратора права удалять может и не быть.
 
 		Raises:
 			UserbotUnavailableError: Проверить не удалось (нет связи).
 		"""
-		return await self._gateway.userbot_check_community(account_id, community.tg_chat_id)
+		info = await self._gateway.userbot_check_community(account_id, community.tg_chat_id)
+		return info.rights
 
 	# --- выполнение -----------------------------------------------------------
 

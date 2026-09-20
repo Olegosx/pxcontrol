@@ -10,13 +10,13 @@ import pytest
 
 from pxcontrol.engine.services.posts import TextLimits
 from pxcontrol.engine.services.publish_route import PublishRoute
+from pxcontrol.engine.telegram.rights import ParticipantStatus
 from pxcontrol.engine.telegram.types import (
 	CAPTION_LENGTH_LIMIT,
 	GENERAL_TOPIC_ID,
 	TEXT_LENGTH_LIMIT,
 	ForumTopicInfo,
 	MediaKind,
-	UserbotRole,
 )
 from pxcontrol.ui.pages.common import (
 	CONTENT_KINDS,
@@ -38,26 +38,26 @@ _TOPICS = [
 
 def test_visible_topics_drops_general() -> None:
 	"""General отдельным пунктом не показывается — он и есть «Общая лента»."""
-	shown, _closed = visible_topics(_TOPICS, UserbotRole.ADMIN)
+	shown, _closed = visible_topics(_TOPICS, ParticipantStatus.ADMIN)
 	assert [topic.id for topic in shown] == [5, 9]
 
 
 def test_visible_topics_keeps_closed_for_admin() -> None:
 	"""Админ пишет и в закрытые темы — они остаются в списке."""
-	shown, closed = visible_topics(_TOPICS, UserbotRole.ADMIN)
+	shown, closed = visible_topics(_TOPICS, ParticipantStatus.ADMIN)
 	assert closed == 0
 	assert any(topic.closed for topic in shown)
 
 
 def test_visible_topics_hides_closed_for_member() -> None:
 	"""Участнику закрытые недоступны: скрываются, их число — для подписи."""
-	shown, closed = visible_topics(_TOPICS, UserbotRole.MEMBER)
+	shown, closed = visible_topics(_TOPICS, ParticipantStatus.MEMBER)
 	assert [topic.id for topic in shown] == [5]
 	assert closed == 1
 
 
-def test_visible_topics_unknown_role_behaves_as_member() -> None:
-	"""Роль неизвестна — считаем участником: показать лишнее хуже, чем скрыть."""
+def test_visible_topics_unknown_status_behaves_as_member() -> None:
+	"""Участие неизвестно — считаем участником: показать лишнее хуже, чем скрыть."""
 	shown, closed = visible_topics(_TOPICS, None)
 	assert [topic.id for topic in shown] == [5]
 	assert closed == 1

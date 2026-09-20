@@ -23,7 +23,15 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.refs import ChatRefError, normalize_chat_ref
-from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind, UserbotRole
+from pxcontrol.engine.telegram.rights import (
+	ALL_ADMIN_RIGHTS,
+	ALL_MEMBER_RIGHTS,
+	AdminRights,
+	ExecutorRights,
+	MemberRights,
+	ParticipantStatus,
+)
+from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
 
 
 class _FakeGateway:
@@ -40,7 +48,7 @@ class _FakeGateway:
 		self.bot_is_admin = True  # ответ проверки прав бота
 		self.kind = CommunityKind.CHANNEL  # вид, который «увидит» проверка
 		self.forum = False  # признак форума в ответе проверки
-		self.role = UserbotRole.ADMIN  # роль аккаунта в userbot-зонде
+		self.status = ParticipantStatus.ADMIN  # участие аккаунта в userbot-зонде
 		self.title = "Тестовый канал"  # название в ответе проверки
 		self.username: str | None = "testchan"  # @имя (None — приватное)
 		self.bot_can_edit = False  # право бота править чужие посты (ADR-0031)
@@ -58,8 +66,12 @@ class _FakeGateway:
 			self.title,
 			self.username,
 			self.kind,
+			ExecutorRights(
+				ParticipantStatus.ADMIN,
+				AdminRights(post_messages=True, edit_messages=self.bot_can_edit),
+				ALL_MEMBER_RIGHTS,
+			),
 			self.forum,
-			can_edit=self.bot_can_edit,
 		)
 
 	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo:
@@ -68,8 +80,14 @@ class _FakeGateway:
 				"Userbot не администратор канала — добавьте аккаунт "
 				"администратором с правом публиковать."
 			)
+		admin = ALL_ADMIN_RIGHTS if self.status.administers else AdminRights()
 		return CommunityInfo(
-			"-1001234", self.title, self.username, self.kind, self.forum, role=self.role
+			"-1001234",
+			self.title,
+			self.username,
+			self.kind,
+			ExecutorRights(self.status, admin, ALL_MEMBER_RIGHTS),
+			self.forum,
 		)
 
 
@@ -311,13 +329,17 @@ async def test_community_enabled_comes_from_settings(db: Database) -> None:
 
 
 def test_ensure_bot_can_post() -> None:
-	"""Право публиковать: владелец и админ с правом проходят, прочие — нет."""
-	ensure_bot_can_post(SimpleNamespace(status="creator"))
-	ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=True))
+	"""Право публиковать: владелец и админ с правом проходят, прочие — нет.
+
+	Правило читает снимок прав (ADR-0035), а не ответ библиотеки: перевод
+	ответа в снимок — забота :mod:`rights` и его тестов.
+	"""
+	ensure_bot_can_post(ExecutorRights(ParticipantStatus.CREATOR, ALL_ADMIN_RIGHTS))
+	ensure_bot_can_post(ExecutorRights(ParticipantStatus.ADMIN, AdminRights(post_messages=True)))
 	with pytest.raises(BotError, match="не администратор"):
-		ensure_bot_can_post(SimpleNamespace(status="member"))
+		ensure_bot_can_post(ExecutorRights(ParticipantStatus.MEMBER))
 	with pytest.raises(BotError, match="нет права"):
-		ensure_bot_can_post(SimpleNamespace(status="administrator", can_post_messages=False))
+		ensure_bot_can_post(ExecutorRights(ParticipantStatus.ADMIN, AdminRights()))
 
 
 def test_bot_caption_keeps_separators_literal() -> None:
@@ -346,30 +368,27 @@ def test_community_kind_from_chat_type() -> None:
 
 
 def test_ensure_bot_can_send_in_group() -> None:
-	"""Права бота в группе: участник без ограничений; админа они не касаются."""
-	allow = SimpleNamespace(can_send_messages=True)
-	deny = SimpleNamespace(can_send_messages=False)
-	# админу и создателю общие ограничения группы не мешают
-	ensure_bot_can_send_in_group(SimpleNamespace(status="administrator"), deny)
-	ensure_bot_can_send_in_group(SimpleNamespace(status="creator"), deny)
-	ensure_bot_can_send_in_group(SimpleNamespace(status="member"), allow)
-	# Bot API может не отдать права — отсутствие запрета не считается запретом
-	ensure_bot_can_send_in_group(SimpleNamespace(status="member"), None)
+	"""Права бота в группе: участник без ограничений; админа они не касаются.
+
+	Причину отказа называет статус: ограниченному — про его ограничения,
+	обычному участнику — про группу, где пишут только администраторы.
+	"""
+	may_write = MemberRights(send_plain=True)
+	# админу и владельцу общие ограничения группы не мешают
+	ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.ADMIN, ALL_ADMIN_RIGHTS))
+	ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.CREATOR, ALL_ADMIN_RIGHTS))
+	ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.MEMBER, AdminRights(), may_write))
 	ensure_bot_can_send_in_group(
-		SimpleNamespace(status="restricted", is_member=True, can_send_messages=True), allow
+		ExecutorRights(ParticipantStatus.RESTRICTED, AdminRights(), may_write)
 	)
 	with pytest.raises(BotError, match="только администраторы"):
-		ensure_bot_can_send_in_group(SimpleNamespace(status="member"), deny)
+		ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.MEMBER))
 	with pytest.raises(BotError, match="не участник"):
-		ensure_bot_can_send_in_group(SimpleNamespace(status="left"), allow)
+		ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.LEFT))
 	with pytest.raises(BotError, match="не участник"):
-		ensure_bot_can_send_in_group(
-			SimpleNamespace(status="restricted", is_member=False, can_send_messages=True), allow
-		)
+		ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.BANNED))
 	with pytest.raises(BotError, match="ограничен в отправке"):
-		ensure_bot_can_send_in_group(
-			SimpleNamespace(status="restricted", is_member=True, can_send_messages=False), allow
-		)
+		ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.RESTRICTED))
 
 
 async def _community_row(db: Database, community_id: int) -> Community:
@@ -506,20 +525,20 @@ async def test_membership_crud_and_default(db: Database) -> None:
 	"""Участники: добавление с ролью из зонда, умолчание, явная смена."""
 	service, gateway, community_id, second = await _member_service(db)
 	members = await service.list_members(community_id)
-	assert [(m.label, m.role, m.is_default) for m in members] == [
-		("@first", UserbotRole.ADMIN, True)
+	assert [(m.label, m.status, m.is_default) for m in members] == [
+		("@first", ParticipantStatus.ADMIN, True)
 	]
-	gateway.role = UserbotRole.MEMBER  # второй аккаунт — простой участник
+	gateway.status = ParticipantStatus.MEMBER  # второй аккаунт — простой участник
 	members = await service.add_member(community_id, second)
-	assert [(m.label, m.role, m.is_default) for m in members] == [
-		("@first", UserbotRole.ADMIN, True),
-		("@second", UserbotRole.MEMBER, False),
+	assert [(m.label, m.status, m.is_default) for m in members] == [
+		("@first", ParticipantStatus.ADMIN, True),
+		("@second", ParticipantStatus.MEMBER, False),
 	]
 	with pytest.raises(CommunityError, match="уже участник"):
 		await service.add_member(community_id, second)
 	dto = await service.set_default(community_id, second)
 	assert dto.default_account_id == second
-	assert dto.default_role is UserbotRole.MEMBER
+	assert dto.default_status is ParticipantStatus.MEMBER
 	assert dto.members_count == 2
 
 
@@ -548,14 +567,14 @@ async def test_set_default_requires_membership(db: Database) -> None:
 async def test_recheck_updates_roles_and_drops_refused(db: Database) -> None:
 	"""Перепроверка: роль обновляется, отказник исключается, умолчание падает."""
 	service, gateway, community_id, second = await _member_service(db)
-	gateway.role = UserbotRole.MEMBER
+	gateway.status = ParticipantStatus.MEMBER
 	await service.add_member(community_id, second)
 	# админа разжаловали в участники — роль обновится по зонду
 	await service.recheck_community(community_id)
 	members = await service.list_members(community_id)
-	assert [(m.label, m.role) for m in members] == [
-		("@first", UserbotRole.MEMBER),
-		("@second", UserbotRole.MEMBER),
+	assert [(m.label, m.status) for m in members] == [
+		("@first", ParticipantStatus.MEMBER),
+		("@second", ParticipantStatus.MEMBER),
 	]
 	# умолчание выгнали из сообщества: членство и умолчание снимаются
 	gateway.userbot_admins = {second}
@@ -648,8 +667,8 @@ async def test_communities_of_account_and_bot(db: Database) -> None:
 	first = await service.add_community_via_userbot(account_id, "@testchan")
 	bot_id = await _make_bot(db)
 	memberships = await service.communities_of_account(account_id)
-	assert [(m.community.id, m.role, m.is_default) for m in memberships] == [
-		(first.id, UserbotRole.ADMIN, True)
+	assert [(m.community.id, m.status, m.is_default) for m in memberships] == [
+		(first.id, ParticipantStatus.ADMIN, True)
 	]
 	assert await service.communities_of_account(999_999) == []
 	dto = await service.assign_bot(first.id, bot_id)

@@ -90,11 +90,11 @@ from pxcontrol.ui.pages.common import (
 	list_area,
 	list_button,
 	page_layout,
-	role_caption,
 	section_header,
 	show_info,
 	show_success,
 	show_warning,
+	status_caption,
 	tab_strip,
 )
 from pxcontrol.ui.pages.community_overview import OverviewTab
@@ -354,7 +354,7 @@ class MembersPanel(QWidget):
 		box = QWidget(self)
 		row = QHBoxLayout(box)
 		row.setContentsMargins(0, 0, 0, 0)
-		row.addWidget(BodyLabel(f"{member.label} — {role_caption(member.role)}", box))
+		row.addWidget(BodyLabel(f"{member.label} — {status_caption(member.status)}", box))
 		row.addStretch()
 		if member.is_default:
 			row.addWidget(CaptionLabel("публикатор по умолчанию", box))

@@ -22,6 +22,11 @@ from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
 from pxcontrol.engine.telegram.refs import CHANNEL_ID_PREFIX, normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
+from pxcontrol.engine.telegram.rights import (
+	ExecutorRights,
+	ParticipantStatus,
+	userbot_rights,
+)
 from pxcontrol.engine.telegram.stats_graph import (
 	GraphSeries,
 	daily,
@@ -59,7 +64,6 @@ from pxcontrol.engine.telegram.types import (
 	TopInviter,
 	TopPoster,
 	UserbotProfile,
-	UserbotRole,
 )
 
 logger = logging.getLogger(__name__)
@@ -280,92 +284,50 @@ _NOT_ADMIN_TEXT = (
 )
 
 
-def has_admin_right(perms: Any, right: str) -> bool:
-	"""Есть ли у аккаунта конкретное право администратора.
-
-	Одно правило на все проверки прав userbot: владельцу сообщества
-	можно всё, администратору — только то, что ему выдали поимённо.
-	Роль «администратор» сама по себе не гарантирует ни удаления чужих
-	сообщений, ни исключения участников (ADR-0026), поэтому каждое
-	право спрашивается отдельно — но одним способом.
-
-	У самой библиотеки есть одноимённые свойства (``delete_messages``
-	и прочие), но они читают присланный набор флагов как есть — и для
-	**владельца** отвечают ровно то, что прислал сервер. Проверено
-	2026-09-13: владелец с неполным набором флагов получает от них
-	«нельзя», хотя в Telegram владельцу нельзя урезать права в принципе.
-	Поэтому владелец здесь — отдельная ветка, а не частный случай
-	общего чтения флагов.
-
-	Args:
-		perms: ответ Telegram о правах аккаунта в сообществе.
-		right: имя права в наборе ``admin_rights`` (``post_messages``,
-			``delete_messages``, ``ban_users``).
-	"""
-	if getattr(perms, "is_creator", False):
-		return True
-	admin_rights = getattr(getattr(perms, "participant", None), "admin_rights", None)
-	return bool(getattr(admin_rights, right, False))
-
-
-def ensure_userbot_can_post(perms: Any) -> None:
-	"""Требует права админа с публикацией (владельцу можно всё).
+def ensure_userbot_can_post(rights: ExecutorRights) -> None:
+	"""Требует права админа с публикацией в канале (владельцу можно всё).
 
 	Парная форма ``ensure_bot_can_post`` бот-пути: публичная функция
 	модуля, тестируется по имени, а не через внутренности класса.
+	Разбора ответа Telegram здесь больше нет — он живёт одной точкой
+	(:mod:`pxcontrol.engine.telegram.rights`, ADR-0035), а тут остаётся
+	только правило «чего хватает для публикации». Владелец при этом
+	проходит по построению: в снимке ему выдано всё.
 
 	Raises:
 		UserbotAccessError: Прав не хватает (подтверждённый отказ —
 			основание для сервисов менять привязку аккаунта, ADR-0019).
 	"""
-	if not perms.is_admin:
+	if not rights.status.administers:
 		raise UserbotAccessError(_NOT_ADMIN_TEXT)
-	if not has_admin_right(perms, "post_messages"):
+	if not rights.admin.post_messages:
 		raise UserbotAccessError("У userbot нет права публиковать сообщения в канале.")
 
 
-def _forbids_sending(banned_rights: Any) -> bool:
-	"""Запрещает ли набор ограничений отправку сообщений.
-
-	Проверяются общий флаг ``send_messages`` и текстовый ``send_plain``
-	(гранулярные права 2023 года). Медиа-права (``send_media``
-	и подробнее) сознательно не проверяются: их сочетаний много,
-	а отказ по конкретному типу вложения честно вернёт сама отправка.
-	"""
-	return bool(
-		getattr(banned_rights, "send_messages", False)
-		or getattr(banned_rights, "send_plain", False)
-	)
-
-
-def ensure_userbot_can_send(perms: Any, default_banned_rights: Any) -> None:
+def ensure_userbot_can_send(rights: ExecutorRights) -> None:
 	"""Требует возможность писать в группе (ADR-0021).
 
-	Групповая пара ``ensure_userbot_can_post``: права ``post_messages``
-	в группах нет. Админам (и создателю) ограничения не мешают;
-	ограниченный участник упирается в свои ограничения, обычный —
-	в общие ограничения группы (в том числе гигагруппы: там писать
-	могут только админы, что выражено теми же общими ограничениями).
-
-	Args:
-		perms: ``ParticipantPermissions`` самого аккаунта.
-		default_banned_rights: общие ограничения группы
-			(``entity.default_banned_rights``).
+	Групповая пара :func:`ensure_userbot_can_post`: права ``post_messages``
+	в группах не существует. Администраторам и владельцу ограничения
+	не мешают; остальным причину отказа называет статус — у ограниченного
+	это его личные ограничения, у обычного участника общие ограничения
+	группы (в том числе гигагруппы, где писать могут только админы).
 
 	Raises:
 		UserbotAccessError: Аккаунт не участник или не может писать
 			(подтверждённый отказ — основание менять привязку, ADR-0019).
 	"""
-	if perms.is_admin:
+	if rights.status.administers:
 		return
-	if perms.has_left:
+	if not rights.status.in_community:
 		raise UserbotAccessError("Userbot не участник группы — вступите в неё с этого аккаунта.")
-	if perms.is_banned and _forbids_sending(getattr(perms.participant, "banned_rights", None)):
+	if rights.allowed.send_plain:
+		return
+	if rights.status is ParticipantStatus.RESTRICTED:
 		raise UserbotAccessError("Userbot ограничен в отправке сообщений в этой группе.")
-	if _forbids_sending(default_banned_rights):
-		raise UserbotAccessError(
-			"В группе писать могут только администраторы — назначьте аккаунт администратором."
-		)
+	raise UserbotAccessError(
+		"В группе писать могут только администраторы — назначьте аккаунт администратором."
+	)
 
 
 def community_kind_from_entity(entity: Any) -> CommunityKind:
@@ -1239,22 +1201,21 @@ class MtprotoTransport:
 			entity = await client.get_entity(ref)
 			perms = await client.get_permissions(entity, "me")
 		kind = community_kind_from_entity(entity)
+		# снимок прав — бесплатный побочный продукт зонда (ADR-0035):
+		# ответ Telegram уже на руках, и разобрать его целиком стоит
+		# столько же, сколько вытащить из него одну роль
+		rights = userbot_rights(perms, getattr(entity, "default_banned_rights", None))
 		if kind is CommunityKind.CHANNEL:
-			ensure_userbot_can_post(perms)
+			ensure_userbot_can_post(rights)
 		else:
-			ensure_userbot_can_send(perms, getattr(entity, "default_banned_rights", None))
+			ensure_userbot_can_send(rights)
 		return CommunityInfo(
 			chat_id=str(utils.get_peer_id(entity)),
 			title=str(getattr(entity, "title", "") or chat_ref),
 			username=getattr(entity, "username", None),
 			kind=kind,
+			rights=rights,
 			forum=bool(getattr(entity, "forum", False)),
-			# роль — бесплатный побочный продукт зонда (ADR-0022)
-			role=UserbotRole.ADMIN if perms.is_admin else UserbotRole.MEMBER,
-			# права, нужные обслуживанию, — тоже (ADR-0026). Спрашиваем
-			# именно право, а не роль: у администратора его может не быть
-			can_delete=has_admin_right(perms, "delete_messages"),
-			can_ban=has_admin_right(perms, "ban_users"),
 		)
 
 	async def get_forum_topics(self, chat_id: str) -> list[ForumTopicInfo]:

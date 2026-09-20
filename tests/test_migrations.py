@@ -283,9 +283,11 @@ def test_community_kind_defaults_for_existing_rows(tmp_path: Path) -> None:
 def test_bindings_become_memberships(tmp_path: Path) -> None:
 	"""Миграция f8b3d67c1a49: привязка → членство + умолчание (ADR-0022).
 
-	Роль заполняется по виду: каналу — admin (инвариант проверки
+	Участие заполняется по виду: каналу — admin (инвариант проверки
 	подключения до ADR-0022), группе — member (наименьшие права,
-	фактическую роль поднимет перепроверка).
+	фактическое участие поднимет перепроверка). Колонка с тех пор
+	переименована в ``status`` (ADR-0035, миграция a4e9c72f1b85):
+	прогон идёт до головы цепочки, поэтому проверяется её нынешнее имя.
 	"""
 	db_file = tmp_path / "members.db"
 	_upgrade(db_file, "d6a9c48e2f57")  # состояние до членств
@@ -309,7 +311,8 @@ def test_bindings_become_memberships(tmp_path: Path) -> None:
 	_upgrade(db_file, "head")
 	with sqlite3.connect(db_file) as conn:
 		members = conn.execute(
-			"SELECT community_id, tg_account_id, role FROM community_members ORDER BY community_id"
+			"SELECT community_id, tg_account_id, status FROM community_members"
+			" ORDER BY community_id"
 		).fetchall()
 		defaults = conn.execute(
 			"SELECT id, default_tg_account_id FROM communities ORDER BY id"

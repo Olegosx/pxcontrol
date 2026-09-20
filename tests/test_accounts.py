@@ -495,9 +495,9 @@ async def test_bot_pause_and_publisher_counts(db: Database) -> None:
 		await session.flush()
 		session.add_all(
 			[
-				CommunityMember(community_id=first.id, tg_account_id=account.id, role="admin"),
-				CommunityMember(community_id=second.id, tg_account_id=account.id, role="member"),
-				CommunityMember(community_id=second.id, tg_account_id=other.id, role="member"),
+				CommunityMember(community_id=first.id, tg_account_id=account.id, status="admin"),
+				CommunityMember(community_id=second.id, tg_account_id=account.id, status="member"),
+				CommunityMember(community_id=second.id, tg_account_id=other.id, status="member"),
 			]
 		)
 		await session.commit()

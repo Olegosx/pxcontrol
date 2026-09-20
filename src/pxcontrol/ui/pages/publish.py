@@ -57,7 +57,6 @@ from pxcontrol.engine.telegram.types import (
 	CommunityKind,
 	LinkPreview,
 	MediaKind,
-	UserbotRole,
 	limit_mb,
 	text_length_limit,
 )
@@ -75,6 +74,7 @@ from pxcontrol.ui.pages.common import (
 	kind_segments,
 	noop,
 	plural,
+	status_caption,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, MarkupState, markup_state
 from pxcontrol.ui.pages.media_picker import MediaPicker, over_bot_limit
@@ -110,8 +110,12 @@ def _actor_note(community: CommunityDto) -> str:
 	if community.kind is not CommunityKind.GROUP or not community.default_account_label:
 		return ""
 	actor = community.default_account_label
-	if community.default_role is UserbotRole.MEMBER:
-		return f" Пост уйдёт от имени {actor} (участник) — действует медленный режим группы."
+	status = community.default_status
+	if status is not None and not status.administers:
+		return (
+			f" Пост уйдёт от имени {actor} ({status_caption(status)}) — "
+			"действует медленный режим группы."
+		)
 	return f" Пост уйдёт от имени {actor} (админ)."
 
 

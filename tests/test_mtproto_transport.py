@@ -22,12 +22,18 @@ from pxcontrol.engine.telegram.mtproto import (
 	ensure_userbot_can_send,
 	media_kind_of,
 )
+from pxcontrol.engine.telegram.rights import (
+	ALL_ADMIN_RIGHTS,
+	AdminRights,
+	ExecutorRights,
+	MemberRights,
+	ParticipantStatus,
+)
 from pxcontrol.engine.telegram.types import (
 	CommunityKind,
 	MediaKind,
 	OutgoingFile,
 	OutgoingPost,
-	UserbotRole,
 )
 
 
@@ -444,35 +450,19 @@ def test_media_kind_of_names_poll() -> None:
 
 
 def test_ensure_userbot_can_post() -> None:
-	"""Права userbot: админ с публикацией или владелец; иначе — ошибка."""
-	ok = SimpleNamespace(
-		is_admin=True,
-		is_creator=False,
-		participant=SimpleNamespace(admin_rights=SimpleNamespace(post_messages=True)),
+	"""Права userbot: админ с публикацией или владелец; иначе — ошибка.
+
+	Правило читает снимок прав (ADR-0035); перевод ответа Telegram
+	в снимок — забота :mod:`rights` и его тестов.
+	"""
+	ensure_userbot_can_post(ExecutorRights(ParticipantStatus.CREATOR, ALL_ADMIN_RIGHTS))
+	ensure_userbot_can_post(
+		ExecutorRights(ParticipantStatus.ADMIN, AdminRights(post_messages=True))
 	)
-	ensure_userbot_can_post(ok)
-	creator = SimpleNamespace(
-		is_admin=True,
-		is_creator=True,
-		participant=SimpleNamespace(admin_rights=None),
-	)
-	ensure_userbot_can_post(creator)
 	with pytest.raises(UserbotUnavailableError, match="не администратор"):
-		ensure_userbot_can_post(
-			SimpleNamespace(
-				is_admin=False,
-				is_creator=False,
-				participant=SimpleNamespace(),
-			)
-		)
+		ensure_userbot_can_post(ExecutorRights(ParticipantStatus.MEMBER))
 	with pytest.raises(UserbotUnavailableError, match="нет права публиковать"):
-		ensure_userbot_can_post(
-			SimpleNamespace(
-				is_admin=True,
-				is_creator=False,
-				participant=SimpleNamespace(admin_rights=SimpleNamespace(post_messages=False)),
-			)
-		)
+		ensure_userbot_can_post(ExecutorRights(ParticipantStatus.ADMIN, AdminRights()))
 
 
 async def test_activate_userbot_pool_per_account() -> None:
@@ -669,25 +659,23 @@ def _group_member(
 
 
 def test_ensure_userbot_can_send() -> None:
-	"""Права в группе: писать может любой не ограниченный участник."""
-	deny_all = SimpleNamespace(send_messages=True, send_plain=False)
-	deny_text = SimpleNamespace(send_messages=False, send_plain=True)
-	allow = SimpleNamespace(send_messages=False, send_plain=False)
-	# админу общие ограничения группы не мешают (гигагруппа — тот же случай)
-	ensure_userbot_can_send(_group_member(admin=True), deny_all)
-	ensure_userbot_can_send(_group_member(), None)
-	ensure_userbot_can_send(_group_member(), allow)
+	"""Права в группе: писать может любой не ограниченный участник.
+
+	Причину отказа называет участие: ограниченному — про его собственные
+	ограничения, обычному участнику — про группу, где пишут только
+	администраторы (гигагруппа — тот же случай).
+	"""
+	may_write = MemberRights(send_plain=True)
+	ensure_userbot_can_send(ExecutorRights(ParticipantStatus.ADMIN, ALL_ADMIN_RIGHTS))
+	ensure_userbot_can_send(ExecutorRights(ParticipantStatus.MEMBER, AdminRights(), may_write))
 	# ограниченный, но с правом писать — годится
-	ensure_userbot_can_send(_group_member(banned=True, banned_rights=allow), None)
+	ensure_userbot_can_send(ExecutorRights(ParticipantStatus.RESTRICTED, AdminRights(), may_write))
 	with pytest.raises(UserbotUnavailableError, match="не участник"):
-		ensure_userbot_can_send(_group_member(left=True), None)
+		ensure_userbot_can_send(ExecutorRights(ParticipantStatus.LEFT))
 	with pytest.raises(UserbotUnavailableError, match="ограничен в отправке"):
-		ensure_userbot_can_send(_group_member(banned=True, banned_rights=deny_all), None)
-	# гранулярный запрет текста (send_plain) — тоже запрет
-	with pytest.raises(UserbotUnavailableError, match="ограничен в отправке"):
-		ensure_userbot_can_send(_group_member(banned=True, banned_rights=deny_text), None)
+		ensure_userbot_can_send(ExecutorRights(ParticipantStatus.RESTRICTED))
 	with pytest.raises(UserbotUnavailableError, match="только администраторы"):
-		ensure_userbot_can_send(_group_member(), deny_all)
+		ensure_userbot_can_send(ExecutorRights(ParticipantStatus.MEMBER))
 
 
 async def test_check_community_group_returns_kind_and_forum() -> None:
@@ -780,10 +768,10 @@ async def test_check_community_reports_role() -> None:
 	transport = _transport(client)
 	await transport.start()
 	info = await transport.check_community("@grp2")
-	assert info.role is UserbotRole.MEMBER
+	assert info.rights.status is ParticipantStatus.MEMBER
 	client.permissions = _group_member(admin=True)
 	info = await transport.check_community("@grp2")
-	assert info.role is UserbotRole.ADMIN
+	assert info.rights.status is ParticipantStatus.ADMIN
 
 
 async def test_gateway_flood_freezes_whole_account() -> None:
@@ -1203,58 +1191,6 @@ async def test_me_treats_empty_answer_as_expired_session() -> None:
 	await transport.start()
 	with pytest.raises(UserbotSessionExpiredError):
 		await transport.me()
-
-
-def test_admin_rights_are_read_from_real_permissions() -> None:
-	"""Права читаются верно на настоящем объекте прав Telethon.
-
-	Тест намеренно строит не подставную заглушку, а тот самый объект,
-	который приходит от библиотеки: подмена легко расходится с правдой,
-	а права — основание для необратимых действий.
-	"""
-	from telethon.tl import types
-	from telethon.tl.custom.participantpermissions import ParticipantPermissions
-
-	from pxcontrol.engine.telegram.mtproto import has_admin_right
-
-	def _rights(**flags: bool) -> Any:
-		fields = {
-			"change_info": False,
-			"post_messages": False,
-			"edit_messages": False,
-			"delete_messages": False,
-			"ban_users": False,
-			"invite_users": False,
-			"pin_messages": False,
-			"add_admins": False,
-			"anonymous": False,
-			"manage_call": False,
-			"other": False,
-		}
-		fields.update(flags)
-		return types.ChatAdminRights(**fields)
-
-	admin = ParticipantPermissions(
-		types.ChannelParticipantAdmin(
-			user_id=1, admin_rights=_rights(delete_messages=True), promoted_by=2, date=None
-		),
-		chat=False,
-	)
-	assert has_admin_right(admin, "delete_messages") is True
-	assert has_admin_right(admin, "ban_users") is False  # выдали не всё
-
-	# владельцу можно всё, даже если присланный набор флагов неполон:
-	# в Telegram права владельца урезать нельзя, а библиотечные свойства
-	# читают набор как есть и ответили бы «нельзя»
-	creator = ParticipantPermissions(
-		types.ChannelParticipantCreator(user_id=1, admin_rights=_rights()), chat=False
-	)
-	assert creator.ban_users is False  # так отвечает библиотека
-	assert has_admin_right(creator, "ban_users") is True  # так отвечаем мы
-
-	# обычный участник не может ничего
-	member = ParticipantPermissions(types.ChannelParticipant(user_id=1, date=None), chat=False)
-	assert has_admin_right(member, "delete_messages") is False
 
 
 # --- отложенные записи: вид вложения, тема, действия ---------------------------

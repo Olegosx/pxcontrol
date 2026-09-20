@@ -1005,7 +1005,7 @@ async def _add_group_with_members(db: Database, count: int = 2) -> tuple[int, li
 			CommunityMember(
 				community_id=community.id,
 				tg_account_id=account.id,
-				role="admin" if account is accounts[0] else "member",
+				status="admin" if account is accounts[0] else "member",
 			)
 			for account in accounts
 		)
@@ -1063,7 +1063,7 @@ async def test_list_scheduled_channel_polls_only_default(db: Database) -> None:
 		session.add(extra)
 		await session.flush()
 		session.add_all(
-			CommunityMember(community_id=community_id, tg_account_id=acc_id, role="admin")
+			CommunityMember(community_id=community_id, tg_account_id=acc_id, status="admin")
 			for acc_id in (default_id, extra.id)
 		)
 		await session.commit()
