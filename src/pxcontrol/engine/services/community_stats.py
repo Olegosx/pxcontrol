@@ -463,7 +463,8 @@ class CommunityStatsService:
 					await session.execute(
 						select(Community)
 						.options(
-							selectinload(Community.bot), selectinload(Community.default_account)
+							selectinload(Community.default_bot),
+							selectinload(Community.default_account),
 						)
 						.order_by(Community.id)
 					)
@@ -479,9 +480,9 @@ class CommunityStatsService:
 			# бот — просто пропуск, userbot получил бы отказ шлюза
 			# на каждом тике и засорял бы журнал
 			bot_refs = {
-				c.id: BotRef(c.bot.id, c.bot.token)
+				c.id: BotRef(c.default_bot.id, c.default_bot.token)
 				for c in communities
-				if c.bot is not None and not c.bot.paused
+				if c.default_bot is not None and not c.default_bot.paused
 			}
 			account_ids = {
 				c.id: c.default_account.id

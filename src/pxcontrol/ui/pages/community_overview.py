@@ -283,9 +283,9 @@ def reference_rows(
 		role = f" · {status_caption(status)}" if status else ""
 		paused = " · приостановлен" if community.default_account_paused else ""
 		publisher = f"{community.default_account_label}{role}{paused}"
-	elif community.bot_label:
-		paused = " · приостановлен" if community.bot_paused else ""
-		publisher = f"бот {community.bot_label}{paused}"
+	elif community.default_bot_label:
+		paused = " · приостановлен" if community.default_bot_paused else ""
+		publisher = f"бот {community.default_bot_label}{paused}"
 	return [
 		("Тип", kind_text(community)),
 		("Создана", _date_text(overview.tg_created_at)),
@@ -313,7 +313,7 @@ def source_note(overview: CommunityOverviewDto, community: CommunityDto) -> str:
 		)
 	else:
 		rows = "Истории пока нет — графики появятся по мере накопления снимков."
-	who = "бот раз в 15 минут" if community.bot_id is not None else "userbot раз в 6 часов"
+	who = "бот раз в 15 минут" if community.default_bot_id is not None else "userbot раз в 6 часов"
 	return (
 		f"Участники, онлайн и отложенные — из кэша опроса ({who}). {rows} "
 		"Удалённые аккаунты — итог последнего прохода обслуживания. Числа справочные: "

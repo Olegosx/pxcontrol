@@ -89,7 +89,6 @@ from pxcontrol.ui.pages.user_state import (
 	BotAction,
 	UserAction,
 	bot_actions,
-	bot_community_caption,
 	bot_reference_rows,
 	bot_state,
 	bot_subtitle,
@@ -493,9 +492,14 @@ class UserPage(ScrollArea):
 		rows = [(m.community, membership_caption(m)) for m in memberships]
 		self._render_communities(rows, "Не состоит в сообществах.")
 
-	def _render_bot_communities(self, communities: list[CommunityDto]) -> None:
-		rows = [(c, bot_community_caption(c)) for c in communities]
-		self._render_communities(rows, "Не назначен публикатором ни в одном сообществе.")
+	def _render_bot_communities(self, memberships: list[AccountMembershipDto]) -> None:
+		"""Сообщества бота — тем же списком, что у пользователя (ADR-0035).
+
+		Пул стал общим, и подстрочник у обоих видов теперь один: участие,
+		признак публикатора, выключенность сообщества.
+		"""
+		rows = [(m.community, membership_caption(m)) for m in memberships]
+		self._render_communities(rows, "Не состоит в сообществах.")
 
 	def _render_communities(self, rows: list[tuple[CommunityDto, str]], empty: str) -> None:
 		"""Список сообществ: строка с логотипом и подстрочником, клик — на страницу."""

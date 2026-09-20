@@ -37,6 +37,7 @@ from pxcontrol.engine.telegram.types import (
 	TopInviter,
 	TopPoster,
 )
+from tests.conftest import community_executor
 
 _NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
 
@@ -138,9 +139,14 @@ async def _add_community(
 			tg_chat_id=chat_id,
 			kind="channel",
 			default_tg_account_id=account_id,
-			bot_id=bot_id,
+			default_bot_id=bot_id,
 		)
 		session.add(community)
+		await session.flush()
+		if account_id is not None:
+			session.add(community_executor(community.id, account_id=account_id))
+		if bot_id is not None:
+			session.add(community_executor(community.id, bot_id=bot_id))
 		await session.commit()
 		await session.refresh(community)
 		return community.id

@@ -20,7 +20,7 @@ from pxcontrol.engine.db.models import (
 	AiCredential,
 	Bot,
 	Community,
-	CommunityMember,
+	CommunityExecutor,
 	TgAccount,
 	TgApiCredential,
 )
@@ -234,7 +234,7 @@ class AccountsService:
 		"""Возвращает всех ботов с числом сообществ, где каждый — публикатор."""
 		async with self._db.session_factory() as session:
 			bots = list((await session.execute(select(Bot).order_by(Bot.id))).scalars())
-			publisher_of = await _count_by(session, Community.bot_id)
+			publisher_of = await _count_by(session, Community.default_bot_id)
 		return [self._bot_dto(b, publisher_of.get(b.id, 0)) for b in bots]
 
 	async def set_bot_label(self, bot_id: int, label: str) -> BotDto:
@@ -421,7 +421,7 @@ class AccountsService:
 		"""
 		async with self._db.session_factory() as session:
 			rows = list((await session.execute(select(TgAccount).order_by(TgAccount.id))).scalars())
-			memberships = await _count_by(session, CommunityMember.tg_account_id)
+			memberships = await _count_by(session, CommunityExecutor.tg_account_id)
 			publisher_of = await _count_by(session, Community.default_tg_account_id)
 		return [
 			self._acc_dto(

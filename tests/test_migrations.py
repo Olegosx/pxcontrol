@@ -17,7 +17,7 @@ EXPECTED_TABLES = {
 	"ai_credentials",
 	"video_presets",
 	"communities",
-	"community_members",
+	"community_executors",
 	"community_stats",
 	"publish_queue_items",
 	"caption_fields",
@@ -126,8 +126,8 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 		)
 		await session.execute(
 			text(
-				"INSERT INTO communities (title, tg_chat_id, bot_id, default_tg_account_id,"
-				" created_at, updated_at) VALUES ('c', '-1001', 1, 1,"
+				"INSERT INTO communities (title, tg_chat_id, default_bot_id,"
+				" default_tg_account_id, created_at, updated_at) VALUES ('c', '-1001', 1, 1,"
 				" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
 			)
 		)
@@ -157,7 +157,7 @@ async def test_foreign_key_policies(tmp_path: Path) -> None:
 		await session.execute(text("DELETE FROM bots WHERE id = 1"))
 		await session.commit()
 		bot_id = (
-			await session.execute(text("SELECT bot_id FROM communities WHERE id = 1"))
+			await session.execute(text("SELECT default_bot_id FROM communities WHERE id = 1"))
 		).scalar_one()
 		assert bot_id is None  # SET NULL, а не висячая ссылка
 
@@ -311,8 +311,8 @@ def test_bindings_become_memberships(tmp_path: Path) -> None:
 	_upgrade(db_file, "head")
 	with sqlite3.connect(db_file) as conn:
 		members = conn.execute(
-			"SELECT community_id, tg_account_id, status FROM community_members"
-			" ORDER BY community_id"
+			"SELECT community_id, tg_account_id, status FROM community_executors"
+			" WHERE tg_account_id IS NOT NULL ORDER BY community_id"
 		).fetchall()
 		defaults = conn.execute(
 			"SELECT id, default_tg_account_id FROM communities ORDER BY id"

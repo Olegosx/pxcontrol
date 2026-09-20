@@ -158,12 +158,14 @@ def test_markup_state_is_one_rule_for_all_three_forms() -> None:
 		title="Канал",
 		username=None,
 		tg_chat_id="-1001",
-		bot_id=1,
-		bot_label="Бот",
+		default_bot_id=1,
+		default_bot_label="Бот",
 		enabled=True,
 		default_account_id=7,
 		kind=CommunityKind.CHANNEL,
-		bot_can_edit=True,
+		bot_ready=True,
+		userbot_ready=True,
+		markup_edit=True,
 	)
 	premium = TextLimits(text=8192, caption=4096)
 	video = MediaFile("a.mp4", MediaKind.VIDEO)

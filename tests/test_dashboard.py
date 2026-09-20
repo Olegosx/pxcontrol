@@ -118,8 +118,8 @@ def _community(**overrides: object) -> CommunityDto:
 		title="Канал",
 		username="kino",
 		tg_chat_id="-100",
-		bot_id=None,
-		bot_label=None,
+		default_bot_id=None,
+		default_bot_label=None,
 		enabled=True,
 	)
 	return replace(base, **overrides)  # type: ignore[arg-type]

@@ -38,11 +38,12 @@ def _community(**overrides: object) -> CommunityDto:
 		"title": "Чат подписчиков",
 		"username": "kinohd_chat",
 		"tg_chat_id": "-1001874553201",
-		"bot_id": None,
-		"bot_label": None,
+		"default_bot_id": None,
+		"default_bot_label": None,
 		"enabled": True,
 		"default_account_id": 3,
 		"default_account_label": "Олег К.",
+		"userbot_ready": True,
 		"default_status": ParticipantStatus.MEMBER,
 		"kind": CommunityKind.GROUP,
 		"forum": False,
@@ -113,8 +114,8 @@ def test_reference_rows_and_kind() -> None:
 		kind=CommunityKind.CHANNEL,
 		username=None,
 		default_account_label=None,
-		bot_id=7,
-		bot_label="Мой бот",
+		default_bot_id=7,
+		default_bot_label="Мой бот",
 	)
 	rows = dict(reference_rows(overview, channel))
 	assert rows["Адрес"] == "имя не задано"
@@ -137,7 +138,7 @@ def test_source_note_names_the_source() -> None:
 		CommunityOverviewDto(community_id=1, source=SeriesSource.SNAPSHOTS), community
 	)
 	assert "оценка по разности" in snapshots
-	none = source_note(CommunityOverviewDto(community_id=1), _community(bot_id=7))
+	none = source_note(CommunityOverviewDto(community_id=1), _community(default_bot_id=7))
 	assert "бот раз в 15 минут" in none and "Истории пока нет" in none
 
 

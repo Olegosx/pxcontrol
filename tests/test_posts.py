@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Bot, Community, CommunityMember, TgAccount
+from pxcontrol.engine.db.models import Bot, Community, CommunityExecutor, TgAccount
 from pxcontrol.engine.services.posts import (
 	MAX_ALBUM_FILES,
 	PUBLISHED_PAGE_SIZE,
@@ -47,6 +49,7 @@ from pxcontrol.engine.telegram.mtproto import (
 )
 from pxcontrol.engine.telegram.poll import PollDraft, PollError
 from pxcontrol.engine.telegram.rich_text import RichTextError, TextEntity, TextStyle
+from pxcontrol.engine.telegram.rights import ExecutorRights, ParticipantStatus
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CAPTION_LENGTH_LIMIT,
@@ -61,6 +64,7 @@ from pxcontrol.engine.telegram.types import (
 	ScheduledMessage,
 	TelegramFloodError,
 )
+from tests.conftest import community_executor
 
 
 class _FakeGateway:
@@ -312,16 +316,23 @@ async def _add_community(
 			session.add(account)
 			await session.flush()
 			account_id = account.id
+		kind = "group" if forum else "channel"
 		community = Community(
 			title="Канал",
 			tg_chat_id=tg_chat_id,
-			kind="group" if forum else "channel",
+			kind=kind,
 			forum=forum,
-			bot_id=bot_id,
-			bot_can_edit=bot_can_edit,
+			default_bot_id=bot_id,
 			default_tg_account_id=account_id,
 		)
 		session.add(community)
+		await session.flush()
+		if bot_id is not None:
+			session.add(
+				community_executor(community.id, bot_id=bot_id, kind=kind, can_edit=bot_can_edit)
+			)
+		if account_id is not None:
+			session.add(community_executor(community.id, account_id=account_id, kind=kind))
 		await session.commit()
 		await session.refresh(community)
 		return community.id
@@ -525,7 +536,7 @@ async def test_publish_rename_validations(db: Database, tmp_path: Path) -> None:
 
 def test_publish_capabilities() -> None:
 	"""Возможности из способов администрирования; userbot — приоритет."""
-	from pxcontrol.engine.services.posts import publish_capabilities
+	from pxcontrol.engine.services.publish_route import publish_capabilities
 
 	both = publish_capabilities(bot_assigned=True, userbot_assigned=True)
 	assert both.userbot and both.bot
@@ -651,14 +662,15 @@ async def test_list_scheduled_isolates_community_failure(db: Database) -> None:
 	await _add_community(db)  # tg_chat_id="-1001" — упадёт
 	other_account = await _add_account(db, "@второй")
 	async with db.session_factory() as session:
-		session.add(
-			Community(
-				title="Второй",
-				tg_chat_id="-1002",
-				bot_id=None,
-				default_tg_account_id=other_account,
-			)
+		second = Community(
+			title="Второй",
+			tg_chat_id="-1002",
+			default_bot_id=None,
+			default_tg_account_id=other_account,
 		)
+		session.add(second)
+		await session.flush()
+		session.add(community_executor(second.id, account_id=other_account))
 		await session.commit()
 	scheduled = await service.list_scheduled()
 	assert [item.community_title for item in scheduled.items] == ["Второй"]
@@ -1002,10 +1014,13 @@ async def _add_group_with_members(db: Database, count: int = 2) -> tuple[int, li
 		session.add(community)
 		await session.flush()
 		session.add_all(
-			CommunityMember(
-				community_id=community.id,
-				tg_account_id=account.id,
-				status="admin" if account is accounts[0] else "member",
+			community_executor(
+				community.id,
+				account_id=account.id,
+				kind="group",
+				status=ParticipantStatus.ADMIN
+				if account is accounts[0]
+				else ParticipantStatus.MEMBER,
 			)
 			for account in accounts
 		)
@@ -1062,10 +1077,8 @@ async def test_list_scheduled_channel_polls_only_default(db: Database) -> None:
 		extra = TgAccount(label="@extra", phone="+7999", session="s")
 		session.add(extra)
 		await session.flush()
-		session.add_all(
-			CommunityMember(community_id=community_id, tg_account_id=acc_id, status="admin")
-			for acc_id in (default_id, extra.id)
-		)
+		# у умолчания строка уже есть — заводим только второго админа
+		session.add(community_executor(community_id, account_id=extra.id))
 		await session.commit()
 	await service.list_scheduled()
 	assert gateway.polled == [default_id]
@@ -1361,20 +1374,42 @@ async def test_bot_path_uses_base_limits(db: Database) -> None:
 # --- приостановленные публикаторы (ADR-0029) --------------------------------------
 
 
+async def _grant_bot_edit(session: AsyncSession, community: Community) -> None:
+	"""Выдаёт боту сообщества право править чужие сообщения (ADR-0035).
+
+	Право живёт в снимке прав исполнителя, а не колонкой сообщества:
+	так его и выдаёт Telegram — конкретному боту в конкретном канале.
+	"""
+	row = (
+		await session.execute(
+			select(CommunityExecutor).where(
+				CommunityExecutor.community_id == community.id,
+				CommunityExecutor.bot_id == community.default_bot_id,
+			)
+		)
+	).scalar_one()
+	rights = ExecutorRights.from_payload(ParticipantStatus(row.status), row.rights)
+	row.rights = ExecutorRights(
+		rights.status, replace(rights.admin, edit_messages=True), rights.allowed
+	).to_payload()
+
+
 async def _set_paused(db: Database, community_id: int, *, account: bool, bot: bool) -> None:
 	"""Ставит на паузу публикаторов сообщества прямо в БД."""
 	async with db.session_factory() as session:
 		community = (
 			await session.execute(
 				select(Community)
-				.options(selectinload(Community.bot), selectinload(Community.default_account))
+				.options(
+					selectinload(Community.default_bot), selectinload(Community.default_account)
+				)
 				.where(Community.id == community_id)
 			)
 		).scalar_one()
 		if community.default_account is not None:
 			community.default_account.paused = account
-		if community.bot is not None:
-			community.bot.paused = bot
+		if community.default_bot is not None:
+			community.default_bot.paused = bot
 		await session.commit()
 
 
@@ -1859,7 +1894,7 @@ async def test_stale_bot_rights_are_rechecked_before_refusing(db: Database) -> N
 		async with db.session_factory() as session:  # зонд нашёл право
 			community = await session.get(Community, community_id)
 			assert community is not None
-			community.bot_can_edit = True
+			await _grant_bot_edit(session, community)
 			await session.commit()
 
 	service = PostsService(db, gateway, refresh_rights=refresh)

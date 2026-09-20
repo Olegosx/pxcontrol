@@ -44,11 +44,11 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Community, PromisedMarkup
+from pxcontrol.engine.db.models import Community, CommunityExecutor, PromisedMarkup
 from pxcontrol.engine.db.types import as_utc, as_utc_optional
 from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.periodic import PeriodicTask
-from pxcontrol.engine.services.posts import community_capabilities
+from pxcontrol.engine.services.communities import community_capabilities
 from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
 from pxcontrol.engine.telegram.markup import (
 	MarkupError,
@@ -589,14 +589,21 @@ class MarkupsService:
 			community = (
 				await session.execute(
 					select(Community)
-					.options(selectinload(Community.bot), selectinload(Community.default_account))
+					.options(
+						selectinload(Community.default_bot),
+						selectinload(Community.default_account),
+						selectinload(Community.executors).selectinload(
+							CommunityExecutor.tg_account
+						),
+						selectinload(Community.executors).selectinload(CommunityExecutor.bot),
+					)
 					.where(Community.id == community_id)
 				)
 			).scalar_one_or_none()
 			if community is None:
 				return None
 			caps = community_capabilities(community)
-			bot = community.bot
+			bot = community.default_bot
 			account_id = community.default_tg_account_id
 			if not caps.bot or bot is None or not caps.markup_edit:
 				logger.info(

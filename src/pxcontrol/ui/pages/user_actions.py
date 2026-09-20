@@ -297,7 +297,7 @@ def delete_bot(worker: EngineWorker, owner: QWidget, bot: BotDto, done: Done) ->
 	"""Удаление: сначала — какие сообщества останутся без бота."""
 
 	def _confirm(communities: list[CommunityDto]) -> None:
-		bound = [c.title for c in communities if c.bot_id == bot.id]
+		bound = [c.title for c in communities if c.default_bot_id == bot.id]
 		if not confirm_delete(owner, delete_bot_text(bot, bound)):
 			return
 		run_in_engine(

@@ -128,7 +128,7 @@ def markup_state(
 		blocked=blocked,
 		notice=""
 		if blocked is not None
-		else markup_notice(route, community.bot_label, scheduled=scheduled),
+		else markup_notice(route, community.default_bot_label, scheduled=scheduled),
 		mode_available=scheduled and has_markup,
 		limits=limits.on_route(route),
 	)

@@ -41,6 +41,7 @@ from pxcontrol.engine.telegram.types import (
 	OutgoingPost,
 	TelegramFloodError,
 )
+from tests.conftest import community_executor
 
 
 class _SlowGateway:
@@ -90,8 +91,8 @@ async def _attach_bot(db: Database, community_id: int, *, can_edit: bool = True)
 		await session.flush()
 		community = await session.get(Community, community_id)
 		assert community is not None
-		community.bot_id = bot.id
-		community.bot_can_edit = can_edit
+		community.default_bot_id = bot.id
+		session.add(community_executor(community_id, bot_id=bot.id, can_edit=can_edit))
 		await session.commit()
 
 
@@ -103,6 +104,8 @@ async def _add_community(db: Database, tg_chat_id: str = "-1001", title: str = "
 		await session.flush()
 		community = Community(title=title, tg_chat_id=tg_chat_id, default_tg_account_id=account.id)
 		session.add(community)
+		await session.flush()
+		session.add(community_executor(community.id, account_id=account.id))
 		await session.commit()
 		await session.refresh(community)
 		return community.id
@@ -914,6 +917,13 @@ async def test_flood_on_slot_check_isolates_account(db: Database, make_queue: Qu
 			title="Свободный", tg_chat_id="-1002", default_tg_account_id=free_account.id
 		)
 		session.add_all([first, other])
+		await session.flush()
+		session.add_all(
+			[
+				community_executor(first.id, account_id=flooded_account.id),
+				community_executor(other.id, account_id=free_account.id),
+			]
+		)
 		await session.commit()
 		await session.refresh(first)
 		await session.refresh(other)

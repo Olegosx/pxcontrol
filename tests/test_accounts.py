@@ -14,7 +14,9 @@ from pxcontrol.engine.services.accounts import (
 )
 from pxcontrol.engine.telegram.bot_api import InvalidBotTokenError
 from pxcontrol.engine.telegram.mtproto import LoginError, UserbotNotConnectedError
+from pxcontrol.engine.telegram.rights import ParticipantStatus
 from pxcontrol.engine.telegram.types import BotRef, UserbotProfile
+from tests.conftest import community_executor
 
 
 class _FakeLogin:
@@ -479,7 +481,7 @@ async def test_startup_registers_paused_and_skips_them(db: Database) -> None:
 
 async def test_bot_pause_and_publisher_counts(db: Database) -> None:
 	"""Пауза бота — признак в БД; списки считают участие и назначения публикатором."""
-	from pxcontrol.engine.db.models import Community, CommunityMember
+	from pxcontrol.engine.db.models import Community
 
 	gateway = _FakeGateway()
 	service = AccountsService(db, gateway)
@@ -488,16 +490,22 @@ async def test_bot_pause_and_publisher_counts(db: Database) -> None:
 	other = await service.add_tg_account("", "+7901")
 	async with db.session_factory() as session:
 		first = Community(
-			title="Первое", tg_chat_id="-1001", bot_id=bot.id, default_tg_account_id=account.id
+			title="Первое",
+			tg_chat_id="-1001",
+			default_bot_id=bot.id,
+			default_tg_account_id=account.id,
 		)
 		second = Community(title="Второе", tg_chat_id="-1002")
 		session.add_all([first, second])
 		await session.flush()
 		session.add_all(
 			[
-				CommunityMember(community_id=first.id, tg_account_id=account.id, status="admin"),
-				CommunityMember(community_id=second.id, tg_account_id=account.id, status="member"),
-				CommunityMember(community_id=second.id, tg_account_id=other.id, status="member"),
+				community_executor(first.id, account_id=account.id),
+				community_executor(first.id, bot_id=bot.id),
+				community_executor(
+					second.id, account_id=account.id, status=ParticipantStatus.MEMBER
+				),
+				community_executor(second.id, account_id=other.id, status=ParticipantStatus.MEMBER),
 			]
 		)
 		await session.commit()

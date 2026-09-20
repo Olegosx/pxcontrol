@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import (
 	JSON,
 	Boolean,
+	CheckConstraint,
 	DateTime,
 	Float,
 	ForeignKey,
@@ -24,6 +25,7 @@ from sqlalchemy import (
 	Integer,
 	String,
 	Text,
+	UniqueConstraint,
 	func,
 	text,
 )
@@ -207,11 +209,14 @@ class Community(TimestampMixin, Base):
 
 	Вид (канал или группа) — колонка ``kind`` со значениями
 	``CommunityKind`` (ADR-0021); признак форума — изменчивый флаг.
-	Два возможных публикатора — ссылками (оба необязательны, ADR-0019):
-	``tg_account_id`` — userbot-аккаунт-админ (постинг идёт из его
-	сессии, приоритетный путь по ADR-0011), ``bot_id`` — бот-публикатор
-	(запасной путь; самостоятелен — работает по токену, без
-	пользовательской сессии). Параметры-предпочтения сообщества — строками
+	Исполнители сообщества живут отдельной таблицей
+	(``community_executors``, ADR-0035), а здесь — только **назначения**:
+	``default_tg_account_id`` — публикатор-пользователь (постинг идёт
+	из его сессии, приоритетный путь по ADR-0011),
+	``default_bot_id`` — публикатор-бот (запасной путь; самостоятелен —
+	работает по токену, без пользовательской сессии). По одному на вид:
+	инвариант «ровно один публикатор каждого вида» держит схема, а не
+	дисциплина сервиса. Параметры-предпочтения сообщества — строками
 	в ``community_settings`` (ADR-0013), например пресет обработки
 	по умолчанию.
 	"""
@@ -235,60 +240,77 @@ class Community(TimestampMixin, Base):
 		ForeignKey("tg_accounts.id", ondelete="SET NULL"), default=None
 	)
 	# бот удаляется — сообщество остаётся без бота (проверку ключей включает Database)
-	bot_id: Mapped[int | None] = mapped_column(
+	default_bot_id: Mapped[int | None] = mapped_column(
 		ForeignKey("bots.id", ondelete="SET NULL"), default=None
 	)
-	# может ли бот править ЧУЖИЕ сообщения (право канала edit_messages):
-	# от него зависят кнопки поверх поста публикателя (ADR-0031).
-	# Свойство изменчивое — владелец канала может отобрать право,
-	# поэтому обновляется зондами, как название и признак форума
-	bot_can_edit: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
 
-	bot: Mapped[Bot | None] = relationship()
+	default_bot: Mapped[Bot | None] = relationship()
 	default_account: Mapped[TgAccount | None] = relationship()
-	# членства (ADR-0022): каскад БД дублируется ORM-каскадом, чтобы
+	# исполнители (ADR-0035): каскад БД дублируется ORM-каскадом, чтобы
 	# удаление сообщества через сессию не пыталось занулить ключи
-	members: Mapped[list[CommunityMember]] = relationship(
+	executors: Mapped[list[CommunityExecutor]] = relationship(
 		cascade="all, delete-orphan", passive_deletes=True
 	)
 
 
-class CommunityMember(TimestampMixin, Base):
-	"""Членство userbot-аккаунта в сообществе (ADR-0022, ADR-0035).
+class CommunityExecutor(TimestampMixin, Base):
+	"""Исполнитель в сообществе: пользователь или бот (ADR-0035).
 
-	Пул аккаунтов сообщества: публикует умолчание
-	(``Community.default_tg_account_id``), остальные — фундамент
-	модуля соцактивности. Членство живёт и умирает вместе с сообществом
-	и с аккаунтом (CASCADE с обеих сторон).
+	Строка на пару «сообщество + исполнитель». Это **факт**, а не
+	разрешение: она заводится на того, кто в сообществе есть, и живёт,
+	пока её не убрал человек. Потеря прав или выход из сообщества меняют
+	``status``, но строку не удаляют — иначе вместе с членством пропадало
+	бы и назначение публикатором, а возврат аккаунта его не восстановил бы.
 
-	Что известно о правах, описывают три поля (ADR-0035). ``status`` —
-	как аккаунт участвует (значения ``ParticipantStatus``; наследник
-	прежней роли ``admin``/``member``, которой было мало: «не состоит»
-	и «ограничен» — разные факты). ``rights`` — полный снимок прав
-	(формат — ``ExecutorRights.to_payload``); ``None`` значит «снимок
-	ещё не читался», и таким он остаётся у записей, переживших миграцию,
-	до первой перепроверки доступов. ``checked_at`` — когда зондировали.
-	Истина о правах живёт в Telegram: снимок стареет, и отказ сервера
-	остаётся последним словом (ADR-0022, п. 8).
+	Владелец — **ровно одна** из двух ссылок (``tg_account_id`` либо
+	``bot_id``): у пользователей и ботов свои таблицы, и идентификаторы
+	в них пересекаются. Тем же приёмом описан владелец операции
+	(ADR-0030), и ключ совпадает с владельцем дорожки шлюза
+	(``LaneOwner``) — поэтому «кто состоит», «что ему можно» и «сколько
+	он был занят» говорят об одном объекте одним ключом. Это предусловие
+	распределения нагрузки: сопоставлять права с занятостью можно только
+	у одинаково адресуемого.
+
+	Права описывают три поля. ``status`` — как исполнитель участвует
+	(значения ``ParticipantStatus``). ``rights`` — полный снимок
+	(формат — ``ExecutorRights.to_payload``). ``checked_at`` — когда его
+	сняли; ``None`` значит, что снимка ещё не было, а права перенесены
+	миграцией из того, что подтверждала прежняя модель, — первая же
+	перепроверка доступов заменит их целиком.
 	"""
 
-	__tablename__ = "community_members"
-
-	community_id: Mapped[int] = mapped_column(
-		ForeignKey("communities.id", ondelete="CASCADE"), primary_key=True
+	__tablename__ = "community_executors"
+	__table_args__ = (
+		# «этот аккаунт в этом сообществе» — не больше одной строки;
+		# у бот-строк ссылка на аккаунт пуста, и SQLite считает пустые
+		# значения различными, поэтому бот-строкам этот индекс не мешает
+		UniqueConstraint("community_id", "tg_account_id", name="uq_executor_account"),
+		UniqueConstraint("community_id", "bot_id", name="uq_executor_bot"),
+		# ровно один владелец: строка без владельца или с двумя — бессмыслица,
+		# и проверять её лучше схемой, чем дисциплиной вызывающих
+		CheckConstraint(
+			"(tg_account_id IS NULL) <> (bot_id IS NULL)", name="ck_executor_single_owner"
+		),
 	)
-	tg_account_id: Mapped[int] = mapped_column(
-		ForeignKey("tg_accounts.id", ondelete="CASCADE"), primary_key=True
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
+	tg_account_id: Mapped[int | None] = mapped_column(
+		ForeignKey("tg_accounts.id", ondelete="CASCADE"), default=None
+	)
+	bot_id: Mapped[int | None] = mapped_column(
+		ForeignKey("bots.id", ondelete="CASCADE"), default=None
 	)
 	# участие — значения ParticipantStatus (creator, admin, member…)
 	status: Mapped[str] = mapped_column(String(16))
-	# снимок прав, формат — ExecutorRights.to_payload; NULL — не читался
-	rights: Mapped[Any | None] = mapped_column(JSON, default=None)
+	# снимок прав, формат — ExecutorRights.to_payload
+	rights: Mapped[Any] = mapped_column(JSON)
 	checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
-	tg_account: Mapped[TgAccount] = relationship()
-	# обратная сторона членства (страница аккаунта, ADR-0029): без
-	# back_populates — сообщество грузит участников своим каскадом
+	tg_account: Mapped[TgAccount | None] = relationship()
+	bot: Mapped[Bot | None] = relationship()
+	# обратная сторона (страница исполнителя, ADR-0029): без back_populates —
+	# сообщество грузит исполнителей своим каскадом
 	community: Mapped[Community] = relationship(viewonly=True)
 
 

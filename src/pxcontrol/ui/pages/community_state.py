@@ -14,10 +14,17 @@ from enum import StrEnum
 from PySide6.QtWidgets import QWidget
 from qfluentwidgets import InfoBadge, InfoLevel
 
-from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.communities import CommunityDto, ExecutorDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto
+from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.types import CommunityKind
-from pxcontrol.ui.pages.common import QueueCounts, format_count, plural, queue_counts
+from pxcontrol.ui.pages.common import (
+	QueueCounts,
+	format_count,
+	plural,
+	queue_counts,
+	status_caption,
+)
 
 #: Подсказка неактивного «Обслуживания» — одна на дашборд и страницу.
 MAINTENANCE_UNAVAILABLE = "Нужен userbot-публикатор: боту история и участники недоступны"
@@ -36,6 +43,10 @@ class CardState(StrEnum):
 	# публикатор назначен, но приостановлен человеком (ADR-0029):
 	# назначать нового не нужно — нужно возобновить прежнего
 	PUBLISHER_PAUSED = "publisher_paused"
+	# публикатор назначен и не на паузе, но по правам публиковать
+	# не может (ADR-0035): права отобрали в Telegram, и звать назначать
+	# нового так же неверно, как при паузе
+	PUBLISHER_INCAPABLE = "publisher_incapable"
 	DISABLED = "disabled"  # выключено переключателем активности
 
 
@@ -56,6 +67,8 @@ def card_state(community: CommunityDto, counts: QueueCounts) -> CardState:
 		return CardState.PUBLISHER_PAUSED
 	caps = community.capabilities
 	if not caps.userbot and not caps.bot:
+		if community.publisher_incapable:
+			return CardState.PUBLISHER_INCAPABLE
 		return CardState.NO_PUBLISHER
 	return CardState.NORMAL
 
@@ -68,6 +81,8 @@ def state_badge_text(state: CardState, counts: QueueCounts) -> str | None:
 		return "нет публикатора"
 	if state is CardState.PUBLISHER_PAUSED:
 		return "публикатор приостановлен"
+	if state is CardState.PUBLISHER_INCAPABLE:
+		return "публикатор без прав"
 	if state is CardState.DISABLED:
 		return "выключено"
 	return None
@@ -188,23 +203,45 @@ def community_queue_counts(items: list[QueueItemDto], community_id: int) -> Queu
 
 
 def executors_count(community: CommunityDto) -> int:
-	"""Сколько исполнителей у сообщества: пул userbot-аккаунтов и бот.
+	"""Сколько исполнителей у сообщества — число на вкладке «Участники».
 
-	Число на вкладке «Участники». Бот считается наравне с людьми:
-	в списке он теперь стоит рядом с ними, и счёт, который его
-	не видит, противоречил бы самому списку.
+	С ADR-0035 пул один на оба вида, и складывать больше нечего: боты
+	стоят в нём рядом с людьми, потому что вопрос у человека один —
+	«кто работает в этом сообществе».
 	"""
-	return community.members_count + (1 if community.bot_id is not None else 0)
+	return community.executors_count
 
 
-def bot_member_text(community: CommunityDto) -> str:
-	"""Строка бота в разделе «Боты»: назначенный — с названием.
+def executor_row_text(executor: ExecutorDto) -> str:
+	"""Строка исполнителя в пуле: «Вася — админ · публиковать не может».
 
-	Устроена как строка пользователя («Вася — админ»): имя, тире, роль.
-	Слово «бот» в роль не входит намеренно — раздел уже называется
-	«Боты», и у бота с названием «Публикатор» вышло бы заикание
-	«Публикатор — бот-публикатор».
+	Сначала участие, затем то, что мешает работе прямо сейчас. Пауза
+	и нехватка прав не складываются: приостановленного приложение
+	не использует вовсе, и говорить про его права — сбивать с толку.
 	"""
-	if community.bot_id is None:
-		return "Бот не назначен"
-	return f"{community.bot_label} — публикатор"
+	parts = [status_caption(executor.status)]
+	if executor.paused:
+		parts.append("приостановлен")
+	elif not executor.can_publish:
+		parts.append("публиковать не может")
+	return f"{executor.label} — {' · '.join(parts)}"
+
+
+def remove_executor_text(executor: ExecutorDto, community: CommunityDto) -> str:
+	"""Подтверждение: что потеряет сообщество, если убрать исполнителя.
+
+	Исполнитель убирается **из приложения**, а не из Telegram: сообщество
+	перестаёт им пользоваться, но в самом Telegram он остаётся там, где был.
+	"""
+	text = f"Убрать «{executor.label}» из пула «{community.title}»?"
+	if not executor.is_default:
+		return text
+	if executor.owner.kind is OwnerKind.USER:
+		return (
+			f"{text} Это публикатор по умолчанию: публикация через userbot "
+			"остановится до выбора нового."
+		)
+	return (
+		f"{text} Это публикатор-бот: кнопки под постами и запасной путь "
+		"публикации станут недоступны."
+	)

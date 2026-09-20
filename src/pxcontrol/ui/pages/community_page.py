@@ -56,7 +56,11 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
-from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto, MemberDto
+from pxcontrol.engine.services.communities import (
+	CommunityAccess,
+	CommunityDto,
+	ExecutorDto,
+)
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.posts import ScheduledList
 from pxcontrol.engine.services.publish_queue import EDITABLE_STATUSES, QueueItemDto
@@ -68,6 +72,7 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 )
 from pxcontrol.engine.services.video import PresetDto
+from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -94,16 +99,16 @@ from pxcontrol.ui.pages.common import (
 	show_info,
 	show_success,
 	show_warning,
-	status_caption,
 	tab_strip,
 )
 from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
 	MAINTENANCE_UNAVAILABLE,
-	bot_member_text,
 	community_queue_counts,
+	executor_row_text,
 	executors_count,
 	header_state_text,
+	remove_executor_text,
 	state_badge,
 	subtitle_text,
 )
@@ -190,9 +195,9 @@ def recheck_summary(access: CommunityAccess) -> tuple[bool, str]:
 	elif access.userbot_ok:
 		userbot_text = f"публикатор — {access.community.default_account_label or '—'}"
 	else:
-		userbot_text = "не админ — привязка снята"
+		userbot_text = "публиковать не может — права изменились"
 	parts = [f"userbot: {userbot_text}"]
-	if access.community.bot_id is not None:
+	if access.community.default_bot_id is not None:
 		# None у назначенного бота — «не проверили», а не «потерял
 		# права»: приговор правам из-за пропавшей сети — неправда
 		if access.bot_ok is None:
@@ -253,14 +258,18 @@ def read_executors(
 
 
 class MembersPanel(QWidget):
-	"""Исполнители сообщества: пул userbot-аккаунтов (ADR-0022) и бот.
+	"""Исполнители сообщества: пул обоих видов (ADR-0035).
 
-	Два раздела одного списка. **Пользователи** — пул сообщества
-	с ролями и публикатором по умолчанию: состав хранится таблицей
-	членств. **Боты** — один бот сообщества (`communities.bot_id`),
-	запасной путь публикации и единственный, кто умеет кнопки под
-	постом (ADR-0031); своей строки в членствах у него нет и не нужно —
-	ссылка на бота у сообщества одна.
+	Два раздела одного пула. **Пользователи** — userbot-аккаунты:
+	публикует назначенный, остальные нужны чтению, реакциям
+	и обслуживанию. **Боты** — тоже пул: публикатор-бот один
+	(запасной путь и единственный, кто умеет кнопки под постом,
+	ADR-0031), прочие боты состоят в сообществе наравне.
+
+	Каждая строка показывает участие и то, что человеку важно знать
+	сейчас: назначен ли публикатором, не приостановлен ли, может ли
+	вообще публиковать. Права публиковать для добавления **не нужны** —
+	исполнителя заводят и ради других работ.
 
 	Живой список: операции выполняются сразу (движком), список
 	перечитывается после каждой, а владелец узнаёт об изменении
@@ -285,14 +294,15 @@ class MembersPanel(QWidget):
 		self._accounts = accounts
 		self._bots = bots
 		self._show_error = error_reporter(self)
+		self._executors: list[ExecutorDto] = []
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(density.spacing().row_spacing)
 		layout.addWidget(section_header(self, "Пользователи"))
 		layout.addWidget(
 			CaptionLabel(
-				"Публикует аккаунт по умолчанию; остальные — пул сообщества. "
-				"Каналу нужен админ с правом публиковать, группе — участник.",
+				"Публикует назначенный аккаунт; остальные — пул сообщества: "
+				"чтение, реакции, обслуживание. Права публиковать для этого не нужны.",
 				self,
 			)
 		)
@@ -302,7 +312,7 @@ class MembersPanel(QWidget):
 		self._add_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
 		add_row.addWidget(self._add_combo, stretch=1)
 		add_button = PushButton("Добавить", self)
-		add_button.clicked.connect(self._on_add)
+		add_button.clicked.connect(self._on_add_user)
 		add_row.addWidget(add_button)
 		layout.addLayout(add_row)
 		layout.addWidget(section_header(self, "Боты"))
@@ -313,131 +323,82 @@ class MembersPanel(QWidget):
 				self,
 			)
 		)
-		self._bot_box = QVBoxLayout()
-		self._bot_box.setContentsMargins(0, 0, 0, 0)
-		self._bot_box.setSpacing(density.spacing().list_spacing)
-		layout.addLayout(self._bot_box)
+		bot_area, self._bot_rows = list_area(self, spacing=density.spacing().list_spacing)
+		layout.addWidget(bot_area, stretch=1)
+		bot_add_row = QHBoxLayout()
+		self._bot_combo: DtoComboBox[BotDto] = DtoComboBox(self)
+		bot_add_row.addWidget(self._bot_combo, stretch=1)
+		assign = PushButton("Добавить", self)
+		assign.clicked.connect(self._on_add_bot)
+		bot_add_row.addWidget(assign)
+		layout.addLayout(bot_add_row)
 		self._error = ErrorLabel(self)
 		layout.addWidget(self._error)
-		self._members: list[MemberDto] = []
-		self._show_bot()
 		self.reload()
 
 	def reload(self) -> None:
-		"""Перечитывает участников из движка."""
+		"""Перечитывает пул исполнителей из движка."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.communities.list_members(self._community.id),
+			self._worker.engine.communities.list_executors(self._community.id),
 			self,
-			self._show_members,
+			self._show_executors,
 			self._show_error,
 		)
 
-	def _show_members(self, members: list[MemberDto]) -> None:
-		"""Перестраивает строки участников и список кандидатов."""
-		self._members = members
-		clear_layout(self._rows)
-		if not members:
-			self._rows.addWidget(BodyLabel("Участников нет — добавьте вошедший аккаунт.", self))
-		for member in members:
-			self._rows.addWidget(self._member_row(member))
-		self._rows.addStretch()
-		taken = {member.account_id for member in members}
+	def _show_executors(self, executors: list[ExecutorDto]) -> None:
+		"""Перестраивает строки обоих разделов и списки кандидатов."""
+		self._executors = executors
+		users = [dto for dto in executors if dto.owner.kind is OwnerKind.USER]
+		bots = [dto for dto in executors if dto.owner.kind is OwnerKind.BOT]
+		self._fill(self._rows, users, "Пользователей нет — добавьте вошедший аккаунт.")
+		self._fill(self._bot_rows, bots, "Ботов нет — добавьте бота, если нужны кнопки.")
+		taken_accounts = {dto.owner.id for dto in users}
 		self._add_combo.set_items(
-			[account for account in self._accounts if account.id not in taken],
+			[account for account in self._accounts if account.id not in taken_accounts],
 			label=lambda acc: account_caption(acc.display, acc.phone),
 			key=lambda acc: acc.id,
 		)
+		taken_bots = {dto.owner.id for dto in bots}
+		self._bot_combo.set_items(
+			[bot for bot in self._bots if bot.id not in taken_bots],
+			label=lambda bot: bot_caption(bot.label, bot.username),
+			key=lambda bot: bot.id,
+		)
 
-	def _member_row(self, member: MemberDto) -> QWidget:
-		"""Строка участника: имя, роль, умолчание, удаление."""
+	def _fill(self, box: QVBoxLayout, executors: list[ExecutorDto], empty: str) -> None:
+		"""Наполняет раздел строками исполнителей (пустой — объяснением)."""
+		clear_layout(box)
+		if not executors:
+			box.addWidget(BodyLabel(empty, self))
+		for dto in executors:
+			box.addWidget(self._executor_row(dto))
+		box.addStretch()
+
+	def _executor_row(self, dto: ExecutorDto) -> QWidget:
+		"""Строка исполнителя: имя, участие, пометки и действия."""
 		box = QWidget(self)
 		row = QHBoxLayout(box)
 		row.setContentsMargins(0, 0, 0, 0)
-		row.addWidget(BodyLabel(f"{member.label} — {status_caption(member.status)}", box))
+		row.addWidget(BodyLabel(executor_row_text(dto), box))
 		row.addStretch()
-		if member.is_default:
+		if dto.is_default:
 			row.addWidget(CaptionLabel("публикатор по умолчанию", box))
 		else:
 			make_default = PushButton("Сделать публикатором", box)
-			make_default.clicked.connect(bind(self._on_set_default, member))
+			make_default.clicked.connect(bind(self._on_set_default, dto))
 			row.addWidget(make_default)
-		remove = PushButton("Удалить", box)
-		remove.clicked.connect(bind(self._on_remove, member))
+		remove = PushButton("Убрать", box)
+		remove.clicked.connect(bind(self._on_remove, dto))
 		row.addWidget(remove)
 		return box
 
-	def _show_bot(self) -> None:
-		"""Перестраивает раздел «Боты»: назначенный бот или выбор кандидата."""
-		clear_layout(self._bot_box)
-		box = QWidget(self)
-		row = QHBoxLayout(box)
-		row.setContentsMargins(0, 0, 0, 0)
-		if self._community.bot_id is not None:
-			row.addWidget(BodyLabel(bot_member_text(self._community), box))
-			row.addStretch()
-			unassign = PushButton("Отвязать", box)
-			unassign.clicked.connect(self._on_unassign_bot)
-			row.addWidget(unassign)
-			self._bot_box.addWidget(box)
-			return
-		# бота нет: строка выбора — та же механика, что у пользователей
-		self._bot_combo: DtoComboBox[BotDto] = DtoComboBox(box)
-		self._bot_combo.set_items(
-			self._bots, label=lambda bot: bot_caption(bot.label, bot.username), key=lambda b: b.id
-		)
-		row.addWidget(self._bot_combo, stretch=1)
-		assign = PushButton("Назначить", box)
-		assign.clicked.connect(self._on_assign_bot)
-		row.addWidget(assign)
-		self._bot_box.addWidget(box)
-
-	def _on_assign_bot(self) -> None:
-		"""Назначает выбранного бота — с проверкой его прав живым зондом."""
-		bot = self._bot_combo.selected()
-		if bot is None:
-			self._error.fail(
-				"Нет активных ботов — добавьте или возобновите: «Пользователи и боты»."
-			)
-			return
-		self._error.succeed()
-		show_info(self, "Проверка", "Проверяю права бота…")
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.assign_bot(self._community.id, bot.id),
-			self,
-			self._after_bot_change,
-			self._show_error,
-		)
-
-	def _on_unassign_bot(self) -> None:
-		if not confirm_delete(
-			self,
-			f"Отвязать бота от «{self._community.title}»? "
-			"Кнопки под постами станут недоступны, запасного пути публикации не останется.",
-			accept_text="Отвязать",
-		):
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.communities.unassign_bot(self._community.id),
-			self,
-			self._after_bot_change,
-			self._show_error,
-		)
-
-	def _after_bot_change(self, community: CommunityDto) -> None:
-		"""Бот назначен или отвязан: свежий снимок сообщества — в раздел."""
-		self._community = community
-		self._show_bot()
-		self.changed.emit()
-
-	def _after_change(self, members: list[MemberDto]) -> None:
+	def _after_change(self, executors: list[ExecutorDto]) -> None:
 		"""Операция прошла: перерисовать и сообщить владельцу."""
-		self._show_members(members)
+		self._show_executors(executors)
 		self.changed.emit()
 
-	def _on_add(self) -> None:
+	def _on_add_user(self) -> None:
 		account = self._add_combo.selected()
 		if account is None:
 			self._error.fail(
@@ -445,20 +406,33 @@ class MembersPanel(QWidget):
 				"«Пользователи и боты»."
 			)
 			return
+		self._add(LaneOwner(OwnerKind.USER, account.id), "Проверяю права аккаунта…")
+
+	def _on_add_bot(self) -> None:
+		bot = self._bot_combo.selected()
+		if bot is None:
+			self._error.fail(
+				"Нет свободных активных ботов — добавьте или возобновите: «Пользователи и боты»."
+			)
+			return
+		self._add(LaneOwner(OwnerKind.BOT, bot.id), "Проверяю права бота…")
+
+	def _add(self, owner: LaneOwner, note: str) -> None:
+		"""Заводит исполнителя: зонд прав живой, поэтому человека предупреждаем."""
 		self._error.succeed()
-		show_info(self, "Проверка", "Проверяю права аккаунта…")
+		show_info(self, "Проверка", note)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.communities.add_member(self._community.id, account.id),
+			self._worker.engine.communities.add_executor(self._community.id, owner),
 			self,
 			self._after_change,
 			self._show_error,
 		)
 
-	def _on_set_default(self, member: MemberDto) -> None:
+	def _on_set_default(self, dto: ExecutorDto) -> None:
 		run_in_engine(
 			self._worker,
-			self._worker.engine.communities.set_default(self._community.id, member.account_id),
+			self._worker.engine.communities.set_default_publisher(self._community.id, dto.owner),
 			self,
 			lambda _dto: self._reload_and_notify(),
 			self._show_error,
@@ -468,21 +442,16 @@ class MembersPanel(QWidget):
 		self.reload()
 		self.changed.emit()
 
-	def _on_remove(self, member: MemberDto) -> None:
-		warning = (
-			" Это публикатор по умолчанию: публикация через userbot остановится до выбора нового."
-			if member.is_default
-			else ""
-		)
+	def _on_remove(self, dto: ExecutorDto) -> None:
 		if not confirm_delete(
 			self,
-			f"Удалить «{member.label}» из участников?{warning}",
-			accept_text="Удалить",
+			remove_executor_text(dto, self._community),
+			accept_text="Убрать",
 		):
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.communities.remove_member(self._community.id, member.account_id),
+			self._worker.engine.communities.remove_executor(self._community.id, dto.owner),
 			self,
 			self._after_change,
 			self._show_error,

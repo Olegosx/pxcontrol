@@ -17,6 +17,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	ensure_bot_can_post,
 	ensure_bot_can_send_in_group,
 )
+from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotNotConnectedError,
@@ -44,8 +45,10 @@ class _FakeGateway:
 	login = None  # вход userbot в этих тестах не используется
 
 	def __init__(self) -> None:
-		self.userbot_admins: set[int] = set()
-		self.bot_is_admin = True  # ответ проверки прав бота
+		self.userbot_admins: set[int] = set()  # кто здесь администратор
+		self.invisible_for: set[int] = set()  # кому сообщество не видно вовсе
+		self.bot_is_admin = True  # бот — админ с правом публиковать
+		self.bot_visible = True  # сообщество видно боту (иначе Telegram молчит)
 		self.kind = CommunityKind.CHANNEL  # вид, который «увидит» проверка
 		self.forum = False  # признак форума в ответе проверки
 		self.status = ParticipantStatus.ADMIN  # участие аккаунта в userbot-зонде
@@ -59,34 +62,39 @@ class _FakeGateway:
 	async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo:
 		if chat_ref == "@notfound":
 			raise BotError("Канал не найден — проверьте @имя или ID.")
-		if chat_ref == "@noperm" or not self.bot_is_admin:
-			raise BotError("У бота нет права публиковать сообщения в канале.")
+		if chat_ref == "@noperm" or not self.bot_visible:
+			raise BotError("Бот не добавлен в сообщество — добавьте его.")
+		# нехватка прав больше не отказ, а факт в снимке (ADR-0035, п. 7)
+		status = ParticipantStatus.ADMIN if self.bot_is_admin else ParticipantStatus.MEMBER
+		admin = (
+			AdminRights(post_messages=True, edit_messages=self.bot_can_edit)
+			if self.bot_is_admin
+			else AdminRights()
+		)
+		allowed = ALL_MEMBER_RIGHTS if self.bot_is_admin else MemberRights(send_plain=True)
 		return CommunityInfo(
 			"-1001234",
 			self.title,
 			self.username,
 			self.kind,
-			ExecutorRights(
-				ParticipantStatus.ADMIN,
-				AdminRights(post_messages=True, edit_messages=self.bot_can_edit),
-				ALL_MEMBER_RIGHTS,
-			),
+			ExecutorRights(status, admin, allowed),
 			self.forum,
 		)
 
 	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo:
-		if account_id not in self.userbot_admins:
-			raise UserbotAccessError(
-				"Userbot не администратор канала — добавьте аккаунт "
-				"администратором с правом публиковать."
-			)
-		admin = ALL_ADMIN_RIGHTS if self.status.administers else AdminRights()
+		if account_id in self.invisible_for:
+			raise UserbotAccessError("Сообщество закрыто от этого аккаунта.")
+		# не админ — не отказ, а участие с правами участника (ADR-0035)
+		here_admin = account_id in self.userbot_admins
+		status = self.status if here_admin else ParticipantStatus.MEMBER
+		admin = ALL_ADMIN_RIGHTS if here_admin and status.administers else AdminRights()
+		allowed = ALL_MEMBER_RIGHTS if here_admin else MemberRights(send_plain=True)
 		return CommunityInfo(
 			"-1001234",
 			self.title,
 			self.username,
 			self.kind,
-			ExecutorRights(self.status, admin, ALL_MEMBER_RIGHTS),
+			ExecutorRights(status, admin, allowed),
 			self.forum,
 		)
 
@@ -115,10 +123,10 @@ async def test_community_lifecycle(db: Database) -> None:
 	dto = await service.add_community(bot_id, "@testchan")
 	assert dto.title == "Тестовый канал"
 	assert dto.tg_chat_id == "-1001234"
-	assert dto.bot_label == "Публикатор"
+	assert dto.default_bot_label == "Публикатор"
 	listed = await service.list_communities()
 	assert [c.title for c in listed] == ["Тестовый канал"]
-	assert listed[0].bot_label == "Публикатор"
+	assert listed[0].default_bot_label == "Публикатор"
 	await service.delete_community(dto.id)
 	assert await service.list_communities() == []
 
@@ -129,7 +137,7 @@ async def test_failed_check_not_saved(db: Database) -> None:
 	service = CommunitiesService(db, _FakeGateway())
 	with pytest.raises(BotError, match="не найден"):
 		await service.add_community(bot_id, "@notfound")
-	with pytest.raises(BotError, match="нет права"):
+	with pytest.raises(BotError, match="не добавлен"):
 		await service.add_community(bot_id, "@noperm")
 	assert await service.list_communities() == []
 
@@ -166,46 +174,66 @@ async def test_connect_via_userbot(db: Database) -> None:
 	gateway.userbot_admins = {account_id}
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community_via_userbot(account_id, "@testchan")
-	assert dto.bot_id is None and dto.bot_label is None
+	assert dto.default_bot_id is None and dto.default_bot_label is None
 	assert dto.default_account_id == account_id and dto.userbot_assigned is True
 	listed = await service.list_communities()
 	assert listed[0].default_account_label == "@ub"
 	with pytest.raises(CommunityError, match="уже подключено"):
 		await service.add_community_via_userbot(account_id, "@testchan")
 	await service.delete_community(dto.id)
+	# не админ — сообщество всё равно подключается (ADR-0035, п. 7),
+	# просто публиковать им нельзя, и снимок это честно показывает
 	gateway.userbot_admins = set()
-	with pytest.raises(UserbotUnavailableError, match="не администратор"):
+	dto = await service.add_community_via_userbot(account_id, "@testchan")
+	assert dto.userbot_assigned is True
+	assert not dto.capabilities.userbot
+	assert dto.publisher_incapable is True
+	await service.delete_community(dto.id)
+	# а вот невидимое сообщество не подключается: проверять нечего
+	gateway.invisible_for = {account_id}
+	with pytest.raises(UserbotUnavailableError, match="закрыто"):
 		await service.add_community_via_userbot(account_id, "@testchan")
 	assert await service.list_communities() == []
 	with pytest.raises(CommunityError, match="Аккаунт не найден"):
 		await service.add_community_via_userbot(999, "@testchan")
 
 
-async def test_recheck_updates_binding_both_ways(db: Database) -> None:
-	"""Перепроверка привязывает найденного админа и снимает потерявшего права."""
+async def test_recheck_tracks_rights_without_losing_assignments(db: Database) -> None:
+	"""Перепроверка обновляет права, но назначения не трогает (ADR-0035).
+
+	Прежде подтверждённый отказ снимал привязку, и вместе с правами
+	пропадала настройка: вернули аккаунту права — публикатора всё равно
+	нужно назначать заново. Теперь строка живёт, а «может ли он сейчас»
+	читается из снимка.
+	"""
 	bot_id = await _make_bot(db)
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")  # аккаунт пока не админ
 	assert dto.default_account_id is None
-	# аккаунт стал админом (например, добавили после подключения)
+	# аккаунт стал админом (например, выдали права после подключения)
 	gateway.userbot_admins = {account_id}
 	access = await service.recheck_community(dto.id)
 	assert access.userbot_ok and access.community.default_account_id == account_id
 	assert access.bot_ok is True
-	# бота выгнали: бот — только предупреждение, привязка userbot цела
+	# бота разжаловали: предупреждение есть, назначение цело
 	gateway.bot_is_admin = False
 	access = await service.recheck_community(dto.id)
 	assert access.bot_ok is False
-	assert access.community.bot_id is not None  # бот не отвязан молча
+	assert access.community.default_bot_id is not None  # бот не отвязан молча
 	assert access.community.default_account_id == account_id
-	# аккаунт потерял права (подтверждённый отказ) — привязка снимается
+	# аккаунт потерял права — назначение остаётся, публиковать нельзя
 	gateway.userbot_admins = set()
 	gateway.bot_is_admin = True
 	access = await service.recheck_community(dto.id)
 	assert access.userbot_ok is False
-	assert access.community.default_account_id is None
+	assert access.community.default_account_id == account_id
+	assert not access.community.capabilities.userbot
+	# права вернули — и публикация снова доступна без единого назначения
+	gateway.userbot_admins = {account_id}
+	access = await service.recheck_community(dto.id)
+	assert access.userbot_ok is True and access.community.capabilities.userbot
 
 
 async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> None:
@@ -232,26 +260,36 @@ async def test_recheck_keeps_binding_when_userbot_unreachable(db: Database) -> N
 	assert access.community.default_account_id == account_id  # привязка не тронута
 
 
-async def test_assign_and_unassign_bot(db: Database) -> None:
-	"""Каналу без бота назначается бот (с проверкой прав) и отвязывается."""
+async def test_bot_joins_pool_and_leaves_it(db: Database) -> None:
+	"""Бот — исполнитель пула: добавляется, становится публикатором, убирается.
+
+	Первый бот сообщества сразу становится публикатором-ботом: иначе
+	запасной путь публикации и кнопки остались бы недоступны без второго
+	действия человека.
+	"""
 	bot_id = await _make_bot(db)
 	account_id = await _make_account(db)
 	gateway = _FakeGateway()
 	gateway.userbot_admins = {account_id}
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community_via_userbot(account_id, "@testchan")
-	assert dto.bot_id is None
-	# без прав — не назначается
+	assert dto.default_bot_id is None
+	# бота, который не админ, тоже можно завести — он просто не публикует
 	gateway.bot_is_admin = False
-	with pytest.raises(BotError, match="нет права"):
-		await service.assign_bot(dto.id, bot_id)
-	# с правами — назначается
+	executors = await service.add_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	bot_row = next(e for e in executors if e.owner.kind is OwnerKind.BOT)
+	assert bot_row.is_default and not bot_row.can_publish
+	updated = await service.get_community(dto.id)
+	assert updated.default_bot_id == bot_id and not updated.capabilities.bot
+	# права выдали — публиковать ботом можно, назначать заново не нужно
 	gateway.bot_is_admin = True
-	updated = await service.assign_bot(dto.id, bot_id)
-	assert updated.bot_id == bot_id and updated.bot_label == "Публикатор"
-	# отвязка: бот исчезает, привязка userbot не трогается
-	updated = await service.unassign_bot(dto.id)
-	assert updated.bot_id is None and updated.default_account_id == account_id
+	await service.recheck_community(dto.id)
+	updated = await service.get_community(dto.id)
+	assert updated.capabilities.bot and updated.default_bot_label == "Публикатор"
+	# бота убрали: пул без него, публикатор-пользователь не тронут
+	await service.remove_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	updated = await service.get_community(dto.id)
+	assert updated.default_bot_id is None and updated.default_account_id == account_id
 
 
 async def test_unknown_bot_rejected(db: Database) -> None:
@@ -468,9 +506,10 @@ async def test_confirmed_checks_call_profile_sync_hook(db: Database) -> None:
 	dto = await service.add_community_via_userbot(admin, "@testchan")
 	assert synced == [admin], "подключение подтвердило права — профиль актуализирован"
 	synced.clear()
-	await service.add_member(dto.id, other)
+	await service.add_executor(dto.id, LaneOwner(OwnerKind.USER, other))
 	assert other in synced, "добавление участника тоже проверяет права живьём"
-	gateway.userbot_admins = {admin}  # второй аккаунт потерял права
+	# сообщество закрылось от второго аккаунта: зонд отвечает отказом
+	gateway.invisible_for = {other}
 	synced.clear()
 	await service.recheck_community(dto.id)
 	assert admin in synced, "перепроверка актуализирует профиль живого участника"
@@ -506,7 +545,7 @@ async def test_assign_bot_refreshes_forum(db: Database) -> None:
 	dto = await service.add_community_via_userbot(account_id, "@testchan")
 	bot_id = await _make_bot(db)
 	gateway.forum = True
-	await service.assign_bot(dto.id, bot_id)
+	await service.add_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
 	assert (await _community_row(db, dto.id)).forum is True
 
 
@@ -524,64 +563,70 @@ async def _member_service(db: Database) -> tuple[CommunitiesService, _FakeGatewa
 async def test_membership_crud_and_default(db: Database) -> None:
 	"""Участники: добавление с ролью из зонда, умолчание, явная смена."""
 	service, gateway, community_id, second = await _member_service(db)
-	members = await service.list_members(community_id)
-	assert [(m.label, m.status, m.is_default) for m in members] == [
+	executors = await service.list_executors(community_id)
+	assert [(e.label, e.status, e.is_default) for e in executors] == [
 		("@first", ParticipantStatus.ADMIN, True)
 	]
 	gateway.status = ParticipantStatus.MEMBER  # второй аккаунт — простой участник
-	members = await service.add_member(community_id, second)
-	assert [(m.label, m.status, m.is_default) for m in members] == [
+	gateway.userbot_admins.discard(second)
+	executors = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert [(e.label, e.status, e.is_default) for e in executors] == [
 		("@first", ParticipantStatus.ADMIN, True),
 		("@second", ParticipantStatus.MEMBER, False),
 	]
-	with pytest.raises(CommunityError, match="уже участник"):
-		await service.add_member(community_id, second)
-	dto = await service.set_default(community_id, second)
+	with pytest.raises(CommunityError, match="уже в пуле"):
+		await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	dto = await service.set_default_publisher(community_id, LaneOwner(OwnerKind.USER, second))
 	assert dto.default_account_id == second
 	assert dto.default_status is ParticipantStatus.MEMBER
-	assert dto.members_count == 2
+	assert dto.executors_count == 2
 
 
 async def test_remove_default_member_resets_default(db: Database) -> None:
 	"""Удаление участника-умолчания сбрасывает умолчание без авто-замены."""
-	service, gateway, community_id, second = await _member_service(db)
-	members = await service.add_member(community_id, second)
-	assert len(members) == 2
-	first_id = next(m.account_id for m in members if m.is_default)
-	remaining = await service.remove_member(community_id, first_id)
-	assert [m.label for m in remaining] == ["@second"]
+	service, _gateway, community_id, second = await _member_service(db)
+	executors = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert len(executors) == 2
+	first = next(e.owner for e in executors if e.is_default)
+	remaining = await service.remove_executor(community_id, first)
+	assert [e.label for e in remaining] == ["@second"]
 	dto = next(c for c in await service.list_communities() if c.id == community_id)
 	assert dto.default_account_id is None  # авто-выбора нет (ADR-0022)
 	assert dto.userbot_assigned is False
-	with pytest.raises(CommunityError, match="не участник"):
-		await service.remove_member(community_id, first_id)
+	with pytest.raises(CommunityError, match="нет в пуле"):
+		await service.remove_executor(community_id, first)
 
 
 async def test_set_default_requires_membership(db: Database) -> None:
 	"""Умолчанием может стать только участник сообщества."""
 	service, _gateway, community_id, second = await _member_service(db)
-	with pytest.raises(CommunityError, match="только участник"):
-		await service.set_default(community_id, second)
+	with pytest.raises(CommunityError, match="только исполнитель пула"):
+		await service.set_default_publisher(community_id, LaneOwner(OwnerKind.USER, second))
 
 
-async def test_recheck_updates_roles_and_drops_refused(db: Database) -> None:
-	"""Перепроверка: роль обновляется, отказник исключается, умолчание падает."""
+async def test_recheck_updates_participation_and_keeps_the_pool(db: Database) -> None:
+	"""Перепроверка обновляет участие, но пул не редеет (ADR-0035).
+
+	Прежде подтверждённый отказ исключал участника из пула вместе
+	с назначением. Теперь членство — факт: меняется участие, а решение
+	убрать исполнителя остаётся за человеком.
+	"""
 	service, gateway, community_id, second = await _member_service(db)
 	gateway.status = ParticipantStatus.MEMBER
-	await service.add_member(community_id, second)
-	# админа разжаловали в участники — роль обновится по зонду
+	await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	# админов разжаловали в участники — участие обновится по зонду
 	await service.recheck_community(community_id)
-	members = await service.list_members(community_id)
-	assert [(m.label, m.status) for m in members] == [
+	executors = await service.list_executors(community_id)
+	assert [(e.label, e.status) for e in executors] == [
 		("@first", ParticipantStatus.MEMBER),
 		("@second", ParticipantStatus.MEMBER),
 	]
-	# умолчание выгнали из сообщества: членство и умолчание снимаются
-	gateway.userbot_admins = {second}
+	# в канале участник публиковать не может — это видно, но пул цел
 	access = await service.recheck_community(community_id)
 	assert access.userbot_ok is False
-	assert [m.label for m in await service.list_members(community_id)] == ["@second"]
-	assert access.community.default_account_id is None
+	assert [e.label for e in await service.list_executors(community_id)] == ["@first", "@second"]
+	assert access.community.default_account_id is not None
+	assert access.community.publisher_incapable is True
 
 
 async def test_bot_probe_separates_refusal_from_no_connection(db: Database) -> None:
@@ -639,7 +684,8 @@ async def test_dto_reports_paused_publisher(db: Database) -> None:
 	assert dto.publisher_paused is True, "публиковать некому именно из-за паузы"
 	# с активным ботом действующий публикатор есть — паузы «нет»
 	bot_id = await _make_bot(db)
-	dto = await service.assign_bot(dto.id, bot_id)
+	await service.add_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	dto = await service.get_community(dto.id)
 	assert dto.capabilities.bot and not dto.publisher_paused
 
 
@@ -655,7 +701,7 @@ async def test_recheck_skips_paused_members(db: Database) -> None:
 	access = await service.recheck_community(dto.id)
 	assert access.userbot_ok is None, "не проверяли — не утверждаем"
 	assert access.community.default_account_id == account_id
-	assert access.community.members_count == 1
+	assert access.community.executors_count == 1
 
 
 async def test_communities_of_account_and_bot(db: Database) -> None:
@@ -671,8 +717,9 @@ async def test_communities_of_account_and_bot(db: Database) -> None:
 		(first.id, ParticipantStatus.ADMIN, True)
 	]
 	assert await service.communities_of_account(999_999) == []
-	dto = await service.assign_bot(first.id, bot_id)
-	assert [c.id for c in await service.communities_of_bot(bot_id)] == [dto.id]
+	await service.add_executor(first.id, LaneOwner(OwnerKind.BOT, bot_id))
+	of_bot = await service.communities_of_bot(bot_id)
+	assert [(m.community.id, m.is_default) for m in of_bot] == [(first.id, True)]
 	assert await service.communities_of_bot(999_999) == []
 
 
@@ -688,8 +735,10 @@ async def test_bot_edit_right_stored_on_connect(db: Database) -> None:
 	gateway.bot_can_edit = True
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.bot_can_edit is True
 	assert dto.capabilities.markup_edit is True
+	executors = await service.list_executors(dto.id)
+	bot_row = next(e for e in executors if e.owner.kind is OwnerKind.BOT)
+	assert bot_row.rights.admin.edit_messages is True
 
 
 async def test_bot_edit_right_absent_does_not_block_connect(db: Database) -> None:
@@ -698,7 +747,6 @@ async def test_bot_edit_right_absent_does_not_block_connect(db: Database) -> Non
 	gateway = _FakeGateway()  # право по умолчанию не выдано
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.bot_can_edit is False
 	assert dto.capabilities.bot is True  # публиковать ботом можно
 	assert dto.capabilities.markup_edit is False  # дорисовать кнопки — нельзя
 
@@ -709,22 +757,21 @@ async def test_recheck_updates_bot_edit_right_both_ways(db: Database) -> None:
 	gateway = _FakeGateway()
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.bot_can_edit is False
+	assert dto.capabilities.markup_edit is False
 	gateway.bot_can_edit = True
 	access = await service.recheck_community(dto.id)
-	assert access.community.bot_can_edit is True
+	assert access.community.capabilities.markup_edit is True
 	gateway.bot_can_edit = False
 	access = await service.recheck_community(dto.id)
-	assert access.community.bot_can_edit is False
+	assert access.community.capabilities.markup_edit is False
 
 
 async def test_userbot_probe_does_not_clobber_bot_edit_right(db: Database) -> None:
-	"""Userbot-зонд права бота не знает и не должен его затирать.
+	"""Права бота принадлежат его строке и чужим зондом не затираются.
 
-	В ``CommunityInfo`` от userbot-пути ``can_edit`` всегда False —
-	если бы перепроверка брала свежие данные у него, подтверждённое
-	право бота пропадало бы при каждом опросе, и кнопки «терялись» бы
-	без причины.
+	Прежде право жило колонкой сообщества, и userbot-зонд мог бы стереть
+	подтверждённое ботом — кнопки «терялись» бы без причины. С ADR-0035
+	у каждого исполнителя своя строка, и правило держит сама модель.
 	"""
 
 	class _BotUnreachable(_FakeGateway):
@@ -737,7 +784,7 @@ async def test_userbot_probe_does_not_clobber_bot_edit_right(db: Database) -> No
 	gateway.bot_can_edit = True
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.bot_can_edit is True
+	assert dto.capabilities.markup_edit is True
 	# бот недоступен, права принёс только userbot-зонд
 	offline = _BotUnreachable()
 	offline.userbot_admins = {account_id}
@@ -745,17 +792,20 @@ async def test_userbot_probe_does_not_clobber_bot_edit_right(db: Database) -> No
 	service = CommunitiesService(db, offline)
 	access = await service.recheck_community(dto.id)
 	assert access.bot_ok is None  # знания о боте нет
-	assert access.community.bot_can_edit is True  # право не затёрто
+	assert access.community.capabilities.markup_edit is True  # право не затёрто
 
 
-async def test_unassign_bot_resets_edit_right(db: Database) -> None:
-	"""Право принадлежит паре «сообщество + этот бот», а не сообществу."""
+async def test_removing_bot_takes_its_rights_with_it(db: Database) -> None:
+	"""Права принадлежат паре «сообщество + этот бот», а не сообществу."""
 	bot_id = await _make_bot(db)
 	gateway = _FakeGateway()
 	gateway.bot_can_edit = True
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
-	assert dto.bot_can_edit is True
-	dto = await service.unassign_bot(dto.id)
-	assert dto.bot_can_edit is False
+	assert dto.capabilities.markup_edit is True
+	await service.remove_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	dto = await service.get_community(dto.id)
+	assert dto.default_bot_id is None
+	assert dto.capabilities.markup_edit is False
+	assert await service.list_executors(dto.id) == []
 	assert dto.capabilities.markup_edit is False

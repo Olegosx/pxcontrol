@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from pxcontrol.engine.telegram.rights import ExecutorRights
 from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES, CommunityKind, limit_mb
 
 
@@ -43,6 +44,42 @@ class PublishCapabilities:
 	userbot: bool
 	bot: bool
 	markup_edit: bool = False
+
+
+def can_publish(rights: ExecutorRights, kind: CommunityKind) -> bool:
+	"""Может ли исполнитель с такими правами опубликовать пост здесь (ADR-0035).
+
+	Правило одно на оба вида исполнителей, потому что различает их
+	не приложение, а Telegram: в **канале** публикует только
+	администратор с правом ``post_messages`` (у бота оно называется
+	иначе, но значит то же), в **группе** — любой участник, которого
+	не ограничили в отправке; администратору там ограничения не мешают.
+
+	Права — снимок, и он стареет: «да» здесь означает «по последнему
+	ответу Telegram мог». Отказ сервера при отправке остаётся последним
+	словом (ADR-0022, п. 8) — роли слепо не доверяют.
+
+	Args:
+		rights: снимок прав исполнителя в этом сообществе.
+		kind: вид сообщества (ADR-0021).
+	"""
+	if kind is CommunityKind.CHANNEL:
+		return rights.status.administers and rights.admin.post_messages
+	if not rights.status.in_community:
+		return False
+	return rights.status.administers or rights.allowed.send_plain
+
+
+def can_edit_others(rights: ExecutorRights) -> bool:
+	"""Может ли исполнитель править **чужие** сообщения (ADR-0031).
+
+	От этого зависит единственный маршрут, в котором кнопки достаются
+	посту публикателя: клавиатуру дорисовывает бот правкой. Право
+	существует только у каналов — в группах каждый правит лишь своё,
+	и Telegram такого права там не выдаёт вовсе, поэтому вида сообщества
+	спрашивать не нужно: в группе снимок его просто не содержит.
+	"""
+	return rights.status.administers and rights.admin.edit_messages
 
 
 def publish_capabilities(

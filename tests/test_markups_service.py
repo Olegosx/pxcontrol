@@ -30,6 +30,7 @@ from pxcontrol.engine.telegram.markup import (
 	PostMarkup,
 )
 from pxcontrol.engine.telegram.types import BotRef, TelegramFloodError
+from tests.conftest import community_executor
 
 
 def _promise_dto(
@@ -239,11 +240,17 @@ async def make_ready_community(db: Database, *, bot_can_edit: bool = True) -> in
 		community = Community(
 			title="Канал",
 			tg_chat_id="-1001",
-			bot_id=bot.id,
-			bot_can_edit=bot_can_edit,
+			default_bot_id=bot.id,
 			default_tg_account_id=account.id,
 		)
 		session.add(community)
+		await session.flush()
+		session.add_all(
+			[
+				community_executor(community.id, bot_id=bot.id, can_edit=bot_can_edit),
+				community_executor(community.id, account_id=account.id),
+			]
+		)
 		await session.commit()
 		await session.refresh(community)
 		return community.id

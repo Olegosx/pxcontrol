@@ -23,17 +23,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Community, CommunityMember
+from pxcontrol.engine.db.models import Community, CommunityExecutor
 from pxcontrol.engine.errors import EngineError, user_message
 from pxcontrol.engine.services.captions import filename_complaint
+from pxcontrol.engine.services.communities import (
+	community_capabilities,
+	publisher_incapable,
+	publisher_paused,
+)
 from pxcontrol.engine.services.publish_route import (
-	PublishCapabilities,
 	PublishRoute,
 	choose_route,
 	markup_blocker,
 	poll_blocker,
 	post_markup_blocker,
-	publish_capabilities,
 	route_uses_userbot,
 )
 from pxcontrol.engine.services.settings import (
@@ -57,6 +60,7 @@ from pxcontrol.engine.telegram.rich_text import (
 	trimmed,
 	validate_rich_text,
 )
+from pxcontrol.engine.telegram.rights import ParticipantStatus
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CAPTION_LENGTH_LIMIT,
@@ -120,38 +124,6 @@ _SCHEDULED_GONE_TEXT = (
 )
 
 _T = TypeVar("_T")
-
-
-def community_capabilities(community: Community) -> PublishCapabilities:
-	"""Возможности публикации строки сообщества (связи должны быть подгружены).
-
-	Приостановленный публикатор (ADR-0029) не считается: приложение его
-	не использует, и пост через него не пойдёт. Одна точка на подготовку
-	публикации и проверку препятствий — прежде правило «назначен ли»
-	было написано в обеих.
-	"""
-	bot = community.bot
-	account = community.default_account
-	bot_ready = bot is not None and not bot.paused
-	return publish_capabilities(
-		bot_ready,
-		account is not None and not account.paused,
-		markup_edit=bot_ready and community.bot_can_edit,
-	)
-
-
-def publisher_paused(community: Community) -> bool:
-	"""Есть ли у сообщества **приостановленный** публикатор (ADR-0029).
-
-	Не путать с одноимённым свойством DTO сообщества: там вопрос другой —
-	«публиковать некому именно из-за паузы», и оно ложно, пока есть хоть
-	один действующий публикатор. Здесь — просто «среди назначенных есть
-	приостановленный», и зовут это только из ветки «публиковать некем»,
-	чтобы отличить «нет публикатора» от «публикатор на паузе».
-	"""
-	bot = community.bot
-	account = community.default_account
-	return (bot is not None and bot.paused) or (account is not None and account.paused)
 
 
 def _dedup_scheduled(items: list[ScheduledPostDto]) -> list[ScheduledPostDto]:
@@ -1166,6 +1138,12 @@ class PostsService:
 					f"Публикатор «{community.title}» приостановлен — пост ждёт, "
 					"пока его возобновят в разделе «Пользователи и боты»."
 				)
+			if publisher_incapable(community):
+				return (
+					f"Публикатор «{community.title}» больше не может публиковать — "
+					"проверьте его права в Telegram и перепроверьте доступы; "
+					"пост ждёт."
+				)
 			return (
 				f"У «{community.title}» нет публикатора — пост ждёт, "
 				"пока аккаунт или бот вернётся в доступы."
@@ -1256,12 +1234,12 @@ class PostsService:
 		правки в снимке нет. Всё прочее (бота нет вовсе, группа) зондом
 		не лечится — там отказ окончателен.
 		"""
-		bot = community.bot
+		bot = community.default_bot
 		return (
 			CommunityKind(community.kind) is CommunityKind.CHANNEL
 			and bot is not None
 			and not bot.paused
-			and not community.bot_can_edit
+			and not community_capabilities(community).markup_edit
 		)
 
 	async def _fresh_community(self, community: Community) -> Community:
@@ -1446,7 +1424,7 @@ class PostsService:
 		"""
 		if plan.route is not PublishRoute.USERBOT_MARKUP or not plan.draft.markup:
 			return None
-		bot = plan.community.bot
+		bot = plan.community.default_bot
 		if bot is None or message_id is None:
 			return "Кнопки не поставлены: пост ушёл, но бота для разметки не оказалось."
 		try:
@@ -1608,9 +1586,9 @@ class PostsService:
 		Returns:
 			Номер вышедшего поста.
 		"""
-		if community.bot is None:  # publish() сюда без бота не приводит
+		if community.default_bot is None:  # publish() сюда без бота не приводит
 			raise PostError("У сообщества не назначен бот — переподключите его.")
-		bot = BotRef(community.bot.id, community.bot.token)
+		bot = BotRef(community.default_bot.id, community.default_bot.token)
 		if draft.poll is not None:
 			return await self._gateway.bot_send_poll(
 				bot, community.tg_chat_id, draft.poll, draft.topic_id, draft.markup
@@ -2140,8 +2118,8 @@ class PostsService:
 					await session.execute(
 						select(Community)
 						.options(
-							selectinload(Community.members).selectinload(
-								CommunityMember.tg_account
+							selectinload(Community.executors).selectinload(
+								CommunityExecutor.tg_account
 							),
 							selectinload(Community.default_account),
 						)
@@ -2401,7 +2379,7 @@ class PostsService:
 			raise PostError(blocker)
 		if markup is not None:
 			validate_markup(markup)
-		bot = community.bot
+		bot = community.default_bot
 		if bot is None:  # проверка выше уже это исключила — страховка контракта
 			raise PostError(f"У «{community.title}» нет бота — кнопки ставить некому.")
 		try:
@@ -2497,15 +2475,20 @@ class PostsService:
 		(страховка рассинхрона инварианта). Приостановленные аккаунты
 		(ADR-0029) не спрашиваются: обращений к ним нет, а их сообщество
 		в «непрочитанные» не попадает — его и не пытались читать.
-		Связи ``members → tg_account`` и ``default_account`` должны быть
-		подгружены.
+		Связи ``executors → tg_account`` и ``default_account`` должны быть
+		подгружены. Вышедшие из сообщества (ADR-0035) не спрашиваются:
+		отложенных они не видят, а обращение стоило бы места на дорожке.
 		"""
 		default = community.default_account
 		default_id = default.id if default is not None and not default.paused else None
 		if community.kind != "group":
 			return [default_id] if default_id is not None else []
 		readers = [
-			member.tg_account_id for member in community.members if not member.tg_account.paused
+			row.tg_account_id
+			for row in community.executors
+			if row.tg_account_id is not None
+			and not (row.tg_account is not None and row.tg_account.paused)
+			and ParticipantStatus(row.status).in_community
 		]
 		if default_id is not None and default_id not in readers:
 			readers.append(default_id)
@@ -2542,7 +2525,14 @@ class PostsService:
 			community = (
 				await session.execute(
 					select(Community)
-					.options(selectinload(Community.bot), selectinload(Community.default_account))
+					.options(
+						selectinload(Community.default_bot),
+						selectinload(Community.default_account),
+						selectinload(Community.executors).selectinload(
+							CommunityExecutor.tg_account
+						),
+						selectinload(Community.executors).selectinload(CommunityExecutor.bot),
+					)
 					.where(Community.id == community_id)
 				)
 			).scalar_one_or_none()

@@ -11,9 +11,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from pxcontrol.engine.jobs import JobStatus
-from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto
+from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto, ExecutorDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto
+from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
+from pxcontrol.engine.telegram.rights import ExecutorRights, ParticipantStatus
 from pxcontrol.engine.telegram.types import CommunityKind
 from pxcontrol.ui.pages.common import QueueCounts, bold_numbers, format_count, plural
 from pxcontrol.ui.pages.communities import (
@@ -41,11 +43,12 @@ from pxcontrol.ui.pages.community_state import (
 	CardState,
 	action_available,
 	audience_word,
-	bot_member_text,
 	card_actions,
 	card_state,
+	executor_row_text,
 	executors_count,
 	header_state_text,
+	remove_executor_text,
 	state_badge_text,
 	subtitle_text,
 )
@@ -68,12 +71,16 @@ def _community(
 		title=title,
 		username=username,
 		tg_chat_id=f"-100{community_id}",
-		bot_id=7 if bot else None,
-		bot_label="бот" if bot else None,
+		default_bot_id=7 if bot else None,
+		default_bot_label="бот" if bot else None,
 		enabled=enabled,
 		default_account_id=3 if userbot else None,
 		default_account_label="аккаунт" if userbot else None,
 		kind=kind,
+		# готовность считает движок (ADR-0035): назначенный публикатор
+		# без прав и на паузе сюда приходит уже «не готовым»
+		userbot_ready=userbot,
+		bot_ready=bot,
 	)
 
 
@@ -354,10 +361,27 @@ def test_recheck_summary_distinguishes_unknown_from_lost() -> None:
 	ok, text = recheck_summary(CommunityAccess(community, userbot_ok=None, bot_ok=None))
 	assert not ok and "не удалось проверить" in text and "проверить не удалось" in text
 	ok, text = recheck_summary(CommunityAccess(community, userbot_ok=False, bot_ok=False))
-	assert not ok and "привязка снята" in text and "права потеряны" in text
+	assert not ok and "права изменились" in text and "права потеряны" in text
 	# бота нет — про бота ни слова
 	_ok, text = recheck_summary(CommunityAccess(_community(), userbot_ok=True, bot_ok=None))
 	assert "бот" not in text
+
+
+def test_card_state_publisher_without_rights_is_its_own_state() -> None:
+	"""Публикатор без прав — не «нет публикатора» (ADR-0035).
+
+	Назначать нового не нужно: назначенный на месте, у него отобрали
+	права в Telegram. Звать «назначьте публикатора» тут так же неверно,
+	как при паузе.
+	"""
+	from dataclasses import replace
+
+	lost = replace(_community(), userbot_ready=False, publisher_incapable=True)
+	assert card_state(lost, QueueCounts()) is CardState.PUBLISHER_INCAPABLE
+	assert state_badge_text(CardState.PUBLISHER_INCAPABLE, QueueCounts()) == "публикатор без прав"
+	# публикатора нет вовсе — прежнее состояние на месте
+	empty = replace(_community(userbot=False), userbot_ready=False)
+	assert card_state(empty, QueueCounts()) is CardState.NO_PUBLISHER
 
 
 def test_queue_subtitle_without_community_for_community_page() -> None:
@@ -383,16 +407,23 @@ def test_card_state_publisher_paused_between_errors_and_no_publisher() -> None:
 	"""Пауза публикатора: своя плашка без действий; ошибки главнее, «нет публикатора» — ниже."""
 	from dataclasses import replace
 
-	paused = replace(_community(), default_account_paused=True)
+	# приостановленный публикатор приходит из движка уже «не готовым»
+	paused = replace(_community(), default_account_paused=True, userbot_ready=False)
 	assert card_state(paused, QueueCounts()) is CardState.PUBLISHER_PAUSED
 	assert state_badge_text(CardState.PUBLISHER_PAUSED, QueueCounts()) == "публикатор приостановлен"
 	assert card_actions(paused, QueueCounts()) == ()
 	assert card_state(paused, QueueCounts(errors=1)) is CardState.ERRORS
 	# с активным ботом действующий публикатор есть — состояние штатное
-	with_bot = replace(_community(bot=True), default_account_paused=True)
+	with_bot = replace(_community(bot=True), default_account_paused=True, userbot_ready=False)
 	assert card_state(with_bot, QueueCounts()) is CardState.NORMAL
 	# оба на паузе — тоже «приостановлен», а не «нет публикатора»
-	both = replace(_community(bot=True), default_account_paused=True, bot_paused=True)
+	both = replace(
+		_community(bot=True),
+		default_account_paused=True,
+		default_bot_paused=True,
+		userbot_ready=False,
+		bot_ready=False,
+	)
 	assert card_state(both, QueueCounts()) is CardState.PUBLISHER_PAUSED
 	rows = [
 		Row(paused, QueueCounts(), None),
@@ -406,18 +437,54 @@ def test_card_state_publisher_paused_between_errors_and_no_publisher() -> None:
 # --- вкладка «Участники»: исполнители сообщества ----------------------------------
 
 
-def test_executors_count_adds_bot_to_pool() -> None:
-	"""Число на вкладке считает и пул аккаунтов, и бота: список-то общий."""
+def test_executors_count_is_the_whole_pool() -> None:
+	"""Число на вкладке — весь пул: с ADR-0035 боты лежат в нём рядом с людьми."""
 	from dataclasses import replace
 
-	pool = replace(_community(userbot=True, bot=False), members_count=2)
-	assert executors_count(pool) == 2
-	assert executors_count(replace(pool, bot_id=7, bot_label="бот")) == 3
-	# сообщество без исполнителей вовсе
-	assert executors_count(replace(_community(userbot=False), members_count=0)) == 0
+	pool = replace(_community(userbot=True, bot=True), executors_count=3)
+	assert executors_count(pool) == 3
+	assert executors_count(replace(_community(userbot=False), executors_count=0)) == 0
 
 
-def test_bot_member_text_names_assigned_bot() -> None:
-	"""Строка раздела «Боты»: назначенный — по названию, иначе честное «не назначен»."""
-	assert bot_member_text(_community(bot=True)) == "бот — публикатор"
-	assert bot_member_text(_community(bot=False)) == "Бот не назначен"
+def _executor(
+	kind: OwnerKind = OwnerKind.USER,
+	*,
+	status: ParticipantStatus = ParticipantStatus.ADMIN,
+	is_default: bool = False,
+	paused: bool = False,
+	can_publish: bool = True,
+	label: str = "Вася",
+) -> ExecutorDto:
+	"""Исполнитель для проверки правил показа."""
+	return ExecutorDto(
+		owner=LaneOwner(kind, 1),
+		label=label,
+		status=status,
+		rights=ExecutorRights(status),
+		is_default=is_default,
+		paused=paused,
+		can_publish=can_publish,
+	)
+
+
+def test_executor_row_names_participation_and_trouble() -> None:
+	"""Строка исполнителя: участие, а следом то, что мешает работе сейчас."""
+	assert executor_row_text(_executor()) == "Вася — админ"
+	assert executor_row_text(_executor(status=ParticipantStatus.MEMBER)) == "Вася — участник"
+	assert executor_row_text(_executor(can_publish=False)) == "Вася — админ · публиковать не может"
+	# пауза и права не складываются: приостановленного не используют вовсе
+	assert (
+		executor_row_text(_executor(paused=True, can_publish=False))
+		== "Вася — админ · приостановлен"
+	)
+
+
+def test_remove_executor_text_warns_about_publisher() -> None:
+	"""Подтверждение называет последствие — и разное у пользователя и бота."""
+	community = _community(userbot=True, bot=True)
+	plain = remove_executor_text(_executor(), community)
+	assert "Убрать «Вася»" in plain and "публикатор" not in plain
+	user = remove_executor_text(_executor(is_default=True), community)
+	assert "публикация через userbot остановится" in user
+	bot = remove_executor_text(_executor(OwnerKind.BOT, is_default=True, label="бот"), community)
+	assert "кнопки под постами" in bot
