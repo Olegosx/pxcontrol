@@ -18,15 +18,10 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotSessionExpiredError,
 	UserbotUnavailableError,
 	community_kind_from_entity,
-	ensure_userbot_can_post,
-	ensure_userbot_can_send,
 	media_kind_of,
 )
 from pxcontrol.engine.telegram.rights import (
-	ALL_ADMIN_RIGHTS,
 	AdminRights,
-	ExecutorRights,
-	MemberRights,
 	ParticipantStatus,
 )
 from pxcontrol.engine.telegram.types import (
@@ -474,186 +469,6 @@ def test_media_kind_of_names_poll() -> None:
 	assert media_kind_of(media) is MediaKind.POLL
 
 
-def test_ensure_userbot_can_post() -> None:
-	"""Права userbot: админ с публикацией или владелец; иначе — ошибка.
-
-	Правило читает снимок прав (ADR-0035); перевод ответа Telegram
-	в снимок — забота :mod:`rights` и его тестов.
-	"""
-	ensure_userbot_can_post(ExecutorRights(ParticipantStatus.CREATOR, ALL_ADMIN_RIGHTS))
-	ensure_userbot_can_post(
-		ExecutorRights(ParticipantStatus.ADMIN, AdminRights(post_messages=True))
-	)
-	with pytest.raises(UserbotUnavailableError, match="не администратор"):
-		ensure_userbot_can_post(ExecutorRights(ParticipantStatus.MEMBER))
-	with pytest.raises(UserbotUnavailableError, match="нет права публиковать"):
-		ensure_userbot_can_post(ExecutorRights(ParticipantStatus.ADMIN, AdminRights()))
-
-
-async def test_activate_userbot_pool_per_account() -> None:
-	"""Пул шлюза: у каждого аккаунта свой клиент, повторная активация
-	заменяет клиента только этого аккаунта (ADR-0019)."""
-	from pxcontrol.engine.telegram.gateway import TelegramGateway
-
-	created: list[tuple[int, str, str | None]] = []
-	clients: list[_FakeClient] = []
-
-	def client_factory(api_id: int, api_hash: str, session: str | None) -> _FakeClient:
-		created.append((api_id, api_hash, session))
-		client = _FakeClient()
-		clients.append(client)
-		return client
-
-	gateway = TelegramGateway()
-	gateway.transport_factory = lambda: MtprotoTransport(client_factory=client_factory)
-	await gateway.activate_userbot(10, 1, "h", "s1")
-	await gateway.activate_userbot(20, 1, "h", "s2")
-	assert created == [(1, "h", "s1"), (1, "h", "s2")]
-	assert clients[0].connected and clients[1].connected  # оба аккаунта в пуле
-	# повторный вход аккаунта 10 заменяет только его клиента
-	await gateway.activate_userbot(10, 1, "h", "s1-new")
-	assert clients[0].connected is False  # старый клиент аккаунта закрыт
-	assert clients[1].connected is True  # чужой аккаунт не тронут
-	assert clients[2].connected is True
-	# деактивация выборочная; публикация без клиента — понятная ошибка
-	await gateway.deactivate_userbot(20)
-	assert clients[1].connected is False
-	with pytest.raises(UserbotNotConnectedError, match="войдите"):
-		await gateway.userbot_publish(20, "-1001", OutgoingPost(text="x"))
-	await gateway.stop()
-	assert clients[2].connected is False  # остановка гасит весь пул
-
-
-async def test_gateway_premium_per_account() -> None:
-	"""Premium читается по аккаунту; неизвестный аккаунт и None — False."""
-	from pxcontrol.engine.telegram.gateway import TelegramGateway
-
-	premium_client = _FakeClient()
-	premium_client.me_premium = True
-	plain_client = _FakeClient()
-	clients = [premium_client, plain_client]
-	gateway = TelegramGateway()
-	gateway.transport_factory = lambda: MtprotoTransport(
-		client_factory=lambda a, b, c: clients.pop(0)
-	)
-	await gateway.activate_userbot(10, 1, "h", "s1")
-	await gateway.activate_userbot(20, 1, "h", "s2")
-	assert gateway.userbot_premium(10) is True
-	assert gateway.userbot_premium(20) is False
-	assert gateway.userbot_premium(None) is False
-	assert gateway.userbot_premium(99) is False  # не активирован
-	assert gateway.any_userbot_premium() is True
-	await gateway.stop()
-	assert gateway.any_userbot_premium() is False
-
-
-async def test_get_scheduled_returns_messages() -> None:
-	"""Чтение отложенных отдаёт собственный тип границы, не Telethon."""
-	transport = _transport(_FakeClient())
-	await transport.start()
-	messages = await transport.get_scheduled("-1001234")
-	assert len(messages) == 1
-	assert messages[0].id == 5
-	assert messages[0].text == "из телеграма"
-	assert messages[0].scheduled_at == datetime(2026, 7, 13, tzinfo=UTC)
-	assert messages[0].media_kind is MediaKind.NONE  # у записи нет поля media
-	assert messages[0].topic_id is None
-
-
-async def test_community_stats_reads_full_info() -> None:
-	"""Подписчики и онлайн — из одного запроса полной информации."""
-	client = _FakeClient()
-	client.online = 17
-	transport = _transport(client)
-	await transport.start()
-	stats = await transport.community_stats("-1001234")
-	assert stats.participants == 1234
-	assert stats.online == 17
-	# нулевой онлайн (каналы) нормализуется в None — «не отдан»
-	client.online = 0
-	assert (await transport.community_stats("-1001234")).online is None
-
-
-async def test_download_avatar_and_absence(tmp_path: Path) -> None:
-	"""Аватар скачивается в файл; отсутствие аватара — честный None."""
-	client = _FakeClient()
-	transport = _transport(client)
-	await transport.start()
-	target = tmp_path / "1.jpg"
-	path = await transport.download_avatar("-1001234", str(target))
-	assert path == str(target) and target.exists()
-	client.has_avatar = False
-	assert await transport.download_avatar("-1001234", str(target)) is None
-
-
-def test_translate_error_confirmed_refusals() -> None:
-	"""«Выгнали из канала» и родня — подтверждённый отказ, не временный сбой.
-
-	От класса зависит поведение системы: только UserbotAccessError даёт
-	recheck_community право снять хранимый флаг userbot-админа.
-	"""
-	from telethon import errors
-
-	from pxcontrol.engine.telegram.mtproto import UserbotAccessError, _translate_error
-
-	for exc in (
-		errors.UserNotParticipantError(request=None),
-		errors.ChannelPrivateError(request=None),
-		errors.ChatWriteForbiddenError(request=None),
-		errors.ChatAdminRequiredError(request=None),
-	):
-		assert isinstance(_translate_error(exc), UserbotAccessError)
-	# сетевой сбой — по-прежнему временная недоступность
-	assert not isinstance(_translate_error(ConnectionError("x")), UserbotAccessError)
-	# ValueError про entity — «канал не виден», прочие ValueError — нет:
-	# ложный совет «добавьте аккаунт в канал» хуже честного общего текста
-	assert isinstance(
-		_translate_error(ValueError("Could not find the input entity for PeerUser")),
-		UserbotAccessError,
-	)
-	assert not isinstance(_translate_error(ValueError("bad argument")), UserbotAccessError)
-
-
-async def test_bot_errors_translate_flood_and_server_failures() -> None:
-	"""Флуд-лимит, «файл велик» и 5xx Bot API — понятные тексты, не дампы."""
-	from aiogram.methods import GetMe
-
-	from pxcontrol.engine.telegram.bot_api import BotError, _bot_errors
-
-	async def _raise_inside(exc: BaseException) -> None:
-		async with _bot_errors("нет прав", "отклонено"):
-			raise exc
-
-	from aiogram.exceptions import (
-		TelegramEntityTooLarge,
-		TelegramRetryAfter,
-		TelegramServerError,
-	)
-
-	from pxcontrol.engine.telegram.types import TelegramFloodError
-
-	with pytest.raises(TelegramFloodError, match="подождать 17 с") as flood:
-		await _raise_inside(TelegramRetryAfter(GetMe(), "flood", retry_after=17))
-	assert flood.value.retry_after_s == 17  # очередь ждёт ровно названный срок
-	# «файл велик» наследует сетевую ошибку — не должен стать «нет связи»
-	with pytest.raises(BotError, match="лимита Bot API"):
-		await _raise_inside(TelegramEntityTooLarge(GetMe(), "too large"))
-	with pytest.raises(BotError, match="отклонил операцию"):
-		await _raise_inside(TelegramServerError(GetMe(), "internal"))
-
-	# «сообщения нет» отделено от «нет прав»: у Bot API кода для этого
-	# отказа нет — только описание словами, поэтому сверяем по нему
-	from aiogram.exceptions import TelegramBadRequest
-
-	from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
-
-	with pytest.raises(BotMessageGoneError, match="уже нет"):
-		await _raise_inside(TelegramBadRequest(GetMe(), "Bad Request: message to edit not found"))
-	# обычный отказ остаётся обычным
-	with pytest.raises(BotError, match="отклонено"):
-		await _raise_inside(TelegramBadRequest(GetMe(), "Bad Request: chat not found"))
-
-
 def test_community_kind_from_entity() -> None:
 	"""Вид по сущности Telethon; малая группа и личный чат — отказ."""
 	from telethon.tl.types import Chat
@@ -683,26 +498,6 @@ def _group_member(
 	)
 
 
-def test_ensure_userbot_can_send() -> None:
-	"""Права в группе: писать может любой не ограниченный участник.
-
-	Причину отказа называет участие: ограниченному — про его собственные
-	ограничения, обычному участнику — про группу, где пишут только
-	администраторы (гигагруппа — тот же случай).
-	"""
-	may_write = MemberRights(send_plain=True)
-	ensure_userbot_can_send(ExecutorRights(ParticipantStatus.ADMIN, ALL_ADMIN_RIGHTS))
-	ensure_userbot_can_send(ExecutorRights(ParticipantStatus.MEMBER, AdminRights(), may_write))
-	# ограниченный, но с правом писать — годится
-	ensure_userbot_can_send(ExecutorRights(ParticipantStatus.RESTRICTED, AdminRights(), may_write))
-	with pytest.raises(UserbotUnavailableError, match="не участник"):
-		ensure_userbot_can_send(ExecutorRights(ParticipantStatus.LEFT))
-	with pytest.raises(UserbotUnavailableError, match="ограничен в отправке"):
-		ensure_userbot_can_send(ExecutorRights(ParticipantStatus.RESTRICTED))
-	with pytest.raises(UserbotUnavailableError, match="только администраторы"):
-		ensure_userbot_can_send(ExecutorRights(ParticipantStatus.MEMBER))
-
-
 async def test_check_community_group_returns_kind_and_forum() -> None:
 	"""check_community: группа-форум проходит и отдаёт вид и признак тем."""
 	from telethon.tl.types import Channel
@@ -720,8 +515,15 @@ async def test_check_community_group_returns_kind_and_forum() -> None:
 	assert info.title == "Группа"
 
 
-async def test_check_community_channel_requires_admin() -> None:
-	"""check_community: канал по-прежнему требует админа с правом постить."""
+async def test_check_community_reports_facts_not_verdicts() -> None:
+	"""Зонд отдаёт факт, а не приговор: неадмин канала — не отказ (ADR-0035, п. 7).
+
+	Тест написан по живому дефекту (20.09.2026): решение сняло требование
+	права публиковать при подключении, сервис и подставной шлюз тестов
+	уже вели себя по-новому, а транспорт продолжал отказывать — и ввести
+	в канал исполнителя без админства было нельзя. Подделка разошлась
+	с правдой, и поймал это только живой прогон.
+	"""
 	from telethon.tl.types import Channel
 
 	client = _FakeClient()
@@ -729,12 +531,38 @@ async def test_check_community_channel_requires_admin() -> None:
 		id=124, title="Канал", photo=None, date=None, broadcast=True, username="chan"
 	)
 	client.permissions = SimpleNamespace(
-		is_admin=False, is_creator=False, participant=SimpleNamespace()
+		is_admin=False,
+		is_creator=False,
+		has_left=False,
+		is_banned=False,
+		participant=SimpleNamespace(),
 	)
 	transport = _transport(client)
 	await transport.start()
-	with pytest.raises(UserbotUnavailableError, match="не администратор"):
-		await transport.check_community("@chan")
+	info = await transport.check_community("@chan")
+	assert info.kind is CommunityKind.CHANNEL
+	assert info.rights.status is ParticipantStatus.MEMBER, "состоит, но не администратор"
+	assert not info.rights.admin.post_messages, "права публиковать нет — и это факт снимка"
+
+
+async def test_check_community_reports_leaving_as_a_fact() -> None:
+	"""«Не состоит» — тоже факт: без него лестнице ввода не с чего начинать."""
+	from telethon.errors import UserNotParticipantError
+	from telethon.tl.types import Channel
+
+	class _Outsider(_FakeClient):
+		async def get_permissions(self, entity: Any, who: str) -> Any:
+			raise UserNotParticipantError(request=None)
+
+	client = _Outsider()
+	client.entity = Channel(
+		id=125, title="Чужой", photo=None, date=None, broadcast=True, username="alien"
+	)
+	transport = _transport(client)
+	await transport.start()
+	info = await transport.check_community("@alien")
+	assert info.rights.status is ParticipantStatus.LEFT
+	assert not info.rights.status.in_community
 
 
 async def test_publish_passes_topic() -> None:

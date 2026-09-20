@@ -336,52 +336,6 @@ _NOT_ADMIN_TEXT = (
 )
 
 
-def ensure_userbot_can_post(rights: ExecutorRights) -> None:
-	"""Требует права админа с публикацией в канале (владельцу можно всё).
-
-	Парная форма ``ensure_bot_can_post`` бот-пути: публичная функция
-	модуля, тестируется по имени, а не через внутренности класса.
-	Разбора ответа Telegram здесь больше нет — он живёт одной точкой
-	(:mod:`pxcontrol.engine.telegram.rights`, ADR-0035), а тут остаётся
-	только правило «чего хватает для публикации». Владелец при этом
-	проходит по построению: в снимке ему выдано всё.
-
-	Raises:
-		UserbotAccessError: Прав не хватает (подтверждённый отказ —
-			основание для сервисов менять привязку аккаунта, ADR-0019).
-	"""
-	if not rights.status.administers:
-		raise UserbotAccessError(_NOT_ADMIN_TEXT)
-	if not rights.admin.post_messages:
-		raise UserbotAccessError("У userbot нет права публиковать сообщения в канале.")
-
-
-def ensure_userbot_can_send(rights: ExecutorRights) -> None:
-	"""Требует возможность писать в группе (ADR-0021).
-
-	Групповая пара :func:`ensure_userbot_can_post`: права ``post_messages``
-	в группах не существует. Администраторам и владельцу ограничения
-	не мешают; остальным причину отказа называет статус — у ограниченного
-	это его личные ограничения, у обычного участника общие ограничения
-	группы (в том числе гигагруппы, где писать могут только админы).
-
-	Raises:
-		UserbotAccessError: Аккаунт не участник или не может писать
-			(подтверждённый отказ — основание менять привязку, ADR-0019).
-	"""
-	if rights.status.administers:
-		return
-	if not rights.status.in_community:
-		raise UserbotAccessError("Userbot не участник группы — вступите в неё с этого аккаунта.")
-	if rights.allowed.send_plain:
-		return
-	if rights.status is ParticipantStatus.RESTRICTED:
-		raise UserbotAccessError("Userbot ограничен в отправке сообщений в этой группе.")
-	raise UserbotAccessError(
-		"В группе писать могут только администраторы — назначьте аккаунт администратором."
-	)
-
-
 def community_kind_from_entity(entity: Any) -> CommunityKind:
 	"""Вид сообщества по сущности Telethon (ADR-0021).
 
@@ -1232,16 +1186,20 @@ class MtprotoTransport:
 	async def check_community(self, chat_ref: str) -> CommunityInfo:
 		"""Проверяет сообщество и права userbot по его виду (ADR-0021).
 
-		Канал: аккаунт — админ с правом публиковать. Группа
-		(супергруппа): участник, не ограниченный в отправке. Малая
-		группа и личный чат не подключаются. Принимает @имя, ссылку
-		t.me/… или ID -100… (разбор общий с бот-путём —
-		``normalize_chat_ref``).
+		Возвращает **факт**, а не приговор (ADR-0035, п. 7): участие
+		и полный снимок прав. Нехватка прав отказом больше не является —
+		исполнитель бывает нужен и ради чтения, реакций, обслуживания,
+		а «может ли он публиковать» решает правило над снимком
+		(:func:`abilities.can`). Отказ остаётся там, где дело не в правах:
+		сообщество не видно аккаунту, это малая группа или личный чат.
+
+		Принимает @имя, ссылку t.me/… или ID -100… (разбор общий
+		с бот-путём — ``normalize_chat_ref``).
 
 		Raises:
 			ChatRefError: Введённую ссылку/имя не удалось разобрать.
-			UserbotAccessError: Прав не хватает или вид не подключается
-				(малая группа, личный чат) — подтверждённый отказ.
+			UserbotAccessError: Сообщество закрыто от аккаунта или вид
+				не подключается (малая группа, личный чат).
 			UserbotUnavailableError: Userbot не подключён или сообщество
 				не найдено.
 		"""
@@ -1268,10 +1226,6 @@ class MtprotoTransport:
 			if perms is not None
 			else ExecutorRights(ParticipantStatus.LEFT)
 		)
-		if kind is CommunityKind.CHANNEL:
-			ensure_userbot_can_post(rights)
-		else:
-			ensure_userbot_can_send(rights)
 		return CommunityInfo(
 			chat_id=str(utils.get_peer_id(entity)),
 			title=str(getattr(entity, "title", "") or chat_ref),

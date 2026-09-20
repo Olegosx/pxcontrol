@@ -22,8 +22,6 @@ from pxcontrol.engine.telegram.poll import PollDraft
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
 from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
 from pxcontrol.engine.telegram.rights import (
-	ExecutorRights,
-	ParticipantStatus,
 	bot_rights,
 )
 from pxcontrol.engine.telegram.types import (
@@ -319,45 +317,6 @@ def community_kind_from_chat_type(chat_type: str) -> CommunityKind:
 			"в супергруппу (в настройках группы) и повторите."
 		)
 	raise BotError("Это личный чат — укажите канал или группу.")
-
-
-def ensure_bot_can_post(rights: ExecutorRights) -> None:
-	"""Проверяет, что бот — администратор канала с правом публиковать.
-
-	Разбора ответа Telegram здесь больше нет: снимок прав складывает
-	одна точка (:mod:`pxcontrol.engine.telegram.rights`, ADR-0035),
-	а тут остаётся правило «чего хватает для публикации». Владелец
-	проходит по построению — в снимке ему выдано всё.
-
-	Raises:
-		BotError: Бот не админ или без права публикации.
-	"""
-	if not rights.status.administers:
-		raise BotError("Бот не администратор канала — добавьте его администратором.")
-	if not rights.admin.post_messages:
-		raise BotError("У бота нет права публиковать сообщения в канале.")
-
-
-def ensure_bot_can_send_in_group(rights: ExecutorRights) -> None:
-	"""Проверяет, что бот может писать в группе (ADR-0021).
-
-	В группах права ``post_messages`` нет: писать может любой участник,
-	которого не ограничили. Администраторам и владельцу ограничения
-	не мешают; остальным причину отказа называет статус — у ограниченного
-	это его личные ограничения, у обычного участника общие права группы.
-
-	Raises:
-		BotError: Бот не участник или не может писать.
-	"""
-	if rights.status.administers:
-		return
-	if not rights.status.in_community:
-		raise BotError("Бот не участник группы — добавьте его в группу.")
-	if rights.allowed.send_plain:
-		return
-	if rights.status is ParticipantStatus.RESTRICTED:
-		raise BotError("Бот ограничен в отправке сообщений в этой группе.")
-	raise BotError("В группе писать могут только администраторы — назначьте бота администратором.")
 
 
 def to_reply_markup(markup: PostMarkup | None) -> Any | None:
@@ -690,12 +649,13 @@ async def get_bot_events(token: str) -> list[str]:
 
 
 async def check_community(token: str, chat_ref: str) -> CommunityInfo:
-	"""Проверяет сообщество и права бота по его виду (ADR-0021).
+	"""Читает сообщество и права бота в нём (ADR-0021, ADR-0035).
 
-	Канал: бот — админ с правом публиковать. Группа (супергруппа):
-	бот — участник, не ограниченный в отправке. Малая группа и личный
-	чат не подключаются. Вид и признак форума возвращаются в
-	:class:`CommunityInfo`.
+	Возвращает **факт**, а не приговор (ADR-0035, п. 7): участие и полный
+	снимок прав. Нехватка прав отказом не является — «может ли бот
+	публиковать» решает правило над снимком (:func:`abilities.can`).
+	Отказ остаётся там, где дело не в правах: Telegram не показал боту
+	сообщество, это малая группа или личный чат.
 
 	Raises:
 		ChatRefError: Введённую ссылку/имя не удалось разобрать.
@@ -723,10 +683,6 @@ async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 		# править чужие сообщения, от которого зависят кнопки поверх
 		# поста публикателя (ADR-0031): подключению оно не требуется
 		rights = bot_rights(member, chat.permissions)
-		if kind is CommunityKind.CHANNEL:
-			ensure_bot_can_post(rights)
-		else:
-			ensure_bot_can_send_in_group(rights)
 		return CommunityInfo(
 			str(chat.id),
 			chat.title or str(ref),

@@ -15,12 +15,7 @@ from pxcontrol.engine.services.communities import (
 	JoinOutcome,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
-from pxcontrol.engine.telegram.bot_api import (
-	BotError,
-	community_kind_from_chat_type,
-	ensure_bot_can_post,
-	ensure_bot_can_send_in_group,
-)
+from pxcontrol.engine.telegram.bot_api import BotError, community_kind_from_chat_type
 from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
@@ -438,20 +433,6 @@ async def test_community_enabled_comes_from_settings(db: Database) -> None:
 	assert [ch.enabled for ch in listed] == [False]
 
 
-def test_ensure_bot_can_post() -> None:
-	"""Право публиковать: владелец и админ с правом проходят, прочие — нет.
-
-	Правило читает снимок прав (ADR-0035), а не ответ библиотеки: перевод
-	ответа в снимок — забота :mod:`rights` и его тестов.
-	"""
-	ensure_bot_can_post(ExecutorRights(ParticipantStatus.CREATOR, ALL_ADMIN_RIGHTS))
-	ensure_bot_can_post(ExecutorRights(ParticipantStatus.ADMIN, AdminRights(post_messages=True)))
-	with pytest.raises(BotError, match="не администратор"):
-		ensure_bot_can_post(ExecutorRights(ParticipantStatus.MEMBER))
-	with pytest.raises(BotError, match="нет права"):
-		ensure_bot_can_post(ExecutorRights(ParticipantStatus.ADMIN, AdminRights()))
-
-
 def test_bot_caption_keeps_separators_literal() -> None:
 	"""Бот-путь не разбирает разделители: текст уходит как набран.
 
@@ -475,30 +456,6 @@ def test_community_kind_from_chat_type() -> None:
 		community_kind_from_chat_type("group")
 	with pytest.raises(BotError, match="личный чат"):
 		community_kind_from_chat_type("private")
-
-
-def test_ensure_bot_can_send_in_group() -> None:
-	"""Права бота в группе: участник без ограничений; админа они не касаются.
-
-	Причину отказа называет статус: ограниченному — про его ограничения,
-	обычному участнику — про группу, где пишут только администраторы.
-	"""
-	may_write = MemberRights(send_plain=True)
-	# админу и владельцу общие ограничения группы не мешают
-	ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.ADMIN, ALL_ADMIN_RIGHTS))
-	ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.CREATOR, ALL_ADMIN_RIGHTS))
-	ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.MEMBER, AdminRights(), may_write))
-	ensure_bot_can_send_in_group(
-		ExecutorRights(ParticipantStatus.RESTRICTED, AdminRights(), may_write)
-	)
-	with pytest.raises(BotError, match="только администраторы"):
-		ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.MEMBER))
-	with pytest.raises(BotError, match="не участник"):
-		ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.LEFT))
-	with pytest.raises(BotError, match="не участник"):
-		ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.BANNED))
-	with pytest.raises(BotError, match="ограничен в отправке"):
-		ensure_bot_can_send_in_group(ExecutorRights(ParticipantStatus.RESTRICTED))
 
 
 async def _community_row(db: Database, community_id: int) -> Community:
