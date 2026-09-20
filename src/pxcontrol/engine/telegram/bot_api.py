@@ -55,6 +55,18 @@ class BotError(EngineError):
 	"""
 
 
+class BotNotInCommunityError(BotError):
+	"""Telegram не пускает бота в сообщество: не добавлен или выгнан (ADR-0035).
+
+	Отдельный класс, потому что это **факт участия**, а не сбой: по нему
+	перепроверка записывает боту «не состоит» — как пользователю по ответу
+	«не участник». Без него выгнанный бот оставался бы в снимке
+	администратором навсегда, и подбор продолжал бы его предлагать.
+	Bot API отвечает на это статусом 403 (``TelegramForbiddenError``) —
+	распознаётся по классу исключения, а не по тексту.
+	"""
+
+
 class BotMessageGoneError(BotError):
 	"""Сообщения, которое бот собрался править или удалить, больше нет.
 
@@ -90,6 +102,7 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	Raises:
 		InvalidBotTokenError: Telegram отклонил токен (Unauthorized).
 		TelegramFloodError: Флуд-лимит — подождать и повторить.
+		BotNotInCommunityError: Бота в сообществе нет (403).
 		BotError: Telegram отклонил операцию (права, запрос).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
@@ -108,7 +121,9 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 	except TelegramUnauthorizedError as exc:
 		raise InvalidBotTokenError("Telegram отклонил токен (Unauthorized).") from exc
 	except TelegramForbiddenError as exc:
-		raise BotError(f"{forbidden} (Telegram: {exc.message})") from exc
+		# 403 у бота значит одно: в этом сообществе его нет (не добавлен,
+		# выгнан, заблокирован) — факт участия, а не просто отказ
+		raise BotNotInCommunityError(f"{forbidden} (Telegram: {exc.message})") from exc
 	except TelegramRetryAfter as exc:
 		# флуд-лимит (429) — временное состояние: очередь отправки ждёт
 		# и повторяет (парный перевод — FloodWaitError в mtproto)

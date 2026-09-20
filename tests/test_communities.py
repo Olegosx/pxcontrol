@@ -15,11 +15,15 @@ from pxcontrol.engine.services.communities import (
 	JoinOutcome,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
-from pxcontrol.engine.telegram.bot_api import BotError, community_kind_from_chat_type
+from pxcontrol.engine.telegram.bot_api import (
+	BotError,
+	BotNotInCommunityError,
+	community_kind_from_chat_type,
+)
 from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.mtproto import (
-	UserbotAccessError,
 	UserbotNotConnectedError,
+	UserbotNotInCommunityError,
 	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.refs import ChatRefError, invite_hash, normalize_chat_ref
@@ -71,7 +75,7 @@ class _FakeGateway:
 		if chat_ref == "@notfound":
 			raise BotError("Канал не найден — проверьте @имя или ID.")
 		if chat_ref == "@noperm" or not self.bot_visible or not self.bot_inside:
-			raise BotError("Бот не добавлен в сообщество — добавьте его.")
+			raise BotNotInCommunityError("Бот не добавлен в сообщество — добавьте его.")
 		# нехватка прав больше не отказ, а факт в снимке (ADR-0035, п. 7)
 		status = ParticipantStatus.ADMIN if self.bot_is_admin else ParticipantStatus.MEMBER
 		admin = (
@@ -116,7 +120,7 @@ class _FakeGateway:
 
 	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		if account_id in self.invisible_for:
-			raise UserbotAccessError("Сообщество закрыто от этого аккаунта.")
+			raise UserbotNotInCommunityError("Сообщество закрыто от этого аккаунта.")
 		if account_id in self.outsiders:
 			# «не состоит» — факт участия, а не отказ в доступе (ADR-0035)
 			return CommunityInfo(
@@ -446,6 +450,22 @@ def test_bot_caption_keeps_separators_literal() -> None:
 	assert post_html("Метод __init__ и 2**3**4") == "Метод __init__ и 2**3**4"
 	assert post_html("Re: Zero <2 сезон> & ещё") == "Re: Zero &lt;2 сезон&gt; &amp; ещё"
 	assert post_html("без разметки") == "без разметки"
+
+
+async def test_bot_forbidden_means_not_in_community() -> None:
+	"""403 у бота — факт участия: отдельный класс, а не общий отказ (ADR-0035).
+
+	По этому классу перепроверка пишет боту «не состоит». Распознаётся
+	по классу исключения aiogram, а не по тексту ответа.
+	"""
+	from aiogram.exceptions import TelegramForbiddenError
+	from aiogram.methods import GetChat
+
+	from pxcontrol.engine.telegram.bot_api import _bot_errors
+
+	with pytest.raises(BotNotInCommunityError, match="не добавлен"):
+		async with _bot_errors("Бот не добавлен в сообщество", "отклонено"):
+			raise TelegramForbiddenError(GetChat(chat_id=1), "bot was kicked from the channel chat")
 
 
 def test_community_kind_from_chat_type() -> None:
@@ -826,6 +846,66 @@ async def test_recheck_updates_participation_and_keeps_the_pool(db: Database) ->
 	assert [e.label for e in await service.list_executors(community_id)] == ["@first", "@second"]
 	assert access.community.default_account_id is not None
 	assert access.community.publisher_incapable is True
+
+
+async def test_recheck_records_kicked_bot_as_left(db: Database) -> None:
+	"""Выгнанный бот после перепроверки — «не состоит», а не «админ» навсегда.
+
+	Bot API отвечает на это статусом 403, и это факт участия (ADR-0035,
+	п. 2): без записи подбор продолжал бы предлагать бота, которого
+	в сообществе нет, а дозор кнопок — править им посты.
+	"""
+	bot_id = await _make_bot(db)
+	gateway = _FakeGateway()
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community(bot_id, "@testchan")
+	assert dto.capabilities.bot
+	gateway.bot_inside = False  # бота выгнали из сообщества
+	access = await service.recheck_community(dto.id)
+	assert access.bot_ok is False
+	bot_row = next(e for e in await service.list_executors(dto.id) if e.owner.id == bot_id)
+	assert bot_row.status is ParticipantStatus.LEFT
+	assert not bot_row.can_publish
+	assert access.community.default_bot_id == bot_id, "назначение цело — вернут, заработает"
+	assert not access.community.capabilities.bot
+	assert access.community.publisher_incapable
+
+
+async def test_recheck_records_invisible_user_as_left(db: Database) -> None:
+	"""Аккаунт, от которого сообщество закрылось, — «не состоит», назначение цело."""
+	service, gateway, community_id, _second = await _member_service(db)
+	gateway.invisible_for = {1}
+	access = await service.recheck_community(community_id)
+	assert access.userbot_ok is False
+	row = next(e for e in await service.list_executors(community_id) if e.owner.id == 1)
+	assert row.status is ParticipantStatus.LEFT
+	assert access.community.default_account_id == 1
+	assert access.community.publisher_incapable
+
+
+async def test_recheck_keeps_pending_join_request(db: Database) -> None:
+	"""Отправленная заявка переживает перепроверку.
+
+	Для Telegram заявитель — «не участник», и слепая запись стёрла бы
+	след нашего действия. Статус сменится, когда заявку одобрят.
+	"""
+	service, gateway, community_id, second = await _member_service(db)
+	gateway.username = None
+	await _make_private(db, community_id)
+	gateway.outsiders = {second}
+	gateway.known_link = "https://t.me/+needsApproval"
+	gateway.approval_needed = True
+	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert result.outcome is JoinOutcome.REQUESTED
+	await service.recheck_community(community_id)  # заявитель для зонда — «не участник»
+	row = next(e for e in await service.list_executors(community_id) if e.owner.id == second)
+	assert row.status is ParticipantStatus.REQUESTED
+	# заявку одобрили — статус догоняет правду
+	gateway.outsiders.clear()
+	gateway.approval_needed = False
+	await service.recheck_community(community_id)
+	row = next(e for e in await service.list_executors(community_id) if e.owner.id == second)
+	assert row.status.in_community, "заявку одобрили — участие записано по факту"
 
 
 async def test_bot_probe_separates_refusal_from_no_connection(db: Database) -> None:

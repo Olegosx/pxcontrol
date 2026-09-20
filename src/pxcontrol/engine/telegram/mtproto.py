@@ -114,6 +114,18 @@ class UserbotAccessError(UserbotUnavailableError):
 	"""Подтверждённый отказ Telegram: нет прав или канал не виден."""
 
 
+class UserbotNotInCommunityError(UserbotAccessError):
+	"""Аккаунт не состоит в сообществе или оно закрыто от него (ADR-0035).
+
+	Подкласс подтверждённого отказа: для потребителей это по-прежнему
+	«Telegram ответил нет», но перепроверка по нему пишет исполнителю
+	«не состоит», а не оставляет прежний снимок. Приходит на приватном
+	сообществе, из которого аккаунт выгнали или вышел (Telegram отвечает
+	``CHANNEL_PRIVATE``, не отличая «закрыто» от «исключён»); публичное
+	отвечает иначе — «не участник», и зонд превращает это в снимок сам.
+	"""
+
+
 class UserbotDeleteForbiddenError(UserbotUnavailableError):
 	"""Telegram отказался удалять сообщения (``MESSAGE_DELETE_FORBIDDEN``).
 
@@ -233,19 +245,16 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 			"Аккаунт состоит в предельном числе сообществ — Telegram больше "
 			"не пускает. Выйдите из ненужных или введите другого исполнителя."
 		)
-	if isinstance(
-		exc,
-		errors.UserNotParticipantError
-		| errors.ChannelPrivateError
-		| errors.ChatWriteForbiddenError,
-	):
-		# подтверждённый отказ: userbot удалили из сообщества / его закрыли
-		# от него / запретили писать — основание снять хранимый флаг прав
-		return UserbotAccessError(
-			"Userbot не состоит в сообществе или не может в нём публиковать — "
-			"добавьте аккаунт участником, а в канал — администратором "
-			"с правом публиковать."
+	if isinstance(exc, errors.UserNotParticipantError | errors.ChannelPrivateError):
+		# подтверждённый факт участия: аккаунта в сообществе нет —
+		# выгнали, вышел или закрыли от него (ADR-0035). Совет — ввести
+		# заново: прав для этого не требуется, нужен только сам ввод
+		return UserbotNotInCommunityError(
+			"Аккаунт не состоит в сообществе или оно закрыто от него — "
+			"введите его заново на вкладке «Участники»."
 		)
+	if isinstance(exc, errors.ChatWriteForbiddenError):
+		return UserbotAccessError("Telegram запретил этому аккаунту писать в сообществе.")
 	if isinstance(
 		exc,
 		errors.AuthKeyUnregisteredError

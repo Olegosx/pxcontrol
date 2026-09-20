@@ -44,9 +44,13 @@ from pxcontrol.engine.services.publish_route import (
 	publish_capabilities,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
-from pxcontrol.engine.telegram.bot_api import BotError
+from pxcontrol.engine.telegram.bot_api import BotError, BotNotInCommunityError
 from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
-from pxcontrol.engine.telegram.mtproto import UserbotAccessError, UserbotUnavailableError
+from pxcontrol.engine.telegram.mtproto import (
+	UserbotAccessError,
+	UserbotNotInCommunityError,
+	UserbotUnavailableError,
+)
 from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, ParticipantStatus
 from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
 
@@ -270,16 +274,21 @@ class _ProbeResult:
 	"""Итог сетевого зонда прав публикатора.
 
 	Attributes:
-		ok: True/False — Telegram подтвердил наличие/отсутствие прав;
-			None — проверить не удалось (нет связи, аккаунт отключён):
-			это не знание о правах, менять привязку по нему нельзя.
+		ok: True — Telegram ответил и снимок в ``info``; False —
+			подтверждённый отказ; None — проверить не удалось (нет связи,
+			аккаунт отключён): это не знание, менять по нему ничего нельзя.
 		info: свежие данные сообщества при ``ok is True`` — из них
 			обновляются изменчивые свойства: признак форума (ADR-0021),
 			название и @имя.
+		left: Telegram подтвердил, что исполнителя в сообществе **нет**
+			(выгнали, вышел, закрыли от него), а подробностей о самом
+			сообществе не дал — снимка не собрать, но факт участия есть,
+			и перепроверка обязана его записать (ADR-0035, п. 2).
 	"""
 
 	ok: bool | None
 	info: CommunityInfo | None = None
+	left: bool = False
 
 
 class _CommunityChecker(Protocol):
@@ -511,8 +520,11 @@ class CommunitiesService:
 		"""Проверяет права одного аккаунта (сбой не мешает операции)."""
 		try:
 			info = await self._gateway.userbot_check_community(account_id, chat_id)
+		except UserbotNotInCommunityError:
+			logger.info("Аккаунт id=%s не состоит в сообществе %s.", account_id, chat_id)
+			return _ProbeResult(ok=False, left=True)
 		except UserbotAccessError:
-			logger.info("Сообщество %s не видно аккаунту id=%s.", chat_id, account_id)
+			logger.info("Сообщество %s недоступно аккаунту id=%s.", chat_id, account_id)
 			return _ProbeResult(ok=False)
 		except Exception as exc:  # noqa: BLE001 — вспомогательная проверка
 			# тип и текст обязательны: без них обрыв сети и ошибка в коде
@@ -639,6 +651,12 @@ class CommunitiesService:
 			if probe.ok is True and probe.info is not None:
 				await self._store_executor_rights(community_id, owner, probe.info.rights)
 				fresh.setdefault(owner.kind, probe.info)
+			elif probe.left:
+				# исполнителя там нет — это знание, и строка обязана его
+				# отражать, иначе выгнанный бот остался бы «админом» навсегда
+				await self._store_executor_rights(
+					community_id, owner, ExecutorRights(ParticipantStatus.LEFT)
+				)
 			if defaults.get(owner.kind) == owner.id:
 				verdicts[owner.kind] = self._verdict(probe, kind)
 		if not any(owner.kind is OwnerKind.USER for owner, _ref in targets):
@@ -747,6 +765,14 @@ class CommunitiesService:
 			if row is None:
 				return
 			was = row.status
+			if (
+				ParticipantStatus(was) is ParticipantStatus.REQUESTED
+				and not rights.status.in_community
+			):
+				# заявка ждёт одобрения: для Telegram аккаунт «не участник»,
+				# но ход уже сделан, и стирать его след было бы неправдой —
+				# статус сменится, когда заявку одобрят
+				return
 			row.status = rights.status
 			row.rights = rights.to_payload()
 			row.checked_at = datetime.now(UTC)
@@ -1215,8 +1241,11 @@ class CommunitiesService:
 		"""
 		try:
 			info = await self._gateway.bot_check_community(bot, chat_id)
+		except BotNotInCommunityError:
+			logger.info("Бота id=%s в сообществе %s нет.", bot.id, chat_id)
+			return _ProbeResult(ok=False, left=True)
 		except BotError as exc:
-			logger.info("Бот не может публиковать в сообществе %s: %s", chat_id, exc)
+			logger.info("Telegram отклонил зонд бота в сообществе %s: %s", chat_id, exc)
 			return _ProbeResult(ok=False)
 		except Exception as exc:  # noqa: BLE001 — вспомогательная проверка
 			logger.warning(

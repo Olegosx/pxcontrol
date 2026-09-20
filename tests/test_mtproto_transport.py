@@ -515,6 +515,31 @@ async def test_check_community_group_returns_kind_and_forum() -> None:
 	assert info.title == "Группа"
 
 
+def test_closed_community_translates_to_not_in_community() -> None:
+	"""«Закрыто от аккаунта» — факт участия, отдельный подкласс отказа (ADR-0035).
+
+	Telegram отвечает ``CHANNEL_PRIVATE`` и на «выгнали», и на «вышел»,
+	и на «закрыли» — не различая; для приложения всё это «не состоит».
+	Запрет писать — отказ иного рода и остаётся общим классом.
+	"""
+	from telethon import errors
+
+	from pxcontrol.engine.telegram.mtproto import (
+		UserbotAccessError,
+		UserbotNotInCommunityError,
+		_translate_error,
+	)
+
+	closed = _translate_error(errors.ChannelPrivateError(request=None))
+	assert isinstance(closed, UserbotNotInCommunityError)
+	assert "введите его заново" in str(closed)
+	gone = _translate_error(errors.UserNotParticipantError(request=None))
+	assert isinstance(gone, UserbotNotInCommunityError)
+	muted = _translate_error(errors.ChatWriteForbiddenError(request=None))
+	assert isinstance(muted, UserbotAccessError)
+	assert not isinstance(muted, UserbotNotInCommunityError)
+
+
 async def test_check_community_reports_facts_not_verdicts() -> None:
 	"""Зонд отдаёт факт, а не приговор: неадмин канала — не отказ (ADR-0035, п. 7).
 
