@@ -62,8 +62,13 @@ class BotNotInCommunityError(BotError):
 	перепроверка записывает боту «не состоит» — как пользователю по ответу
 	«не участник». Без него выгнанный бот оставался бы в снимке
 	администратором навсегда, и подбор продолжал бы его предлагать.
-	Bot API отвечает на это статусом 403 (``TelegramForbiddenError``) —
-	распознаётся по классу исключения, а не по тексту.
+
+	Bot API сообщает об этом двумя ответами, и оба — этот класс:
+	статусом 403 (``TelegramForbiddenError``: выгнан, заблокирован),
+	который распознаётся по классу исключения, и статусом 400 с описанием
+	«chat not found», когда бота в сообщество не добавляли вовсе: по
+	числовому идентификатору сервер отвечает только участнику, а кода
+	у такого отказа нет — только описание (живой ответ 20.09.2026).
 	"""
 
 
@@ -88,6 +93,19 @@ def _message_gone(description: str | None) -> bool:
 	"""Отказ означает «сообщения больше нет», а не «нет прав»."""
 	text = (description or "").lower()
 	return any(mark in text for mark in _MESSAGE_GONE)
+
+
+#: Что Telegram отвечает боту, которого в сообщество не добавляли:
+#: по числовому идентификатору сервер отвечает только участнику,
+#: и это 400 с описанием словами, а не 403 (тот приходит выгнанному).
+#: Приём тот же, что у ``_MESSAGE_GONE``: кода нет, сверяем по описанию.
+_CHAT_UNSEEN = ("chat not found",)
+
+
+def _chat_unseen(description: str | None) -> bool:
+	"""Отказ означает «бот не видит это сообщество», а не «неверный запрос»."""
+	text = (description or "").lower()
+	return any(mark in text for mark in _CHAT_UNSEEN)
 
 
 @asynccontextmanager
@@ -135,6 +153,10 @@ async def _bot_errors(forbidden: str, bad_request: str) -> AsyncIterator[None]:
 			raise BotMessageGoneError(
 				"Сообщения уже нет — его удалили из другого клиента Telegram."
 			) from exc
+		if _chat_unseen(exc.message):
+			# «chat not found» по идентификатору — факт участия, как и 403:
+			# бота в сообществе нет (не добавляли), а не запрос кривой
+			raise BotNotInCommunityError(f"{bad_request} (Telegram: {exc.message})") from exc
 		raise BotError(f"{bad_request} (Telegram: {exc.message})") from exc
 	except TelegramEntityTooLarge as exc:
 		# наследует сетевую ошибку — ветка обязана стоять раньше неё,
@@ -676,18 +698,24 @@ async def check_community(token: str, chat_ref: str) -> CommunityInfo:
 		ChatRefError: Введённую ссылку/имя не удалось разобрать.
 		InvalidBotTokenError: Токен в БД повреждён (не похож на токен).
 		TelegramFloodError: Флуд-лимит — очередь ждёт и повторяет сама.
-		BotError: Сообщество не найдено / бот не добавлен /
-			нет прав / вид не подключается (малая группа, личный чат).
+		BotNotInCommunityError: Бота в сообществе нет — выгнан (403)
+			или не добавляли и оно ему не видно (400 «chat not found»).
+		BotError: Прочие отказы Telegram и вид, который не подключается
+			(малая группа, личный чат).
 		ConnectionError: Нет связи с серверами Telegram.
 	"""
 	ref = normalize_chat_ref(chat_ref)
 	logger.info("Проверка сообщества: ввод %r распознан как %r.", chat_ref, ref)
+	# тексты нейтральны к сценарию: та же проверка служит и подключению
+	# по вводу человека, и вводу бота в известное сообщество, где ID
+	# взят из базы и «проверьте ID» человеку не помог бы
 	async with (
 		_bot_client(token) as bot,
 		_bot_errors(
 			"Бот не добавлен в сообщество — добавьте его (в канал — администратором).",
-			"Канал или группа не найдены — проверьте @имя или ID; приватное "
-			"сообщество видно боту только после добавления его участником.",
+			"Бот не видит это сообщество: по числовому ID Telegram отвечает только "
+			"участнику. Добавьте бота в сообщество (в канал — администратором) "
+			"или укажите публичное @имя.",
 		),
 	):
 		chat = await bot.get_chat(ref)

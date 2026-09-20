@@ -24,7 +24,7 @@ from pxcontrol.engine.db.models import Bot, Community, TgAccount
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.abilities import BOT_ADMIN_RIGHTS, ExecutorAction, can
 from pxcontrol.engine.services.community_rights import executor_paused, executor_rights
-from pxcontrol.engine.telegram.bot_api import BotError
+from pxcontrol.engine.telegram.bot_api import BotNotInCommunityError
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError, UserbotUnavailableError
 from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, ParticipantStatus
 from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
@@ -143,6 +143,8 @@ class ExecutorJoiner:
 
 		Raises:
 			JoinError: У бота нет @имени или в пуле некому его ввести.
+			BotError: Telegram отклонил зонд бота не фактом участия
+				(сбой сервера, токен) — до ввода дело не доходит.
 		"""
 		ref = BotRef(bot.id, bot.token)
 		info = await self._seen_by_bot(ref, community.tg_chat_id)
@@ -207,10 +209,16 @@ class ExecutorJoiner:
 		return info
 
 	async def _seen_by_bot(self, bot: BotRef, chat_id: str) -> CommunityInfo | None:
-		"""Что видит бот в сообществе (None — Telegram его туда не пускает)."""
+		"""Что видит бот в сообществе (None — Telegram его туда не пускает).
+
+		Пара :meth:`_seen_by`: глушится только подтверждённый факт «бота
+		там нет», а прочие отказы (серверный сбой, неверный токен, нет
+		связи) поднимаются человеку. Иначе по сбою Telegram приложение
+		сочло бы, что бота нет, и пошло бы вводить его заново.
+		"""
 		try:
 			return await self._gateway.bot_check_community(bot, chat_id)
-		except BotError:
+		except BotNotInCommunityError:
 			return None
 
 	async def _known_invite_link(self, community: Community) -> str | None:

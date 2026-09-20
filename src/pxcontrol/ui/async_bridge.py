@@ -29,7 +29,7 @@ from PySide6.QtCore import QObject, Signal
 from shiboken6 import isValid
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.errors import user_message
+from pxcontrol.engine.errors import EngineError, user_message
 
 logger = logging.getLogger(__name__)
 
@@ -230,15 +230,31 @@ def run_in_engine(
 		try:
 			result = fut.result()
 		except Exception as exc:  # noqa: BLE001 — любую ошибку показываем в UI
-			# полный трейсбек — в лог; пользователю — читаемый текст:
-			# доменные ошибки как есть, неожиданные — короткой сводкой
-			# (дампы СУБД/библиотек в интерфейс не попадают)
-			logger.exception("Ошибка операции движка: %s", exc)
+			# пользователю — читаемый текст: доменные ошибки как есть,
+			# неожиданные — короткой сводкой (дампы СУБД/библиотек
+			# в интерфейс не попадают); в лог — по природе ошибки
+			_log_failure(exc)
 			dispatcher.emit_result(token, False, user_message(exc))
 			return
 		dispatcher.emit_result(token, True, result)
 
 	future.add_done_callback(_finished)
+
+
+def _log_failure(exc: BaseException) -> None:
+	"""Пишет отказ операции движка в лог по его природе.
+
+	Доменная ошибка (:class:`EngineError`) и «нет связи» — ожидаемый
+	исход, у которого одно место возникновения (маппер транспорта)
+	и причина уже в тексте: одна строка WARNING без трейсбека. Всё
+	остальное — неожиданность: ERROR с полным трейсбеком. Так ERROR
+	в журнале снова означает «дефект, разбирать», а не «бота ещё
+	не добавили в сообщество».
+	"""
+	if isinstance(exc, EngineError | ConnectionError):
+		logger.warning("Операция движка отклонена (%s): %s", type(exc).__name__, exc)
+		return
+	logger.error("Ошибка операции движка: %s", exc, exc_info=exc)
 
 
 def ui_callback(owner: QObject, callback: Callable[..., None]) -> Callable[..., None]:

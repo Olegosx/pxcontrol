@@ -481,6 +481,29 @@ async def test_bot_forbidden_means_not_in_community() -> None:
 			raise TelegramForbiddenError(GetChat(chat_id=1), "bot was kicked from the channel chat")
 
 
+async def test_bot_chat_not_found_means_not_in_community() -> None:
+	"""400 «chat not found» — тот же факт участия, что и 403 (живой ответ 20.09.2026).
+
+	Бота, которого в сообщество не добавляли, Telegram по числовому ID
+	не «выгоняет» (403), а «не находит» (400): кода у отказа нет, только
+	описание. Без этой ветки перепроверка не записала бы «не состоит»,
+	а человек читал бы «проверьте ID», хотя ID взят из базы. Прочие 400
+	остаются общим отказом.
+	"""
+	from aiogram.exceptions import TelegramBadRequest
+	from aiogram.methods import GetChat
+
+	from pxcontrol.engine.telegram.bot_api import _bot_errors
+
+	with pytest.raises(BotNotInCommunityError, match="не видит"):
+		async with _bot_errors("нет прав", "Бот не видит это сообщество"):
+			raise TelegramBadRequest(GetChat(chat_id=1), "Bad Request: chat not found")
+	with pytest.raises(BotError, match="отклонено") as plain:
+		async with _bot_errors("нет прав", "отклонено"):
+			raise TelegramBadRequest(GetChat(chat_id=1), "Bad Request: message is too long")
+	assert not isinstance(plain.value, BotNotInCommunityError)
+
+
 def test_community_kind_from_chat_type() -> None:
 	"""Вид по типу чата Bot API; малая группа и личный чат — отказ."""
 	assert community_kind_from_chat_type("channel") is CommunityKind.CHANNEL
@@ -832,6 +855,30 @@ async def test_bot_is_invited_to_group_and_promoted_in_channel(db: Database) -> 
 	assert (account_id, target) == (1, "@test_bot")
 	assert rights.post_messages and rights.edit_messages
 	assert not rights.ban_users, "лишних прав боту не просим"
+
+
+async def test_bot_join_does_not_take_server_failure_for_absence(db: Database) -> None:
+	"""Сбой Telegram при зонде бота — не «бота нет»: ввод не начинается.
+
+	Глушится только подтверждённый факт участия (``BotNotInCommunityError``),
+	как у аккаунтов ``UserbotAccessError``; иначе по 5xx приложение
+	назначило бы администратором бота, который уже в канале.
+	"""
+
+	class _FailingBotGateway(_FakeGateway):
+		async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo:
+			raise BotError("Telegram отклонил операцию: internal")
+
+	gateway = _FailingBotGateway()
+	first = await _make_account(db, "@first")
+	gateway.userbot_admins = {first}
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(first, "@testchan")
+	bot_id = await _make_bot(db)
+	with pytest.raises(BotError, match="internal"):
+		await service.add_executor(dto.id, ExecutorRef(OwnerKind.BOT, bot_id))
+	assert gateway.promoted == [] and gateway.invited == []
+	assert all(e.owner.kind is not OwnerKind.BOT for e in await service.list_executors(dto.id))
 
 
 async def test_bot_without_username_is_refused_honestly(db: Database) -> None:
