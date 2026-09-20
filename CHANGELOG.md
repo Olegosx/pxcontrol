@@ -364,7 +364,7 @@ userbot-аккаунтов, а бот жил строкой во вкладке 
 (`drain_operations`) не опустошала список, а подменяла поле новым:
 
 ```python
-records, self._operations = self._operations, []   # было
+records, self._operations = self._operations, []  # было
 ```
 
 После первой же выемки все созданные до неё дорожки продолжали писать
