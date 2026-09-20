@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import pytest
 
 from pxcontrol.engine.db.database import Database
-from pxcontrol.engine.db.models import Community, TgAccount
+from pxcontrol.engine.db.models import Community, CommunityExecutor, TgAccount
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunitiesService
 from pxcontrol.engine.services.maintenance import (
@@ -56,6 +56,8 @@ class _FakeGateway:
 	) -> None:
 		self.pages = pages or []
 		self.member_pages = member_pages or []
+		#: чьими руками шла работа (ADR-0035, этап E: не только публикатора)
+		self.used_accounts: list[int] = []
 		self.can_delete = can_delete
 		self.can_ban = can_ban
 		self.deleted: list[list[int]] = []
@@ -90,6 +92,7 @@ class _FakeGateway:
 	async def userbot_delete_messages(
 		self, account_id: int, chat_id: str, message_ids: list[int]
 	) -> int:
+		self.used_accounts.append(account_id)
 		self.deleted.append(list(message_ids))
 		return sum(1 for message_id in message_ids if message_id not in self.undeletable)
 
@@ -128,8 +131,18 @@ def _page(
 	)
 
 
-async def _community(db: Database, *, with_account: bool = True) -> int:
-	"""Сообщество с userbot-публикатором (или без него)."""
+async def _community(
+	db: Database,
+	*,
+	with_account: bool = True,
+	can_delete: bool = True,
+	can_ban: bool = True,
+) -> int:
+	"""Сообщество с исполнителем-публикатором (или без исполнителей вовсе).
+
+	Права задаются строке пула, а не ответу зонда: обслуживание читает
+	их из снимка (ADR-0035, этап E) и в Telegram перед проходом не ходит.
+	"""
 	async with db.session_factory() as session:
 		account_id = None
 		if with_account:
@@ -144,6 +157,21 @@ async def _community(db: Database, *, with_account: bool = True) -> int:
 			default_tg_account_id=account_id,
 		)
 		session.add(community)
+		await session.flush()
+		if account_id is not None:
+			session.add(
+				CommunityExecutor(
+					community_id=community.id,
+					tg_account_id=account_id,
+					status=ParticipantStatus.ADMIN,
+					rights=ExecutorRights(
+						ParticipantStatus.ADMIN,
+						AdminRights(delete_messages=can_delete, ban_users=can_ban),
+						ALL_MEMBER_RIGHTS,
+					).to_payload(),
+					checked_at=datetime.now(UTC),
+				)
+			)
 		await session.commit()
 		await session.refresh(community)
 		return community.id
@@ -285,11 +313,15 @@ async def test_depth_out_of_range_is_rejected(db: Database) -> None:
 		await service.scan_service_messages(community_id, depth=7)
 
 
-async def test_community_without_publisher_is_rejected(db: Database) -> None:
-	"""Без userbot-публикатора обслуживание недоступно — и объясняет почему."""
+async def test_community_without_executors_is_rejected(db: Database) -> None:
+	"""Без исполнителя-пользователя обслуживание недоступно — и объясняет почему.
+
+	Бот тут не годится по существу: ни списка участников, ни чужой
+	истории Bot API не отдаёт (ADR-0026, п. 8).
+	"""
 	service = _service(db, _FakeGateway())
 	community_id = await _community(db, with_account=False)
-	with pytest.raises(MaintenanceError, match="userbot-публикатор"):
+	with pytest.raises(MaintenanceError, match="только пользователи"):
 		await service.scan_service_messages(community_id)
 
 
@@ -355,13 +387,85 @@ async def test_clean_counts_refused_as_skipped(db: Database) -> None:
 
 
 async def test_clean_requires_delete_right(db: Database) -> None:
-	"""Без права удалять чистка не начинается — проверка живая, до прохода."""
-	gateway = _FakeGateway(can_delete=False)
-	service = _service(db, gateway)
-	community_id = await _community(db)
-	with pytest.raises(MaintenanceError, match="права удалять"):
+	"""Без права удалять чистка не начинается — по снимку прав, без зонда.
+
+	Прежде право спрашивалось живым запросом перед каждым проходом;
+	теперь оно уже хранится (ADR-0035), и обслуживание ищет в пуле того,
+	кому удалять разрешено.
+	"""
+	service = _service(db, _FakeGateway())
+	community_id = await _community(db, can_delete=False)
+	with pytest.raises(MaintenanceError, match="удалять чужие сообщения"):
 		await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
 	assert await service.state() == []  # задание даже не поставлено
+
+
+async def test_maintenance_takes_a_capable_executor_not_only_publisher(
+	db: Database,
+) -> None:
+	"""Право есть у другого исполнителя пула — работу делает он (ADR-0035, этап E).
+
+	Прежде обслуживание знало только публикатора и отказывало, даже когда
+	в пуле был администратор с нужным правом. Теперь работу берёт
+	способный, а публикатор идёт первым, когда способен сам.
+	"""
+	from pxcontrol.engine.db.models import CommunityExecutor as ExecutorRow
+
+	gateway = _FakeGateway([_page(kinds=[ServiceMessageKind.MEMBERS])])
+	service = _service(db, gateway)
+	community_id = await _community(db, can_delete=False)  # публикатор удалять не может
+	async with db.session_factory() as session:
+		helper = TgAccount(label="@helper", phone="+7901", session="s")
+		session.add(helper)
+		await session.flush()
+		session.add(
+			ExecutorRow(
+				community_id=community_id,
+				tg_account_id=helper.id,
+				status=ParticipantStatus.ADMIN,
+				rights=ExecutorRights(
+					ParticipantStatus.ADMIN,
+					AdminRights(delete_messages=True),
+					ALL_MEMBER_RIGHTS,
+				).to_payload(),
+				checked_at=datetime.now(UTC),
+			)
+		)
+		await session.commit()
+		helper_id = helper.id
+	await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	await service.settle()
+	assert gateway.deleted, "чистка прошла — нашёлся способный исполнитель"
+	assert gateway.used_accounts == [helper_id], "работала не публикатор, а способный"
+
+
+async def test_unread_rights_are_clarified_by_a_probe(db: Database) -> None:
+	"""Снимка прав не было — уточняем живым зондом, а не отказываем (ADR-0035).
+
+	Строки, пережившие миграцию, несут только то, что подтверждала
+	прежняя модель: право публиковать есть, прав удалять и исключать
+	нет — не потому, что их отобрали, а потому, что их никто не читал.
+	Отказ по такому снимку был бы неправдой.
+	"""
+	from sqlalchemy import select
+
+	from pxcontrol.engine.db.models import CommunityExecutor as ExecutorRow
+
+	gateway = _FakeGateway([_page(kinds=[ServiceMessageKind.MEMBERS])])
+	service = _service(db, gateway)
+	community_id = await _community(db, can_delete=False)
+	async with db.session_factory() as session:  # снимка не было вовсе
+		row = (
+			await session.execute(
+				select(ExecutorRow).where(ExecutorRow.community_id == community_id)
+			)
+		).scalar_one()
+		row.rights = ExecutorRights(ParticipantStatus.ADMIN).to_payload()
+		row.checked_at = None
+		await session.commit()
+	await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	await service.settle()
+	assert gateway.deleted, "зонд подтвердил права — чистка пошла"
 
 
 async def test_clean_without_kinds_is_rejected(db: Database) -> None:
@@ -631,10 +735,9 @@ async def test_clean_members_reports_notes_left_without_delete_right(db: Databas
 	"""Без права удалять записи об исключении остаются — и это сказано."""
 	gateway = _FakeGateway(
 		member_pages=[_members(deleted=[11], scanned=10, next_offset=None, total=10)],
-		can_delete=False,
 	)
 	service = _service(db, gateway)
-	community_id = await _community(db)
+	community_id = await _community(db, can_delete=False)
 	await service.clean_deleted_accounts(community_id, limit=10)
 	await service.settle()
 	item = (await service.state())[0]
@@ -644,11 +747,10 @@ async def test_clean_members_reports_notes_left_without_delete_right(db: Databas
 
 
 async def test_clean_members_requires_ban_right(db: Database) -> None:
-	"""Без права исключать чистка не начинается."""
-	gateway = _FakeGateway(can_ban=False)
-	service = _service(db, gateway)
-	community_id = await _community(db)
-	with pytest.raises(MaintenanceError, match="права исключать"):
+	"""Без права исключать чистка не начинается (по снимку прав)."""
+	service = _service(db, _FakeGateway())
+	community_id = await _community(db, can_ban=False)
+	with pytest.raises(MaintenanceError, match="исключать участников"):
 		await service.clean_deleted_accounts(community_id)
 	assert await service.state() == []
 

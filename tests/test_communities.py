@@ -946,6 +946,31 @@ async def test_recheck_skips_paused_members(db: Database) -> None:
 	assert access.community.executors_count == 1
 
 
+async def test_executors_for_puts_the_publisher_first(db: Database) -> None:
+	"""Подбор исполнителя: способные, публикатор первым, приостановленные мимо.
+
+	Точка, ради которой этап E и делался: работу можно поручить не только
+	публикатору — но когда он способен, делает её он, и прежнее поведение
+	сохраняется само собой.
+	"""
+	from pxcontrol.engine.services.abilities import ExecutorAction
+
+	service, gateway, community_id, second = await _member_service(db)
+	gateway.userbot_admins.discard(second)  # второй — обычный участник канала
+	await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	# участник состоит и читает ленту, но в канале не публикует
+	readers = await service.executors_for(community_id, ExecutorAction.READ_HISTORY)
+	assert [e.label for e in readers] == ["@first", "@second"]
+	assert readers[0].is_default, "публикатор идёт первым"
+	publishers = await service.executors_for(community_id, ExecutorAction.PUBLISH)
+	assert [e.label for e in publishers] == ["@first"]
+	# приостановленного в подборе нет вовсе (ADR-0029)
+	await _pause_account(db, second)
+	assert [
+		e.label for e in await service.executors_for(community_id, ExecutorAction.READ_HISTORY)
+	] == ["@first"]
+
+
 async def test_communities_of_account_and_bot(db: Database) -> None:
 	"""Обратная сторона членств: сообщества аккаунта с ролью и умолчанием; сообщества бота."""
 	gateway = _FakeGateway()

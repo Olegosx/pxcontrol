@@ -31,9 +31,14 @@ from typing import Protocol
 
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
-from pxcontrol.engine.services.communities import CommunitiesService, CommunityDto
+from pxcontrol.engine.services.abilities import ACTION_WORDS, ExecutorAction, can
+from pxcontrol.engine.services.communities import (
+	CommunitiesService,
+	CommunityDto,
+	ExecutorDto,
+)
+from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
-from pxcontrol.engine.telegram.rights import ExecutorRights
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	DeletedAccount,
@@ -322,12 +327,12 @@ class MaintenanceService:
 				userbot-публикатора или глубина вне допустимых границ.
 		"""
 		_check_range("Глубина просмотра", depth, DEPTH_RANGE)
-		community, account_id = await self._target(community_id)
+		community, executor = await self._target(community_id, ExecutorAction.READ_HISTORY)
 		return self._put(
 			_MaintenanceJob(
 				self._jobs.new_id(),
 				community,
-				account_id,
+				executor.owner.id,
 				target=MaintenanceTarget.SERVICE_MESSAGES,
 				clean=False,
 				depth=depth,
@@ -362,19 +367,12 @@ class MaintenanceService:
 			raise MaintenanceError("Не выбрано ни одного вида записей — чистить нечего.")
 		_check_range("Глубина просмотра", depth, DEPTH_RANGE)
 		_check_range("Предел удаления за проход", delete_limit, DELETE_LIMIT_RANGE)
-		community, account_id = await self._target(community_id)
-		rights = await self._rights(community, account_id)
-		if not rights.admin.delete_messages:
-			raise MaintenanceError(
-				f"У публикатора «{community.title}» нет права удалять сообщения — "
-				"выдайте аккаунту право «Удаление сообщений» в настройках "
-				"администраторов Telegram."
-			)
+		community, executor = await self._target(community_id, ExecutorAction.DELETE_OTHERS)
 		return self._put(
 			_MaintenanceJob(
 				self._jobs.new_id(),
 				community,
-				account_id,
+				executor.owner.id,
 				target=MaintenanceTarget.SERVICE_MESSAGES,
 				clean=True,
 				kinds=chosen,
@@ -396,12 +394,12 @@ class MaintenanceService:
 		Raises:
 			MaintenanceError: Сообщество не найдено или нет публикатора.
 		"""
-		community, account_id = await self._target(community_id)
+		community, executor = await self._target(community_id, ExecutorAction.READ_HISTORY)
 		return self._put(
 			_MaintenanceJob(
 				self._jobs.new_id(),
 				community,
-				account_id,
+				executor.owner.id,
 				target=MaintenanceTarget.DELETED_ACCOUNTS,
 				clean=False,
 			)
@@ -433,23 +431,18 @@ class MaintenanceService:
 			UserbotUnavailableError: Проверить права не удалось.
 		"""
 		_check_range("Предел исключений за проход", limit, KICK_LIMIT_RANGE)
-		community, account_id = await self._target(community_id)
-		rights = await self._rights(community, account_id)
-		if not rights.admin.ban_users:
-			raise MaintenanceError(
-				f"У публикатора «{community.title}» нет права исключать участников — "
-				"выдайте аккаунту право «Блокировка пользователей» в настройках "
-				"администраторов Telegram."
-			)
+		community, executor = await self._target(community_id, ExecutorAction.BAN)
 		return self._put(
 			_MaintenanceJob(
 				self._jobs.new_id(),
 				community,
-				account_id,
+				executor.owner.id,
 				target=MaintenanceTarget.DELETED_ACCOUNTS,
 				clean=True,
 				limit=limit,
-				can_delete=rights.admin.delete_messages,
+				# чистка исключением попутно убирает служебные записи о входах
+				# и выходах — если этому же исполнителю их удалять разрешено
+				can_delete=can(executor.rights, ExecutorAction.DELETE_OTHERS, community.kind),
 			)
 		)
 
@@ -543,38 +536,72 @@ class MaintenanceService:
 		)
 		return job.id
 
-	async def _target(self, community_id: int) -> tuple[CommunityDto, int]:
-		"""Сообщество и его аккаунт-публикатор — или понятный отказ.
+	async def _target(
+		self, community_id: int, action: ExecutorAction
+	) -> tuple[CommunityDto, ExecutorDto]:
+		"""Сообщество и исполнитель, способный на это действие (ADR-0035).
+
+		Работу берёт публикатор по умолчанию, когда он способен, — иначе
+		любой другой исполнитель пула с нужным правом. Прежде обслуживание
+		знало только публикатора и отказывало, даже когда в пуле был
+		администратор с правами; заодно оно зондировало права живым
+		запросом перед каждым проходом, хотя снимок уже хранится
+		(ADR-0035). Устаревший снимок поправит отказ сервера: для
+		удаления он и так считается пропуском пачки, а не сбоем (ADR-0026).
 
 		Raises:
-			MaintenanceError: Сообщество не найдено или у него нет
-				userbot-публикатора.
+			MaintenanceError: Сообщество не найдено или способного
+				исполнителя-пользователя в пуле нет.
 		"""
 		try:
 			community = await self._communities.get_community(community_id)
+			capable = await self._communities.executors_for(community_id, action)
 		except EngineError as exc:
 			raise MaintenanceError(str(exc)) from exc
-		if community.default_account_id is None:
+		users = [executor for executor in capable if executor.owner.kind is OwnerKind.USER]
+		if not users and await self._refresh_unread_rights(community_id):
+			capable = await self._communities.executors_for(community_id, action)
+			users = [executor for executor in capable if executor.owner.kind is OwnerKind.USER]
+		if not users:
 			raise MaintenanceError(
-				f"У «{community.title}» нет userbot-публикатора — обслуживание "
-				"доступно только ему: список участников и чужую историю "
-				"бот прочитать не может."
+				f"В пуле «{community.title}» некому {ACTION_WORDS[action]}: обслуживание "
+				"ведут только пользователи (список участников и чужую историю бот "
+				"прочитать не может), и нужное право должно быть у них. Выдайте его "
+				"в Telegram и перепроверьте доступы."
 			)
-		return community, community.default_account_id
+		return community, users[0]
 
-	async def _rights(self, community: CommunityDto, account_id: int) -> ExecutorRights:
-		"""Живой зонд прав аккаунта в сообществе (ADR-0035).
+	async def _refresh_unread_rights(self, community_id: int) -> bool:
+		"""Уточняет права живым зондом, если снимка у кого-то ещё не было.
 
-		Права меняются в Telegram без нашего ведома, а начинать проход,
-		который упрётся в отказ на первой же пачке, незачем. Снимок
-		складывает сам транспорт — здесь спрашивается конкретное право,
-		а не роль: у администратора права удалять может и не быть.
+		Зонд здесь **уточняющий, а не обязательный** (ADR-0035, этап E).
+		Нужен он ровно строкам, пережившим миграцию: в них перенесено
+		то, что подтверждала прежняя модель (право публиковать), а прав
+		удалять и исключать там нет — не потому, что их отобрали, а
+		потому, что их никто не читал. Отказывать по такому снимку
+		значило бы соврать.
 
-		Raises:
-			UserbotUnavailableError: Проверить не удалось (нет связи).
+		Перепроверка заполняет снимок целиком, и второй раз сюда не зайдут:
+		у прочитанных строк отметка чтения уже стоит.
+
+		Returns:
+			True — снимок уточняли (стоит спросить подбор заново).
 		"""
-		info = await self._gateway.userbot_check_community(account_id, community.tg_chat_id)
-		return info.rights
+		executors = await self._communities.list_executors(community_id)
+		unread = [
+			executor
+			for executor in executors
+			if executor.owner.kind is OwnerKind.USER and executor.checked_at is None
+		]
+		if not unread:
+			return False
+		logger.info(
+			"Обслуживание «%s»: права %d исполнителей не читались — перепроверяю доступы.",
+			community_id,
+			len(unread),
+		)
+		await self._communities.recheck_community(community_id)
+		return True
 
 	# --- выполнение -----------------------------------------------------------
 

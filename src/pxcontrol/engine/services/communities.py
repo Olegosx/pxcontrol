@@ -35,10 +35,8 @@ from pxcontrol.engine.db.models import Bot, Community, CommunityExecutor, TgAcco
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.abilities import (
 	BOT_ADMIN_RIGHTS,
-	can_edit_others,
-	can_invite,
-	can_promote,
-	can_publish,
+	ExecutorAction,
+	can,
 )
 from pxcontrol.engine.services.accounts import account_display
 from pxcontrol.engine.services.publish_route import (
@@ -179,7 +177,7 @@ def publisher_ready(community: Community, kind: OwnerKind) -> bool:
 	row = publisher_row(community, kind)
 	if row is None or executor_paused(row):
 		return False
-	return can_publish(executor_rights(row), CommunityKind(community.kind))
+	return can(executor_rights(row), ExecutorAction.PUBLISH, CommunityKind(community.kind))
 
 
 def community_capabilities(community: Community) -> PublishCapabilities:
@@ -193,7 +191,9 @@ def community_capabilities(community: Community) -> PublishCapabilities:
 	markup_edit = False
 	if bot_ready:
 		row = publisher_row(community, OwnerKind.BOT)
-		markup_edit = row is not None and can_edit_others(executor_rights(row))
+		markup_edit = row is not None and can(
+			executor_rights(row), ExecutorAction.EDIT_OTHERS, CommunityKind(community.kind)
+		)
 	return publish_capabilities(
 		bot_ready, publisher_ready(community, OwnerKind.USER), markup_edit=markup_edit
 	)
@@ -222,7 +222,7 @@ def publisher_incapable(community: Community) -> bool:
 		row = publisher_row(community, owner_kind)
 		if row is None or executor_paused(row):
 			continue
-		if not can_publish(executor_rights(row), kind):
+		if not can(executor_rights(row), ExecutorAction.PUBLISH, kind):
 			return True
 	return False
 
@@ -564,7 +564,11 @@ class CommunitiesService:
 			)
 		for account_id in account_ids:
 			probe = await self._probe_userbot(account_id, chat_id)
-			if probe.ok is True and probe.info is not None and can_publish(probe.info.rights, kind):
+			if (
+				probe.ok is True
+				and probe.info is not None
+				and can(probe.info.rights, ExecutorAction.PUBLISH, kind)
+			):
 				return account_id, probe.info.rights
 		return None
 
@@ -709,7 +713,7 @@ class CommunitiesService:
 			return None
 		if probe.ok is False or probe.info is None:
 			return False
-		return can_publish(probe.info.rights, kind)
+		return can(probe.info.rights, ExecutorAction.PUBLISH, kind)
 
 	async def _restore_publisher(
 		self, community_id: int, chat_id: str, kind: CommunityKind
@@ -830,7 +834,7 @@ class CommunitiesService:
 						rights=rights,
 						is_default=is_default,
 						paused=executor_paused(row),
-						can_publish=can_publish(rights, kind),
+						can_publish=can(rights, ExecutorAction.PUBLISH, kind),
 						checked_at=row.checked_at,
 					)
 				)
@@ -884,6 +888,34 @@ class CommunitiesService:
 				)
 				for row in rows
 			]
+
+	async def executors_for(self, community_id: int, action: ExecutorAction) -> list[ExecutorDto]:
+		"""Исполнители сообщества, способные на это действие (ADR-0035).
+
+		Точка подбора исполнителя: её спрашивают там, где работу можно
+		поручить не только публикатору, — обслуживание (ADR-0026) и,
+		в будущем, распределение нагрузки между исполнителями. Выбор идёт
+		по **хранимому снимку прав**, без обращения к Telegram: зонд перед
+		каждым проходом стоил бы обращения там, где ответ уже известен,
+		а устаревший снимок поправит отказ сервера — он и так остаётся
+		последним словом.
+
+		Приостановленные (ADR-0029) в список не попадают. Публикатор
+		по умолчанию идёт первым: когда он способен, работу делает он —
+		так сохраняется прежнее поведение, а прочие исполнители
+		подхватывают лишь то, чего он не может.
+
+		Raises:
+			CommunityError: Сообщество не найдено.
+		"""
+		community = await self.get_community(community_id)
+		executors = await self.list_executors(community_id)
+		capable = [
+			executor
+			for executor in executors
+			if not executor.paused and can(executor.rights, action, community.kind)
+		]
+		return sorted(capable, key=lambda executor: not executor.is_default)
 
 	async def add_executor(
 		self, community_id: int, owner: LaneOwner, invite: str | None = None
@@ -1022,7 +1054,7 @@ class CommunitiesService:
 		if CommunityKind(community.kind) is CommunityKind.CHANNEL:
 			# в канале бот бывает только администратором — значит ввод
 			# это назначение, и нужен наш исполнитель с правом назначать
-			account_id = self._executor_for(community, can_promote)
+			account_id = self._executor_for(community, ExecutorAction.PROMOTE)
 			if account_id is None:
 				raise CommunityError(
 					f"Некому принять бота в канал «{community.title}»: нужен исполнитель "
@@ -1034,7 +1066,7 @@ class CommunitiesService:
 			)
 			outcome = JoinOutcome.PROMOTED
 		else:
-			account_id = self._executor_for(community, can_invite)
+			account_id = self._executor_for(community, ExecutorAction.INVITE)
 			if account_id is None:
 				raise CommunityError(
 					f"Некому пригласить бота в «{community.title}»: нужен исполнитель "
@@ -1078,7 +1110,7 @@ class CommunitiesService:
 		а не создаёт: создание — изменение состояния сообщества, за
 		которым тянется вопрос «кто её завёл и кто по ней пришёл».
 		"""
-		account_id = self._executor_for(community, can_invite)
+		account_id = self._executor_for(community, ExecutorAction.INVITE)
 		if account_id is None:
 			return None
 		try:
@@ -1094,7 +1126,7 @@ class CommunitiesService:
 		а в чужие настройки приватности, поэтому отказ здесь не ошибка
 		операции, а повод попросить у человека ссылку.
 		"""
-		account_id = self._executor_for(community, can_invite)
+		account_id = self._executor_for(community, ExecutorAction.INVITE)
 		if account_id is None:
 			return False
 		try:
@@ -1105,20 +1137,18 @@ class CommunitiesService:
 		return True
 
 	@staticmethod
-	def _executor_for(
-		community: Community, ability: Callable[[ExecutorRights], bool]
-	) -> int | None:
+	def _executor_for(community: Community, action: ExecutorAction) -> int | None:
 		"""Аккаунт из пула, способный на названное действие (None — такого нет).
 
-		Узкая форма подбора исполнителя: ввод в сообщество делают руками
-		своих же администраторов, и выбрать их можно только по правам.
-		Приостановленные (ADR-0029) не рассматриваются — приложение их
-		не использует ни для чего.
+		Ввод исполнителя делают руками своих же администраторов, и выбрать
+		их можно только по правам. Приостановленные (ADR-0029)
+		не рассматриваются — приложение их не использует ни для чего.
 		"""
+		kind = CommunityKind(community.kind)
 		for row in community.executors:
 			if row.tg_account_id is None or executor_paused(row):
 				continue
-			if ability(executor_rights(row)):
+			if can(executor_rights(row), action, kind):
 				return row.tg_account_id
 		return None
 
