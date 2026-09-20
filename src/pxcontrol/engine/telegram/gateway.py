@@ -59,6 +59,7 @@ from pxcontrol.engine.telegram.mtproto import (
 )
 from pxcontrol.engine.telegram.poll import PollDraft
 from pxcontrol.engine.telegram.rich_text import TextEntity
+from pxcontrol.engine.telegram.rights import AdminRights
 from pxcontrol.engine.telegram.types import (
 	BotRef,
 	CommunityAnalytics,
@@ -475,6 +476,51 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
 			return await transport.check_community(chat_ref)
+
+	async def userbot_join_public(self, account_id: int, username: str) -> None:
+		"""Вступает в публичное сообщество по @имени (ADR-0035).
+
+		Приоритет — «человек ждёт ответа»: ввод исполнителя делается
+		только по явному нажатию и никогда в фоне (ADR-0035, п. 11).
+
+		Raises: см. :meth:`MtprotoTransport.join_public`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			await transport.join_public(username)
+
+	async def userbot_join_by_invite(self, account_id: int, link: str) -> bool:
+		"""Вступает по ссылке-приглашению; False — отправлена заявка (ADR-0035).
+
+		Raises: см. :meth:`MtprotoTransport.join_by_invite`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.join_by_invite(link)
+
+	async def userbot_invite_link(self, account_id: int, chat_id: str) -> str | None:
+		"""Основная ссылка-приглашение сообщества (читается, не создаётся).
+
+		Raises: см. :meth:`MtprotoTransport.invite_link`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.invite_link(chat_id)
+
+	async def userbot_invite_participant(self, account_id: int, chat_id: str, target: str) -> None:
+		"""Приглашает исполнителя в сообщество от имени аккаунта (ADR-0035).
+
+		Raises: см. :meth:`MtprotoTransport.invite_participant`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			await transport.invite_participant(chat_id, target)
+
+	async def userbot_promote(
+		self, account_id: int, chat_id: str, target: str, rights: AdminRights
+	) -> None:
+		"""Назначает исполнителя администратором сообщества (ADR-0035).
+
+		Raises: см. :meth:`MtprotoTransport.promote`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			await transport.promote(chat_id, target, rights)
 
 	async def userbot_publish(
 		self,

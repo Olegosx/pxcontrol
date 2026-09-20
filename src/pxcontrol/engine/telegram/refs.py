@@ -88,3 +88,49 @@ def normalize_chat_ref(chat_ref: str) -> str | int:
 	if not ref:
 		raise ChatRefError(_ASK_REF)
 	return f"@{ref}"
+
+
+def invite_hash(link: str) -> str:
+	"""Достаёт хеш из ссылки-приглашения (ADR-0035).
+
+	Приглашение адресуется не именем, а хешем: по нему вступают
+	(``messages.importChatInvite``) в сообщество, которого аккаунт
+	ещё не видит. Принимает оба формата Telegram — новый ``t.me/+хеш``
+	и старый ``t.me/joinchat/хеш``, — а также голый хеш: человек может
+	скопировать его из настроек сообщества без адреса.
+
+	Raises:
+		ChatRefError: Ссылка пустая или это не приглашение (например,
+			обычная ссылка на публичное сообщество — по ней вступают
+			иначе).
+	"""
+	ref = link.strip()
+	for prefix in ("https://", "http://"):
+		if ref.lower().startswith(prefix):
+			ref = ref[len(prefix) :]
+	with_host = False
+	for host in ("t.me/", "telegram.me/", "telegram.dog/"):
+		if ref.lower().startswith(host):
+			ref = ref[len(host) :]
+			with_host = True
+			break
+	ref = ref.strip("/")
+	# ссылка с адресом обязана быть помечена как приглашение: без «+»
+	# или «joinchat/» это обычная ссылка на публичное сообщество,
+	# и «хеш» из неё Telegram не примет. Голый ввод без адреса —
+	# другое дело: там хеш и есть весь ввод
+	marked = ref.startswith("+") or ref.lower().startswith("joinchat/")
+	if with_host and not marked:
+		raise ChatRefError(
+			"Это ссылка на публичное сообщество, а не приглашение. "
+			"Нужна ссылка вида t.me/+… или t.me/joinchat/…"
+		)
+	if ref.lower().startswith("joinchat/"):
+		ref = ref[len("joinchat/") :]
+	ref = ref.lstrip("+")
+	if not ref or "/" in ref or ref.startswith("@"):
+		raise ChatRefError(
+			"Это не ссылка-приглашение. Нужна ссылка вида t.me/+… "
+			"или t.me/joinchat/… — её можно взять в настройках сообщества."
+		)
+	return ref

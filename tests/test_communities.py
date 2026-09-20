@@ -9,7 +9,11 @@ import pytest
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, TgAccount
 from pxcontrol.engine.services.accounts import AccountsService
-from pxcontrol.engine.services.communities import CommunitiesService, CommunityError
+from pxcontrol.engine.services.communities import (
+	CommunitiesService,
+	CommunityError,
+	JoinOutcome,
+)
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import (
 	BotError,
@@ -23,7 +27,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotUnavailableError,
 )
-from pxcontrol.engine.telegram.refs import ChatRefError, normalize_chat_ref
+from pxcontrol.engine.telegram.refs import ChatRefError, invite_hash, normalize_chat_ref
 from pxcontrol.engine.telegram.rights import (
 	ALL_ADMIN_RIGHTS,
 	ALL_MEMBER_RIGHTS,
@@ -47,8 +51,17 @@ class _FakeGateway:
 	def __init__(self) -> None:
 		self.userbot_admins: set[int] = set()  # кто здесь администратор
 		self.invisible_for: set[int] = set()  # кому сообщество не видно вовсе
+		self.outsiders: set[int] = set()  # кто в сообществе не состоит (ADR-0035)
 		self.bot_is_admin = True  # бот — админ с правом публиковать
 		self.bot_visible = True  # сообщество видно боту (иначе Telegram молчит)
+		self.bot_inside = True  # бот уже в сообществе
+		# ввод исполнителя (ADR-0035): что приложение сделало в Telegram
+		self.joined_public: list[tuple[int, str]] = []
+		self.joined_by_link: list[tuple[int, str]] = []
+		self.invited: list[tuple[int, str]] = []
+		self.promoted: list[tuple[int, str, AdminRights]] = []
+		self.known_link: str | None = None  # ссылка, которую отдаёт Telegram
+		self.approval_needed = False  # приглашение требует одобрения
 		self.kind = CommunityKind.CHANNEL  # вид, который «увидит» проверка
 		self.forum = False  # признак форума в ответе проверки
 		self.status = ParticipantStatus.ADMIN  # участие аккаунта в userbot-зонде
@@ -62,7 +75,7 @@ class _FakeGateway:
 	async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo:
 		if chat_ref == "@notfound":
 			raise BotError("Канал не найден — проверьте @имя или ID.")
-		if chat_ref == "@noperm" or not self.bot_visible:
+		if chat_ref == "@noperm" or not self.bot_visible or not self.bot_inside:
 			raise BotError("Бот не добавлен в сообщество — добавьте его.")
 		# нехватка прав больше не отказ, а факт в снимке (ADR-0035, п. 7)
 		status = ParticipantStatus.ADMIN if self.bot_is_admin else ParticipantStatus.MEMBER
@@ -81,9 +94,44 @@ class _FakeGateway:
 			self.forum,
 		)
 
+	async def userbot_join_public(self, account_id: int, username: str) -> None:
+		self.joined_public.append((account_id, username))
+		self.outsiders.discard(account_id)
+
+	async def userbot_join_by_invite(self, account_id: int, link: str) -> bool:
+		self.joined_by_link.append((account_id, link))
+		if self.approval_needed:
+			return False  # заявка отправлена, участником аккаунт ещё не стал
+		self.outsiders.discard(account_id)
+		return True
+
+	async def userbot_invite_link(self, account_id: int, chat_id: str) -> str | None:
+		return self.known_link
+
+	async def userbot_invite_participant(self, account_id: int, chat_id: str, target: str) -> None:
+		self.invited.append((account_id, target))
+		self.outsiders.clear()
+		self.bot_inside = True
+
+	async def userbot_promote(
+		self, account_id: int, chat_id: str, target: str, rights: AdminRights
+	) -> None:
+		self.promoted.append((account_id, target, rights))
+		self.bot_inside = True
+
 	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo:
 		if account_id in self.invisible_for:
 			raise UserbotAccessError("Сообщество закрыто от этого аккаунта.")
+		if account_id in self.outsiders:
+			# «не состоит» — факт участия, а не отказ в доступе (ADR-0035)
+			return CommunityInfo(
+				"-1001234",
+				self.title,
+				self.username,
+				self.kind,
+				ExecutorRights(ParticipantStatus.LEFT),
+				self.forum,
+			)
 		# не админ — не отказ, а участие с правами участника (ADR-0035)
 		here_admin = account_id in self.userbot_admins
 		status = self.status if here_admin else ParticipantStatus.MEMBER
@@ -276,8 +324,9 @@ async def test_bot_joins_pool_and_leaves_it(db: Database) -> None:
 	assert dto.default_bot_id is None
 	# бота, который не админ, тоже можно завести — он просто не публикует
 	gateway.bot_is_admin = False
-	executors = await service.add_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
-	bot_row = next(e for e in executors if e.owner.kind is OwnerKind.BOT)
+	joined = await service.add_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	assert joined.outcome is JoinOutcome.ALREADY_IN, "бот уже был в сообществе"
+	bot_row = next(e for e in joined.executors if e.owner.kind is OwnerKind.BOT)
 	assert bot_row.is_default and not bot_row.can_publish
 	updated = await service.get_community(dto.id)
 	assert updated.default_bot_id == bot_id and not updated.capabilities.bot
@@ -310,6 +359,29 @@ def test_normalize_chat_ref() -> None:
 	assert normalize_chat_ref("-1001234567") == -1001234567
 	with pytest.raises(ChatRefError):
 		normalize_chat_ref("   ")
+
+
+def test_invite_hash_accepts_both_formats_and_bare_hash() -> None:
+	"""Хеш приглашения берётся из обоих форматов Telegram и из голого хеша.
+
+	Человек копирует ссылку как придётся: из настроек сообщества,
+	из чужого сообщения, иногда — один хеш без адреса.
+	"""
+	assert invite_hash("https://t.me/+AbCdEf12") == "AbCdEf12"
+	assert invite_hash("t.me/joinchat/XyZ") == "XyZ"
+	assert invite_hash("https://telegram.me/+QQ") == "QQ"
+	assert invite_hash("  AbC  ") == "AbC"
+
+
+def test_invite_hash_rejects_ordinary_links() -> None:
+	"""Обычная ссылка — не приглашение: по ней вступают иначе, и молчать нельзя."""
+	with pytest.raises(ChatRefError, match="публичное сообщество"):
+		invite_hash("t.me/kino")
+	with pytest.raises(ChatRefError, match="публичное сообщество"):
+		invite_hash("https://t.me/kino/42")
+	for bad in ("@kino", ""):
+		with pytest.raises(ChatRefError, match="ссылка-приглашение"):
+			invite_hash(bad)
 
 
 def test_normalize_chat_ref_hardened() -> None:
@@ -569,8 +641,8 @@ async def test_membership_crud_and_default(db: Database) -> None:
 	]
 	gateway.status = ParticipantStatus.MEMBER  # второй аккаунт — простой участник
 	gateway.userbot_admins.discard(second)
-	executors = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
-	assert [(e.label, e.status, e.is_default) for e in executors] == [
+	added = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert [(e.label, e.status, e.is_default) for e in added.executors] == [
 		("@first", ParticipantStatus.ADMIN, True),
 		("@second", ParticipantStatus.MEMBER, False),
 	]
@@ -582,12 +654,182 @@ async def test_membership_crud_and_default(db: Database) -> None:
 	assert dto.executors_count == 2
 
 
+async def _make_private(db: Database, community_id: int) -> None:
+	"""Делает сообщество приватным: у записи снимается @имя.
+
+	Вступить по имени в такое нельзя — остаётся ссылка-приглашение.
+	"""
+	async with db.session_factory() as session:
+		community = await session.get(Community, community_id)
+		assert community is not None
+		community.username = None
+		await session.commit()
+
+
+async def _set_username(db: Database, account_id: int, username: str) -> None:
+	"""Проставляет аккаунту @имя: по нему Telegram и находит приглашаемого."""
+	async with db.session_factory() as session:
+		account = await session.get(TgAccount, account_id)
+		assert account is not None
+		account.username = username
+		await session.commit()
+
+
+async def _forget_username(db: Database, account_id: int) -> None:
+	"""Стирает @имя аккаунта: пригласить такого Telegram не даст."""
+	async with db.session_factory() as session:
+		account = await session.get(TgAccount, account_id)
+		assert account is not None
+		account.username = None
+		await session.commit()
+
+
+async def _forget_bot_username(db: Database, bot_id: int) -> None:
+	"""Стирает @имя бота (в жизни бывает у записи, созданной до проверки)."""
+	from pxcontrol.engine.db.models import Bot as BotRow
+
+	async with db.session_factory() as session:
+		bot = await session.get(BotRow, bot_id)
+		assert bot is not None
+		bot.username = None
+		await session.commit()
+
+
+# --- ввод исполнителя в сообщество (ADR-0035, этап C) -------------------------------
+
+
+async def test_join_public_community_by_username(db: Database) -> None:
+	"""Не состоит, сообщество публичное — аккаунт вступает сам, без чужой помощи.
+
+	Самая дешёвая ступень лестницы: ни ссылки, ни приглашающего, ни чьих-то
+	прав. Потому она и первая.
+	"""
+	service, gateway, community_id, second = await _member_service(db)
+	gateway.outsiders = {second}
+	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert result.outcome is JoinOutcome.JOINED
+	assert gateway.joined_public == [(second, "@testchan")]
+	assert not gateway.joined_by_link and not gateway.invited
+	assert [e.owner.id for e in result.executors] == [1, second]
+
+
+async def test_already_inside_changes_nothing_in_telegram(db: Database) -> None:
+	"""Уже состоит — в Telegram не ходим вовсе, только записываем права."""
+	service, gateway, community_id, second = await _member_service(db)
+	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert result.outcome is JoinOutcome.ALREADY_IN
+	assert not gateway.joined_public and not gateway.joined_by_link and not gateway.invited
+
+
+async def test_private_community_joined_by_existing_link(db: Database) -> None:
+	"""Приватное: ссылку **читаем** у Telegram и вступаем по ней (ADR-0035, п. 10).
+
+	Своих ссылок приложение не создаёт: у сообщества она уже есть,
+	и Telegram отдаёт её администратору с правом приглашать.
+	"""
+	service, gateway, community_id, second = await _member_service(db)
+	gateway.username = None  # приватное сообщество: вступить по имени нельзя
+	await _make_private(db, community_id)
+	gateway.outsiders = {second}
+	gateway.known_link = "https://t.me/+secretHash"
+	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert result.outcome is JoinOutcome.JOINED
+	assert gateway.joined_by_link == [(second, "https://t.me/+secretHash")]
+	assert not gateway.joined_public
+
+
+async def test_join_request_is_an_outcome_not_a_membership(db: Database) -> None:
+	"""Заявка на вступление: строка заводится, но участия ещё нет.
+
+	До одобрения прав у заявителя нет, публиковать им нельзя, и приложение
+	говорит это прямо — вместо того чтобы притвориться, что всё готово.
+	"""
+	service, gateway, community_id, second = await _member_service(db)
+	gateway.username = None
+	await _make_private(db, community_id)
+	gateway.outsiders = {second}
+	gateway.known_link = "https://t.me/+needsApproval"
+	gateway.approval_needed = True
+	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert result.outcome is JoinOutcome.REQUESTED
+	row = next(e for e in result.executors if e.owner.id == second)
+	assert row.status is ParticipantStatus.REQUESTED
+	assert not row.can_publish and not row.status.in_community
+
+
+async def test_private_without_link_asks_the_human(db: Database) -> None:
+	"""Ссылки нет и пригласить некому — исход «нужна ссылка», пул не тронут.
+
+	Это не ошибка: в Telegram ничего не делали, операция продолжится
+	с той ссылкой, которую даст человек.
+	"""
+	service, gateway, community_id, second = await _member_service(db)
+	gateway.username = None
+	await _make_private(db, community_id)
+	gateway.outsiders = {second}
+	gateway.known_link = None
+	await _forget_username(db, second)  # приглашать некого: @имени нет
+	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert result.outcome is JoinOutcome.NEEDS_LINK
+	assert [e.owner.id for e in result.executors] == [1], "пул остался прежним"
+	# человек дал ссылку — тем же путём доводим дело до конца
+	result = await service.add_executor(
+		community_id, LaneOwner(OwnerKind.USER, second), "https://t.me/+fromHuman"
+	)
+	assert result.outcome is JoinOutcome.JOINED
+	assert gateway.joined_by_link == [(second, "https://t.me/+fromHuman")]
+
+
+async def test_pool_invites_when_there_is_no_link(db: Database) -> None:
+	"""Ссылки нет, но у нас есть админ с правом приглашать — приглашаем сами.
+
+	Ступень идёт до вопроса человеку: спрашивать, пока остаются
+	автоматические пути, значит звать его зря.
+	"""
+	service, gateway, community_id, second = await _member_service(db)
+	gateway.username = None
+	await _make_private(db, community_id)
+	await _set_username(db, second, "second")  # без @имени приглашать некого
+	gateway.outsiders = {second}
+	gateway.known_link = None
+	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert result.outcome is JoinOutcome.INVITED
+	assert gateway.invited == [(1, "@second")], "пригласил администратор из пула"
+
+
+async def test_bot_is_invited_to_group_and_promoted_in_channel(db: Database) -> None:
+	"""Бот сам вступить не может: в группу его приглашают, в канал — назначают.
+
+	В канале участником бот не бывает вовсе, поэтому ввод там — это
+	назначение администратором, и права называются заранее.
+	"""
+	service, gateway, community_id, _second = await _member_service(db)
+	bot_id = await _make_bot(db)
+	gateway.bot_inside = False
+	result = await service.add_executor(community_id, LaneOwner(OwnerKind.BOT, bot_id))
+	assert result.outcome is JoinOutcome.PROMOTED
+	account_id, target, rights = gateway.promoted[0]
+	assert (account_id, target) == (1, "@test_bot")
+	assert rights.post_messages and rights.edit_messages
+	assert not rights.ban_users, "лишних прав боту не просим"
+
+
+async def test_bot_without_username_is_refused_honestly(db: Database) -> None:
+	"""Без @имени Telegram не найдёт, кого добавлять, — отказ с объяснением."""
+	service, gateway, community_id, _second = await _member_service(db)
+	bot_id = await _make_bot(db)
+	gateway.bot_inside = False
+	await _forget_bot_username(db, bot_id)
+	with pytest.raises(CommunityError, match="не известно @имя"):
+		await service.add_executor(community_id, LaneOwner(OwnerKind.BOT, bot_id))
+
+
 async def test_remove_default_member_resets_default(db: Database) -> None:
 	"""Удаление участника-умолчания сбрасывает умолчание без авто-замены."""
 	service, _gateway, community_id, second = await _member_service(db)
-	executors = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
-	assert len(executors) == 2
-	first = next(e.owner for e in executors if e.is_default)
+	added = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	assert len(added.executors) == 2
+	first = next(e.owner for e in added.executors if e.is_default)
 	remaining = await service.remove_executor(community_id, first)
 	assert [e.label for e in remaining] == ["@second"]
 	dto = next(c for c in await service.list_communities() if c.id == community_id)

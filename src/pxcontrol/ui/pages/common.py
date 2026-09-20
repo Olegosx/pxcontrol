@@ -2031,6 +2031,9 @@ class FormDialog(MessageBoxBase):
 	не пропадает (крючок ``validate`` библиотеки, как в диалоге
 	настроек канала). ``initial`` — начальные значения полей
 	(для диалогов правки существующего: например, пометки аккаунта).
+	``note`` — пояснение над полями: зачем это спрашивают и где взять
+	ответ. Нужно там, где вопрос сам по себе непонятен, — например
+	ссылка-приглашение приватного сообщества (ADR-0035).
 	"""
 
 	def __init__(
@@ -2042,9 +2045,14 @@ class FormDialog(MessageBoxBase):
 		password_fields: tuple[str, ...] = (),
 		validator: Callable[[dict[str, str]], str | None] | None = None,
 		initial: dict[str, str] | None = None,
+		note: str = "",
 	) -> None:
 		super().__init__(parent)
 		self.viewLayout.addWidget(SubtitleLabel(title, self))
+		if note:
+			hint = CaptionLabel(note, self)
+			hint.setWordWrap(True)
+			self.viewLayout.addWidget(hint)
 		self._edits: dict[str, LineEdit] = {}
 		self._validator = validator
 		self._error = ErrorLabel(self)

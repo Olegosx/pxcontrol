@@ -60,6 +60,8 @@ from pxcontrol.engine.services.communities import (
 	CommunityAccess,
 	CommunityDto,
 	ExecutorDto,
+	JoinOutcome,
+	JoinResult,
 )
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.posts import ScheduledList
@@ -78,6 +80,7 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
+	FormDialog,
 	QueueCounts,
 	TabItem,
 	WorkDialog,
@@ -103,11 +106,13 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
+	INVITE_LINK_PROMPT,
 	MAINTENANCE_UNAVAILABLE,
 	community_queue_counts,
 	executor_row_text,
 	executors_count,
 	header_state_text,
+	join_result_text,
 	remove_executor_text,
 	state_badge,
 	subtitle_text,
@@ -311,7 +316,11 @@ class MembersPanel(QWidget):
 		add_row = QHBoxLayout()
 		self._add_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
 		add_row.addWidget(self._add_combo, stretch=1)
-		add_button = PushButton("Добавить", self)
+		add_button = PushButton("Ввести", self)
+		add_button.setToolTip(
+			"Если исполнитель ещё не в сообществе, приложение введёт его: "
+			"вступит по @имени, по ссылке-приглашению или пригласит своими силами"
+		)
 		add_button.clicked.connect(self._on_add_user)
 		add_row.addWidget(add_button)
 		layout.addLayout(add_row)
@@ -328,7 +337,11 @@ class MembersPanel(QWidget):
 		bot_add_row = QHBoxLayout()
 		self._bot_combo: DtoComboBox[BotDto] = DtoComboBox(self)
 		bot_add_row.addWidget(self._bot_combo, stretch=1)
-		assign = PushButton("Добавить", self)
+		assign = PushButton("Ввести", self)
+		assign.setToolTip(
+			"Бот сам вступить не может: в группу его пригласит, а в канал "
+			"примет администратором исполнитель из пула"
+		)
 		assign.clicked.connect(self._on_add_bot)
 		bot_add_row.addWidget(assign)
 		layout.addLayout(bot_add_row)
@@ -406,7 +419,9 @@ class MembersPanel(QWidget):
 				"«Пользователи и боты»."
 			)
 			return
-		self._add(LaneOwner(OwnerKind.USER, account.id), "Проверяю права аккаунта…")
+		self._add(
+			LaneOwner(OwnerKind.USER, account.id), account.display, "Проверяю права аккаунта…"
+		)
 
 	def _on_add_bot(self) -> None:
 		bot = self._bot_combo.selected()
@@ -415,19 +430,53 @@ class MembersPanel(QWidget):
 				"Нет свободных активных ботов — добавьте или возобновите: «Пользователи и боты»."
 			)
 			return
-		self._add(LaneOwner(OwnerKind.BOT, bot.id), "Проверяю права бота…")
+		self._add(LaneOwner(OwnerKind.BOT, bot.id), bot.label, "Проверяю права бота…")
 
-	def _add(self, owner: LaneOwner, note: str) -> None:
-		"""Заводит исполнителя: зонд прав живой, поэтому человека предупреждаем."""
+	def _add(self, owner: LaneOwner, label: str, note: str, invite: str | None = None) -> None:
+		"""Вводит исполнителя в сообщество (ADR-0035).
+
+		Зонд прав живой, а ввод меняет состояние в Telegram — поэтому
+		человека предупреждают до и извещают после. Приватное сообщество
+		без готовой ссылки возвращает исход «нужна ссылка»: тогда её
+		просят и повторяют тем же путём.
+		"""
 		self._error.succeed()
 		show_info(self, "Проверка", note)
 		run_in_engine(
 			self._worker,
-			self._worker.engine.communities.add_executor(self._community.id, owner),
+			self._worker.engine.communities.add_executor(self._community.id, owner, invite),
 			self,
-			self._after_change,
+			partial(self._after_join, owner, label),
 			self._show_error,
 		)
+
+	def _after_join(self, owner: LaneOwner, label: str, result: JoinResult) -> None:
+		"""Показывает исход ввода; «нужна ссылка» — просит её и повторяет."""
+		if result.outcome is JoinOutcome.NEEDS_LINK:
+			self._ask_invite_link(owner, label)
+			return
+		self._after_change(result.executors)
+		if result.outcome is JoinOutcome.REQUESTED:
+			show_info(self, "Заявка отправлена", join_result_text(result, label))
+		else:
+			show_success(self, "Готово", join_result_text(result, label))
+
+	def _ask_invite_link(self, owner: LaneOwner, label: str) -> None:
+		"""Спрашивает ссылку-приглашение — последняя ступень лестницы ввода."""
+		dialog = FormDialog(
+			"Нужна ссылка-приглашение",
+			[("link", "Ссылка t.me/+…")],
+			self.window(),
+			accept_text="Ввести",
+			note=INVITE_LINK_PROMPT,
+		)
+		if not exec_dialog(dialog):
+			return
+		link = dialog.value("link").strip()
+		if not link:
+			self._error.fail("Ссылка не указана — ввести исполнителя нечем.")
+			return
+		self._add(owner, label, "Вступаю по ссылке…", invite=link)
 
 	def _on_set_default(self, dto: ExecutorDto) -> None:
 		run_in_engine(

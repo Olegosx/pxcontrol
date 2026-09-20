@@ -23,6 +23,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Protocol
 
 from sqlalchemy import select
@@ -32,18 +33,23 @@ from sqlalchemy.orm import selectinload
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, CommunityExecutor, TgAccount
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.services.abilities import (
+	BOT_ADMIN_RIGHTS,
+	can_edit_others,
+	can_invite,
+	can_promote,
+	can_publish,
+)
 from pxcontrol.engine.services.accounts import account_display
 from pxcontrol.engine.services.publish_route import (
 	PublishCapabilities,
-	can_edit_others,
-	can_publish,
 	publish_capabilities,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import BotError
 from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
-from pxcontrol.engine.telegram.mtproto import UserbotAccessError
-from pxcontrol.engine.telegram.rights import ExecutorRights, ParticipantStatus
+from pxcontrol.engine.telegram.mtproto import UserbotAccessError, UserbotUnavailableError
+from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, ParticipantStatus
 from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
 
 logger = logging.getLogger(__name__)
@@ -51,6 +57,36 @@ logger = logging.getLogger(__name__)
 
 class CommunityError(EngineError):
 	"""Ошибка операций с каналами (с понятным человеку текстом)."""
+
+
+class JoinOutcome(StrEnum):
+	"""Чем кончился ввод исполнителя в сообщество (ADR-0035).
+
+	Исходов несколько не ради дробности: человеку важно разное — «он
+	уже был там» ничего не изменило в Telegram, «вступил» и «приглашён»
+	изменили, а «заявка отправлена» требует чьего-то одобрения, и без
+	него исполнитель не заработает.
+	"""
+
+	ALREADY_IN = "already_in"  # состоял и раньше — в Telegram ничего не делали
+	JOINED = "joined"  # вступил сам: по @имени или по ссылке
+	REQUESTED = "requested"  # заявка на вступление отправлена и ждёт одобрения
+	INVITED = "invited"  # приглашён нашим исполнителем
+	PROMOTED = "promoted"  # принят в канал назначением администратором
+	# ввести нечем: сообщество приватное, готовой ссылки Telegram не отдал,
+	# пригласить некому. Это **исход**, а не ошибка: в Telegram ничего
+	# не изменилось, и операция продолжится, когда человек даст ссылку.
+	# Исключением такой случай быть не может — мост отдаёт интерфейсу
+	# текст ошибки, а не её тип, и распознавание свелось бы к разбору строки
+	NEEDS_LINK = "needs_link"
+
+
+@dataclass(frozen=True)
+class JoinResult:
+	"""Итог ввода исполнителя: что произошло и каким стал пул."""
+
+	outcome: JoinOutcome
+	executors: list[ExecutorDto]
 
 
 #: Связи для снимка DTO: назначенные публикаторы и все исполнители
@@ -252,6 +288,20 @@ class _CommunityChecker(Protocol):
 	async def bot_check_community(self, bot: BotRef, chat_ref: str) -> CommunityInfo: ...
 
 	async def userbot_check_community(self, account_id: int, chat_ref: str) -> CommunityInfo: ...
+
+	async def userbot_join_public(self, account_id: int, username: str) -> None: ...
+
+	async def userbot_join_by_invite(self, account_id: int, link: str) -> bool: ...
+
+	async def userbot_invite_link(self, account_id: int, chat_id: str) -> str | None: ...
+
+	async def userbot_invite_participant(
+		self, account_id: int, chat_id: str, target: str
+	) -> None: ...
+
+	async def userbot_promote(
+		self, account_id: int, chat_id: str, target: str, rights: AdminRights
+	) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -835,47 +885,242 @@ class CommunitiesService:
 				for row in rows
 			]
 
-	async def add_executor(self, community_id: int, owner: LaneOwner) -> list[ExecutorDto]:
-		"""Заводит исполнителя в сообществе, записав его права живым зондом.
+	async def add_executor(
+		self, community_id: int, owner: LaneOwner, invite: str | None = None
+	) -> JoinResult:
+		"""Вводит исполнителя в сообщество и заводит ему строку пула (ADR-0035).
+
+		Лестницей, от простого к сложному — и усложнение только
+		по названной причине. Уже состоит: в Telegram ничего не делаем,
+		только читаем права. Не состоит: в публичное сообщество аккаунт
+		**вступает сам** по @имени; в приватное — по ссылке-приглашению,
+		которую приложение **читает** у Telegram (создавать ссылки оно
+		не умеет намеренно) или получает от человека; если ссылки нет —
+		исполнителя приглашает наш же администратор. Бот сам вступить
+		не может: в группу его приглашают, в канал принимают назначением
+		администратором — участником бот там не бывает.
+
+		Вступление и приглашение делаются **только по этому вызову**,
+		то есть по явному действию человека: в фоне приложение в чужие
+		сообщества не вступает (ADR-0035, п. 11).
 
 		Первый исполнитель своего вида становится публикатором
-		по умолчанию (иначе публикация так и осталась бы недоступной);
-		дальше умолчание меняется только явно
-		(:meth:`set_default_publisher`).
+		по умолчанию — иначе публикация осталась бы недоступной
+		до второго действия.
 
-		Права публиковать не требуются (ADR-0035): исполнитель может быть
-		нужен ради чтения, реакций и обслуживания. Что ему можно, скажет
-		записанный снимок.
+		Args:
+			community_id: сообщество.
+			owner: кого вводим.
+			invite: ссылка-приглашение от человека (когда своей нет).
+
+		Returns:
+			Итог ввода и пул после него. Исход ``NEEDS_LINK`` значит, что
+			в Telegram ничего не делали и нужна ссылка-приглашение
+			от человека — повторите вызов с ней.
 
 		Raises:
 			CommunityError: Сообщество или исполнитель не найдены, либо
-				он уже в пуле.
-			UserbotUnavailableError: Аккаунт не подключён или сообщество
-				ему не видно.
-			BotError: Telegram не показал сообщество боту.
+				он уже в пуле, либо ввести его нечем.
+			UserbotUnavailableError: Отказ Telegram на userbot-пути.
+			BotError: Отказ Telegram на бот-пути.
+		"""
+		community = await self._executor_context(community_id, owner)
+		if owner.kind is OwnerKind.USER:
+			account = await self._get_account(owner.id)
+			label = self._account_display(account)
+			outcome, rights, info = await self._bring_user(community, owner.id, account, invite)
+		else:
+			bot = await self._get_bot(owner.id)
+			label = bot.label
+			outcome, rights, info = await self._bring_bot(community, bot)
+		if outcome is JoinOutcome.NEEDS_LINK:
+			# в Telegram ничего не менялось — и строки пула не заводим
+			return JoinResult(outcome, await self.list_executors(community_id))
+		had_kind = any(
+			(row.tg_account_id is not None) == (owner.kind is OwnerKind.USER)
+			for row in community.executors
+		)
+		await self._adopt_executor(community_id, owner, rights, make_default=not had_kind)
+		if info is not None:
+			await self._refresh_mutable(community_id, info)
+		logger.info(
+			"Сообществу id=%s добавлен исполнитель «%s» (%s).", community_id, label, outcome
+		)
+		return JoinResult(outcome, await self.list_executors(community_id))
+
+	async def _executor_context(self, community_id: int, owner: LaneOwner) -> Community:
+		"""Сообщество со связями — и отказ, если исполнитель уже в пуле.
+
+		Raises:
+			CommunityError: Сообщество не найдено или исполнитель уже в пуле.
 		"""
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id, with_refs=True)
-			chat_id = community.tg_chat_id
 			if await self._executor_in_session(session, community_id, owner) is not None:
 				raise CommunityError("Этот исполнитель уже в пуле сообщества.")
-			had_kind = any(
-				(row.tg_account_id is not None) == (owner.kind is OwnerKind.USER)
-				for row in community.executors
+			session.expunge(community)
+			return community
+
+	async def _bring_user(
+		self, community: Community, account_id: int, account: TgAccount, invite: str | None
+	) -> tuple[JoinOutcome, ExecutorRights, CommunityInfo | None]:
+		"""Вводит пользователя: лестница «состоит → @имя → ссылка → приглашение»."""
+		info = await self._seen_by(account_id, community.tg_chat_id)
+		if info is not None and info.rights.status.in_community:
+			return JoinOutcome.ALREADY_IN, info.rights, info
+		outcome = await self._let_user_in(community, account_id, account, invite)
+		if outcome is JoinOutcome.NEEDS_LINK:
+			return outcome, ExecutorRights(ParticipantStatus.LEFT), None
+		if outcome is JoinOutcome.REQUESTED:
+			# заявку ещё не одобрили: прав нет и спрашивать их не у кого
+			return outcome, ExecutorRights(ParticipantStatus.REQUESTED), None
+		fresh = await self._gateway.userbot_check_community(account_id, community.tg_chat_id)
+		await self._sync_profile(account_id)
+		return outcome, fresh.rights, fresh
+
+	async def _let_user_in(
+		self, community: Community, account_id: int, account: TgAccount, invite: str | None
+	) -> JoinOutcome:
+		"""Заводит пользователя в сообщество — ступенями (ADR-0035, п. 9).
+
+		Порядок ступеней — от независимой к самой отказоопасной: вступить
+		по @имени можно без чьей-либо помощи; ссылка нужна приватному;
+		приглашение упирается в чужие настройки приватности. Последним
+		идёт не приглашение, а вопрос человеку: это единственная ступень,
+		которая останавливает операцию, и уводить в неё, пока остаются
+		автоматические пути, значило бы звать человека зря.
+		"""
+		if community.username and invite is None:
+			await self._gateway.userbot_join_public(account_id, f"@{community.username}")
+			return JoinOutcome.JOINED
+		link = invite or await self._known_invite_link(community)
+		if link is not None:
+			joined = await self._gateway.userbot_join_by_invite(account_id, link)
+			return JoinOutcome.JOINED if joined else JoinOutcome.REQUESTED
+		if account.username and await self._invite_by_pool(community, f"@{account.username}"):
+			return JoinOutcome.INVITED
+		return JoinOutcome.NEEDS_LINK
+
+	async def _bring_bot(
+		self, community: Community, bot: Bot
+	) -> tuple[JoinOutcome, ExecutorRights, CommunityInfo | None]:
+		"""Вводит бота: сам он вступить не может — его вводит наш администратор.
+
+		Raises:
+			CommunityError: У бота нет @имени или в пуле некому его ввести.
+		"""
+		ref = BotRef(bot.id, bot.token)
+		info = await self._seen_by_bot(ref, community.tg_chat_id)
+		if info is not None and info.rights.status.in_community:
+			return JoinOutcome.ALREADY_IN, info.rights, info
+		if not bot.username:
+			raise CommunityError(
+				f"У бота «{bot.label}» не известно @имя — без него Telegram не найдёт, "
+				"кого добавлять. Проверьте бота в разделе «Пользователи и боты»."
 			)
-		if owner.kind is OwnerKind.USER:
-			account = await self._get_account(owner.id)
-			info = await self._gateway.userbot_check_community(owner.id, chat_id)
-			await self._sync_profile(owner.id)
-			label = self._account_display(account)
+		target = f"@{bot.username}"
+		if CommunityKind(community.kind) is CommunityKind.CHANNEL:
+			# в канале бот бывает только администратором — значит ввод
+			# это назначение, и нужен наш исполнитель с правом назначать
+			account_id = self._executor_for(community, can_promote)
+			if account_id is None:
+				raise CommunityError(
+					f"Некому принять бота в канал «{community.title}»: нужен исполнитель "
+					"с правом назначать администраторов. Добавьте бота администратором "
+					"вручную в Telegram."
+				)
+			await self._gateway.userbot_promote(
+				account_id, community.tg_chat_id, target, BOT_ADMIN_RIGHTS
+			)
+			outcome = JoinOutcome.PROMOTED
 		else:
-			bot = await self._get_bot(owner.id)
-			info = await self._gateway.bot_check_community(BotRef(bot.id, bot.token), chat_id)
-			label = bot.label
-		await self._adopt_executor(community_id, owner, info.rights, make_default=not had_kind)
-		await self._refresh_mutable(community_id, info)
-		logger.info("Сообществу id=%s добавлен исполнитель «%s».", community_id, label)
-		return await self.list_executors(community_id)
+			account_id = self._executor_for(community, can_invite)
+			if account_id is None:
+				raise CommunityError(
+					f"Некому пригласить бота в «{community.title}»: нужен исполнитель "
+					"с правом приглашать. Добавьте бота в группу вручную в Telegram."
+				)
+			await self._gateway.userbot_invite_participant(account_id, community.tg_chat_id, target)
+			outcome = JoinOutcome.INVITED
+		fresh = await self._gateway.bot_check_community(ref, community.tg_chat_id)
+		return outcome, fresh.rights, fresh
+
+	async def _seen_by(self, account_id: int, chat_id: str) -> CommunityInfo | None:
+		"""Что видит аккаунт в сообществе (None — не видит вовсе).
+
+		От :meth:`_probe_userbot` отличается тем, что не глушит сбои:
+		ввод исполнителя — действие человека, и «нет связи» он должен
+		увидеть ошибкой, а не молчаливым переходом к вступлению.
+
+		Удавшийся зонд — подтверждённая связь с аккаунтом, поэтому здесь
+		же актуализируется его профиль: ответ «не состоит» для этого
+		годится не хуже ответа «состоит».
+		"""
+		try:
+			info = await self._gateway.userbot_check_community(account_id, chat_id)
+		except UserbotAccessError:
+			return None
+		await self._sync_profile(account_id)
+		return info
+
+	async def _seen_by_bot(self, bot: BotRef, chat_id: str) -> CommunityInfo | None:
+		"""Что видит бот в сообществе (None — Telegram его туда не пускает)."""
+		try:
+			return await self._gateway.bot_check_community(bot, chat_id)
+		except BotError:
+			return None
+
+	async def _known_invite_link(self, community: Community) -> str | None:
+		"""Основная ссылка-приглашение сообщества, если её кто-то из пула видит.
+
+		Ссылка у приватного сообщества уже есть, и Telegram отдаёт её
+		администратору с правом приглашать. Приложение её **читает**,
+		а не создаёт: создание — изменение состояния сообщества, за
+		которым тянется вопрос «кто её завёл и кто по ней пришёл».
+		"""
+		account_id = self._executor_for(community, can_invite)
+		if account_id is None:
+			return None
+		try:
+			return await self._gateway.userbot_invite_link(account_id, community.tg_chat_id)
+		except UserbotUnavailableError as exc:
+			logger.info("Ссылку-приглашение «%s» прочитать не удалось: %s", community.title, exc)
+			return None
+
+	async def _invite_by_pool(self, community: Community, target: str) -> bool:
+		"""Приглашает исполнителя силами пула; False — не вышло.
+
+		Самая отказоопасная ступень: она упирается не в наши права,
+		а в чужие настройки приватности, поэтому отказ здесь не ошибка
+		операции, а повод попросить у человека ссылку.
+		"""
+		account_id = self._executor_for(community, can_invite)
+		if account_id is None:
+			return False
+		try:
+			await self._gateway.userbot_invite_participant(account_id, community.tg_chat_id, target)
+		except UserbotUnavailableError as exc:
+			logger.info("Пригласить %s в «%s» не вышло: %s", target, community.title, exc)
+			return False
+		return True
+
+	@staticmethod
+	def _executor_for(
+		community: Community, ability: Callable[[ExecutorRights], bool]
+	) -> int | None:
+		"""Аккаунт из пула, способный на названное действие (None — такого нет).
+
+		Узкая форма подбора исполнителя: ввод в сообщество делают руками
+		своих же администраторов, и выбрать их можно только по правам.
+		Приостановленные (ADR-0029) не рассматриваются — приложение их
+		не использует ни для чего.
+		"""
+		for row in community.executors:
+			if row.tg_account_id is None or executor_paused(row):
+				continue
+			if ability(executor_rights(row)):
+				return row.tg_account_id
+		return None
 
 	async def remove_executor(self, community_id: int, owner: LaneOwner) -> list[ExecutorDto]:
 		"""Убирает исполнителя из пула сообщества (из приложения, не из Telegram).

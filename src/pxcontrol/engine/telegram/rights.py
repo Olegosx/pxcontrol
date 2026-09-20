@@ -53,6 +53,10 @@ class ParticipantStatus(StrEnum):
 	RESTRICTED = "restricted"  # участник с личными ограничениями
 	LEFT = "left"  # не состоит
 	BANNED = "banned"  # исключён и лишён доступа
+	# заявка на вступление отправлена и ждёт одобрения администратора
+	# (ADR-0035): исполнитель ещё не участник, но и не «не состоит» —
+	# ход уже сделан, и человеку важно видеть разницу
+	REQUESTED = "requested"
 
 	@property
 	def administers(self) -> bool:
@@ -65,8 +69,16 @@ class ParticipantStatus(StrEnum):
 
 	@property
 	def in_community(self) -> bool:
-		"""Состоит ли в сообществе сейчас (ограниченный — состоит)."""
-		return self not in (ParticipantStatus.LEFT, ParticipantStatus.BANNED)
+		"""Состоит ли в сообществе сейчас (ограниченный — состоит).
+
+		Отправленная заявка участием не считается: прав у заявителя нет
+		до одобрения, и обращаться к сообществу от его имени рано.
+		"""
+		return self not in (
+			ParticipantStatus.LEFT,
+			ParticipantStatus.BANNED,
+			ParticipantStatus.REQUESTED,
+		)
 
 
 @dataclass(frozen=True)
@@ -210,6 +222,16 @@ class ExecutorRights:
 			_restore(AdminRights, payload.get("admin")),
 			_restore(MemberRights, payload.get("allowed")),
 		)
+
+
+def admin_flags(rights: AdminRights) -> dict[str, bool]:
+	"""Права администратора флагами Telegram — для запроса назначения (ADR-0035).
+
+	Имена наших полей и полей ``chatAdminRights`` совпадают один в один
+	(это проверяет тест полноты), поэтому перевода не нужно — нужен
+	только словарь той же формы, какую ждёт запрос.
+	"""
+	return {field.name: bool(getattr(rights, field.name)) for field in fields(AdminRights)}
 
 
 def _granted(rights: AdminRights | MemberRights) -> list[str]:

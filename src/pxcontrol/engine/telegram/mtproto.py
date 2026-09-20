@@ -20,11 +20,18 @@ from typing import Any
 
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
-from pxcontrol.engine.telegram.refs import CHANNEL_ID_PREFIX, normalize_chat_ref, numeric_chat_id
+from pxcontrol.engine.telegram.refs import (
+	CHANNEL_ID_PREFIX,
+	invite_hash,
+	normalize_chat_ref,
+	numeric_chat_id,
+)
 from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
 from pxcontrol.engine.telegram.rights import (
+	AdminRights,
 	ExecutorRights,
 	ParticipantStatus,
+	admin_flags,
 	userbot_rights,
 )
 from pxcontrol.engine.telegram.stats_graph import (
@@ -136,6 +143,23 @@ class UserbotMessageGoneError(UserbotUnavailableError):
 	"""
 
 
+class UserbotInviteLinkError(UserbotUnavailableError):
+	"""Ссылка-приглашение не сработала: недействительна, устарела или отозвана.
+
+	Отдельный класс: человеку тут нужен не «повтор позже», а другая
+	ссылка — её берут в настройках сообщества (ADR-0035).
+	"""
+
+
+class UserbotInviteRefusedError(UserbotUnavailableError):
+	"""Telegram отказал в приглашении исполнителя (ADR-0035).
+
+	Приглашение упирается не в наши права, а в чужие настройки: приватность
+	приглашаемого, невзаимные контакты, пределы сообщества. Это самый
+	отказоопасный путь, потому он и последний в лестнице ввода.
+	"""
+
+
 class UserbotFloodError(TelegramFloodError, UserbotUnavailableError):
 	"""Флуд-лимит на userbot-аккаунте: «подождите N секунд».
 
@@ -181,6 +205,34 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 
 	if isinstance(exc, errors.ChatAdminRequiredError):
 		return UserbotAccessError(_NOT_ADMIN_TEXT)
+	if isinstance(
+		exc,
+		errors.InviteHashInvalidError
+		| errors.InviteHashExpiredError
+		| errors.InviteHashEmptyError
+		| errors.InviteRevokedMissingError,
+	):
+		return UserbotInviteLinkError(
+			"Ссылка-приглашение не действует — она устарела или отозвана. "
+			"Возьмите свежую в настройках сообщества."
+		)
+	if isinstance(
+		exc,
+		errors.UserPrivacyRestrictedError
+		| errors.UserNotMutualContactError
+		| errors.UsersTooMuchError
+		| errors.BotsTooMuchError
+		| errors.UserChannelsTooMuchError,
+	):
+		return UserbotInviteRefusedError(
+			"Telegram отказал в приглашении: настройки приватности приглашаемого "
+			"или пределы сообщества. Добавьте исполнителя вручную в Telegram."
+		)
+	if isinstance(exc, errors.ChannelsTooMuchError):
+		return UserbotInviteRefusedError(
+			"Аккаунт состоит в предельном числе сообществ — Telegram больше "
+			"не пускает. Выйдите из ненужных или введите другого исполнителя."
+		)
 	if isinstance(
 		exc,
 		errors.UserNotParticipantError
@@ -1194,17 +1246,28 @@ class MtprotoTransport:
 				не найдено.
 		"""
 		from telethon import utils
+		from telethon.errors import UserNotParticipantError
 
 		client = await self._connected_client()
 		ref = normalize_chat_ref(chat_ref)
 		async with _mtproto_errors():
 			entity = await client.get_entity(ref)
-			perms = await client.get_permissions(entity, "me")
+			try:
+				perms = await client.get_permissions(entity, "me")
+			except UserNotParticipantError:
+				# «не состоит» — это факт участия, а не отказ в доступе
+				# (ADR-0035): без него ввод исполнителя не с чего начинать,
+				# а перепроверка не могла бы записать уход из сообщества
+				perms = None
 		kind = community_kind_from_entity(entity)
 		# снимок прав — бесплатный побочный продукт зонда (ADR-0035):
 		# ответ Telegram уже на руках, и разобрать его целиком стоит
 		# столько же, сколько вытащить из него одну роль
-		rights = userbot_rights(perms, getattr(entity, "default_banned_rights", None))
+		rights = (
+			userbot_rights(perms, getattr(entity, "default_banned_rights", None))
+			if perms is not None
+			else ExecutorRights(ParticipantStatus.LEFT)
+		)
 		if kind is CommunityKind.CHANNEL:
 			ensure_userbot_can_post(rights)
 		else:
@@ -1217,6 +1280,140 @@ class MtprotoTransport:
 			rights=rights,
 			forum=bool(getattr(entity, "forum", False)),
 		)
+
+	async def join_public(self, username: str) -> None:
+		"""Вступает в публичное сообщество по @имени (ADR-0035).
+
+		Самая дешёвая ступень лестницы ввода: не зависит ни от чьих прав
+		и ни от чьих настроек приватности. Приватное сообщество так
+		не берётся — Telegram отвечает «вы не состоите», и вступать
+		приходится по ссылке-приглашению.
+
+		Raises:
+			ChatRefError: Введённое имя не удалось разобрать.
+			UserbotUnavailableError: Telegram отказал (в том числе предел
+				числа сообществ у аккаунта).
+		"""
+		from telethon.tl.functions.channels import JoinChannelRequest
+
+		client = await self._connected_client()
+		ref = normalize_chat_ref(username)
+		async with _mtproto_errors():
+			await client(JoinChannelRequest(ref))
+		logger.info("Userbot вступил в сообщество %s.", ref)
+
+	async def join_by_invite(self, link: str) -> bool:
+		"""Вступает по ссылке-приглашению (ADR-0035).
+
+		Ссылка — единственный путь в приватное сообщество: аккаунт,
+		который в нём не состоит, не может адресовать его по идентификатору
+		(проверено 12.09.2026). Если приглашение требует одобрения,
+		Telegram отвечает «заявка отправлена» — это не ошибка, а исход.
+
+		Returns:
+			True — вступил; False — отправлена заявка на вступление.
+
+		Raises:
+			ChatRefError: Это не ссылка-приглашение.
+			UserbotInviteLinkError: Ссылка недействительна или отозвана.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.errors import InviteRequestSentError, UserAlreadyParticipantError
+		from telethon.tl.functions.messages import ImportChatInviteRequest
+
+		client = await self._connected_client()
+		invite = invite_hash(link)
+		async with _mtproto_errors():
+			try:
+				await client(ImportChatInviteRequest(invite))
+			except InviteRequestSentError:
+				logger.info("Userbot отправил заявку на вступление по приглашению.")
+				return False
+			except UserAlreadyParticipantError:
+				return True  # уже состоит — повтор не ошибка
+		logger.info("Userbot вступил по ссылке-приглашению.")
+		return True
+
+	async def invite_link(self, chat_id: str) -> str | None:
+		"""Основная ссылка-приглашение сообщества — **читает**, не создаёт (ADR-0035).
+
+		Ссылка у сообщества уже есть, и Telegram отдаёт её тем же ответом,
+		которым приложение читает статистику. Создавать новую значило бы
+		менять состояние сообщества ради собственного удобства.
+
+		Returns:
+			Ссылку или None — её не видно этому аккаунту (нужны права
+			приглашать) либо её у сообщества нет.
+
+		Raises:
+			UserbotUnavailableError: Сообщество недоступно аккаунту.
+		"""
+		from telethon.tl.functions.channels import GetFullChannelRequest
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			full = await client(GetFullChannelRequest(entity))
+		invite = getattr(getattr(full, "full_chat", None), "exported_invite", None)
+		link = getattr(invite, "link", None)
+		return str(link) if link else None
+
+	async def invite_participant(self, chat_id: str, target: str) -> None:
+		"""Приглашает исполнителя в сообщество от имени этого аккаунта (ADR-0035).
+
+		Последняя ступень лестницы: она упирается не в наши права,
+		а в чужие настройки — приватность приглашаемого и пределы
+		сообщества. Отказ Telegram приходит двумя способами: исключением
+		или списком «не приглашённых» в ответе, и второй разбирается
+		здесь же, иначе отказ выглядел бы удачей.
+
+		Args:
+			chat_id: сообщество.
+			target: @имя приглашаемого (по нему Telegram его и находит).
+
+		Raises:
+			UserbotInviteRefusedError: Telegram отказал в приглашении.
+			UserbotUnavailableError: Прочие отказы (в том числе нехватка
+				права приглашать).
+		"""
+		from telethon.tl.functions.channels import InviteToChannelRequest
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			user = await client.get_input_entity(target)
+			result = await client(InviteToChannelRequest(entity, [user]))
+		if getattr(result, "missing_invitees", None):
+			raise UserbotInviteRefusedError(
+				f"Telegram не добавил {target} — мешают настройки приватности "
+				"приглашаемого. Добавьте его в сообщество вручную."
+			)
+		logger.info("Userbot пригласил %s в сообщество %s.", target, chat_id)
+
+	async def promote(self, chat_id: str, target: str, rights: AdminRights) -> None:
+		"""Назначает исполнителя администратором сообщества (ADR-0035).
+
+		Так приложение вводит бота в **канал**: участником бот там
+		не бывает. Telegram не позволит выдать больше прав, чем есть
+		у назначающего, — отказ приходит честной ошибкой.
+
+		Args:
+			chat_id: сообщество.
+			target: @имя назначаемого.
+			rights: какие права выдать.
+
+		Raises:
+			UserbotAccessError: У аккаунта нет права назначать админов.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.channels import EditAdminRequest
+		from telethon.tl.types import ChatAdminRights
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			user = await client.get_input_entity(target)
+			await client(
+				EditAdminRequest(entity, user, ChatAdminRights(**admin_flags(rights)), rank="")
+			)
+		logger.info("Userbot назначил %s администратором сообщества %s.", target, chat_id)
 
 	async def get_forum_topics(self, chat_id: str) -> list[ForumTopicInfo]:
 		"""Читает темы форума (id и название), «General» — id 1.

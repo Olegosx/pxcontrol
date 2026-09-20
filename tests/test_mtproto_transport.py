@@ -52,6 +52,11 @@ class _FakeClient:
 		self.permissions: Any = None
 		self.online = 0  # онлайн в ответе полной информации (0 — не отдан)
 		self.has_avatar = True  # есть ли у сообщества аватар
+		# ввод исполнителя (ADR-0035): что запрашивали и что отвечает Telegram
+		self.requests: list[Any] = []
+		self.exported_link: str | None = None  # основная ссылка-приглашение
+		self.approval_needed = False  # приглашение требует одобрения
+		self.missing_invitees: list[Any] = []  # кого Telegram не добавил
 
 	async def connect(self) -> None:
 		self.connect_calls += 1
@@ -104,9 +109,29 @@ class _FakeClient:
 		return file
 
 	async def __call__(self, request: Any) -> Any:
-		if type(request).__name__ == "GetFullChannelRequest":
+		name = type(request).__name__
+		if name in ("JoinChannelRequest", "EditAdminRequest"):
+			self.requests.append(request)
+			return SimpleNamespace()
+		if name == "ImportChatInviteRequest":
+			self.requests.append(request)
+			if self.approval_needed:
+				from telethon.errors import InviteRequestSentError
+
+				raise InviteRequestSentError(request)
+			return SimpleNamespace()
+		if name == "InviteToChannelRequest":
+			self.requests.append(request)
+			return SimpleNamespace(missing_invitees=self.missing_invitees)
+		if name == "GetFullChannelRequest":
 			return SimpleNamespace(
-				full_chat=SimpleNamespace(participants_count=1234, online_count=self.online)
+				full_chat=SimpleNamespace(
+					participants_count=1234,
+					online_count=self.online,
+					exported_invite=SimpleNamespace(link=self.exported_link)
+					if self.exported_link
+					else None,
+				)
 			)
 		if type(request).__name__ == "GetForumTopicsRequest":
 			return SimpleNamespace(
@@ -1612,3 +1637,72 @@ def test_sent_message_id_reads_raw_answer() -> None:
 	scheduled = SimpleNamespace(updates=[types.UpdateNewScheduledMessage(message)])
 	assert sent_message_id(scheduled, 1) == 77
 	assert sent_message_id(SimpleNamespace(updates=[]), 1) == 0
+
+
+# --- ввод исполнителя в сообщество (ADR-0035) ---------------------------------------
+
+
+async def test_join_by_invite_reports_request_instead_of_failing() -> None:
+	"""Приглашение с одобрением: «заявка отправлена» — исход, а не ошибка.
+
+	Telegram отвечает на такое вступление исключением, но для приложения
+	это не сбой: ход сделан, и дальше нужен администратор сообщества.
+	"""
+	client = _FakeClient()
+	transport = _transport(client)
+	await transport.start()
+	assert await transport.join_by_invite("https://t.me/+hashHash") is True
+	client.approval_needed = True
+	assert await transport.join_by_invite("https://t.me/+hashHash") is False
+
+
+async def test_invite_link_is_read_not_created() -> None:
+	"""Ссылку-приглашение берём из ответа Telegram; нет её — честное «нет».
+
+	Приложение своих ссылок не создаёт (ADR-0035, п. 10): создание —
+	изменение состояния сообщества, а не чтение.
+	"""
+	from telethon.tl.types import Channel
+
+	client = _FakeClient()
+	client.entity = Channel(
+		id=5, title="Приватный", photo=None, date=None, broadcast=True, username=None
+	)
+	transport = _transport(client)
+	await transport.start()
+	assert await transport.invite_link("-1005") is None
+	client.exported_link = "https://t.me/+secret"
+	assert await transport.invite_link("-1005") == "https://t.me/+secret"
+
+
+async def test_invite_refusal_inside_the_answer_is_not_success() -> None:
+	"""Отказ приходит списком «не приглашённых» — и это отказ, а не удача.
+
+	Telegram отвечает на приглашение двумя способами: исключением или
+	тихим перечнем тех, кого не добавил. Второй способ легко принять
+	за успех — тогда исполнитель считался бы введённым, не будучи им.
+	"""
+	from telethon.tl.types import Channel
+
+	client = _FakeClient()
+	client.entity = Channel(id=6, title="Группа", photo=None, date=None, megagroup=True)
+	transport = _transport(client)
+	await transport.start()
+	await transport.invite_participant("-1006", "@pub_bot")
+	client.missing_invitees = [SimpleNamespace(user_id=42)]
+	with pytest.raises(UserbotUnavailableError, match="приватности"):
+		await transport.invite_participant("-1006", "@pub_bot")
+
+
+async def test_promote_passes_exactly_the_named_rights() -> None:
+	"""Назначение администратором выдаёт ровно названные права — не больше."""
+	from telethon.tl.types import Channel
+
+	client = _FakeClient()
+	client.entity = Channel(id=7, title="Канал", photo=None, date=None, broadcast=True)
+	transport = _transport(client)
+	await transport.start()
+	await transport.promote("-1007", "@pub_bot", AdminRights(post_messages=True))
+	request = client.requests[-1]
+	assert request.admin_rights.post_messages is True
+	assert request.admin_rights.ban_users is False

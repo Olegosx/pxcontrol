@@ -14,7 +14,12 @@ from enum import StrEnum
 from PySide6.QtWidgets import QWidget
 from qfluentwidgets import InfoBadge, InfoLevel
 
-from pxcontrol.engine.services.communities import CommunityDto, ExecutorDto
+from pxcontrol.engine.services.communities import (
+	CommunityDto,
+	ExecutorDto,
+	JoinOutcome,
+	JoinResult,
+)
 from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.types import CommunityKind
@@ -225,6 +230,32 @@ def executor_row_text(executor: ExecutorDto) -> str:
 	elif not executor.can_publish:
 		parts.append("публиковать не может")
 	return f"{executor.label} — {' · '.join(parts)}"
+
+
+#: Что сказать человеку про исход ввода исполнителя (ADR-0035). Ввод
+#: меняет состояние в Telegram, и молчаливое «готово» тут неуместно:
+#: человек должен знать, вступил ли аккаунт, приглашён ли, ждёт ли
+#: заявка одобрения — от этого зависит, работает исполнитель или нет.
+_JOIN_WORDS = {
+	JoinOutcome.ALREADY_IN: "уже состоял — записаны его права",
+	JoinOutcome.JOINED: "вступил в сообщество",
+	JoinOutcome.INVITED: "приглашён и добавлен",
+	JoinOutcome.PROMOTED: "принят администратором канала",
+	JoinOutcome.REQUESTED: "заявка на вступление отправлена — ждёт одобрения",
+}
+
+
+def join_result_text(result: JoinResult, label: str) -> str:
+	"""Человеческий итог ввода исполнителя в сообщество."""
+	return f"{label}: {_JOIN_WORDS.get(result.outcome, str(result.outcome))}"
+
+
+#: Чего просить у человека, когда автоматических путей не осталось.
+INVITE_LINK_PROMPT = (
+	"Это приватное сообщество: вступить по имени нельзя, а готовую "
+	"ссылку Telegram не отдал. Вставьте ссылку-приглашение — её видно "
+	"в настройках сообщества (приложение своих ссылок не создаёт)."
+)
 
 
 def remove_executor_text(executor: ExecutorDto, community: CommunityDto) -> str:
