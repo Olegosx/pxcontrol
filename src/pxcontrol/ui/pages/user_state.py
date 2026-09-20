@@ -28,10 +28,11 @@ from pxcontrol.engine.services.activity import (
 	WindowStats,
 )
 from pxcontrol.engine.services.communities import AccountMembershipDto
-from pxcontrol.engine.telegram.lane import LaneOwner, TelegramPriority
+from pxcontrol.engine.telegram.lane import TelegramPriority
 from pxcontrol.engine.telegram.types import (
 	USERBOT_PREMIUM_MAX_FILE_BYTES,
 	DayPoint,
+	ExecutorRef,
 	Share,
 	limit_gb,
 )
@@ -385,7 +386,7 @@ def live_shown(state: UserState | BotState) -> bool:
 # --- страница аккаунта (ADR-0030) --------------------------------------------------------
 
 
-def user_route_key(owner: LaneOwner) -> str:
+def user_route_key(owner: ExecutorRef) -> str:
 	"""Ключ маршрута страницы аккаунта в навигации (objectName)."""
 	return f"{owner.kind}_{owner.id}"
 

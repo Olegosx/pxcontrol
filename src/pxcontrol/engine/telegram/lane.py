@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 
-from pxcontrol.engine.telegram.types import TelegramFloodError
+from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind, TelegramFloodError
 
 logger = logging.getLogger(__name__)
 
@@ -48,25 +48,6 @@ DEFAULT_MIN_INTERVAL_S = 0.3
 #: (десятки сообщений в секунду), темп держать незачем — дорожка нужна
 #: боту ради очереди, приоритета и заморозки после «подождите N секунд».
 BOT_MIN_INTERVAL_S = 0.0
-
-
-class OwnerKind(StrEnum):
-	"""Чья дорожка: пользователя (userbot-аккаунт) или бота (ADR-0030)."""
-
-	USER = "user"
-	BOT = "bot"
-
-
-@dataclass(frozen=True)
-class LaneOwner:
-	"""Владелец дорожки — исполнитель в Telegram: вид и id в нашей БД.
-
-	Ключ пула дорожек в шлюзе и владелец записей активности:
-	у пользователя и бота свои таблицы, и id могут совпадать.
-	"""
-
-	kind: OwnerKind
-	id: int
 
 
 class Outcome(StrEnum):
@@ -96,7 +77,7 @@ class OperationRecord:
 		wait_s: срок, названный Telegram при флуд-лимите (0 — не было).
 	"""
 
-	owner: LaneOwner
+	owner: ExecutorRef
 	kind: TelegramPriority
 	started_at: datetime
 	finished_at: datetime
@@ -239,7 +220,7 @@ class AccountLane:
 
 	def __init__(
 		self,
-		owner: LaneOwner,
+		owner: ExecutorRef,
 		min_interval_s: float = DEFAULT_MIN_INTERVAL_S,
 		*,
 		clock: Callable[[], float] = time.monotonic,
@@ -280,7 +261,7 @@ class AccountLane:
 		self._busy_since: datetime | None = None
 
 	@property
-	def owner(self) -> LaneOwner:
+	def owner(self) -> ExecutorRef:
 		"""Владелец дорожки."""
 		return self._owner
 

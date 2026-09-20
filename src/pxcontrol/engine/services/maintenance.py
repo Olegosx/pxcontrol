@@ -37,11 +37,11 @@ from pxcontrol.engine.services.communities import (
 	CommunityDto,
 	ExecutorDto,
 )
-from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
 from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	DeletedAccount,
+	OwnerKind,
 	ParticipantsPage,
 	ServiceMessageKind,
 	ServiceMessagesPage,

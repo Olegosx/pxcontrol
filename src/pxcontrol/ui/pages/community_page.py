@@ -74,7 +74,7 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 )
 from pxcontrol.engine.services.video import PresetDto
-from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
+from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.card_list import CardList
@@ -453,7 +453,7 @@ class MembersPanel(QWidget):
 			)
 			return
 		self._add(
-			LaneOwner(OwnerKind.USER, account.id), account.display, "Проверяю права аккаунта…"
+			ExecutorRef(OwnerKind.USER, account.id), account.display, "Проверяю права аккаунта…"
 		)
 
 	def _on_add_bot(self) -> None:
@@ -463,9 +463,9 @@ class MembersPanel(QWidget):
 				"Нет свободных активных ботов — добавьте или возобновите: «Пользователи и боты»."
 			)
 			return
-		self._add(LaneOwner(OwnerKind.BOT, bot.id), bot.label, "Проверяю права бота…")
+		self._add(ExecutorRef(OwnerKind.BOT, bot.id), bot.label, "Проверяю права бота…")
 
-	def _add(self, owner: LaneOwner, label: str, note: str, invite: str | None = None) -> None:
+	def _add(self, owner: ExecutorRef, label: str, note: str, invite: str | None = None) -> None:
 		"""Вводит исполнителя в сообщество (ADR-0035).
 
 		Зонд прав живой, а ввод меняет состояние в Telegram — поэтому
@@ -483,7 +483,7 @@ class MembersPanel(QWidget):
 			self._show_error,
 		)
 
-	def _after_join(self, owner: LaneOwner, label: str, result: JoinResult) -> None:
+	def _after_join(self, owner: ExecutorRef, label: str, result: JoinResult) -> None:
 		"""Показывает исход ввода; «нужна ссылка» — просит её и повторяет."""
 		if result.outcome is JoinOutcome.NEEDS_LINK:
 			self._ask_invite_link(owner, label)
@@ -494,7 +494,7 @@ class MembersPanel(QWidget):
 		else:
 			show_success(self, "Готово", join_result_text(result, label))
 
-	def _ask_invite_link(self, owner: LaneOwner, label: str) -> None:
+	def _ask_invite_link(self, owner: ExecutorRef, label: str) -> None:
 		"""Спрашивает ссылку-приглашение — последняя ступень лестницы ввода."""
 		dialog = FormDialog(
 			"Нужна ссылка-приглашение",

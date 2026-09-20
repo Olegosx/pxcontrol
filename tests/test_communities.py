@@ -20,7 +20,6 @@ from pxcontrol.engine.telegram.bot_api import (
 	BotNotInCommunityError,
 	community_kind_from_chat_type,
 )
-from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotNotInCommunityError,
@@ -35,7 +34,13 @@ from pxcontrol.engine.telegram.rights import (
 	MemberRights,
 	ParticipantStatus,
 )
-from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
+from pxcontrol.engine.telegram.types import (
+	BotRef,
+	CommunityInfo,
+	CommunityKind,
+	ExecutorRef,
+	OwnerKind,
+)
 
 
 class _FakeGateway:
@@ -323,7 +328,7 @@ async def test_bot_joins_pool_and_leaves_it(db: Database) -> None:
 	assert dto.default_bot_id is None
 	# бота, который не админ, тоже можно завести — он просто не публикует
 	gateway.bot_is_admin = False
-	joined = await service.add_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	joined = await service.add_executor(dto.id, ExecutorRef(OwnerKind.BOT, bot_id))
 	assert joined.outcome is JoinOutcome.ALREADY_IN, "бот уже был в сообществе"
 	bot_row = next(e for e in joined.executors if e.owner.kind is OwnerKind.BOT)
 	assert bot_row.is_default and not bot_row.can_publish
@@ -335,7 +340,7 @@ async def test_bot_joins_pool_and_leaves_it(db: Database) -> None:
 	updated = await service.get_community(dto.id)
 	assert updated.capabilities.bot and updated.default_bot_label == "Публикатор"
 	# бота убрали: пул без него, публикатор-пользователь не тронут
-	await service.remove_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	await service.remove_executor(dto.id, ExecutorRef(OwnerKind.BOT, bot_id))
 	updated = await service.get_community(dto.id)
 	assert updated.default_bot_id is None and updated.default_account_id == account_id
 
@@ -555,7 +560,7 @@ async def test_confirmed_checks_call_profile_sync_hook(db: Database) -> None:
 	dto = await service.add_community_via_userbot(admin, "@testchan")
 	assert synced == [admin], "подключение подтвердило права — профиль актуализирован"
 	synced.clear()
-	await service.add_executor(dto.id, LaneOwner(OwnerKind.USER, other))
+	await service.add_executor(dto.id, ExecutorRef(OwnerKind.USER, other))
 	assert other in synced, "добавление участника тоже проверяет права живьём"
 	# сообщество закрылось от второго аккаунта: зонд отвечает отказом
 	gateway.invisible_for = {other}
@@ -594,7 +599,7 @@ async def test_assign_bot_refreshes_forum(db: Database) -> None:
 	dto = await service.add_community_via_userbot(account_id, "@testchan")
 	bot_id = await _make_bot(db)
 	gateway.forum = True
-	await service.add_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	await service.add_executor(dto.id, ExecutorRef(OwnerKind.BOT, bot_id))
 	assert (await _community_row(db, dto.id)).forum is True
 
 
@@ -618,14 +623,14 @@ async def test_membership_crud_and_default(db: Database) -> None:
 	]
 	gateway.status = ParticipantStatus.MEMBER  # второй аккаунт — простой участник
 	gateway.userbot_admins.discard(second)
-	added = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	added = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert [(e.label, e.status, e.is_default) for e in added.executors] == [
 		("@first", ParticipantStatus.ADMIN, True),
 		("@second", ParticipantStatus.MEMBER, False),
 	]
 	with pytest.raises(CommunityError, match="уже в пуле"):
-		await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
-	dto = await service.set_default_publisher(community_id, LaneOwner(OwnerKind.USER, second))
+		await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
+	dto = await service.set_default_publisher(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert dto.default_account_id == second
 	assert dto.default_status is ParticipantStatus.MEMBER
 	assert dto.executors_count == 2
@@ -683,7 +688,7 @@ async def test_join_public_community_by_username(db: Database) -> None:
 	"""
 	service, gateway, community_id, second = await _member_service(db)
 	gateway.outsiders = {second}
-	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	result = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert result.outcome is JoinOutcome.JOINED
 	assert gateway.joined_public == [(second, "@testchan")]
 	assert not gateway.joined_by_link and not gateway.invited
@@ -693,7 +698,7 @@ async def test_join_public_community_by_username(db: Database) -> None:
 async def test_already_inside_changes_nothing_in_telegram(db: Database) -> None:
 	"""Уже состоит — в Telegram не ходим вовсе, только записываем права."""
 	service, gateway, community_id, second = await _member_service(db)
-	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	result = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert result.outcome is JoinOutcome.ALREADY_IN
 	assert not gateway.joined_public and not gateway.joined_by_link and not gateway.invited
 
@@ -709,7 +714,7 @@ async def test_private_community_joined_by_existing_link(db: Database) -> None:
 	await _make_private(db, community_id)
 	gateway.outsiders = {second}
 	gateway.known_link = "https://t.me/+secretHash"
-	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	result = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert result.outcome is JoinOutcome.JOINED
 	assert gateway.joined_by_link == [(second, "https://t.me/+secretHash")]
 	assert not gateway.joined_public
@@ -727,7 +732,7 @@ async def test_join_request_is_an_outcome_not_a_membership(db: Database) -> None
 	gateway.outsiders = {second}
 	gateway.known_link = "https://t.me/+needsApproval"
 	gateway.approval_needed = True
-	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	result = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert result.outcome is JoinOutcome.REQUESTED
 	row = next(e for e in result.executors if e.owner.id == second)
 	assert row.status is ParticipantStatus.REQUESTED
@@ -746,12 +751,12 @@ async def test_private_without_link_asks_the_human(db: Database) -> None:
 	gateway.outsiders = {second}
 	gateway.known_link = None
 	await _forget_username(db, second)  # приглашать некого: @имени нет
-	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	result = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert result.outcome is JoinOutcome.NEEDS_LINK
 	assert [e.owner.id for e in result.executors] == [1], "пул остался прежним"
 	# человек дал ссылку — тем же путём доводим дело до конца
 	result = await service.add_executor(
-		community_id, LaneOwner(OwnerKind.USER, second), "https://t.me/+fromHuman"
+		community_id, ExecutorRef(OwnerKind.USER, second), "https://t.me/+fromHuman"
 	)
 	assert result.outcome is JoinOutcome.JOINED
 	assert gateway.joined_by_link == [(second, "https://t.me/+fromHuman")]
@@ -769,7 +774,7 @@ async def test_pool_invites_when_there_is_no_link(db: Database) -> None:
 	await _set_username(db, second, "second")  # без @имени приглашать некого
 	gateway.outsiders = {second}
 	gateway.known_link = None
-	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	result = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert result.outcome is JoinOutcome.INVITED
 	assert gateway.invited == [(1, "@second")], "пригласил администратор из пула"
 
@@ -783,7 +788,7 @@ async def test_bot_is_invited_to_group_and_promoted_in_channel(db: Database) -> 
 	service, gateway, community_id, _second = await _member_service(db)
 	bot_id = await _make_bot(db)
 	gateway.bot_inside = False
-	result = await service.add_executor(community_id, LaneOwner(OwnerKind.BOT, bot_id))
+	result = await service.add_executor(community_id, ExecutorRef(OwnerKind.BOT, bot_id))
 	assert result.outcome is JoinOutcome.PROMOTED
 	account_id, target, rights = gateway.promoted[0]
 	assert (account_id, target) == (1, "@test_bot")
@@ -798,13 +803,13 @@ async def test_bot_without_username_is_refused_honestly(db: Database) -> None:
 	gateway.bot_inside = False
 	await _forget_bot_username(db, bot_id)
 	with pytest.raises(JoinError, match="не известно @имя"):
-		await service.add_executor(community_id, LaneOwner(OwnerKind.BOT, bot_id))
+		await service.add_executor(community_id, ExecutorRef(OwnerKind.BOT, bot_id))
 
 
 async def test_remove_default_member_resets_default(db: Database) -> None:
 	"""Удаление участника-умолчания сбрасывает умолчание без авто-замены."""
 	service, _gateway, community_id, second = await _member_service(db)
-	added = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	added = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert len(added.executors) == 2
 	first = next(e.owner for e in added.executors if e.is_default)
 	remaining = await service.remove_executor(community_id, first)
@@ -820,7 +825,7 @@ async def test_set_default_requires_membership(db: Database) -> None:
 	"""Умолчанием может стать только участник сообщества."""
 	service, _gateway, community_id, second = await _member_service(db)
 	with pytest.raises(CommunityError, match="только исполнитель пула"):
-		await service.set_default_publisher(community_id, LaneOwner(OwnerKind.USER, second))
+		await service.set_default_publisher(community_id, ExecutorRef(OwnerKind.USER, second))
 
 
 async def test_recheck_updates_participation_and_keeps_the_pool(db: Database) -> None:
@@ -832,7 +837,7 @@ async def test_recheck_updates_participation_and_keeps_the_pool(db: Database) ->
 	"""
 	service, gateway, community_id, second = await _member_service(db)
 	gateway.status = ParticipantStatus.MEMBER
-	await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	# админов разжаловали в участники — участие обновится по зонду
 	await service.recheck_community(community_id)
 	executors = await service.list_executors(community_id)
@@ -895,7 +900,7 @@ async def test_recheck_keeps_pending_join_request(db: Database) -> None:
 	gateway.outsiders = {second}
 	gateway.known_link = "https://t.me/+needsApproval"
 	gateway.approval_needed = True
-	result = await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	result = await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	assert result.outcome is JoinOutcome.REQUESTED
 	await service.recheck_community(community_id)  # заявитель для зонда — «не участник»
 	row = next(e for e in await service.list_executors(community_id) if e.owner.id == second)
@@ -963,7 +968,7 @@ async def test_dto_reports_paused_publisher(db: Database) -> None:
 	assert dto.publisher_paused is True, "публиковать некому именно из-за паузы"
 	# с активным ботом действующий публикатор есть — паузы «нет»
 	bot_id = await _make_bot(db)
-	await service.add_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	await service.add_executor(dto.id, ExecutorRef(OwnerKind.BOT, bot_id))
 	dto = await service.get_community(dto.id)
 	assert dto.capabilities.bot and not dto.publisher_paused
 
@@ -994,7 +999,7 @@ async def test_executors_for_puts_the_publisher_first(db: Database) -> None:
 
 	service, gateway, community_id, second = await _member_service(db)
 	gateway.userbot_admins.discard(second)  # второй — обычный участник канала
-	await service.add_executor(community_id, LaneOwner(OwnerKind.USER, second))
+	await service.add_executor(community_id, ExecutorRef(OwnerKind.USER, second))
 	# участник состоит и читает ленту, но в канале не публикует
 	readers = await service.executors_for(community_id, ExecutorAction.READ_HISTORY)
 	assert [e.label for e in readers] == ["@first", "@second"]
@@ -1021,7 +1026,7 @@ async def test_communities_of_account_and_bot(db: Database) -> None:
 		(first.id, ParticipantStatus.ADMIN, True)
 	]
 	assert await service.communities_of_account(999_999) == []
-	await service.add_executor(first.id, LaneOwner(OwnerKind.BOT, bot_id))
+	await service.add_executor(first.id, ExecutorRef(OwnerKind.BOT, bot_id))
 	of_bot = await service.communities_of_bot(bot_id)
 	assert [(m.community.id, m.is_default) for m in of_bot] == [(first.id, True)]
 	assert await service.communities_of_bot(999_999) == []
@@ -1107,7 +1112,7 @@ async def test_removing_bot_takes_its_rights_with_it(db: Database) -> None:
 	service = CommunitiesService(db, gateway)
 	dto = await service.add_community(bot_id, "@testchan")
 	assert dto.capabilities.markup_edit is True
-	await service.remove_executor(dto.id, LaneOwner(OwnerKind.BOT, bot_id))
+	await service.remove_executor(dto.id, ExecutorRef(OwnerKind.BOT, bot_id))
 	dto = await service.get_community(dto.id)
 	assert dto.default_bot_id is None
 	assert dto.capabilities.markup_edit is False

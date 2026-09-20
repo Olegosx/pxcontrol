@@ -14,9 +14,8 @@ from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunityAccess, CommunityDto, ExecutorDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto
-from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.rights import ExecutorRights, ParticipantStatus
-from pxcontrol.engine.telegram.types import CommunityKind
+from pxcontrol.engine.telegram.types import CommunityKind, ExecutorRef, OwnerKind
 from pxcontrol.ui.pages.common import QueueCounts, bold_numbers, format_count, plural
 from pxcontrol.ui.pages.communities import (
 	VIEW_LIST,
@@ -462,7 +461,7 @@ def _executor(
 ) -> ExecutorDto:
 	"""Исполнитель для проверки правил показа."""
 	return ExecutorDto(
-		owner=LaneOwner(kind, 1),
+		owner=ExecutorRef(kind, 1),
 		label=label,
 		status=status,
 		rights=ExecutorRights(status),
@@ -490,7 +489,7 @@ def test_rights_rows_speak_russian_and_spare_the_admin() -> None:
 	from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, MemberRights
 
 	admin = ExecutorDto(
-		owner=LaneOwner(OwnerKind.BOT, 7),
+		owner=ExecutorRef(OwnerKind.BOT, 7),
 		label="бот",
 		status=ParticipantStatus.ADMIN,
 		rights=ExecutorRights(
@@ -505,7 +504,7 @@ def test_rights_rows_speak_russian_and_spare_the_admin() -> None:
 	assert rows["Как участник"] == "ограничения на администратора не действуют"
 
 	member = ExecutorDto(
-		owner=LaneOwner(OwnerKind.USER, 3),
+		owner=ExecutorRef(OwnerKind.USER, 3),
 		label="Вася",
 		status=ParticipantStatus.MEMBER,
 		rights=ExecutorRights(

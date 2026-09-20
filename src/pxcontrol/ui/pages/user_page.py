@@ -48,7 +48,7 @@ from pxcontrol.engine.services.activity import (
 	WindowStats,
 )
 from pxcontrol.engine.services.communities import AccountMembershipDto, CommunityDto
-from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
+from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -123,10 +123,10 @@ _ROW_LOGO_SIZE = 28
 Subject = TgAccountDto | BotDto
 
 
-def subject_owner(subject: Subject) -> LaneOwner:
+def subject_owner(subject: Subject) -> ExecutorRef:
 	"""Владелец дорожки по снимку: пользователь или бот."""
 	kind = OwnerKind.USER if isinstance(subject, TgAccountDto) else OwnerKind.BOT
-	return LaneOwner(kind, subject.id)
+	return ExecutorRef(kind, subject.id)
 
 
 def subject_title(subject: Subject) -> str:
@@ -279,7 +279,7 @@ class UserPage(ScrollArea):
 		self._timer.timeout.connect(self._poll_activity)
 
 	@property
-	def owner(self) -> LaneOwner:
+	def owner(self) -> ExecutorRef:
 		"""Владелец дорожки этой страницы."""
 		return self._owner
 
@@ -465,7 +465,7 @@ class UserPage(ScrollArea):
 			lambda *_a: None,
 		)
 
-	def _on_activity(self, snapshot: dict[LaneOwner, OwnerActivityDto]) -> None:
+	def _on_activity(self, snapshot: dict[ExecutorRef, OwnerActivityDto]) -> None:
 		self._activity = snapshot.get(self._owner)
 		self._overview.render_tiles(self._activity)
 		self._overview.render_reference(self._reference_rows())

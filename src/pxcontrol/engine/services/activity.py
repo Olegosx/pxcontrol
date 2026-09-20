@@ -43,15 +43,8 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AccountOperation, Bot, TgAccount
 from pxcontrol.engine.db.types import as_utc
 from pxcontrol.engine.periodic import PeriodicTask
-from pxcontrol.engine.telegram.lane import (
-	LaneLiveState,
-	LaneOwner,
-	OperationRecord,
-	Outcome,
-	OwnerKind,
-	TelegramPriority,
-)
-from pxcontrol.engine.telegram.types import DayPoint, Share
+from pxcontrol.engine.telegram.lane import LaneLiveState, OperationRecord, Outcome, TelegramPriority
+from pxcontrol.engine.telegram.types import DayPoint, ExecutorRef, OwnerKind, Share
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +95,7 @@ class _ActivitySource(Protocol):
 
 	def restore_operations(self, records: Sequence[OperationRecord]) -> None: ...
 
-	def live_states(self) -> dict[LaneOwner, LaneLiveState]: ...
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]: ...
 
 
 @dataclass(frozen=True)
@@ -146,7 +139,7 @@ class LiveDto:
 class OwnerActivityDto:
 	"""Снимок активности одного владельца: живое состояние и три окна."""
 
-	owner: LaneOwner
+	owner: ExecutorRef
 	live: LiveDto
 	last_hour: WindowStats
 	last_day: WindowStats
@@ -298,12 +291,12 @@ def _row(record: OperationRecord) -> AccountOperation:
 	)
 
 
-def _owner_of(tg_account_id: int | None, bot_id: int | None) -> LaneOwner | None:
+def _owner_of(tg_account_id: int | None, bot_id: int | None) -> ExecutorRef | None:
 	"""Владелец строки (None — строка без владельца, чего быть не должно)."""
 	if tg_account_id is not None:
-		return LaneOwner(OwnerKind.USER, tg_account_id)
+		return ExecutorRef(OwnerKind.USER, tg_account_id)
 	if bot_id is not None:
-		return LaneOwner(OwnerKind.BOT, bot_id)
+		return ExecutorRef(OwnerKind.BOT, bot_id)
 	return None
 
 
@@ -453,7 +446,7 @@ class ActivityService:
 
 	# --- чтение ----------------------------------------------------------------------
 
-	async def snapshot(self, now: datetime | None = None) -> dict[LaneOwner, OwnerActivityDto]:
+	async def snapshot(self, now: datetime | None = None) -> dict[ExecutorRef, OwnerActivityDto]:
 		"""Активность всех владельцев: живое состояние и окна час / сутки / неделя.
 
 		Буфер сбрасывается перед чтением: снимок не должен отставать
@@ -474,7 +467,7 @@ class ActivityService:
 			owner: LiveDto(state.busy_kind, state.busy_since, state.waiting, state.frozen_for_s)
 			for owner, state in self._gateway.live_states().items()
 		}
-		result: dict[LaneOwner, OwnerActivityDto] = {}
+		result: dict[ExecutorRef, OwnerActivityDto] = {}
 		for owner in set(windows) | set(lives) | set(last_seen):
 			live = lives.get(owner, LiveDto(None, None, 0, 0.0))
 			stats = windows.get(owner, {})
@@ -491,7 +484,7 @@ class ActivityService:
 	@staticmethod
 	async def _window_aggregates(
 		session: AsyncSession, now: datetime
-	) -> dict[LaneOwner, dict[str, WindowStats]]:
+	) -> dict[ExecutorRef, dict[str, WindowStats]]:
 		"""Окна час / сутки / неделя по каждому владельцу — одним запросом базы.
 
 		Выборка режется по самому широкому окну (неделя) — она ложится
@@ -517,7 +510,7 @@ class ActivityService:
 			.where(AccountOperation.finished_at >= week_start)
 			.group_by(AccountOperation.tg_account_id, AccountOperation.bot_id)
 		)
-		result: dict[LaneOwner, dict[str, WindowStats]] = {}
+		result: dict[ExecutorRef, dict[str, WindowStats]] = {}
 		for row in (await session.execute(statement)).mappings():
 			owner = _owner_of(row["tg_account_id"], row["bot_id"])
 			if owner is None:
@@ -535,7 +528,7 @@ class ActivityService:
 		return result
 
 	@staticmethod
-	async def _last_operations(session: AsyncSession) -> dict[LaneOwner, datetime]:
+	async def _last_operations(session: AsyncSession) -> dict[ExecutorRef, datetime]:
 		"""Момент последней операции каждого владельца (по всей истории).
 
 		Отдельный запрос, а не максимум по прочитанным строкам окна:
@@ -550,7 +543,7 @@ class ActivityService:
 		строк) это 540 мс против 40 мс, а снимок читается раз в пять
 		секунд, пока открыта страница исполнителя (измерено 18.09.2026).
 		"""
-		result: dict[LaneOwner, datetime] = {}
+		result: dict[ExecutorRef, datetime] = {}
 		for column, kind in (
 			(AccountOperation.tg_account_id, OwnerKind.USER),
 			(AccountOperation.bot_id, OwnerKind.BOT),
@@ -562,10 +555,10 @@ class ActivityService:
 			)
 			for owner_id, last in rows:
 				if owner_id is not None and last is not None:
-					result[LaneOwner(kind, owner_id)] = as_utc(last)
+					result[ExecutorRef(kind, owner_id)] = as_utc(last)
 		return result
 
-	async def history(self, owner: LaneOwner, now: datetime | None = None) -> ActivityHistoryDto:
+	async def history(self, owner: ExecutorRef, now: datetime | None = None) -> ActivityHistoryDto:
 		"""История одного владельца для графиков страницы аккаунта.
 
 		Читаются операции, пересекающие месячное окно (по концу — после

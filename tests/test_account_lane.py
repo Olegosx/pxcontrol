@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from pxcontrol.engine.telegram.lane import AccountLane, LaneOwner, OwnerKind, TelegramPriority
-from pxcontrol.engine.telegram.types import TelegramFloodError
+from pxcontrol.engine.telegram.lane import AccountLane, TelegramPriority
+from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind, TelegramFloodError
 
 
 class _Clock:
@@ -32,7 +32,7 @@ class _Clock:
 def _lane(interval: float = 0.0, clock: _Clock | None = None) -> AccountLane:
 	"""Дорожка на управляемых часах (без них зазор считать нечем)."""
 	ticker = clock or _Clock()
-	return AccountLane(LaneOwner(OwnerKind.USER, 1), interval, clock=ticker, sleep=ticker.sleep)
+	return AccountLane(ExecutorRef(OwnerKind.USER, 1), interval, clock=ticker, sleep=ticker.sleep)
 
 
 async def test_operations_do_not_overlap() -> None:
@@ -260,7 +260,7 @@ async def test_lane_records_operations_with_outcome_and_live_state() -> None:
 	moments = [first + timedelta(seconds=i) for i in range(10)]
 	log = OperationLog()
 	lane = AccountLane(
-		LaneOwner(OwnerKind.BOT, 7),
+		ExecutorRef(OwnerKind.BOT, 7),
 		0.0,
 		clock=clock,
 		sleep=clock.sleep,
@@ -283,7 +283,7 @@ async def test_lane_records_operations_with_outcome_and_live_state() -> None:
 		(TelegramPriority.BACKGROUND, Outcome.ERROR, 0),
 		(TelegramPriority.MAINTENANCE, Outcome.FLOOD, 40),
 	]
-	assert all(r.owner == LaneOwner(OwnerKind.BOT, 7) for r in records)
+	assert all(r.owner == ExecutorRef(OwnerKind.BOT, 7) for r in records)
 	assert records[0].finished_at - records[0].started_at == timedelta(seconds=1)
 	# заморозка: отказ до тела записи не даёт — Telegram не тревожили
 	with pytest.raises(TelegramFloodError):
@@ -299,7 +299,7 @@ async def test_lane_records_cancelled_operation() -> None:
 	from pxcontrol.engine.telegram.lane import OperationLog, Outcome
 
 	log = OperationLog()
-	lane = AccountLane(LaneOwner(OwnerKind.USER, 1), 0.0, log=log)
+	lane = AccountLane(ExecutorRef(OwnerKind.USER, 1), 0.0, log=log)
 	started = asyncio.Event()
 
 	async def upload() -> None:
@@ -353,7 +353,7 @@ async def test_lane_keeps_writing_after_log_drained() -> None:
 	from pxcontrol.engine.telegram.lane import OperationLog
 
 	log = OperationLog()
-	lane = AccountLane(LaneOwner(OwnerKind.USER, 1), 0.0, log=log)
+	lane = AccountLane(ExecutorRef(OwnerKind.USER, 1), 0.0, log=log)
 	for _ in range(3):
 		async with lane.slot(TelegramPriority.PUBLISH):
 			pass
@@ -369,7 +369,7 @@ async def test_operation_log_drains_in_place_and_caps_capacity() -> None:
 	def _record(number: int) -> OperationRecord:
 		moment = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
 		return OperationRecord(
-			LaneOwner(OwnerKind.BOT, number), TelegramPriority.PUBLISH, moment, moment, Outcome.OK
+			ExecutorRef(OwnerKind.BOT, number), TelegramPriority.PUBLISH, moment, moment, Outcome.OK
 		)
 
 	log = OperationLog(capacity=3)

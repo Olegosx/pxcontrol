@@ -43,10 +43,8 @@ from pxcontrol.engine.telegram.lane import (
 	DEFAULT_MIN_INTERVAL_S,
 	AccountLane,
 	LaneLiveState,
-	LaneOwner,
 	OperationLog,
 	OperationRecord,
-	OwnerKind,
 	TelegramPriority,
 )
 from pxcontrol.engine.telegram.markup import PostMarkup
@@ -66,11 +64,13 @@ from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	CommunityStatsInfo,
 	DeletedAccount,
+	ExecutorRef,
 	ForumTopicInfo,
 	HistoryMarks,
 	LinkPreview,
 	MediaKind,
 	OutgoingPost,
+	OwnerKind,
 	ParticipantsPage,
 	PublishedMessage,
 	PublishedPage,
@@ -95,7 +95,7 @@ class TelegramGateway:
 		# их замену: флуд-лимит Telegram назначает аккаунту, а не сессии,
 		# и повторный вход не должен стирать знание о нём. Ключ — владелец:
 		# у ботов свои дорожки (ADR-0030), без зазора, с той же заморозкой
-		self._lanes: dict[LaneOwner, AccountLane] = {}
+		self._lanes: dict[ExecutorRef, AccountLane] = {}
 		# записи о выполненных операциях (ADR-0030): дорожки складывают
 		# их сюда, сервис активности забирает пачкой (drain_operations).
 		# Журнал — объект, а не список: дорожка получает его один раз
@@ -189,7 +189,7 @@ class TelegramGateway:
 		transport = self._userbots.get(account_id)
 		return transport is not None and transport.connected
 
-	def _lane(self, owner: LaneOwner) -> AccountLane:
+	def _lane(self, owner: ExecutorRef) -> AccountLane:
 		"""Дорожка владельца (заводится при первом обращении).
 
 		Пользователю — зазор ADR-0024, боту — без зазора (ADR-0030);
@@ -215,7 +215,7 @@ class TelegramGateway:
 		"""Возвращает записи в журнал (сброс в БД не удался) — вперёд свежих."""
 		self._log.restore(records)
 
-	def live_states(self) -> dict[LaneOwner, LaneLiveState]:
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]:
 		"""Живое состояние всех дорожек — снимок для показа (ADR-0030)."""
 		return {owner: lane.live_state() for owner, lane in self._lanes.items()}
 
@@ -231,7 +231,7 @@ class TelegramGateway:
 			TelegramFloodError: Дорожка бота заморожена — остаток срока
 				в ``retry_after_s``.
 		"""
-		async with self._lane(LaneOwner(OwnerKind.BOT, bot.id)).slot(priority):
+		async with self._lane(ExecutorRef(OwnerKind.BOT, bot.id)).slot(priority):
 			yield bot.token
 
 	@asynccontextmanager
@@ -258,7 +258,7 @@ class TelegramGateway:
 		"""
 		transport = self._userbot(account_id)
 		try:
-			async with self._lane(LaneOwner(OwnerKind.USER, account_id)).slot(priority):
+			async with self._lane(ExecutorRef(OwnerKind.USER, account_id)).slot(priority):
 				yield transport
 		except UserbotFloodError:
 			raise  # флуд от самого Telegram — уже в нужном классе

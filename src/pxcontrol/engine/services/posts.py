@@ -50,7 +50,6 @@ from pxcontrol.engine.services.settings import (
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
-from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.poll import PollDraft, validate_poll
@@ -74,6 +73,7 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OutgoingFile,
 	OutgoingPost,
+	OwnerKind,
 	PublishedMessage,
 	PublishedPage,
 	ScheduledMessage,

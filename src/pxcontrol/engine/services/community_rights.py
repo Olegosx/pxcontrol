@@ -17,12 +17,11 @@ from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.abilities import ExecutorAction, can
 from pxcontrol.engine.services.accounts import account_display
 from pxcontrol.engine.services.publish_route import PublishCapabilities, publish_capabilities
-from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.rights import ExecutorRights, ParticipantStatus
-from pxcontrol.engine.telegram.types import CommunityKind
+from pxcontrol.engine.telegram.types import CommunityKind, ExecutorRef, OwnerKind
 
 
-def executor_owner(row: CommunityExecutor) -> LaneOwner:
+def executor_owner(row: CommunityExecutor) -> ExecutorRef:
 	"""Владелец строки — ключ, общий со шлюзом и учётом активности (ADR-0035).
 
 	Raises:
@@ -30,9 +29,9 @@ def executor_owner(row: CommunityExecutor) -> LaneOwner:
 			но читать данные вслепую нельзя.
 	"""
 	if row.tg_account_id is not None:
-		return LaneOwner(OwnerKind.USER, row.tg_account_id)
+		return ExecutorRef(OwnerKind.USER, row.tg_account_id)
 	if row.bot_id is not None:
-		return LaneOwner(OwnerKind.BOT, row.bot_id)
+		return ExecutorRef(OwnerKind.BOT, row.bot_id)
 	raise EngineError("Строка исполнителя без владельца — данные повреждены.")
 
 

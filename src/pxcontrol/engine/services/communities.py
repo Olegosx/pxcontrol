@@ -53,13 +53,18 @@ from pxcontrol.engine.services.publish_route import (
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import BotError, BotNotInCommunityError
-from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotNotInCommunityError,
 )
 from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, ParticipantStatus
-from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
+from pxcontrol.engine.telegram.types import (
+	BotRef,
+	CommunityInfo,
+	CommunityKind,
+	ExecutorRef,
+	OwnerKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +92,7 @@ _REF_LOADERS = (
 )
 
 
-def _claim_default(community: Community, owner: LaneOwner) -> None:
+def _claim_default(community: Community, owner: ExecutorRef) -> None:
 	"""Делает исполнителя публикатором своего вида, если место свободно.
 
 	Первый исполнитель вида становится умолчанием — иначе публикация
@@ -101,7 +106,9 @@ def _claim_default(community: Community, owner: LaneOwner) -> None:
 		community.default_bot_id = owner.id
 
 
-def _executor_row(community_id: int, owner: LaneOwner, rights: ExecutorRights) -> CommunityExecutor:
+def _executor_row(
+	community_id: int, owner: ExecutorRef, rights: ExecutorRights
+) -> CommunityExecutor:
 	"""Новая строка исполнителя: владелец — ровно одна из двух ссылок."""
 	return CommunityExecutor(
 		community_id=community_id,
@@ -141,7 +148,7 @@ class ExecutorDto:
 			перенесены из прежней модели.
 	"""
 
-	owner: LaneOwner
+	owner: ExecutorRef
 	label: str
 	status: ParticipantStatus
 	rights: ExecutorRights
@@ -188,7 +195,7 @@ class _RecheckPlan:
 	kind: CommunityKind
 	chat_id: str
 	defaults: dict[OwnerKind, int | None]
-	targets: list[tuple[LaneOwner, BotRef | None]]
+	targets: list[tuple[ExecutorRef, BotRef | None]]
 
 
 class _CommunityChecker(Protocol):
@@ -371,12 +378,12 @@ class CommunitiesService:
 			bot.id,
 		)
 		info = await self._gateway.bot_check_community(BotRef(bot.id, bot.token), chat_ref)
-		executors = [(LaneOwner(OwnerKind.BOT, bot.id), info.rights)]
+		executors = [(ExecutorRef(OwnerKind.BOT, bot.id), info.rights)]
 		# «не удалось проверить» при подключении равносильно «публикатора
 		# нет»: исполнителя добавит перепроверка, когда аккаунт появится
 		found = await self._find_userbot_publisher(info.chat_id, info.kind)
 		if found is not None:
-			executors.append((LaneOwner(OwnerKind.USER, found[0]), found[1]))
+			executors.append((ExecutorRef(OwnerKind.USER, found[0]), found[1]))
 		community = await self._store_community(info, executors)
 		logger.info(
 			"Подключено «%s» (бот %s, userbot-публикатор: %s).",
@@ -408,7 +415,7 @@ class CommunitiesService:
 		info = await self._gateway.userbot_check_community(account_id, chat_ref)
 		await self._sync_profile(account_id)
 		community = await self._store_community(
-			info, [(LaneOwner(OwnerKind.USER, account_id), info.rights)]
+			info, [(ExecutorRef(OwnerKind.USER, account_id), info.rights)]
 		)
 		logger.info(
 			"Подключено «%s» (userbot «%s», участие: %s).",
@@ -487,7 +494,7 @@ class CommunitiesService:
 		return None
 
 	async def _store_community(
-		self, info: CommunityInfo, executors: Sequence[tuple[LaneOwner, ExecutorRights]]
+		self, info: CommunityInfo, executors: Sequence[tuple[ExecutorRef, ExecutorRights]]
 	) -> Community:
 		"""Сохраняет сообщество из проверенных данных, отклоняя дубликат.
 
@@ -572,7 +579,9 @@ class CommunitiesService:
 		)
 		return CommunityAccess(dto, verdicts[OwnerKind.USER], verdicts[OwnerKind.BOT])
 
-	async def _record_probe(self, community_id: int, owner: LaneOwner, probe: _ProbeResult) -> None:
+	async def _record_probe(
+		self, community_id: int, owner: ExecutorRef, probe: _ProbeResult
+	) -> None:
 		"""Переносит знание зонда в строку исполнителя; «не знаю» строку не трогает.
 
 		Подтверждённый ответ — свежий снимок прав. «Исполнителя там нет» —
@@ -597,7 +606,7 @@ class CommunitiesService:
 		"""
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id, with_refs=True)
-			targets: list[tuple[LaneOwner, BotRef | None]] = []
+			targets: list[tuple[ExecutorRef, BotRef | None]] = []
 			for row in community.executors:
 				owner = executor_owner(row)
 				if executor_paused(row):
@@ -616,7 +625,7 @@ class CommunitiesService:
 			)
 
 	async def _probe_executor(
-		self, owner: LaneOwner, ref: BotRef | None, chat_id: str
+		self, owner: ExecutorRef, ref: BotRef | None, chat_id: str
 	) -> _ProbeResult:
 		"""Зондирует одного исполнителя его собственным транспортом."""
 		if owner.kind is OwnerKind.USER:
@@ -650,12 +659,12 @@ class CommunitiesService:
 		if found is None:
 			return None
 		await self._adopt_executor(
-			community_id, LaneOwner(OwnerKind.USER, found[0]), found[1], make_default=True
+			community_id, ExecutorRef(OwnerKind.USER, found[0]), found[1], make_default=True
 		)
 		return True
 
 	async def _store_executor_rights(
-		self, community_id: int, owner: LaneOwner, rights: ExecutorRights
+		self, community_id: int, owner: ExecutorRef, rights: ExecutorRights
 	) -> None:
 		"""Записывает снимок прав исполнителя по подтверждённому зонду (ADR-0035).
 
@@ -693,7 +702,7 @@ class CommunitiesService:
 
 	@staticmethod
 	async def _executor_in_session(
-		session: AsyncSession, community_id: int, owner: LaneOwner
+		session: AsyncSession, community_id: int, owner: ExecutorRef
 	) -> CommunityExecutor | None:
 		"""Строка исполнителя в переданной сессии (None — такого нет)."""
 		column = (
@@ -712,7 +721,7 @@ class CommunitiesService:
 	async def _adopt_executor(
 		self,
 		community_id: int,
-		owner: LaneOwner,
+		owner: ExecutorRef,
 		rights: ExecutorRights,
 		*,
 		make_default: bool,
@@ -779,13 +788,13 @@ class CommunitiesService:
 		Обратная сторона пула (ADR-0035) для страницы исполнителя:
 		порядок — по id сообщества.
 		"""
-		return await self._communities_of(LaneOwner(OwnerKind.USER, account_id))
+		return await self._communities_of(ExecutorRef(OwnerKind.USER, account_id))
 
 	async def communities_of_bot(self, bot_id: int) -> list[AccountMembershipDto]:
 		"""Сообщества, где бот состоит, с участием и признаком умолчания."""
-		return await self._communities_of(LaneOwner(OwnerKind.BOT, bot_id))
+		return await self._communities_of(ExecutorRef(OwnerKind.BOT, bot_id))
 
-	async def _communities_of(self, owner: LaneOwner) -> list[AccountMembershipDto]:
+	async def _communities_of(self, owner: ExecutorRef) -> list[AccountMembershipDto]:
 		"""Сообщества исполнителя — общая половина обеих обратных сторон."""
 		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
 		column = (
@@ -853,7 +862,7 @@ class CommunitiesService:
 		return sorted(capable, key=lambda executor: not executor.is_default)
 
 	async def add_executor(
-		self, community_id: int, owner: LaneOwner, invite: str | None = None
+		self, community_id: int, owner: ExecutorRef, invite: str | None = None
 	) -> JoinResult:
 		"""Вводит исполнителя в сообщество и заводит ему строку пула (ADR-0035).
 
@@ -915,7 +924,7 @@ class CommunitiesService:
 		)
 		return JoinResult(outcome, await self.list_executors(community_id))
 
-	async def _executor_context(self, community_id: int, owner: LaneOwner) -> Community:
+	async def _executor_context(self, community_id: int, owner: ExecutorRef) -> Community:
 		"""Сообщество со связями — и отказ, если исполнитель уже в пуле.
 
 		Raises:
@@ -928,7 +937,7 @@ class CommunitiesService:
 			session.expunge(community)
 			return community
 
-	async def remove_executor(self, community_id: int, owner: LaneOwner) -> list[ExecutorDto]:
+	async def remove_executor(self, community_id: int, owner: ExecutorRef) -> list[ExecutorDto]:
 		"""Убирает исполнителя из пула сообщества (из приложения, не из Telegram).
 
 		Публикатор при этом теряет назначение: инвариант «публикатор —
@@ -952,7 +961,7 @@ class CommunitiesService:
 		logger.info("Исполнитель %s убран из сообщества id=%s.", owner, community_id)
 		return await self.list_executors(community_id)
 
-	async def set_default_publisher(self, community_id: int, owner: LaneOwner) -> CommunityDto:
+	async def set_default_publisher(self, community_id: int, owner: ExecutorRef) -> CommunityDto:
 		"""Назначает публикатора по умолчанию из пула — своего вида (ADR-0035).
 
 		У сообщества два назначения, по одному на вид: пользователь

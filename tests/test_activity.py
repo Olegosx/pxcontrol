@@ -23,15 +23,8 @@ from pxcontrol.engine.services.activity import (
 	_Interval,
 	window_stats,
 )
-from pxcontrol.engine.telegram.lane import (
-	LaneLiveState,
-	LaneOwner,
-	OperationRecord,
-	Outcome,
-	OwnerKind,
-	TelegramPriority,
-)
-from pxcontrol.engine.telegram.types import Share
+from pxcontrol.engine.telegram.lane import LaneLiveState, OperationRecord, Outcome, TelegramPriority
+from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind, Share
 
 _NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 
@@ -45,7 +38,7 @@ class _FakeGateway:
 
 	def __init__(self) -> None:
 		self.buffer: list[OperationRecord] = []
-		self.live: dict[LaneOwner, LaneLiveState] = {}
+		self.live: dict[ExecutorRef, LaneLiveState] = {}
 
 	def drain_operations(self) -> list[OperationRecord]:
 		records, self.buffer = self.buffer, []
@@ -54,12 +47,12 @@ class _FakeGateway:
 	def restore_operations(self, records: Sequence[OperationRecord]) -> None:
 		self.buffer[:0] = list(records)
 
-	def live_states(self) -> dict[LaneOwner, LaneLiveState]:
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]:
 		return dict(self.live)
 
 
 def _record(
-	owner: LaneOwner,
+	owner: ExecutorRef,
 	start_s: float,
 	end_s: float,
 	kind: TelegramPriority = TelegramPriority.BACKGROUND,
@@ -109,7 +102,7 @@ def test_window_adds_running_operation_from_live_state() -> None:
 # --- сервис: сброс, снимок, уборка -------------------------------------------------------
 
 
-async def _owners(db: Database) -> tuple[LaneOwner, LaneOwner]:
+async def _owners(db: Database) -> tuple[ExecutorRef, ExecutorRef]:
 	async with db.session_factory() as session:
 		account = TgAccount(label="ub", phone="+7900", session="s")
 		bot = Bot(label="b", token="123456:AAAbbb")
@@ -117,7 +110,7 @@ async def _owners(db: Database) -> tuple[LaneOwner, LaneOwner]:
 		await session.commit()
 		await session.refresh(account)
 		await session.refresh(bot)
-	return LaneOwner(OwnerKind.USER, account.id), LaneOwner(OwnerKind.BOT, bot.id)
+	return ExecutorRef(OwnerKind.USER, account.id), ExecutorRef(OwnerKind.BOT, bot.id)
 
 
 async def test_flush_writes_rows_and_skips_unknown_owner(db: Database) -> None:
@@ -128,7 +121,7 @@ async def test_flush_writes_rows_and_skips_unknown_owner(db: Database) -> None:
 	gateway.buffer = [
 		_record(user, -100, -90, TelegramPriority.PUBLISH),
 		_record(bot, -80, -79, TelegramPriority.BACKGROUND, Outcome.FLOOD, 30),
-		_record(LaneOwner(OwnerKind.USER, 999), -70, -60),  # удалён, пока шла операция
+		_record(ExecutorRef(OwnerKind.USER, 999), -70, -60),  # удалён, пока шла операция
 	]
 	assert await service.flush() == 2
 	assert gateway.buffer == []
@@ -155,10 +148,10 @@ async def test_snapshot_windows_and_live(db: Database) -> None:
 	]
 	gateway.live = {
 		user: LaneLiveState(TelegramPriority.MAINTENANCE, _at(-5), 2, 0.0),
-		LaneOwner(OwnerKind.BOT, 42): LaneLiveState(None, None, 0, 12.0),  # только дорожка
+		ExecutorRef(OwnerKind.BOT, 42): LaneLiveState(None, None, 0, 12.0),  # только дорожка
 	}
 	snapshot = await service.snapshot(_NOW)
-	assert set(snapshot) == {user, bot, LaneOwner(OwnerKind.BOT, 42)}
+	assert set(snapshot) == {user, bot, ExecutorRef(OwnerKind.BOT, 42)}
 	me = snapshot[user]
 	assert (me.last_hour.operations, me.last_day.operations, me.last_week.operations) == (1, 2, 3)
 	# занятость считает база: функции даты SQLite работают в миллисекундах
@@ -166,7 +159,7 @@ async def test_snapshot_windows_and_live(db: Database) -> None:
 	assert me.live.busy_kind is TelegramPriority.MAINTENANCE and me.live.waiting == 2
 	assert me.last_operation_at == _at(-590)
 	assert snapshot[bot].last_hour.errors == 1
-	frozen_only = snapshot[LaneOwner(OwnerKind.BOT, 42)]
+	frozen_only = snapshot[ExecutorRef(OwnerKind.BOT, 42)]
 	assert frozen_only.live.frozen_for_s == 12.0 and frozen_only.last_operation_at is None
 
 
@@ -348,7 +341,7 @@ async def test_service_counts_operations_of_live_gateway(db: Database) -> None:
 # --- агрегаты базы против Python-эталона ------------------------------------------------
 
 
-def _reference(records: list[OperationRecord], owner: LaneOwner) -> dict[str, WindowStats]:
+def _reference(records: list[OperationRecord], owner: ExecutorRef) -> dict[str, WindowStats]:
 	"""Окна владельца по эталонной ``window_stats`` из тех же записей."""
 	intervals = [
 		_Interval(r.kind.name.lower(), r.started_at, r.finished_at, str(r.outcome), r.wait_s)

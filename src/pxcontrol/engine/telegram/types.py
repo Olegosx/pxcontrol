@@ -33,6 +33,28 @@ class BotRef:
 	token: str = field(repr=False)
 
 
+class OwnerKind(StrEnum):
+	"""Вид исполнителя: пользователь (userbot-аккаунт) или бот (ADR-0030)."""
+
+	USER = "user"
+	BOT = "bot"
+
+
+@dataclass(frozen=True)
+class ExecutorRef:
+	"""Ссылка на исполнителя в Telegram: вид и id в нашей БД.
+
+	Один ключ от базы до дорожки (ADR-0035): строка пула сообщества,
+	владелец записей активности и ключ пула дорожек в шлюзе — у
+	пользователя и бота свои таблицы, и id могут совпадать. До сверки
+	решения (20.09.2026) звался ``LaneOwner`` и жил в ``lane.py``: имя
+	говорило о дорожке, а ключ общий.
+	"""
+
+	kind: OwnerKind
+	id: int
+
+
 class TelegramFloodError(EngineError):
 	"""Флуд-лимит Telegram: «подождите N секунд перед новой попыткой».
 

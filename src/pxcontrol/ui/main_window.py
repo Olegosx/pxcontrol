@@ -20,8 +20,7 @@ from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.services.settings import WINDOW_GEOMETRY
-from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
-from pxcontrol.engine.telegram.types import CommunityKind, MediaKind
+from pxcontrol.engine.telegram.types import CommunityKind, ExecutorRef, MediaKind, OwnerKind
 from pxcontrol.ui.async_bridge import ask_engine
 from pxcontrol.ui.pages.common import exec_dialog, show_info, show_success
 from pxcontrol.ui.pages.communities import CommunitiesPage
@@ -101,7 +100,7 @@ class MainWindow(FluentWindow):
 		self._users_page = UsersPage(self._worker, self)
 		self.addSubInterface(self._users_page, FluentIcon.PEOPLE, "Пользователи и боты")
 		# подменю аккаунтов — живое, как у сообществ (ADR-0030)
-		self._user_pages: dict[LaneOwner, UserPage] = {}
+		self._user_pages: dict[ExecutorRef, UserPage] = {}
 		self._users_page.users_changed.connect(self._sync_user_nav)
 		self._users_page.open_user.connect(self._open_user)
 		self._communities_page = CommunitiesPage(self._worker, self._watchers, self)
@@ -294,7 +293,7 @@ class MainWindow(FluentWindow):
 				if item is not None:
 					item.setText(title)
 
-	def _open_user(self, owner: LaneOwner) -> None:
+	def _open_user(self, owner: ExecutorRef) -> None:
 		"""Клик по карточке дашборда — переход на страницу аккаунта."""
 		page = self._user_pages.get(owner)
 		if page is not None:

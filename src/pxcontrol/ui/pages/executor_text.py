@@ -20,8 +20,8 @@ from pxcontrol.engine.services.communities import (
 	JoinResult,
 )
 from pxcontrol.engine.services.executor_join import JoinOutcome
-from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, MemberRights
+from pxcontrol.engine.telegram.types import OwnerKind
 from pxcontrol.ui.pages.common import format_local, status_caption
 
 

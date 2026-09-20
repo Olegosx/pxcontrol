@@ -56,7 +56,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto, TgApiDto
 from pxcontrol.engine.services.activity import OwnerActivityDto
-from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
+from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -437,7 +437,7 @@ class UsersPage(ScrollArea):
 	"""
 
 	users_changed = Signal(list, list)
-	open_user = Signal(object)  # LaneOwner
+	open_user = Signal(object)  # ExecutorRef
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
@@ -448,7 +448,7 @@ class UsersPage(ScrollArea):
 		self._bots: list[BotDto] = []
 		self._api_key_set = True
 		self._query = ""
-		self._activity: dict[LaneOwner, OwnerActivityDto] = {}
+		self._activity: dict[ExecutorRef, OwnerActivityDto] = {}
 		self._empty: QWidget | None = None
 		self._empty_searched: bool | None = None
 		self._build()
@@ -542,7 +542,7 @@ class UsersPage(ScrollArea):
 			self._show_error,
 		)
 
-	def _on_activity_loaded(self, activity: dict[LaneOwner, OwnerActivityDto]) -> None:
+	def _on_activity_loaded(self, activity: dict[ExecutorRef, OwnerActivityDto]) -> None:
 		"""Снимок активности получен — рисуем страницу целиком."""
 		self._activity = activity
 		self._render()
@@ -559,7 +559,7 @@ class UsersPage(ScrollArea):
 			noop,
 		)
 
-	def _apply_activity(self, activity: dict[LaneOwner, OwnerActivityDto]) -> None:
+	def _apply_activity(self, activity: dict[ExecutorRef, OwnerActivityDto]) -> None:
 		"""Обновляет строки активности у живых карточек."""
 		self._activity = activity
 		for key, kind in ((_USERS, OwnerKind.USER), (_BOTS, OwnerKind.BOT)):
@@ -568,7 +568,7 @@ class UsersPage(ScrollArea):
 				continue
 			for owner_id, card in section.cards.items():
 				if isinstance(card, _Card) and isinstance(owner_id, int):
-					card.set_activity(activity.get(LaneOwner(kind, owner_id)))
+					card.set_activity(activity.get(ExecutorRef(kind, owner_id)))
 
 	# --- отрисовка ---------------------------------------------------------------
 
@@ -631,14 +631,14 @@ class UsersPage(ScrollArea):
 
 	def _make_user_card(self, account: TgAccountDto) -> QWidget:
 		card = UserCard(account, self._run_user_action, self._delete_user, self._rename_user, self)
-		card.set_activity(self._activity.get(LaneOwner(OwnerKind.USER, account.id)))
-		card.clicked.connect(partial(self.open_user.emit, LaneOwner(OwnerKind.USER, account.id)))
+		card.set_activity(self._activity.get(ExecutorRef(OwnerKind.USER, account.id)))
+		card.clicked.connect(partial(self.open_user.emit, ExecutorRef(OwnerKind.USER, account.id)))
 		return card
 
 	def _make_bot_card(self, bot: BotDto) -> QWidget:
 		card = BotCard(bot, self._run_bot_action, self._delete_bot, self._rename_bot, self)
-		card.set_activity(self._activity.get(LaneOwner(OwnerKind.BOT, bot.id)))
-		card.clicked.connect(partial(self.open_user.emit, LaneOwner(OwnerKind.BOT, bot.id)))
+		card.set_activity(self._activity.get(ExecutorRef(OwnerKind.BOT, bot.id)))
+		card.clicked.connect(partial(self.open_user.emit, ExecutorRef(OwnerKind.BOT, bot.id)))
 		return card
 
 	def _show_empty(self, searched: bool) -> None:

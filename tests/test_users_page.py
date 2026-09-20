@@ -238,15 +238,15 @@ def test_reference_rows_and_route_key() -> None:
 	from datetime import UTC, datetime
 
 	from pxcontrol.engine.services.activity import LiveDto, OwnerActivityDto, WindowStats
-	from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
+	from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind
 	from pxcontrol.ui.pages.user_state import (
 		bot_reference_rows,
 		user_reference_rows,
 		user_route_key,
 	)
 
-	assert user_route_key(LaneOwner(OwnerKind.USER, 3)) == "user_3"
-	assert user_route_key(LaneOwner(OwnerKind.BOT, 3)) == "bot_3"
+	assert user_route_key(ExecutorRef(OwnerKind.USER, 3)) == "user_3"
+	assert user_route_key(ExecutorRef(OwnerKind.BOT, 3)) == "bot_3"
 	rows = dict(user_reference_rows(_account(memberships=2, publisher_of=1), None))
 	assert rows["Состояние"] == "подключён"
 	assert rows["@имя"] == "@lara" and rows["Телефон"] == "+7900"
@@ -254,7 +254,7 @@ def test_reference_rows_and_route_key() -> None:
 	assert rows["Последняя операция"] == "ещё не было"
 	last = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 	activity = OwnerActivityDto(
-		LaneOwner(OwnerKind.USER, 1),
+		ExecutorRef(OwnerKind.USER, 1),
 		LiveDto(None, None, 0, 0.0),
 		WindowStats(),
 		WindowStats(),
