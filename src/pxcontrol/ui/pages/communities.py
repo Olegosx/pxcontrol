@@ -653,6 +653,12 @@ class _Table(TableWidget):
 		for index in range(self.rowCount()):
 			height += self.rowHeight(index)
 		self.setFixedHeight(height + 2 * self.frameWidth())
+		# высота фиксирована, и растягиваться по вертикали таблица не должна
+		# ни сама, ни через контейнер: штатная политика области прокрутки —
+		# Expanding, и она передавалась контейнеру раздела дашборда, тот
+		# забирал лишнее место страницы и центрировал в нём таблицу —
+		# над таблицей появлялся зазор (снимки без экрана 20.09.2026)
+		self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
 	def _on_header(self, index: int) -> None:
 		self._on_sort(_TABLE_COLUMNS[index][1])
