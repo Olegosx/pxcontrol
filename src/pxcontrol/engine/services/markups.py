@@ -48,7 +48,7 @@ from pxcontrol.engine.db.models import Community, CommunityExecutor, PromisedMar
 from pxcontrol.engine.db.types import as_utc, as_utc_optional
 from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.periodic import PeriodicTask
-from pxcontrol.engine.services.communities import community_capabilities
+from pxcontrol.engine.services.community_rights import community_capabilities
 from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
 from pxcontrol.engine.telegram.markup import (
 	MarkupError,

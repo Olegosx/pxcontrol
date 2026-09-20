@@ -60,10 +60,10 @@ from pxcontrol.engine.services.communities import (
 	CommunityAccess,
 	CommunityDto,
 	ExecutorDto,
-	JoinOutcome,
 	JoinResult,
 )
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
+from pxcontrol.engine.services.executor_join import JoinOutcome
 from pxcontrol.engine.services.posts import ScheduledList
 from pxcontrol.engine.services.publish_queue import EDITABLE_STATUSES, QueueItemDto
 from pxcontrol.engine.services.schedule_plan import parse_hhmm

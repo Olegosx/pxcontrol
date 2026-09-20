@@ -26,7 +26,7 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, CommunityExecutor
 from pxcontrol.engine.errors import EngineError, user_message
 from pxcontrol.engine.services.captions import filename_complaint
-from pxcontrol.engine.services.communities import (
+from pxcontrol.engine.services.community_rights import (
 	community_capabilities,
 	publisher_incapable,
 	publisher_paused,

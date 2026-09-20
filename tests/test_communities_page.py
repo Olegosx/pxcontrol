@@ -52,7 +52,6 @@ from pxcontrol.ui.pages.community_state import (
 )
 from pxcontrol.ui.pages.executor_text import (
 	executor_rights_rows,
-	executor_row_text,
 	executor_signature,
 	executor_summary,
 	remove_executor_text,
@@ -470,18 +469,6 @@ def _executor(
 		is_default=is_default,
 		paused=paused,
 		can_publish=can_publish,
-	)
-
-
-def test_executor_row_names_participation_and_trouble() -> None:
-	"""Строка исполнителя: участие, а следом то, что мешает работе сейчас."""
-	assert executor_row_text(_executor()) == "Вася — админ"
-	assert executor_row_text(_executor(status=ParticipantStatus.MEMBER)) == "Вася — участник"
-	assert executor_row_text(_executor(can_publish=False)) == "Вася — админ · публиковать не может"
-	# пауза и права не складываются: приостановленного не используют вовсе
-	assert (
-		executor_row_text(_executor(paused=True, can_publish=False))
-		== "Вася — админ · приостановлен"
 	)
 
 

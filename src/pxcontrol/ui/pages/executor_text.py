@@ -17,9 +17,9 @@ from datetime import datetime
 from pxcontrol.engine.services.communities import (
 	CommunityDto,
 	ExecutorDto,
-	JoinOutcome,
 	JoinResult,
 )
+from pxcontrol.engine.services.executor_join import JoinOutcome
 from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, MemberRights
 from pxcontrol.ui.pages.common import format_local, status_caption
@@ -43,17 +43,13 @@ def executor_summary(executor: ExecutorDto) -> str:
 	return " · ".join(parts)
 
 
-def executor_row_text(executor: ExecutorDto) -> str:
-	"""Однострочная запись исполнителя: «Вася — админ · публикатор»."""
-	return f"{executor.label} — {executor_summary(executor)}"
-
-
 def executor_signature(executor: ExecutorDto) -> tuple[object, ...]:
 	"""Отпечаток карточки: всё, от чего зависит её вид (ADR-0034).
 
 	Права входят целиком: карточка раскрывается их перечнем, и смена
 	любого флага должна быть видна без пересборки всего списка.
 	"""
+	payload = executor.rights.to_payload()
 	return (
 		executor.label,
 		executor.status,
@@ -61,8 +57,8 @@ def executor_signature(executor: ExecutorDto) -> tuple[object, ...]:
 		executor.paused,
 		executor.can_publish,
 		executor.checked_at,
-		tuple(sorted(executor.rights.to_payload()["admin"])),
-		tuple(sorted(executor.rights.to_payload()["allowed"])),
+		tuple(sorted(payload["admin"])),
+		tuple(sorted(payload["allowed"])),
 	)
 
 

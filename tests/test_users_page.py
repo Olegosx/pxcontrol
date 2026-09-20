@@ -278,7 +278,6 @@ def test_kind_rows_captions_and_memberships() -> None:
 	from pxcontrol.engine.telegram.rights import ParticipantStatus
 	from pxcontrol.engine.telegram.types import CommunityKind, DayPoint, Share
 	from pxcontrol.ui.pages.user_state import (
-		bot_community_caption,
 		busy_days_caption,
 		hours_caption,
 		kind_rows,
@@ -317,4 +316,3 @@ def test_kind_rows_captions_and_memberships() -> None:
 	assert membership_caption(membership) == (
 		"Группа · админ · публикатор по умолчанию · выключено"
 	)
-	assert bot_community_caption(community) == "Группа · бот-публикатор · выключено"

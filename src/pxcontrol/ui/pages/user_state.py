@@ -27,7 +27,7 @@ from pxcontrol.engine.services.activity import (
 	OwnerActivityDto,
 	WindowStats,
 )
-from pxcontrol.engine.services.communities import AccountMembershipDto, CommunityDto
+from pxcontrol.engine.services.communities import AccountMembershipDto
 from pxcontrol.engine.telegram.lane import LaneOwner, TelegramPriority
 from pxcontrol.engine.telegram.types import (
 	USERBOT_PREMIUM_MAX_FILE_BYTES,
@@ -477,14 +477,6 @@ def membership_caption(membership: AccountMembershipDto) -> str:
 	parts = [community_kind_caption(community), status_caption(membership.status)]
 	if membership.is_default:
 		parts.append("публикатор по умолчанию")
-	if not community.enabled:
-		parts.append("выключено")
-	return " · ".join(parts)
-
-
-def bot_community_caption(community: CommunityDto) -> str:
-	"""Подстрочник строки сообщества на странице бота."""
-	parts = [community_kind_caption(community), "бот-публикатор"]
 	if not community.enabled:
 		parts.append("выключено")
 	return " · ".join(parts)

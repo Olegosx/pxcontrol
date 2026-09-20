@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypeVar
 
 
 class ParticipantStatus(StrEnum):
@@ -142,7 +142,10 @@ class MemberRights:
 	edit_rank: bool = False  # менять свой тег (звание) в сообществе
 
 
-def _all_true(kind: type[Any]) -> Any:
+_Rights = TypeVar("_Rights", AdminRights, MemberRights)
+
+
+def _all_true(kind: type[_Rights]) -> _Rights:
 	"""Набор прав, где выдано всё (владелец и администратор)."""
 	return kind(**{field.name: True for field in fields(kind)})
 

@@ -23,7 +23,6 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Protocol
 
 from sqlalchemy import select
@@ -34,11 +33,20 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Bot, Community, CommunityExecutor, TgAccount
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.services.abilities import (
-	BOT_ADMIN_RIGHTS,
 	ExecutorAction,
 	can,
 )
 from pxcontrol.engine.services.accounts import account_display
+from pxcontrol.engine.services.community_rights import (
+	community_capabilities,
+	executor_label,
+	executor_owner,
+	executor_paused,
+	executor_rights,
+	publisher_incapable,
+	publisher_row,
+)
+from pxcontrol.engine.services.executor_join import ExecutorJoiner, JoinOutcome
 from pxcontrol.engine.services.publish_route import (
 	PublishCapabilities,
 	publish_capabilities,
@@ -49,7 +57,6 @@ from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotNotInCommunityError,
-	UserbotUnavailableError,
 )
 from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, ParticipantStatus
 from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
@@ -59,28 +66,6 @@ logger = logging.getLogger(__name__)
 
 class CommunityError(EngineError):
 	"""Ошибка операций с каналами (с понятным человеку текстом)."""
-
-
-class JoinOutcome(StrEnum):
-	"""Чем кончился ввод исполнителя в сообщество (ADR-0035).
-
-	Исходов несколько не ради дробности: человеку важно разное — «он
-	уже был там» ничего не изменило в Telegram, «вступил» и «приглашён»
-	изменили, а «заявка отправлена» требует чьего-то одобрения, и без
-	него исполнитель не заработает.
-	"""
-
-	ALREADY_IN = "already_in"  # состоял и раньше — в Telegram ничего не делали
-	JOINED = "joined"  # вступил сам: по @имени или по ссылке
-	REQUESTED = "requested"  # заявка на вступление отправлена и ждёт одобрения
-	INVITED = "invited"  # приглашён нашим исполнителем
-	PROMOTED = "promoted"  # принят в канал назначением администратором
-	# ввести нечем: сообщество приватное, готовой ссылки Telegram не отдал,
-	# пригласить некому. Это **исход**, а не ошибка: в Telegram ничего
-	# не изменилось, и операция продолжится, когда человек даст ссылку.
-	# Исключением такой случай быть не может — мост отдаёт интерфейсу
-	# текст ошибки, а не её тип, и распознавание свелось бы к разбору строки
-	NEEDS_LINK = "needs_link"
 
 
 @dataclass(frozen=True)
@@ -102,45 +87,18 @@ _REF_LOADERS = (
 )
 
 
-def executor_owner(row: CommunityExecutor) -> LaneOwner:
-	"""Владелец строки — ключ, общий со шлюзом и учётом активности (ADR-0035).
+def _claim_default(community: Community, owner: LaneOwner) -> None:
+	"""Делает исполнителя публикатором своего вида, если место свободно.
 
-	Raises:
-		CommunityError: Строка без владельца — такого не допускает схема,
-			но читать данные вслепую нельзя.
+	Первый исполнитель вида становится умолчанием — иначе публикация
+	осталась бы недоступной до второго действия человека; занятое место
+	не трогается: смена публикатора — явное решение (ADR-0022).
 	"""
-	if row.tg_account_id is not None:
-		return LaneOwner(OwnerKind.USER, row.tg_account_id)
-	if row.bot_id is not None:
-		return LaneOwner(OwnerKind.BOT, row.bot_id)
-	raise CommunityError("Строка исполнителя без владельца — данные повреждены.")
-
-
-def executor_rights(row: CommunityExecutor) -> ExecutorRights:
-	"""Снимок прав исполнителя из его строки."""
-	return ExecutorRights.from_payload(ParticipantStatus(row.status), row.rights)
-
-
-def executor_paused(row: CommunityExecutor) -> bool:
-	"""Приостановлен ли исполнитель человеком (ADR-0029).
-
-	Связь ``tg_account``/``bot`` должна быть подгружена.
-	"""
-	owner = row.tg_account if row.tg_account_id is not None else row.bot
-	return bool(owner is not None and owner.paused)
-
-
-def executor_label(row: CommunityExecutor) -> str:
-	"""Человеческое имя исполнителя: пометка пользователя или название бота."""
-	if row.tg_account is not None:
-		return account_display(
-			row.tg_account.label,
-			row.tg_account.username,
-			row.tg_account.first_name,
-			row.tg_account.last_name,
-			row.tg_account.phone,
-		)
-	return row.bot.label if row.bot is not None else "исполнитель"
+	if owner.kind is OwnerKind.USER:
+		if community.default_tg_account_id is None:
+			community.default_tg_account_id = owner.id
+	elif community.default_bot_id is None:
+		community.default_bot_id = owner.id
 
 
 def _executor_row(community_id: int, owner: LaneOwner, rights: ExecutorRights) -> CommunityExecutor:
@@ -153,82 +111,6 @@ def _executor_row(community_id: int, owner: LaneOwner, rights: ExecutorRights) -
 		rights=rights.to_payload(),
 		checked_at=datetime.now(UTC),
 	)
-
-
-def publisher_row(community: Community, kind: OwnerKind) -> CommunityExecutor | None:
-	"""Строка назначенного публикатора этого вида (None — не назначен).
-
-	Назначение — ссылка сообщества, исполнитель — строка пула; здесь они
-	сводятся. Связь ``executors`` должна быть подгружена.
-	"""
-	target = community.default_tg_account_id if kind is OwnerKind.USER else community.default_bot_id
-	if target is None:
-		return None
-	for row in community.executors:
-		owner_id = row.tg_account_id if kind is OwnerKind.USER else row.bot_id
-		if owner_id == target:
-			return row
-	return None
-
-
-def publisher_ready(community: Community, kind: OwnerKind) -> bool:
-	"""Может ли назначенный публикатор этого вида публиковать сейчас.
-
-	Три условия: назначен, не приостановлен человеком (ADR-0029)
-	и по последнему снимку прав способен публиковать в сообществе
-	такого вида (ADR-0035).
-	"""
-	row = publisher_row(community, kind)
-	if row is None or executor_paused(row):
-		return False
-	return can(executor_rights(row), ExecutorAction.PUBLISH, CommunityKind(community.kind))
-
-
-def community_capabilities(community: Community) -> PublishCapabilities:
-	"""Чем это сообщество может публиковать (ADR-0011, ADR-0035).
-
-	Одна точка на весь движок и интерфейс: подготовка публикации, дозор
-	кнопок, дашборд и формы спрашивают её, а не собирают правило заново.
-	Связи ``executors`` и учётки исполнителей должны быть подгружены.
-	"""
-	bot_ready = publisher_ready(community, OwnerKind.BOT)
-	markup_edit = False
-	if bot_ready:
-		row = publisher_row(community, OwnerKind.BOT)
-		markup_edit = row is not None and can(
-			executor_rights(row), ExecutorAction.EDIT_OTHERS, CommunityKind(community.kind)
-		)
-	return publish_capabilities(
-		bot_ready, publisher_ready(community, OwnerKind.USER), markup_edit=markup_edit
-	)
-
-
-def publisher_paused(community: Community) -> bool:
-	"""Есть ли у сообщества **приостановленный** публикатор (ADR-0029).
-
-	Зовут это только из ветки «публиковать некем», чтобы отличить
-	«нет публикатора» от «публикатор на паузе»: в первом случае человеку
-	нужно назначить нового, во втором — возобновить прежнего.
-	"""
-	rows = (publisher_row(community, OwnerKind.USER), publisher_row(community, OwnerKind.BOT))
-	return any(row is not None and executor_paused(row) for row in rows)
-
-
-def publisher_incapable(community: Community) -> bool:
-	"""Назначен, не на паузе — и по правам публиковать не может (ADR-0035).
-
-	Третья причина ожидания рядом с «выключено» и «приостановлен»:
-	права в Telegram меняет владелец сообщества, и приложение узнаёт
-	об этом перепроверкой доступов. Пост в таком случае ждёт, а не падает.
-	"""
-	kind = CommunityKind(community.kind)
-	for owner_kind in (OwnerKind.USER, OwnerKind.BOT):
-		row = publisher_row(community, owner_kind)
-		if row is None or executor_paused(row):
-			continue
-		if not can(executor_rights(row), ExecutorAction.PUBLISH, kind):
-			return True
-	return False
 
 
 @dataclass(frozen=True)
@@ -289,6 +171,24 @@ class _ProbeResult:
 	ok: bool | None
 	info: CommunityInfo | None = None
 	left: bool = False
+
+
+@dataclass(frozen=True)
+class _RecheckPlan:
+	"""Кого и где зондировать при перепроверке доступов.
+
+	Attributes:
+		kind: вид сообщества — от него зависит правило «может ли».
+		chat_id: адрес сообщества в Telegram.
+		defaults: назначенные публикаторы по видам (None — не назначен).
+		targets: исполнители для зонда с адресом бота (у пользователя — None);
+			приостановленные сюда не попадают.
+	"""
+
+	kind: CommunityKind
+	chat_id: str
+	defaults: dict[OwnerKind, int | None]
+	targets: list[tuple[LaneOwner, BotRef | None]]
 
 
 class _CommunityChecker(Protocol):
@@ -423,6 +323,8 @@ class CommunitiesService:
 		self._gateway = gateway
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._profile_sync = profile_sync
+		# лестница ввода — над шлюзом, без базы: строку пула пишет сервис
+		self._joiner = ExecutorJoiner(gateway, profile_sync)
 
 	async def list_communities(self) -> list[CommunityDto]:
 		"""Возвращает все подключённые каналы (с именами публикаторов)."""
@@ -613,10 +515,7 @@ class CommunitiesService:
 			await session.flush()
 			for owner, rights in executors:
 				session.add(_executor_row(community.id, owner, rights))
-				if owner.kind is OwnerKind.USER and community.default_tg_account_id is None:
-					community.default_tg_account_id = owner.id
-				elif owner.kind is OwnerKind.BOT and community.default_bot_id is None:
-					community.default_bot_id = owner.id
+				_claim_default(community, owner)
 			await session.commit()
 			await session.refresh(community)
 		return community
@@ -643,24 +542,20 @@ class CommunitiesService:
 		Raises:
 			CommunityError: Сообщество не найдено.
 		"""
-		kind, chat_id, defaults, targets = await self._recheck_targets(community_id)
+		plan = await self._recheck_targets(community_id)
 		verdicts: dict[OwnerKind, bool | None] = {OwnerKind.USER: None, OwnerKind.BOT: None}
 		fresh: dict[OwnerKind, CommunityInfo] = {}
-		for owner, ref in targets:
-			probe = await self._probe_executor(owner, ref, chat_id)
+		for owner, ref in plan.targets:
+			probe = await self._probe_executor(owner, ref, plan.chat_id)
+			await self._record_probe(community_id, owner, probe)
 			if probe.ok is True and probe.info is not None:
-				await self._store_executor_rights(community_id, owner, probe.info.rights)
 				fresh.setdefault(owner.kind, probe.info)
-			elif probe.left:
-				# исполнителя там нет — это знание, и строка обязана его
-				# отражать, иначе выгнанный бот остался бы «админом» навсегда
-				await self._store_executor_rights(
-					community_id, owner, ExecutorRights(ParticipantStatus.LEFT)
-				)
-			if defaults.get(owner.kind) == owner.id:
-				verdicts[owner.kind] = self._verdict(probe, kind)
-		if not any(owner.kind is OwnerKind.USER for owner, _ref in targets):
-			verdicts[OwnerKind.USER] = await self._restore_publisher(community_id, chat_id, kind)
+			if plan.defaults.get(owner.kind) == owner.id:
+				verdicts[owner.kind] = self._verdict(probe, plan.kind)
+		if not any(owner.kind is OwnerKind.USER for owner, _ref in plan.targets):
+			verdicts[OwnerKind.USER] = await self._restore_publisher(
+				community_id, plan.chat_id, plan.kind
+			)
 		# свежие данные предпочитаем от бота: изменчивые свойства у обоих
 		# зондов одинаковы, но бот-путь приносит их вместе с правом правки
 		info = fresh.get(OwnerKind.BOT) or fresh.get(OwnerKind.USER)
@@ -677,11 +572,21 @@ class CommunitiesService:
 		)
 		return CommunityAccess(dto, verdicts[OwnerKind.USER], verdicts[OwnerKind.BOT])
 
-	async def _recheck_targets(
-		self, community_id: int
-	) -> tuple[
-		CommunityKind, str, dict[OwnerKind, int | None], list[tuple[LaneOwner, BotRef | None]]
-	]:
+	async def _record_probe(self, community_id: int, owner: LaneOwner, probe: _ProbeResult) -> None:
+		"""Переносит знание зонда в строку исполнителя; «не знаю» строку не трогает.
+
+		Подтверждённый ответ — свежий снимок прав. «Исполнителя там нет» —
+		тоже знание, и строка обязана его отражать, иначе выгнанный бот
+		остался бы «админом» навсегда.
+		"""
+		if probe.ok is True and probe.info is not None:
+			await self._store_executor_rights(community_id, owner, probe.info.rights)
+		elif probe.left:
+			await self._store_executor_rights(
+				community_id, owner, ExecutorRights(ParticipantStatus.LEFT)
+			)
+
+	async def _recheck_targets(self, community_id: int) -> _RecheckPlan:
 		"""Кого зондировать: вид, чат, назначения и адреса исполнителей.
 
 		Сессия закрывается до похода в Telegram: открытая транзакция
@@ -700,14 +605,14 @@ class CommunitiesService:
 					continue
 				ref = BotRef(row.bot.id, row.bot.token) if row.bot is not None else None
 				targets.append((owner, ref))
-			return (
-				CommunityKind(community.kind),
-				community.tg_chat_id,
-				{
+			return _RecheckPlan(
+				kind=CommunityKind(community.kind),
+				chat_id=community.tg_chat_id,
+				defaults={
 					OwnerKind.USER: community.default_tg_account_id,
 					OwnerKind.BOT: community.default_bot_id,
 				},
-				targets,
+				targets=targets,
 			)
 
 	async def _probe_executor(
@@ -818,10 +723,7 @@ class CommunitiesService:
 				session.add(_executor_row(community_id, owner, rights))
 			community = await self._community_in_session(session, community_id)
 			if make_default:
-				if owner.kind is OwnerKind.USER and community.default_tg_account_id is None:
-					community.default_tg_account_id = owner.id
-				elif owner.kind is OwnerKind.BOT and community.default_bot_id is None:
-					community.default_bot_id = owner.id
+				_claim_default(community, owner)
 			await session.commit()
 		logger.info(
 			"Исполнитель %s принят в сообщество id=%s (%s).", owner, community_id, rights.status
@@ -838,33 +740,38 @@ class CommunitiesService:
 		"""
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id, with_refs=True)
-			kind = CommunityKind(community.kind)
-			rows = sorted(
-				community.executors,
-				key=lambda row: (row.tg_account_id is None, row.tg_account_id or row.bot_id or 0),
+			return self._executor_dtos(community)
+
+	@staticmethod
+	def _executor_dtos(community: Community) -> list[ExecutorDto]:
+		"""Снимки исполнителей сообщества; связи должны быть подгружены (with_refs)."""
+		kind = CommunityKind(community.kind)
+		rows = sorted(
+			community.executors,
+			key=lambda row: (row.tg_account_id is None, row.tg_account_id or row.bot_id or 0),
+		)
+		result: list[ExecutorDto] = []
+		for row in rows:
+			owner = executor_owner(row)
+			rights = executor_rights(row)
+			is_default = (
+				owner.id == community.default_tg_account_id
+				if owner.kind is OwnerKind.USER
+				else owner.id == community.default_bot_id
 			)
-			result: list[ExecutorDto] = []
-			for row in rows:
-				owner = executor_owner(row)
-				rights = executor_rights(row)
-				is_default = (
-					owner.id == community.default_tg_account_id
-					if owner.kind is OwnerKind.USER
-					else owner.id == community.default_bot_id
+			result.append(
+				ExecutorDto(
+					owner=owner,
+					label=executor_label(row),
+					status=rights.status,
+					rights=rights,
+					is_default=is_default,
+					paused=executor_paused(row),
+					can_publish=can(rights, ExecutorAction.PUBLISH, kind),
+					checked_at=row.checked_at,
 				)
-				result.append(
-					ExecutorDto(
-						owner=owner,
-						label=executor_label(row),
-						status=rights.status,
-						rights=rights,
-						is_default=is_default,
-						paused=executor_paused(row),
-						can_publish=can(rights, ExecutorAction.PUBLISH, kind),
-						checked_at=row.checked_at,
-					)
-				)
-			return result
+			)
+		return result
 
 	async def communities_of_account(self, account_id: int) -> list[AccountMembershipDto]:
 		"""Сообщества, где аккаунт состоит, с участием и признаком умолчания.
@@ -934,12 +841,14 @@ class CommunitiesService:
 		Raises:
 			CommunityError: Сообщество не найдено.
 		"""
-		community = await self.get_community(community_id)
-		executors = await self.list_executors(community_id)
+		async with self._db.session_factory() as session:
+			community = await self._community_in_session(session, community_id, with_refs=True)
+			kind = CommunityKind(community.kind)
+			executors = self._executor_dtos(community)
 		capable = [
 			executor
 			for executor in executors
-			if not executor.paused and can(executor.rights, action, community.kind)
+			if not executor.paused and can(executor.rights, action, kind)
 		]
 		return sorted(capable, key=lambda executor: not executor.is_default)
 
@@ -986,11 +895,11 @@ class CommunitiesService:
 		if owner.kind is OwnerKind.USER:
 			account = await self._get_account(owner.id)
 			label = self._account_display(account)
-			outcome, rights, info = await self._bring_user(community, owner.id, account, invite)
+			outcome, rights, info = await self._joiner.bring_user(community, account, invite)
 		else:
 			bot = await self._get_bot(owner.id)
 			label = bot.label
-			outcome, rights, info = await self._bring_bot(community, bot)
+			outcome, rights, info = await self._joiner.bring_bot(community, bot)
 		if outcome is JoinOutcome.NEEDS_LINK:
 			# в Telegram ничего не менялось — и строки пула не заводим
 			return JoinResult(outcome, await self.list_executors(community_id))
@@ -1018,165 +927,6 @@ class CommunitiesService:
 				raise CommunityError("Этот исполнитель уже в пуле сообщества.")
 			session.expunge(community)
 			return community
-
-	async def _bring_user(
-		self, community: Community, account_id: int, account: TgAccount, invite: str | None
-	) -> tuple[JoinOutcome, ExecutorRights, CommunityInfo | None]:
-		"""Вводит пользователя: лестница «состоит → @имя → ссылка → приглашение»."""
-		info = await self._seen_by(account_id, community.tg_chat_id)
-		if info is not None and info.rights.status.in_community:
-			return JoinOutcome.ALREADY_IN, info.rights, info
-		outcome = await self._let_user_in(community, account_id, account, invite)
-		if outcome is JoinOutcome.NEEDS_LINK:
-			return outcome, ExecutorRights(ParticipantStatus.LEFT), None
-		if outcome is JoinOutcome.REQUESTED:
-			# заявку ещё не одобрили: прав нет и спрашивать их не у кого
-			return outcome, ExecutorRights(ParticipantStatus.REQUESTED), None
-		fresh = await self._gateway.userbot_check_community(account_id, community.tg_chat_id)
-		await self._sync_profile(account_id)
-		return outcome, fresh.rights, fresh
-
-	async def _let_user_in(
-		self, community: Community, account_id: int, account: TgAccount, invite: str | None
-	) -> JoinOutcome:
-		"""Заводит пользователя в сообщество — ступенями (ADR-0035, п. 9).
-
-		Порядок ступеней — от независимой к самой отказоопасной: вступить
-		по @имени можно без чьей-либо помощи; ссылка нужна приватному;
-		приглашение упирается в чужие настройки приватности. Последним
-		идёт не приглашение, а вопрос человеку: это единственная ступень,
-		которая останавливает операцию, и уводить в неё, пока остаются
-		автоматические пути, значило бы звать человека зря.
-		"""
-		if community.username and invite is None:
-			await self._gateway.userbot_join_public(account_id, f"@{community.username}")
-			return JoinOutcome.JOINED
-		link = invite or await self._known_invite_link(community)
-		if link is not None:
-			joined = await self._gateway.userbot_join_by_invite(account_id, link)
-			return JoinOutcome.JOINED if joined else JoinOutcome.REQUESTED
-		if account.username and await self._invite_by_pool(community, f"@{account.username}"):
-			return JoinOutcome.INVITED
-		return JoinOutcome.NEEDS_LINK
-
-	async def _bring_bot(
-		self, community: Community, bot: Bot
-	) -> tuple[JoinOutcome, ExecutorRights, CommunityInfo | None]:
-		"""Вводит бота: сам он вступить не может — его вводит наш администратор.
-
-		Raises:
-			CommunityError: У бота нет @имени или в пуле некому его ввести.
-		"""
-		ref = BotRef(bot.id, bot.token)
-		info = await self._seen_by_bot(ref, community.tg_chat_id)
-		if info is not None and info.rights.status.in_community:
-			return JoinOutcome.ALREADY_IN, info.rights, info
-		if not bot.username:
-			raise CommunityError(
-				f"У бота «{bot.label}» не известно @имя — без него Telegram не найдёт, "
-				"кого добавлять. Проверьте бота в разделе «Пользователи и боты»."
-			)
-		target = f"@{bot.username}"
-		if CommunityKind(community.kind) is CommunityKind.CHANNEL:
-			# в канале бот бывает только администратором — значит ввод
-			# это назначение, и нужен наш исполнитель с правом назначать
-			account_id = self._executor_for(community, ExecutorAction.PROMOTE)
-			if account_id is None:
-				raise CommunityError(
-					f"Некому принять бота в канал «{community.title}»: нужен исполнитель "
-					"с правом назначать администраторов. Добавьте бота администратором "
-					"вручную в Telegram."
-				)
-			await self._gateway.userbot_promote(
-				account_id, community.tg_chat_id, target, BOT_ADMIN_RIGHTS
-			)
-			outcome = JoinOutcome.PROMOTED
-		else:
-			account_id = self._executor_for(community, ExecutorAction.INVITE)
-			if account_id is None:
-				raise CommunityError(
-					f"Некому пригласить бота в «{community.title}»: нужен исполнитель "
-					"с правом приглашать. Добавьте бота в группу вручную в Telegram."
-				)
-			await self._gateway.userbot_invite_participant(account_id, community.tg_chat_id, target)
-			outcome = JoinOutcome.INVITED
-		fresh = await self._gateway.bot_check_community(ref, community.tg_chat_id)
-		return outcome, fresh.rights, fresh
-
-	async def _seen_by(self, account_id: int, chat_id: str) -> CommunityInfo | None:
-		"""Что видит аккаунт в сообществе (None — не видит вовсе).
-
-		От :meth:`_probe_userbot` отличается тем, что не глушит сбои:
-		ввод исполнителя — действие человека, и «нет связи» он должен
-		увидеть ошибкой, а не молчаливым переходом к вступлению.
-
-		Удавшийся зонд — подтверждённая связь с аккаунтом, поэтому здесь
-		же актуализируется его профиль: ответ «не состоит» для этого
-		годится не хуже ответа «состоит».
-		"""
-		try:
-			info = await self._gateway.userbot_check_community(account_id, chat_id)
-		except UserbotAccessError:
-			return None
-		await self._sync_profile(account_id)
-		return info
-
-	async def _seen_by_bot(self, bot: BotRef, chat_id: str) -> CommunityInfo | None:
-		"""Что видит бот в сообществе (None — Telegram его туда не пускает)."""
-		try:
-			return await self._gateway.bot_check_community(bot, chat_id)
-		except BotError:
-			return None
-
-	async def _known_invite_link(self, community: Community) -> str | None:
-		"""Основная ссылка-приглашение сообщества, если её кто-то из пула видит.
-
-		Ссылка у приватного сообщества уже есть, и Telegram отдаёт её
-		администратору с правом приглашать. Приложение её **читает**,
-		а не создаёт: создание — изменение состояния сообщества, за
-		которым тянется вопрос «кто её завёл и кто по ней пришёл».
-		"""
-		account_id = self._executor_for(community, ExecutorAction.INVITE)
-		if account_id is None:
-			return None
-		try:
-			return await self._gateway.userbot_invite_link(account_id, community.tg_chat_id)
-		except UserbotUnavailableError as exc:
-			logger.info("Ссылку-приглашение «%s» прочитать не удалось: %s", community.title, exc)
-			return None
-
-	async def _invite_by_pool(self, community: Community, target: str) -> bool:
-		"""Приглашает исполнителя силами пула; False — не вышло.
-
-		Самая отказоопасная ступень: она упирается не в наши права,
-		а в чужие настройки приватности, поэтому отказ здесь не ошибка
-		операции, а повод попросить у человека ссылку.
-		"""
-		account_id = self._executor_for(community, ExecutorAction.INVITE)
-		if account_id is None:
-			return False
-		try:
-			await self._gateway.userbot_invite_participant(account_id, community.tg_chat_id, target)
-		except UserbotUnavailableError as exc:
-			logger.info("Пригласить %s в «%s» не вышло: %s", target, community.title, exc)
-			return False
-		return True
-
-	@staticmethod
-	def _executor_for(community: Community, action: ExecutorAction) -> int | None:
-		"""Аккаунт из пула, способный на названное действие (None — такого нет).
-
-		Ввод исполнителя делают руками своих же администраторов, и выбрать
-		их можно только по правам. Приостановленные (ADR-0029)
-		не рассматриваются — приложение их не использует ни для чего.
-		"""
-		kind = CommunityKind(community.kind)
-		for row in community.executors:
-			if row.tg_account_id is None or executor_paused(row):
-				continue
-			if can(executor_rights(row), action, kind):
-				return row.tg_account_id
-		return None
 
 	async def remove_executor(self, community_id: int, owner: LaneOwner) -> list[ExecutorDto]:
 		"""Убирает исполнителя из пула сообщества (из приложения, не из Telegram).

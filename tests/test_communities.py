@@ -12,8 +12,8 @@ from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.communities import (
 	CommunitiesService,
 	CommunityError,
-	JoinOutcome,
 )
+from pxcontrol.engine.services.executor_join import JoinError, JoinOutcome
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import (
 	BotError,
@@ -797,7 +797,7 @@ async def test_bot_without_username_is_refused_honestly(db: Database) -> None:
 	bot_id = await _make_bot(db)
 	gateway.bot_inside = False
 	await _forget_bot_username(db, bot_id)
-	with pytest.raises(CommunityError, match="не известно @имя"):
+	with pytest.raises(JoinError, match="не известно @имя"):
 		await service.add_executor(community_id, LaneOwner(OwnerKind.BOT, bot_id))
 
 
