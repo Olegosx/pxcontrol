@@ -16,19 +16,14 @@ from qfluentwidgets import InfoBadge, InfoLevel
 
 from pxcontrol.engine.services.communities import (
 	CommunityDto,
-	ExecutorDto,
-	JoinOutcome,
-	JoinResult,
 )
 from pxcontrol.engine.services.publish_queue import QueueItemDto
-from pxcontrol.engine.telegram.lane import OwnerKind
 from pxcontrol.engine.telegram.types import CommunityKind
 from pxcontrol.ui.pages.common import (
 	QueueCounts,
 	format_count,
 	plural,
 	queue_counts,
-	status_caption,
 )
 
 #: Подсказка неактивного «Обслуживания» — одна на дашборд и страницу.
@@ -215,64 +210,3 @@ def executors_count(community: CommunityDto) -> int:
 	«кто работает в этом сообществе».
 	"""
 	return community.executors_count
-
-
-def executor_row_text(executor: ExecutorDto) -> str:
-	"""Строка исполнителя в пуле: «Вася — админ · публиковать не может».
-
-	Сначала участие, затем то, что мешает работе прямо сейчас. Пауза
-	и нехватка прав не складываются: приостановленного приложение
-	не использует вовсе, и говорить про его права — сбивать с толку.
-	"""
-	parts = [status_caption(executor.status)]
-	if executor.paused:
-		parts.append("приостановлен")
-	elif not executor.can_publish:
-		parts.append("публиковать не может")
-	return f"{executor.label} — {' · '.join(parts)}"
-
-
-#: Что сказать человеку про исход ввода исполнителя (ADR-0035). Ввод
-#: меняет состояние в Telegram, и молчаливое «готово» тут неуместно:
-#: человек должен знать, вступил ли аккаунт, приглашён ли, ждёт ли
-#: заявка одобрения — от этого зависит, работает исполнитель или нет.
-_JOIN_WORDS = {
-	JoinOutcome.ALREADY_IN: "уже состоял — записаны его права",
-	JoinOutcome.JOINED: "вступил в сообщество",
-	JoinOutcome.INVITED: "приглашён и добавлен",
-	JoinOutcome.PROMOTED: "принят администратором канала",
-	JoinOutcome.REQUESTED: "заявка на вступление отправлена — ждёт одобрения",
-}
-
-
-def join_result_text(result: JoinResult, label: str) -> str:
-	"""Человеческий итог ввода исполнителя в сообщество."""
-	return f"{label}: {_JOIN_WORDS.get(result.outcome, str(result.outcome))}"
-
-
-#: Чего просить у человека, когда автоматических путей не осталось.
-INVITE_LINK_PROMPT = (
-	"Это приватное сообщество: вступить по имени нельзя, а готовую "
-	"ссылку Telegram не отдал. Вставьте ссылку-приглашение — её видно "
-	"в настройках сообщества (приложение своих ссылок не создаёт)."
-)
-
-
-def remove_executor_text(executor: ExecutorDto, community: CommunityDto) -> str:
-	"""Подтверждение: что потеряет сообщество, если убрать исполнителя.
-
-	Исполнитель убирается **из приложения**, а не из Telegram: сообщество
-	перестаёт им пользоваться, но в самом Telegram он остаётся там, где был.
-	"""
-	text = f"Убрать «{executor.label}» из пула «{community.title}»?"
-	if not executor.is_default:
-		return text
-	if executor.owner.kind is OwnerKind.USER:
-		return (
-			f"{text} Это публикатор по умолчанию: публикация через userbot "
-			"остановится до выбора нового."
-		)
-	return (
-		f"{text} Это публикатор-бот: кнопки под постами и запасной путь "
-		"публикации станут недоступны."
-	)

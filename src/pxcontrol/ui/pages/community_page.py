@@ -77,6 +77,7 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.engine.telegram.lane import LaneOwner, OwnerKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
+from pxcontrol.ui.pages.card_list import CardList
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
@@ -106,16 +107,20 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
-	INVITE_LINK_PROMPT,
 	MAINTENANCE_UNAVAILABLE,
 	community_queue_counts,
-	executor_row_text,
 	executors_count,
 	header_state_text,
-	join_result_text,
-	remove_executor_text,
 	state_badge,
 	subtitle_text,
+)
+from pxcontrol.ui.pages.executor_text import (
+	INVITE_LINK_PROMPT,
+	executor_rights_rows,
+	executor_signature,
+	executor_summary,
+	join_result_text,
+	remove_executor_text,
 )
 from pxcontrol.ui.pages.list_view import ListPage, PagerRow, paginate, step_page
 from pxcontrol.ui.pages.maintenance import MaintenancePanel, open_maintenance
@@ -263,7 +268,7 @@ def read_executors(
 
 
 class MembersPanel(QWidget):
-	"""Исполнители сообщества: пул обоих видов (ADR-0035).
+	"""Исполнители сообщества: пул обоих видов карточками (ADR-0035).
 
 	Два раздела одного пула. **Пользователи** — userbot-аккаунты:
 	публикует назначенный, остальные нужны чтению, реакциям
@@ -271,10 +276,14 @@ class MembersPanel(QWidget):
 	(запасной путь и единственный, кто умеет кнопки под постом,
 	ADR-0031), прочие боты состоят в сообществе наравне.
 
-	Каждая строка показывает участие и то, что человеку важно знать
-	сейчас: назначен ли публикатором, не приостановлен ли, может ли
-	вообще публиковать. Права публиковать для добавления **не нужны** —
-	исполнителя заводят и ради других работ.
+	Карточка **раскрывается перечнем прав**: в шапке — то, что нужно
+	знать сразу (участие, назначение, помехи работе), в теле — что
+	исполнителю можно и когда права прочитаны. Так человек видит,
+	почему публикация недоступна, не уходя в Telegram.
+
+	Список общий с очередями (``CardList``): обновление точечное,
+	раскрытая карточка переживает приход нового снимка — иначе перечень
+	прав закрывался бы сам, стоило соседней строке измениться.
 
 	Живой список: операции выполняются сразу (движком), список
 	перечитывается после каждой, а владелец узнаёт об изменении
@@ -303,51 +312,73 @@ class MembersPanel(QWidget):
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(density.spacing().row_spacing)
-		layout.addWidget(section_header(self, "Пользователи"))
-		layout.addWidget(
-			CaptionLabel(
-				"Публикует назначенный аккаунт; остальные — пул сообщества: "
-				"чтение, реакции, обслуживание. Права публиковать для этого не нужны.",
-				self,
-			)
+		self._user_list, self._user_empty = self._section(
+			layout,
+			"Пользователи",
+			"Публикует назначенный аккаунт; остальные — пул сообщества: "
+			"чтение, реакции, обслуживание. Права публиковать для этого не нужны.",
+			"Пользователей нет — введите вошедший аккаунт.",
 		)
-		area, self._rows = list_area(self, spacing=density.spacing().list_spacing)
-		layout.addWidget(area, stretch=1)
-		add_row = QHBoxLayout()
 		self._add_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
-		add_row.addWidget(self._add_combo, stretch=1)
-		add_button = PushButton("Ввести", self)
-		add_button.setToolTip(
-			"Если исполнитель ещё не в сообществе, приложение введёт его: "
-			"вступит по @имени, по ссылке-приглашению или пригласит своими силами"
+		layout.addLayout(self._add_row(self._add_combo, self._on_add_user, is_bot=False))
+		self._bot_list, self._bot_empty = self._section(
+			layout,
+			"Боты",
+			"Запасной путь публикации: файлы до 50 МБ, только «сейчас». "
+			"Кнопки под постом ставит только бот.",
+			"Ботов нет — введите бота, если нужны кнопки.",
 		)
-		add_button.clicked.connect(self._on_add_user)
-		add_row.addWidget(add_button)
-		layout.addLayout(add_row)
-		layout.addWidget(section_header(self, "Боты"))
-		layout.addWidget(
-			CaptionLabel(
-				"Запасной путь публикации: файлы до 50 МБ, только «сейчас». "
-				"Кнопки под постом ставит только бот.",
-				self,
-			)
-		)
-		bot_area, self._bot_rows = list_area(self, spacing=density.spacing().list_spacing)
-		layout.addWidget(bot_area, stretch=1)
-		bot_add_row = QHBoxLayout()
 		self._bot_combo: DtoComboBox[BotDto] = DtoComboBox(self)
-		bot_add_row.addWidget(self._bot_combo, stretch=1)
-		assign = PushButton("Ввести", self)
-		assign.setToolTip(
-			"Бот сам вступить не может: в группу его пригласит, а в канал "
-			"примет администратором исполнитель из пула"
-		)
-		assign.clicked.connect(self._on_add_bot)
-		bot_add_row.addWidget(assign)
-		layout.addLayout(bot_add_row)
+		layout.addLayout(self._add_row(self._bot_combo, self._on_add_bot, is_bot=True))
 		self._error = ErrorLabel(self)
 		layout.addWidget(self._error)
 		self.reload()
+
+	def _section(
+		self, layout: QVBoxLayout, title: str, hint: str, empty: str
+	) -> tuple[CardList, CaptionLabel]:
+		"""Раздел пула: заголовок, пояснение, список карточек и пустое состояние."""
+		layout.addWidget(section_header(self, title))
+		note = CaptionLabel(hint, self)
+		note.setWordWrap(True)
+		layout.addWidget(note)
+		area, box = list_area(self, spacing=density.spacing().list_spacing)
+		layout.addWidget(area, stretch=1)
+		empty_label = BodyLabel(empty, self)
+		layout.addWidget(empty_label)
+		cards = CardList(
+			self,
+			box,
+			subtitle=executor_summary,
+			signature=executor_signature,
+			key=lambda executor: executor.owner,
+			title=lambda executor: executor.label,
+			actions=self._actions,
+			actions_signature=lambda executor: (executor.is_default,),
+			# раскрывается любая карточка: в теле не правка, а перечень
+			# прав, и он нужен и у приостановленного, и у потерявшего права
+			editable=lambda _executor: True,
+			fill_body=self._fill_rights,
+			compact=True,
+			lost_edit_text="Исполнитель покинул пул — его права больше не показываются.",
+		)
+		return cards, empty_label
+
+	def _add_row(self, combo: QWidget, handler: Callable[[], None], *, is_bot: bool) -> QHBoxLayout:
+		"""Строка ввода нового исполнителя: выбор кандидата и кнопка."""
+		row = QHBoxLayout()
+		row.addWidget(combo, stretch=1)
+		button = PushButton("Ввести", self)
+		button.setToolTip(
+			"Бот сам вступить не может: в группу его пригласит, а в канал "
+			"примет администратором исполнитель из пула"
+			if is_bot
+			else "Если исполнитель ещё не в сообществе, приложение введёт его: "
+			"вступит по @имени, по ссылке-приглашению или пригласит своими силами"
+		)
+		button.clicked.connect(handler)
+		row.addWidget(button)
+		return row
 
 	def reload(self) -> None:
 		"""Перечитывает пул исполнителей из движка."""
@@ -360,12 +391,14 @@ class MembersPanel(QWidget):
 		)
 
 	def _show_executors(self, executors: list[ExecutorDto]) -> None:
-		"""Перестраивает строки обоих разделов и списки кандидатов."""
+		"""Приводит оба раздела к снимку и обновляет списки кандидатов."""
 		self._executors = executors
 		users = [dto for dto in executors if dto.owner.kind is OwnerKind.USER]
 		bots = [dto for dto in executors if dto.owner.kind is OwnerKind.BOT]
-		self._fill(self._rows, users, "Пользователей нет — добавьте вошедший аккаунт.")
-		self._fill(self._bot_rows, bots, "Ботов нет — добавьте бота, если нужны кнопки.")
+		self._user_list.sync(users)
+		self._user_empty.setVisible(not users)
+		self._bot_list.sync(bots)
+		self._bot_empty.setVisible(not bots)
 		taken_accounts = {dto.owner.id for dto in users}
 		self._add_combo.set_items(
 			[account for account in self._accounts if account.id not in taken_accounts],
@@ -379,32 +412,32 @@ class MembersPanel(QWidget):
 			key=lambda bot: bot.id,
 		)
 
-	def _fill(self, box: QVBoxLayout, executors: list[ExecutorDto], empty: str) -> None:
-		"""Наполняет раздел строками исполнителей (пустой — объяснением)."""
-		clear_layout(box)
-		if not executors:
-			box.addWidget(BodyLabel(empty, self))
-		for dto in executors:
-			box.addWidget(self._executor_row(dto))
-		box.addStretch()
+	def _actions(self, executor: ExecutorDto, parent: QWidget) -> list[QWidget]:
+		"""Кнопки шапки карточки: назначение публикатором и удаление из пула."""
+		buttons: list[QWidget] = []
+		if not executor.is_default:
+			make_default = list_button("Публикатор", parent)
+			make_default.setToolTip("Публиковать от имени этого исполнителя по умолчанию")
+			make_default.clicked.connect(bind(self._on_set_default, executor))
+			buttons.append(make_default)
+		remove = list_button("Убрать", parent)
+		remove.setToolTip("Убрать из пула приложения — в самом Telegram исполнитель останется")
+		remove.clicked.connect(bind(self._on_remove, executor))
+		buttons.append(remove)
+		return buttons
 
-	def _executor_row(self, dto: ExecutorDto) -> QWidget:
-		"""Строка исполнителя: имя, участие, пометки и действия."""
-		box = QWidget(self)
-		row = QHBoxLayout(box)
-		row.setContentsMargins(0, 0, 0, 0)
-		row.addWidget(BodyLabel(executor_row_text(dto), box))
-		row.addStretch()
-		if dto.is_default:
-			row.addWidget(CaptionLabel("публикатор по умолчанию", box))
-		else:
-			make_default = PushButton("Сделать публикатором", box)
-			make_default.clicked.connect(bind(self._on_set_default, dto))
-			row.addWidget(make_default)
-		remove = PushButton("Убрать", box)
-		remove.clicked.connect(bind(self._on_remove, dto))
-		row.addWidget(remove)
-		return box
+	def _fill_rights(
+		self, executor: ExecutorDto, box: QVBoxLayout, _collapse: Callable[[], None]
+	) -> None:
+		"""Тело карточки — полный перечень прав исполнителя (ADR-0035)."""
+		for caption, value in executor_rights_rows(executor):
+			row = QHBoxLayout()
+			row.setContentsMargins(0, 0, 0, 0)
+			row.addWidget(CaptionLabel(f"{caption}:", self))
+			text = BodyLabel(value, self)
+			text.setWordWrap(True)
+			row.addWidget(text, stretch=1)
+			box.addLayout(row)
 
 	def _after_change(self, executors: list[ExecutorDto]) -> None:
 		"""Операция прошла: перерисовать и сообщить владельцу."""
@@ -478,10 +511,12 @@ class MembersPanel(QWidget):
 			return
 		self._add(owner, label, "Вступаю по ссылке…", invite=link)
 
-	def _on_set_default(self, dto: ExecutorDto) -> None:
+	def _on_set_default(self, executor: ExecutorDto) -> None:
 		run_in_engine(
 			self._worker,
-			self._worker.engine.communities.set_default_publisher(self._community.id, dto.owner),
+			self._worker.engine.communities.set_default_publisher(
+				self._community.id, executor.owner
+			),
 			self,
 			lambda _dto: self._reload_and_notify(),
 			self._show_error,
@@ -491,16 +526,16 @@ class MembersPanel(QWidget):
 		self.reload()
 		self.changed.emit()
 
-	def _on_remove(self, dto: ExecutorDto) -> None:
+	def _on_remove(self, executor: ExecutorDto) -> None:
 		if not confirm_delete(
 			self,
-			remove_executor_text(dto, self._community),
+			remove_executor_text(executor, self._community),
 			accept_text="Убрать",
 		):
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.communities.remove_executor(self._community.id, dto.owner),
+			self._worker.engine.communities.remove_executor(self._community.id, executor.owner),
 			self,
 			self._after_change,
 			self._show_error,

@@ -45,12 +45,18 @@ from pxcontrol.ui.pages.community_state import (
 	audience_word,
 	card_actions,
 	card_state,
-	executor_row_text,
 	executors_count,
 	header_state_text,
-	remove_executor_text,
 	state_badge_text,
 	subtitle_text,
+)
+from pxcontrol.ui.pages.executor_text import (
+	executor_rights_rows,
+	executor_row_text,
+	executor_signature,
+	executor_summary,
+	remove_executor_text,
+	snapshot_caption,
 )
 from pxcontrol.ui.pages.list_view import paginate
 from pxcontrol.ui.pages.publish_queue_view import queue_subtitle
@@ -477,6 +483,86 @@ def test_executor_row_names_participation_and_trouble() -> None:
 		executor_row_text(_executor(paused=True, can_publish=False))
 		== "Вася — админ · приостановлен"
 	)
+
+
+def test_executor_summary_names_participation_then_trouble() -> None:
+	"""Сводка карточки: участие, назначение и то, что мешает работе сейчас."""
+	assert executor_summary(_executor()) == "админ"
+	assert executor_summary(_executor(is_default=True)) == "админ · публикатор по умолчанию"
+	assert executor_summary(_executor(can_publish=False)) == "админ · публиковать не может"
+	# пауза и права не складываются: приостановленного не используют вовсе
+	assert executor_summary(_executor(paused=True, can_publish=False)) == "админ · приостановлен"
+
+
+def test_rights_rows_speak_russian_and_spare_the_admin() -> None:
+	"""Перечень прав — словами и только выданное; админу ограничений нет.
+
+	Список из тридцати строк, где половина «нельзя», человек читать
+	не станет, а отсутствие права и означает «не выдано».
+	"""
+	from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, MemberRights
+
+	admin = ExecutorDto(
+		owner=LaneOwner(OwnerKind.BOT, 7),
+		label="бот",
+		status=ParticipantStatus.ADMIN,
+		rights=ExecutorRights(
+			ParticipantStatus.ADMIN, AdminRights(post_messages=True, edit_messages=True)
+		),
+		is_default=True,
+		paused=False,
+		can_publish=True,
+	)
+	rows = dict(executor_rights_rows(admin))
+	assert rows["Права администратора"] == "публиковать · править чужие сообщения"
+	assert rows["Как участник"] == "ограничения на администратора не действуют"
+
+	member = ExecutorDto(
+		owner=LaneOwner(OwnerKind.USER, 3),
+		label="Вася",
+		status=ParticipantStatus.MEMBER,
+		rights=ExecutorRights(
+			ParticipantStatus.MEMBER,
+			allowed=MemberRights(send_plain=True, send_reactions=True),
+		),
+		is_default=False,
+		paused=False,
+		can_publish=False,
+	)
+	rows = dict(executor_rights_rows(member))
+	assert rows["Права администратора"] == "нет"
+	assert rows["Как участник"] == "писать текст · реакции"
+
+
+def test_snapshot_caption_admits_transferred_rights() -> None:
+	"""Без отметки чтения права названы перенесёнными, а не свежими.
+
+	Записи, пережившие миграцию (ADR-0035, этап B), полным снимком
+	не были — и делать вид, что были, нельзя.
+	"""
+	from datetime import UTC, datetime
+
+	assert "перенесены из прежней модели" in snapshot_caption(None)
+	assert snapshot_caption(datetime(2026, 9, 20, 16, 40, tzinfo=UTC)).startswith("снимок от ")
+
+
+def test_executor_signature_notices_changed_rights() -> None:
+	"""Отпечаток карточки меняется вместе с правами.
+
+	Карточка раскрывается перечнем прав: не заметив их смену, список
+	показывал бы вчерашние права до полной пересборки.
+	"""
+	from dataclasses import replace
+
+	from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights
+
+	before = _executor()
+	after = replace(
+		before,
+		rights=ExecutorRights(ParticipantStatus.ADMIN, AdminRights(delete_messages=True)),
+	)
+	assert executor_signature(before) != executor_signature(after)
+	assert executor_signature(before) == executor_signature(_executor())
 
 
 def test_remove_executor_text_warns_about_publisher() -> None:
