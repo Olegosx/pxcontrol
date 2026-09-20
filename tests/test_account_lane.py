@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from pxcontrol.engine.telegram.lane import AccountLane, TelegramPriority
+from pxcontrol.engine.telegram.lane import AccountLane, TelegramPriority, WorkKind
 from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind, TelegramFloodError
 
 
@@ -60,7 +60,7 @@ async def test_priority_decides_who_goes_next() -> None:
 	release = asyncio.Event()
 
 	async def hold() -> None:
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			await release.wait()
 
 	async def waiter(name: str, priority: TelegramPriority) -> None:
@@ -70,15 +70,19 @@ async def test_priority_decides_who_goes_next() -> None:
 	holder = asyncio.create_task(hold())
 	await asyncio.sleep(0)  # держатель занял дорожку
 	tasks = [
+		asyncio.create_task(waiter("план", TelegramPriority.PUBLISH_PLANNED)),
 		asyncio.create_task(waiter("фон", TelegramPriority.BACKGROUND)),
+		asyncio.create_task(waiter("уборка", TelegramPriority.MAINTENANCE)),
 		asyncio.create_task(waiter("человек", TelegramPriority.INTERACTIVE)),
-		asyncio.create_task(waiter("пост", TelegramPriority.PUBLISH)),
+		asyncio.create_task(waiter("пост", TelegramPriority.PUBLISH_DUE)),
 	]
-	for _ in range(5):
-		await asyncio.sleep(0)  # все трое успели встать в очередь
+	for _ in range(7):
+		await asyncio.sleep(0)  # все пятеро успели встать в очередь
 	release.set()
 	await asyncio.gather(holder, *tasks)
-	assert order == ["пост", "человек", "фон"]
+	# лестница по срочности (ADR-0036): человек, срочный пост, уборка,
+	# фон и лишь затем плановая загрузка — единственная долгая операция
+	assert order == ["человек", "пост", "уборка", "фон", "план"]
 
 
 async def test_equal_priority_keeps_arrival_order() -> None:
@@ -88,7 +92,7 @@ async def test_equal_priority_keeps_arrival_order() -> None:
 	release = asyncio.Event()
 
 	async def hold() -> None:
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			await release.wait()
 
 	async def waiter(number: int) -> None:
@@ -127,9 +131,9 @@ async def test_interval_counts_from_end_of_operation() -> None:
 	"""
 	clock = _Clock()
 	lane = _lane(0.3, clock)
-	async with lane.slot(TelegramPriority.PUBLISH):
+	async with lane.slot(TelegramPriority.PUBLISH_DUE):
 		clock.now += 5.0  # загрузка большого файла
-	async with lane.slot(TelegramPriority.PUBLISH):
+	async with lane.slot(TelegramPriority.PUBLISH_DUE):
 		pass
 	assert clock.slept == [pytest.approx(0.3)]
 
@@ -139,7 +143,7 @@ async def test_flood_from_operation_freezes_lane() -> None:
 	clock = _Clock()
 	lane = _lane(0.0, clock)
 	with pytest.raises(TelegramFloodError):
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			raise TelegramFloodError("Подождите 30 с.", retry_after_s=30)
 	assert lane.frozen_for() == pytest.approx(30.0)
 	# следующий желающий узнаёт срок, не тревожа Telegram
@@ -183,7 +187,7 @@ async def test_frozen_lane_rejects_before_taking_turn() -> None:
 	release = asyncio.Event()
 
 	async def unlucky() -> None:
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			await release.wait()
 			raise TelegramFloodError("Подождите 20 с.", retry_after_s=20)
 
@@ -211,7 +215,7 @@ async def test_cancelled_waiter_does_not_stall_lane() -> None:
 	passed = False
 
 	async def hold() -> None:
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			await release.wait()
 
 	async def waiter() -> None:
@@ -240,7 +244,7 @@ async def test_failed_operation_releases_lane() -> None:
 	"""Любая ошибка операции отпускает дорожку — очередь не встаёт."""
 	lane = _lane()
 	with pytest.raises(RuntimeError):
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			raise RuntimeError("сеть отвалилась")
 	async with lane.slot(TelegramPriority.BACKGROUND):
 		pass  # дорожка свободна
@@ -268,9 +272,9 @@ async def test_lane_records_operations_with_outcome_and_live_state() -> None:
 		log=log,
 	)
 	assert lane.live_state().busy_kind is None
-	async with lane.slot(TelegramPriority.PUBLISH):
+	async with lane.slot(TelegramPriority.PUBLISH_DUE):
 		live = lane.live_state()
-		assert live.busy_kind is TelegramPriority.PUBLISH and live.busy_since == first
+		assert live.busy_kind is WorkKind.PUBLISH and live.busy_since == first
 	with pytest.raises(RuntimeError):
 		async with lane.slot(TelegramPriority.BACKGROUND):
 			raise RuntimeError("сбой")
@@ -279,15 +283,15 @@ async def test_lane_records_operations_with_outcome_and_live_state() -> None:
 			raise TelegramFloodError("подождите", retry_after_s=40)
 	records = log.drain()
 	assert [(r.kind, r.outcome, r.wait_s) for r in records] == [
-		(TelegramPriority.PUBLISH, Outcome.OK, 0),
-		(TelegramPriority.BACKGROUND, Outcome.ERROR, 0),
-		(TelegramPriority.MAINTENANCE, Outcome.FLOOD, 40),
+		(WorkKind.PUBLISH, Outcome.OK, 0),
+		(WorkKind.BACKGROUND, Outcome.ERROR, 0),
+		(WorkKind.MAINTENANCE, Outcome.FLOOD, 40),
 	]
 	assert all(r.owner == ExecutorRef(OwnerKind.BOT, 7) for r in records)
 	assert records[0].finished_at - records[0].started_at == timedelta(seconds=1)
 	# заморозка: отказ до тела записи не даёт — Telegram не тревожили
 	with pytest.raises(TelegramFloodError):
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			pass
 	assert len(log) == 0
 	assert lane.live_state().frozen_for_s == pytest.approx(40.0)
@@ -303,13 +307,13 @@ async def test_lane_records_cancelled_operation() -> None:
 	started = asyncio.Event()
 
 	async def upload() -> None:
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			started.set()
 			await asyncio.sleep(3600)
 
 	task = asyncio.create_task(upload())
 	await started.wait()
-	assert lane.live_state().busy_kind is TelegramPriority.PUBLISH
+	assert lane.live_state().busy_kind is WorkKind.PUBLISH
 	task.cancel()
 	with pytest.raises(asyncio.CancelledError):
 		await task
@@ -323,7 +327,7 @@ async def test_live_state_counts_waiting() -> None:
 	release = asyncio.Event()
 
 	async def hold() -> None:
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			await release.wait()
 
 	async def wait_turn() -> None:
@@ -355,7 +359,7 @@ async def test_lane_keeps_writing_after_log_drained() -> None:
 	log = OperationLog()
 	lane = AccountLane(ExecutorRef(OwnerKind.USER, 1), 0.0, log=log)
 	for _ in range(3):
-		async with lane.slot(TelegramPriority.PUBLISH):
+		async with lane.slot(TelegramPriority.PUBLISH_DUE):
 			pass
 		assert len(log.drain()) == 1, "операция после выемки обязана попасть в журнал"
 
@@ -369,7 +373,7 @@ async def test_operation_log_drains_in_place_and_caps_capacity() -> None:
 	def _record(number: int) -> OperationRecord:
 		moment = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
 		return OperationRecord(
-			ExecutorRef(OwnerKind.BOT, number), TelegramPriority.PUBLISH, moment, moment, Outcome.OK
+			ExecutorRef(OwnerKind.BOT, number), WorkKind.PUBLISH, moment, moment, Outcome.OK
 		)
 
 	log = OperationLog(capacity=3)
@@ -382,3 +386,40 @@ async def test_operation_log_drains_in_place_and_caps_capacity() -> None:
 	log.record(_record(9))
 	log.restore([_record(7), _record(8)])
 	assert [r.owner.id for r in log.drain()] == [7, 8, 9]
+
+
+def test_work_kind_of_priorities() -> None:
+	"""Учёт видит вид работы: у обеих публикаций он один (ADR-0036)."""
+	assert TelegramPriority.PUBLISH_DUE.work_kind is WorkKind.PUBLISH
+	assert TelegramPriority.PUBLISH_PLANNED.work_kind is WorkKind.PUBLISH
+	assert TelegramPriority.INTERACTIVE.work_kind is WorkKind.INTERACTIVE
+	assert TelegramPriority.MAINTENANCE.work_kind is WorkKind.MAINTENANCE
+	assert TelegramPriority.BACKGROUND.work_kind is WorkKind.BACKGROUND
+	# у каждого приоритета есть вид работы — новый уровень без него
+	# сломал бы учёт молча
+	assert {priority.work_kind for priority in TelegramPriority} == set(WorkKind)
+
+
+def test_publish_priority_follows_urgency() -> None:
+	"""Шлюз выводит приоритет публикации из момента поста (ADR-0036)."""
+	from datetime import UTC, datetime, timedelta
+
+	from pxcontrol.engine.telegram.gateway import publish_priority
+	from pxcontrol.engine.telegram.types import OutgoingPost, Urgency, urgency
+
+	now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+	later = now + timedelta(hours=2)
+	assert urgency(None, now) is Urgency.DUE
+	assert urgency(now, now) is Urgency.DUE, "момент наступил — срочный"
+	assert urgency(now - timedelta(minutes=1), now) is Urgency.DUE, "просрочен — срочный"
+	assert urgency(later, now) is Urgency.PLANNED
+	assert publish_priority(OutgoingPost(text="сейчас"), now) is TelegramPriority.PUBLISH_DUE
+	assert (
+		publish_priority(OutgoingPost(text="потом", when=later), now)
+		is TelegramPriority.PUBLISH_PLANNED
+	)
+	# плановая публикация ниже любой короткой операции, срочная — выше
+	# всех, кроме человека
+	assert TelegramPriority.INTERACTIVE < TelegramPriority.PUBLISH_DUE
+	assert TelegramPriority.PUBLISH_DUE < TelegramPriority.MAINTENANCE
+	assert TelegramPriority.BACKGROUND < TelegramPriority.PUBLISH_PLANNED

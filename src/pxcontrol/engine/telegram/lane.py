@@ -50,6 +50,23 @@ DEFAULT_MIN_INTERVAL_S = 0.3
 BOT_MIN_INTERVAL_S = 0.0
 
 
+class WorkKind(StrEnum):
+	"""Вид работы на дорожке — единица учёта активности (ADR-0030).
+
+	Отделён от приоритета намеренно (ADR-0036): учёт и показ отвечают
+	на вопрос «чем занят аккаунт», а приоритет — «кто пойдёт следующим».
+	У публикации два приоритета по срочности, но вид работы один —
+	иначе графики по видам раздвоились бы на «срочные» и «плановые»
+	публикации, которые для занятости аккаунта неразличимы. Значения —
+	то, что хранится в ``account_operations.kind``.
+	"""
+
+	PUBLISH = "publish"
+	INTERACTIVE = "interactive"
+	MAINTENANCE = "maintenance"
+	BACKGROUND = "background"
+
+
 class Outcome(StrEnum):
 	"""Исход операции на дорожке (ADR-0030).
 
@@ -69,8 +86,8 @@ class OperationRecord:
 
 	Attributes:
 		owner: чья дорожка.
-		kind: вид операции — приоритет, с которым шлюз занял дорожку
-			(публикация, действие человека, обслуживание, фон).
+		kind: вид работы (публикация, действие человека, обслуживание,
+			фон) — по приоритету, с которым шлюз занял дорожку.
 		started_at: момент начала обращения (после очереди и зазора).
 		finished_at: момент конца — по нему считается занятость.
 		outcome: исход.
@@ -78,7 +95,7 @@ class OperationRecord:
 	"""
 
 	owner: ExecutorRef
-	kind: TelegramPriority
+	kind: WorkKind
 	started_at: datetime
 	finished_at: datetime
 	outcome: Outcome
@@ -176,13 +193,13 @@ class LaneLiveState:
 	"""Живое состояние дорожки — снимок для показа (ADR-0030).
 
 	Attributes:
-		busy_kind: вид идущей операции; None — дорожка свободна.
+		busy_kind: вид идущей работы; None — дорожка свободна.
 		busy_since: когда идущая операция началась.
 		waiting: сколько операций ждут своей очереди.
 		frozen_for_s: остаток заморозки после флуд-лимита (0 — нет).
 	"""
 
-	busy_kind: TelegramPriority | None
+	busy_kind: WorkKind | None
 	busy_since: datetime | None
 	waiting: int
 	frozen_for_s: float
@@ -191,23 +208,43 @@ class LaneLiveState:
 class TelegramPriority(IntEnum):
 	"""Кто из ожидающих занимает дорожку следующим (меньше — важнее).
 
+	Лестница — по срочности, а не по виду работы (ADR-0036). Единственная
+	долгая операция на дорожке — загрузка файла, минуты; всё остальное —
+	секунды. «Короткое вперёд длинного» даёт наименьшее суммарное
+	ожидание, а плановая загрузка от этого не голодает: коротких
+	ожидающих всегда конечное число, и она стартует секундами позже них.
+
 	Значения с шагом 10: между уровнями есть место для новых видов
 	работы без перенумерации существующих. Приоритет решает только
 	порядок в очереди ожидания — обойти заморозку он не помогает
 	никому, это физика Telegram, а не наше правило.
 	"""
 
-	#: Публикация постов — то, ради чего приложение существует
-	#: (ADR-0017: публикация приоритетнее чтения).
-	PUBLISH = 10
 	#: Человек ждёт ответа на экране: проверка доступов, список тем.
-	INTERACTIVE = 20
+	INTERACTIVE = 10
+	#: Срочная публикация: пост «сейчас», догон просроченного, режим
+	#: «кнопки важнее», дорисовка кнопок к только что вышедшему посту
+	#: (:class:`Urgency` — ``DUE``). Человек нажал «опубликовать»
+	#: и ждёт пост в ленте через секунды.
+	PUBLISH_DUE = 20
 	#: Массовое обслуживание сообщества (ADR-0026): сотни однотипных
 	#: запросов подряд. Ниже интерактива — человек не должен ждать
 	#: на экране, пока идёт уборка; выше фона — уборку он запустил сам.
-	MAINTENANCE = 25
+	MAINTENANCE = 30
 	#: Фоновые чтения: статистика сообществ, расписание, дозор слотов.
-	BACKGROUND = 30
+	BACKGROUND = 40
+	#: Плановая публикация: отложенная запись с датой в будущем
+	#: (``Urgency.PLANNED``). Единственная долгая операция и единственная
+	#: без срока, кроме свободного слота, — уступает всем коротким,
+	#: в том числе дозору слотов, который её же и выпускает.
+	PUBLISH_PLANNED = 50
+
+	@property
+	def work_kind(self) -> WorkKind:
+		"""Вид работы для учёта активности: у обеих публикаций один."""
+		if self in (TelegramPriority.PUBLISH_DUE, TelegramPriority.PUBLISH_PLANNED):
+			return WorkKind.PUBLISH
+		return WorkKind(self.name.lower())
 
 
 class AccountLane:
@@ -255,9 +292,9 @@ class AccountLane:
 		self._counter = itertools.count()
 		self._last_at: float | None = None
 		self._frozen_until: float | None = None
-		# идущая операция: вид и момент начала (None — дорожка свободна
-		# или занята, но ещё не дошла до обращения: очередь, зазор)
-		self._busy_kind: TelegramPriority | None = None
+		# идущая операция: вид работы и момент начала (None — дорожка
+		# свободна или занята, но ещё не дошла до обращения: очередь, зазор)
+		self._busy_kind: WorkKind | None = None
 		self._busy_since: datetime | None = None
 
 	@property
@@ -333,7 +370,8 @@ class AccountLane:
 			self._pass_on()  # слот не пригодился — отдаём следующему
 			raise
 		started = self._wall_clock()
-		self._busy_kind, self._busy_since = priority, started
+		kind = priority.work_kind
+		self._busy_kind, self._busy_since = kind, started
 		outcome, wait_s = Outcome.OK, 0
 		try:
 			yield
@@ -355,9 +393,7 @@ class AccountLane:
 			self._busy_kind, self._busy_since = None, None
 			if self._log is not None:
 				self._log.record(
-					OperationRecord(
-						self._owner, priority, started, self._wall_clock(), outcome, wait_s
-					)
+					OperationRecord(self._owner, kind, started, self._wall_clock(), outcome, wait_s)
 				)
 			self._pass_on()
 

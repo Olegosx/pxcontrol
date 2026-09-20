@@ -28,7 +28,7 @@ from pxcontrol.engine.services.activity import (
 	WindowStats,
 )
 from pxcontrol.engine.services.communities import AccountMembershipDto
-from pxcontrol.engine.telegram.lane import TelegramPriority
+from pxcontrol.engine.telegram.lane import WorkKind
 from pxcontrol.engine.telegram.types import (
 	USERBOT_PREMIUM_MAX_FILE_BYTES,
 	DayPoint,
@@ -309,12 +309,12 @@ def delete_bot_text(bot: BotDto, bound_titles: list[str]) -> str:
 
 # --- активность (ADR-0030) ------------------------------------------------------------
 
-#: Вид операции словом — по приоритету дорожки, с которым её занял шлюз.
-KIND_WORDS: dict[TelegramPriority, str] = {
-	TelegramPriority.PUBLISH: "публикация",
-	TelegramPriority.INTERACTIVE: "проверка",
-	TelegramPriority.MAINTENANCE: "обслуживание",
-	TelegramPriority.BACKGROUND: "фоновое чтение",
+#: Вид работы словом — то, чем дорожка занята (ADR-0030, ADR-0036).
+KIND_WORDS: dict[WorkKind, str] = {
+	WorkKind.PUBLISH: "публикация",
+	WorkKind.INTERACTIVE: "проверка",
+	WorkKind.MAINTENANCE: "обслуживание",
+	WorkKind.BACKGROUND: "фоновое чтение",
 }
 
 
@@ -396,7 +396,7 @@ def kind_rows(kinds: tuple[Share, ...]) -> list[tuple[str, int]]:
 	total = sum(share.value for share in kinds)
 	if total <= 0:
 		return []
-	words = {priority.name.lower(): word for priority, word in KIND_WORDS.items()}
+	words = {kind.value: word for kind, word in KIND_WORDS.items()}
 	ordered = sorted(kinds, key=lambda s: s.value, reverse=True)
 	return [
 		(words.get(share.name, share.name), round(share.value * 100 / total)) for share in ordered

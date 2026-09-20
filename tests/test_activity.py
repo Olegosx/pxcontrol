@@ -23,7 +23,7 @@ from pxcontrol.engine.services.activity import (
 	_Interval,
 	window_stats,
 )
-from pxcontrol.engine.telegram.lane import LaneLiveState, OperationRecord, Outcome, TelegramPriority
+from pxcontrol.engine.telegram.lane import LaneLiveState, OperationRecord, Outcome, WorkKind
 from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind, Share
 
 _NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
@@ -55,7 +55,7 @@ def _record(
 	owner: ExecutorRef,
 	start_s: float,
 	end_s: float,
-	kind: TelegramPriority = TelegramPriority.BACKGROUND,
+	kind: WorkKind = WorkKind.BACKGROUND,
 	outcome: Outcome = Outcome.OK,
 	wait_s: int = 0,
 ) -> OperationRecord:
@@ -91,7 +91,7 @@ def test_window_clips_intervals_and_counts_by_end() -> None:
 
 def test_window_adds_running_operation_from_live_state() -> None:
 	"""Идущая операция входит в занятость от своего начала, но не в число операций."""
-	live = LiveDto(TelegramPriority.PUBLISH, _at(-120), 0, 0.0)
+	live = LiveDto(WorkKind.PUBLISH, _at(-120), 0, 0.0)
 	stats = window_stats([], _at(-60), _NOW, live)
 	assert stats.operations == 0
 	assert stats.busy_s == 60, "обрезано началом окна"
@@ -119,8 +119,8 @@ async def test_flush_writes_rows_and_skips_unknown_owner(db: Database) -> None:
 	gateway = _FakeGateway()
 	service = ActivityService(db, gateway)
 	gateway.buffer = [
-		_record(user, -100, -90, TelegramPriority.PUBLISH),
-		_record(bot, -80, -79, TelegramPriority.BACKGROUND, Outcome.FLOOD, 30),
+		_record(user, -100, -90, WorkKind.PUBLISH),
+		_record(bot, -80, -79, WorkKind.BACKGROUND, Outcome.FLOOD, 30),
 		_record(ExecutorRef(OwnerKind.USER, 999), -70, -60),  # удалён, пока шла операция
 	]
 	assert await service.flush() == 2
@@ -140,14 +140,14 @@ async def test_snapshot_windows_and_live(db: Database) -> None:
 	gateway = _FakeGateway()
 	service = ActivityService(db, gateway)
 	gateway.buffer = [
-		_record(user, -600, -590, TelegramPriority.PUBLISH),  # в часе
+		_record(user, -600, -590, WorkKind.PUBLISH),  # в часе
 		_record(user, -5 * 3600, -5 * 3600 + 10),  # в сутках, не в часе
 		_record(user, -3 * 86400, -3 * 86400 + 10),  # в неделе
 		_record(user, -10 * 86400, -10 * 86400 + 10),  # за неделей — не читается
-		_record(bot, -30, -29, TelegramPriority.BACKGROUND, Outcome.ERROR),
+		_record(bot, -30, -29, WorkKind.BACKGROUND, Outcome.ERROR),
 	]
 	gateway.live = {
-		user: LaneLiveState(TelegramPriority.MAINTENANCE, _at(-5), 2, 0.0),
+		user: LaneLiveState(WorkKind.MAINTENANCE, _at(-5), 2, 0.0),
 		ExecutorRef(OwnerKind.BOT, 42): LaneLiveState(None, None, 0, 12.0),  # только дорожка
 	}
 	snapshot = await service.snapshot(_NOW)
@@ -156,7 +156,7 @@ async def test_snapshot_windows_and_live(db: Database) -> None:
 	assert (me.last_hour.operations, me.last_day.operations, me.last_week.operations) == (1, 2, 3)
 	# занятость считает база: функции даты SQLite работают в миллисекундах
 	assert me.last_hour.busy_s == pytest.approx(10 + 5, abs=0.002), "плюс идущая операция"
-	assert me.live.busy_kind is TelegramPriority.MAINTENANCE and me.live.waiting == 2
+	assert me.live.busy_kind is WorkKind.MAINTENANCE and me.live.waiting == 2
 	assert me.last_operation_at == _at(-590)
 	assert snapshot[bot].last_hour.errors == 1
 	frozen_only = snapshot[ExecutorRef(OwnerKind.BOT, 42)]
@@ -271,7 +271,7 @@ async def test_history_reads_only_owner_rows(db: Database) -> None:
 	user, bot = await _owners(db)
 	gateway = _FakeGateway()
 	service = ActivityService(db, gateway, tz=UTC)
-	gateway.buffer = [_record(user, -100, -90, TelegramPriority.PUBLISH), _record(bot, -50, -40)]
+	gateway.buffer = [_record(user, -100, -90, WorkKind.PUBLISH), _record(bot, -50, -40)]
 	history = await service.history(user, _NOW)
 	assert history.operations == 1 and sum(history.hours) == 1
 	assert history.busy_days[-1].value == 10
@@ -289,7 +289,7 @@ async def test_snapshot_keeps_last_operation_beyond_window(db: Database) -> None
 	gateway = _FakeGateway()
 	service = ActivityService(db, gateway)
 	old = -9 * 24 * 3600
-	gateway.buffer = [_record(user, old, old + 5, TelegramPriority.PUBLISH)]
+	gateway.buffer = [_record(user, old, old + 5, WorkKind.PUBLISH)]
 	await service.flush()
 	snapshot = await service.snapshot(_NOW)
 	assert snapshot[user].last_week.operations == 0, "в окно недели операция не попала"
@@ -308,7 +308,7 @@ async def test_flush_returns_batch_to_buffer_when_cancelled(db: Database) -> Non
 
 	gateway = _FakeGateway()
 	service = ActivityService(_CancellingDb(), gateway)  # type: ignore[arg-type]
-	records = [_record(user, -100, -90, TelegramPriority.PUBLISH)]
+	records = [_record(user, -100, -90, WorkKind.PUBLISH)]
 	gateway.buffer = list(records)
 	with pytest.raises(asyncio.CancelledError):
 		await service.flush()
@@ -330,7 +330,7 @@ async def test_service_counts_operations_of_live_gateway(db: Database) -> None:
 	gateway = TelegramGateway()
 	service = ActivityService(db, gateway)
 	for _ in range(3):
-		async with gateway._lane(user).slot(Priority.PUBLISH):  # noqa: SLF001 — дорожка изнутри
+		async with gateway._lane(user).slot(Priority.PUBLISH_DUE):  # noqa: SLF001 — дорожка изнутри
 			pass
 		assert await service.flush() == 1, "каждая операция доходит до базы"
 	snapshot = await service.snapshot()
@@ -382,7 +382,7 @@ async def test_snapshot_matches_python_reference_on_random_operations(db: Databa
 	gateway = _FakeGateway()
 	service = ActivityService(db, gateway)
 	rng = random.Random(20260920)
-	kinds = list(TelegramPriority)
+	kinds = list(WorkKind)
 	outcomes = list(Outcome)
 	records: list[OperationRecord] = []
 	for _ in range(240):

@@ -339,7 +339,7 @@ class AccountOperation(Base):
 	bot_id: Mapped[int | None] = mapped_column(
 		ForeignKey("bots.id", ondelete="CASCADE"), default=None
 	)
-	# вид операции — значения TelegramPriority по имени (publish, interactive…)
+	# вид работы — значения WorkKind (publish, interactive, maintenance, background)
 	kind: Mapped[str] = mapped_column(String(16))
 	started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 	finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

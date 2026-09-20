@@ -213,18 +213,18 @@ def test_live_text_and_visibility() -> None:
 	from datetime import UTC, datetime
 
 	from pxcontrol.engine.services.activity import LiveDto
-	from pxcontrol.engine.telegram.lane import TelegramPriority
+	from pxcontrol.engine.telegram.lane import WorkKind
 	from pxcontrol.ui.pages.user_state import live_shown, live_text
 
 	now = datetime(2026, 9, 15, tzinfo=UTC)
 	assert live_text(LiveDto(None, None, 0, 0.0)) == "свободен"
-	assert live_text(LiveDto(TelegramPriority.PUBLISH, now, 0, 0.0)) == "сейчас: публикация"
-	assert live_text(LiveDto(TelegramPriority.BACKGROUND, now, 3, 0.0)) == (
+	assert live_text(LiveDto(WorkKind.PUBLISH, now, 0, 0.0)) == "сейчас: публикация"
+	assert live_text(LiveDto(WorkKind.BACKGROUND, now, 3, 0.0)) == (
 		"сейчас: фоновое чтение · ждут 3"
 	)
 	assert live_text(LiveDto(None, None, 2, 0.0)) == "ждут 2"
 	# заморозка главнее всего: пока она действует, работы нет
-	assert live_text(LiveDto(TelegramPriority.PUBLISH, now, 1, 90.0)) == "заморожен ещё 1 мин"
+	assert live_text(LiveDto(WorkKind.PUBLISH, now, 1, 90.0)) == "заморожен ещё 1 мин"
 	assert live_shown(UserState.ACTIVE) and live_shown(UserState.OFFLINE)
 	assert live_shown(BotState.ACTIVE)
 	assert not live_shown(UserState.PAUSED) and not live_shown(UserState.NOT_LOGGED_IN)

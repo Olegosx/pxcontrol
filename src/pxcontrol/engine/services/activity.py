@@ -43,7 +43,7 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AccountOperation, Bot, TgAccount
 from pxcontrol.engine.db.types import as_utc
 from pxcontrol.engine.periodic import PeriodicTask
-from pxcontrol.engine.telegram.lane import LaneLiveState, OperationRecord, Outcome, TelegramPriority
+from pxcontrol.engine.telegram.lane import LaneLiveState, OperationRecord, Outcome, WorkKind
 from pxcontrol.engine.telegram.types import DayPoint, ExecutorRef, OwnerKind, Share
 
 logger = logging.getLogger(__name__)
@@ -129,7 +129,7 @@ class WindowStats:
 class LiveDto:
 	"""Живое состояние дорожки владельца для карточки."""
 
-	busy_kind: TelegramPriority | None
+	busy_kind: WorkKind | None
 	busy_since: datetime | None
 	waiting: int
 	frozen_for_s: float
@@ -283,7 +283,7 @@ def _row(record: OperationRecord) -> AccountOperation:
 	return AccountOperation(
 		tg_account_id=record.owner.id if record.owner.kind is OwnerKind.USER else None,
 		bot_id=record.owner.id if record.owner.kind is OwnerKind.BOT else None,
-		kind=record.kind.name.lower(),
+		kind=record.kind.value,
 		started_at=record.started_at,
 		finished_at=record.finished_at,
 		outcome=str(record.outcome),

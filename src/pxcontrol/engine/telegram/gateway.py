@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pxcontrol.engine.telegram.bot_api import (
 	check_community,
@@ -77,10 +77,31 @@ from pxcontrol.engine.telegram.types import (
 	ScheduledMessage,
 	ServiceMessagesPage,
 	TelegramFloodError,
+	Urgency,
 	UserbotProfile,
+	urgency,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def publish_priority(post: OutgoingPost, now: datetime | None = None) -> TelegramPriority:
+	"""Приоритет дорожки для публикации — по срочности поста (ADR-0036).
+
+	Приоритет по-прежнему назначает шлюз, а не вызывающий (ADR-0024,
+	п. 3): срочность выводится из самого поста — из его момента
+	публикации. Пост «сейчас» (в том числе догон просроченного: очередь
+	отправки снимает у него время) — срочный; отложенная запись с датой
+	в будущем — плановая и уступает всем коротким операциям аккаунта.
+
+	Args:
+		post: исходящий пост.
+		now: текущее время (None — сейчас, UTC); подменяется в тестах.
+	"""
+	moment = now if now is not None else datetime.now(UTC)
+	if urgency(post.when, moment) is Urgency.DUE:
+		return TelegramPriority.PUBLISH_DUE
+	return TelegramPriority.PUBLISH_PLANNED
 
 
 class TelegramGateway:
@@ -371,7 +392,7 @@ class TelegramGateway:
 
 		Raises: см. :func:`bot_api.send_text`.
 		"""
-		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH_DUE) as token:
 			return await send_text(token, chat_id, text, topic_id, markup, entities, preview)
 
 	async def bot_send_poll(
@@ -386,7 +407,7 @@ class TelegramGateway:
 
 		Raises: см. :func:`bot_api.send_poll`.
 		"""
-		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH_DUE) as token:
 			return await send_poll(token, chat_id, poll, topic_id, markup)
 
 	async def bot_send_media(
@@ -406,7 +427,7 @@ class TelegramGateway:
 
 		Raises: см. :func:`bot_api.send_media`.
 		"""
-		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH_DUE) as token:
 			return await send_media(token, chat_id, kind, path, caption, topic_id, markup, entities)
 
 	async def bot_send_album(
@@ -422,7 +443,7 @@ class TelegramGateway:
 
 		Raises: см. :func:`bot_api.send_album`.
 		"""
-		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH_DUE) as token:
 			return await send_album(token, chat_id, files, caption, topic_id, entities)
 
 	async def bot_edit_markup(
@@ -436,7 +457,7 @@ class TelegramGateway:
 
 		Raises: см. :func:`bot_api.edit_markup`.
 		"""
-		async with self._bot_slot(bot, TelegramPriority.PUBLISH) as token:
+		async with self._bot_slot(bot, TelegramPriority.PUBLISH_DUE) as token:
 			await edit_markup(token, chat_id, message_id, markup)
 
 	async def bot_community_stats(self, bot: BotRef, chat_id: str) -> CommunityStatsInfo:
@@ -549,7 +570,7 @@ class TelegramGateway:
 				отправки ждёт названный срок и повторяет сама.
 			UserbotUnavailableError: Прочие отказы Telegram (лимиты и т.п.).
 		"""
-		async with self._userbot_slot(account_id, TelegramPriority.PUBLISH) as transport:
+		async with self._userbot_slot(account_id, publish_priority(post)) as transport:
 			return await transport.publish(chat_id, post, on_progress)
 
 	async def userbot_get_forum_topics(self, account_id: int, chat_id: str) -> list[ForumTopicInfo]:
