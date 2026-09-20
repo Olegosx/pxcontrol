@@ -73,6 +73,11 @@ def test_inviting_is_allowed_to_ordinary_members_too() -> None:
 	assert not can(member(), ExecutorAction.INVITE, GROUP)
 	assert can(admin(invite_users=True), ExecutorAction.INVITE, GROUP)
 	assert not can(admin(), ExecutorAction.INVITE, GROUP), "админу право тоже выдают поимённо"
+	# ссылку-приглашение Telegram показывает только администратору
+	# (живая проверка 20.09.2026) — участник с правом приглашать её не видит
+	assert can(admin(invite_users=True), ExecutorAction.INVITE_LINK, GROUP)
+	assert not can(admin(), ExecutorAction.INVITE_LINK, GROUP)
+	assert not can(member(invite_users=True), ExecutorAction.INVITE_LINK, GROUP)
 
 
 def test_reading_needs_only_membership() -> None:

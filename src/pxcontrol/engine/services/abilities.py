@@ -28,8 +28,9 @@ class ExecutorAction(StrEnum):
 	"""Предметное действие, на которое проверяют исполнителя (ADR-0035).
 
 	Перечень ровно тот, у которого есть потребитель: публикация и кнопки
-	(маршруты постов), удаление и исключение (обслуживание), приглашение
-	и назначение (ввод исполнителя), чтение истории (обслуживание же).
+	(маршруты постов), удаление и исключение (обслуживание), приглашение,
+	чтение ссылки-приглашения и назначение (ввод исполнителя), чтение
+	истории (обслуживание же).
 	Новое действие — одна ветка в :func:`can` и один потребитель; заводить
 	их про запас в проекте не принято.
 	"""
@@ -39,6 +40,7 @@ class ExecutorAction(StrEnum):
 	DELETE_OTHERS = "delete_others"  # удалять чужие сообщения (ADR-0026)
 	BAN = "ban"  # исключать участников (чистка удалённых аккаунтов)
 	INVITE = "invite"  # приглашать в сообщество
+	INVITE_LINK = "invite_link"  # видеть основную ссылку-приглашение сообщества
 	PROMOTE = "promote"  # назначать администраторов (так входит бот в канал)
 	READ_HISTORY = "read_history"  # читать ленту и список участников
 
@@ -72,13 +74,16 @@ def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> 
 			return rights.admin.invite_users
 		return rights.status.in_community and rights.allowed.invite_users
 	# остальное — права администратора поимённо: роль сама по себе
-	# не гарантирует ни удаления чужих сообщений, ни исключений
+	# не гарантирует ни удаления чужих сообщений, ни исключений.
+	# Ссылку-приглашение — в отличие от самого приглашения — Telegram
+	# показывает только администратору (живая проверка 20.09.2026)
 	if not rights.status.administers:
 		return False
 	return {
 		ExecutorAction.EDIT_OTHERS: rights.admin.edit_messages,
 		ExecutorAction.DELETE_OTHERS: rights.admin.delete_messages,
 		ExecutorAction.BAN: rights.admin.ban_users,
+		ExecutorAction.INVITE_LINK: rights.admin.invite_users,
 		ExecutorAction.PROMOTE: rights.admin.add_admins,
 	}[action]
 
@@ -107,6 +112,7 @@ ACTION_WORDS: dict[ExecutorAction, str] = {
 	ExecutorAction.DELETE_OTHERS: "удалять чужие сообщения",
 	ExecutorAction.BAN: "исключать участников",
 	ExecutorAction.INVITE: "приглашать",
+	ExecutorAction.INVITE_LINK: "видеть ссылку-приглашение",
 	ExecutorAction.PROMOTE: "назначать администраторов",
 	ExecutorAction.READ_HISTORY: "читать историю и участников",
 }

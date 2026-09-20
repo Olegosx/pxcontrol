@@ -64,7 +64,9 @@ class _FakeGateway:
 		self.joined_by_link: list[tuple[int, str]] = []
 		self.invited: list[tuple[int, str]] = []
 		self.promoted: list[tuple[int, str, AdminRights]] = []
-		self.known_link: str | None = None  # ссылка, которую отдаёт Telegram
+		self.known_link: str | None = None  # ссылка, которую Telegram отдаёт администратору
+		self.link_asked: list[int] = []  # кто спрашивал ссылку
+		self.member_invites = False  # участникам разрешено приглашать (настройка группы)
 		self.approval_needed = False  # приглашение требует одобрения
 		self.kind = CommunityKind.CHANNEL  # вид, который «увидит» проверка
 		self.forum = False  # признак форума в ответе проверки
@@ -110,7 +112,9 @@ class _FakeGateway:
 		return True
 
 	async def userbot_invite_link(self, account_id: int, chat_id: str) -> str | None:
-		return self.known_link
+		self.link_asked.append(account_id)
+		# как в Telegram: ссылку видит только администратор (живая проверка 20.09.2026)
+		return self.known_link if account_id in self.userbot_admins else None
 
 	async def userbot_invite_participant(self, account_id: int, chat_id: str, target: str) -> None:
 		self.invited.append((account_id, target))
@@ -140,7 +144,11 @@ class _FakeGateway:
 		here_admin = account_id in self.userbot_admins
 		status = self.status if here_admin else ParticipantStatus.MEMBER
 		admin = ALL_ADMIN_RIGHTS if here_admin and status.administers else AdminRights()
-		allowed = ALL_MEMBER_RIGHTS if here_admin else MemberRights(send_plain=True)
+		allowed = (
+			ALL_MEMBER_RIGHTS
+			if here_admin
+			else MemberRights(send_plain=True, invite_users=self.member_invites)
+		)
 		return CommunityInfo(
 			"-1001234",
 			self.title,
@@ -718,6 +726,36 @@ async def test_private_community_joined_by_existing_link(db: Database) -> None:
 	assert result.outcome is JoinOutcome.JOINED
 	assert gateway.joined_by_link == [(second, "https://t.me/+secretHash")]
 	assert not gateway.joined_public
+
+
+async def test_invite_link_is_asked_from_admin_not_first_inviter(db: Database) -> None:
+	"""Ссылку спрашивают у администратора, даже если первый в пуле — участник.
+
+	Живая проверка 20.09.2026: Telegram показывает основную ссылку только
+	администраторам, участник с правом приглашать её не видит. Спросив
+	первого способного приглашать, лестница сочла бы, что ссылки нет,
+	и ушла бы приглашать напрямую — ступенью, которая упирается в чужие
+	настройки приватности.
+	"""
+	gateway = _FakeGateway()
+	member = await _make_account(db, "@member")
+	admin = await _make_account(db, "@admin")
+	newcomer = await _make_account(db, "@newcomer")
+	gateway.userbot_admins = {admin}
+	gateway.member_invites = True
+	service = CommunitiesService(db, gateway)
+	dto = await service.add_community_via_userbot(member, "@testchan")  # участник — первый в пуле
+	await service.add_executor(dto.id, ExecutorRef(OwnerKind.USER, admin))
+	gateway.username = None
+	await _make_private(db, dto.id)
+	gateway.outsiders = {newcomer}
+	gateway.known_link = "https://t.me/+adminOnly"
+	gateway.link_asked.clear()
+	result = await service.add_executor(dto.id, ExecutorRef(OwnerKind.USER, newcomer))
+	assert result.outcome is JoinOutcome.JOINED
+	assert gateway.link_asked == [admin], "участника с правом приглашать о ссылке не спрашивают"
+	assert gateway.joined_by_link == [(newcomer, "https://t.me/+adminOnly")]
+	assert not gateway.invited
 
 
 async def test_join_request_is_an_outcome_not_a_membership(db: Database) -> None:

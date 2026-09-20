@@ -216,19 +216,30 @@ class ExecutorJoiner:
 	async def _known_invite_link(self, community: Community) -> str | None:
 		"""Основная ссылка-приглашение сообщества, если её кто-то из пула видит.
 
-		Ссылка у приватного сообщества уже есть, и Telegram отдаёт её
-		администратору с правом приглашать. Приложение её **читает**,
-		а не создаёт: создание — изменение состояния сообщества, за
-		которым тянется вопрос «кто её завёл и кто по ней пришёл».
+		Ссылка у приватного сообщества уже есть, но показывает её Telegram
+		только **администратору** с правом приглашать: участник с тем же
+		правом приглашает напрямую, а ссылки не видит (живая проверка
+		20.09.2026). Поэтому спрашиваются все такие администраторы
+		по очереди — спросив первого способного приглашать, лестница
+		с участником впереди пула сочла бы, что ссылки нет, и ушла бы
+		на менее надёжную ступень. Приложение ссылку **читает**, а не
+		создаёт: создание — изменение состояния сообщества, за которым
+		тянется вопрос «кто её завёл и кто по ней пришёл».
 		"""
-		account_id = self._executor_for(community, ExecutorAction.INVITE)
-		if account_id is None:
-			return None
-		try:
-			return await self._gateway.userbot_invite_link(account_id, community.tg_chat_id)
-		except UserbotUnavailableError as exc:
-			logger.info("Ссылку-приглашение «%s» прочитать не удалось: %s", community.title, exc)
-			return None
+		for account_id in self._executors_for(community, ExecutorAction.INVITE_LINK):
+			try:
+				link = await self._gateway.userbot_invite_link(account_id, community.tg_chat_id)
+			except UserbotUnavailableError as exc:
+				logger.info(
+					"Ссылку-приглашение «%s» аккаунтом %s прочитать не удалось: %s",
+					community.title,
+					account_id,
+					exc,
+				)
+				continue
+			if link is not None:
+				return link
+		return None
 
 	async def _invite_by_pool(self, community: Community, target: str) -> bool:
 		"""Приглашает исполнителя силами пула; False — не вышло.
@@ -248,17 +259,24 @@ class ExecutorJoiner:
 		return True
 
 	@staticmethod
-	def _executor_for(community: Community, action: ExecutorAction) -> int | None:
-		"""Аккаунт из пула, способный на названное действие (None — такого нет).
+	def _executors_for(community: Community, action: ExecutorAction) -> list[int]:
+		"""Аккаунты пула, способные на названное действие, в порядке строк пула.
 
 		Ввод исполнителя делают руками своих же администраторов, и выбрать
 		их можно только по правам. Приостановленные (ADR-0029)
 		не рассматриваются — приложение их не использует ни для чего.
 		"""
 		kind = CommunityKind(community.kind)
-		for row in community.executors:
-			if row.tg_account_id is None or executor_paused(row):
-				continue
-			if can(executor_rights(row), action, kind):
-				return row.tg_account_id
-		return None
+		return [
+			row.tg_account_id
+			for row in community.executors
+			if row.tg_account_id is not None
+			and not executor_paused(row)
+			and can(executor_rights(row), action, kind)
+		]
+
+	@classmethod
+	def _executor_for(cls, community: Community, action: ExecutorAction) -> int | None:
+		"""Первый аккаунт пула, способный на действие (None — такого нет)."""
+		capable = cls._executors_for(community, action)
+		return capable[0] if capable else None
