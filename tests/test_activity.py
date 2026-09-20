@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 
@@ -12,8 +13,13 @@ from sqlalchemy import select
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import AccountOperation, Bot, TgAccount
 from pxcontrol.engine.services.activity import (
+	WINDOW_DAY_S,
+	WINDOW_HOUR_S,
+	WINDOW_WEEK_S,
 	ActivityService,
 	LiveDto,
+	OwnerActivityDto,
+	WindowStats,
 	_Interval,
 	window_stats,
 )
@@ -155,7 +161,8 @@ async def test_snapshot_windows_and_live(db: Database) -> None:
 	assert set(snapshot) == {user, bot, LaneOwner(OwnerKind.BOT, 42)}
 	me = snapshot[user]
 	assert (me.last_hour.operations, me.last_day.operations, me.last_week.operations) == (1, 2, 3)
-	assert me.last_hour.busy_s == 10 + 5, "плюс идущая операция"
+	# занятость считает база: функции даты SQLite работают в миллисекундах
+	assert me.last_hour.busy_s == pytest.approx(10 + 5, abs=0.002), "плюс идущая операция"
 	assert me.live.busy_kind is TelegramPriority.MAINTENANCE and me.live.waiting == 2
 	assert me.last_operation_at == _at(-590)
 	assert snapshot[bot].last_hour.errors == 1
@@ -336,3 +343,79 @@ async def test_service_counts_operations_of_live_gateway(db: Database) -> None:
 	snapshot = await service.snapshot()
 	assert snapshot[user].last_day.operations == 3
 	await gateway.stop()
+
+
+# --- агрегаты базы против Python-эталона ------------------------------------------------
+
+
+def _reference(records: list[OperationRecord], owner: LaneOwner) -> dict[str, WindowStats]:
+	"""Окна владельца по эталонной ``window_stats`` из тех же записей."""
+	intervals = [
+		_Interval(r.kind.name.lower(), r.started_at, r.finished_at, str(r.outcome), r.wait_s)
+		for r in records
+		if r.owner == owner
+	]
+	return {
+		"last_hour": window_stats(intervals, _at(-WINDOW_HOUR_S), _NOW),
+		"last_day": window_stats(intervals, _at(-WINDOW_DAY_S), _NOW),
+		"last_week": window_stats(intervals, _at(-WINDOW_WEEK_S), _NOW),
+	}
+
+
+def _assert_windows_match(actual: OwnerActivityDto, expected: dict[str, WindowStats]) -> None:
+	for label, want in expected.items():
+		got: WindowStats = getattr(actual, label)
+		assert (got.operations, got.errors, got.floods, got.window_s) == (
+			want.operations,
+			want.errors,
+			want.floods,
+			want.window_s,
+		), label
+		# функции даты SQLite считают в миллисекундах: до 1 мс на операцию,
+		# у суммы за окно погрешность растёт с их числом (доля окна её не видит)
+		tolerance = 0.002 + 0.001 * want.operations
+		assert got.busy_s == pytest.approx(want.busy_s, abs=tolerance), label
+
+
+async def test_snapshot_matches_python_reference_on_random_operations(db: Database) -> None:
+	"""Агрегаты базы совпадают с эталоном ``window_stats`` на случайных операциях.
+
+	Операции с разными началами и длительностями (в том числе длиннее
+	часа и через границы окон), всеми исходами, у двух владельцев;
+	часть — за пределами недели. Правило окна одно, и разойтись ему
+	нельзя незаметно.
+	"""
+	user, bot = await _owners(db)
+	gateway = _FakeGateway()
+	service = ActivityService(db, gateway)
+	rng = random.Random(20260920)
+	kinds = list(TelegramPriority)
+	outcomes = list(Outcome)
+	records: list[OperationRecord] = []
+	for _ in range(240):
+		owner = user if rng.random() < 0.6 else bot
+		end = -rng.uniform(0, 9 * 86400)  # до девяти дней назад — часть за неделей
+		length = rng.choice([rng.uniform(0.1, 30), rng.uniform(60, 5400)])  # секунды и часы
+		records.append(_record(owner, end - length, end, rng.choice(kinds), rng.choice(outcomes)))
+	gateway.buffer = list(records)
+	snapshot = await service.snapshot(_NOW)
+	for owner in (user, bot):
+		_assert_windows_match(snapshot[owner], _reference(records, owner))
+
+
+async def test_snapshot_window_edges(db: Database) -> None:
+	"""Границы окна: частичное пересечение, конец ровно в now, будущее начало."""
+	user, _bot = await _owners(db)
+	gateway = _FakeGateway()
+	service = ActivityService(db, gateway)
+	gateway.buffer = [
+		# началась до окна, кончилась внутри: в занятость — 20 с, в счёт — да (по концу)
+		_record(user, -WINDOW_HOUR_S - 100, -WINDOW_HOUR_S + 20),
+		_record(user, -5, 0),  # кончилась ровно в now — считается
+		_record(user, 30, 60),  # часы сбились: началась после now — ни счёта, ни занятости
+	]
+	snapshot = await service.snapshot(_NOW)
+	hour = snapshot[user].last_hour
+	assert hour.operations == 2
+	assert hour.busy_s == pytest.approx(20 + 5, abs=0.002)
+	assert snapshot[user].last_day.busy_s == pytest.approx(120 + 5, abs=0.002)

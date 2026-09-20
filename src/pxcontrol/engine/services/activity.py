@@ -14,6 +14,16 @@
 Объём честный: при десятке сообществ — около двух тысяч строк в сутки,
 70 МБ за год хранения (``KEEP_DAYS``); строки старше убирает сам сервис.
 
+Окна снимка (час, сутки, неделя) считает **база одним запросом
+с группировкой по владельцу** (с 2026-09-20): снимок читается раз
+в пять секунд, пока видна страница исполнителей, и поднимать ради него
+тысячи строк недели объектами было расточительно. Правило окна при этом
+одно: чистая :func:`window_stats` осталась эталоном, и тест сверяет
+с ней агрегаты базы на случайных данных. Длительности считаются
+функцией ``julianday`` и многоаргументными ``min``/``max`` — это SQLite
+(стек проекта, ADR-0009); при смене СУБД запрос переписывается вместе
+с остальными местами, зависящими от диалекта.
+
 Живое состояние (чем занята дорожка, сколько ждут, заморозка) в БД
 не пишется — оно меняется каждую секунду и читается из шлюза.
 """
@@ -22,11 +32,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
-from typing import Protocol
+from typing import Any, Protocol
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import BindParameter, DateTime, and_, bindparam, case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pxcontrol.engine.db.database import Database
@@ -59,6 +69,22 @@ PRUNE_EVERY_S = 3600
 WINDOW_HOUR_S = 3600
 WINDOW_DAY_S = 24 * 3600
 WINDOW_WEEK_S = 7 * 24 * 3600
+
+#: Окна снимка по порядку: имя поля ``OwnerActivityDto`` → длина, секунды.
+#: Самое широкое — последнее: по нему режется выборка строк.
+_WINDOWS: tuple[tuple[str, int], ...] = (
+	("last_hour", WINDOW_HOUR_S),
+	("last_day", WINDOW_DAY_S),
+	("last_week", WINDOW_WEEK_S),
+)
+
+#: Секунд в сутках: разница ``julianday`` измеряется в сутках.
+_DAY_S = 86400.0
+
+#: До скольких знаков округлять занятость из базы: функции даты SQLite
+#: считают с точностью до миллисекунды (до 1 мс погрешности на операцию),
+#: показ идёт в долях окна — хвосты дробных микросекунд не нужны.
+_BUSY_DIGITS = 3
 
 #: Окна истории страницы аккаунта (ADR-0030): профиль по часам суток —
 #: за неделю, занятость и флуд-лимиты по дням — за месяц.
@@ -160,6 +186,19 @@ class _Interval:
 	wait_s: int
 
 
+def live_busy_s(live: LiveDto | None, window_start: datetime, now: datetime) -> float:
+	"""Занятость идущей прямо сейчас операции внутри окна, секунды.
+
+	Идущая операция в базе ещё не лежит: в занятость она входит от своего
+	начала (не раньше начала окна) до ``now``, в число операций — нет.
+	Правило одно на Python-эталон (:func:`window_stats`) и на снимок
+	из агрегатов базы.
+	"""
+	if live is None or live.busy_since is None:
+		return 0.0
+	return max(0.0, (now - max(live.busy_since, window_start)).total_seconds())
+
+
 def window_stats(
 	intervals: Iterable[_Interval],
 	window_start: datetime,
@@ -172,6 +211,9 @@ def window_stats(
 	окна; в занятость — пересечением с окном, сколько бы она ни длилась
 	и когда бы ни началась. Идущая сейчас операция (``live``) в занятость
 	входит от своего начала до ``now``, в число операций — нет.
+
+	Снимок для интерфейса это правило считает базой (:meth:`ActivityService.snapshot`);
+	функция осталась **эталоном**: по ней тест сверяет агрегаты SQL.
 	"""
 	operations = 0
 	busy = 0.0
@@ -186,10 +228,7 @@ def window_stats(
 				errors += 1
 			elif item.outcome == Outcome.FLOOD:
 				floods += 1
-	if live is not None and live.busy_since is not None:
-		running = (now - max(live.busy_since, window_start)).total_seconds()
-		if running > 0:
-			busy += running
+	busy += live_busy_s(live, window_start, now)
 	return WindowStats(
 		operations=operations,
 		busy_s=busy,
@@ -266,6 +305,42 @@ def _owner_of(tg_account_id: int | None, bot_id: int | None) -> LaneOwner | None
 	if bot_id is not None:
 		return LaneOwner(OwnerKind.BOT, bot_id)
 	return None
+
+
+def _window_columns(label: str, start: BindParameter[Any], now: BindParameter[Any]) -> list[Any]:
+	"""Столбцы агрегатов одного окна: операции, ошибки, флуд-лимиты, занятость.
+
+	Число операций и исходов — по концу внутри окна; занятость — сумма
+	положительных пересечений ``[started_at, finished_at]`` с ``[start, now]``
+	в секундах (``julianday`` даёт сутки — переводится через :data:`_DAY_S`).
+	Строка, кончившаяся до начала окна, даёт отрицательное пересечение
+	и обнуляется ``max(0, …)`` — как ``overlap > 0`` в эталоне.
+	"""
+	finished = AccountOperation.finished_at
+	started = AccountOperation.started_at
+	in_window = and_(finished >= start, finished <= now)
+	overlap_days = func.min(func.julianday(finished), func.julianday(now)) - func.max(
+		func.julianday(started), func.julianday(start)
+	)
+	busy_s = func.coalesce(func.sum(func.max(0.0, overlap_days * _DAY_S)), 0.0)
+	outcome = AccountOperation.outcome
+	errors = and_(in_window, outcome == str(Outcome.ERROR))
+	floods = and_(in_window, outcome == str(Outcome.FLOOD))
+	return [
+		func.count(case((in_window, 1))).label(f"{label}_operations"),
+		func.count(case((errors, 1))).label(f"{label}_errors"),
+		func.count(case((floods, 1))).label(f"{label}_floods"),
+		busy_s.label(f"{label}_busy_s"),
+	]
+
+
+def _with_live(
+	stats: WindowStats | None, window_s: int, live: LiveDto, now: datetime
+) -> WindowStats:
+	"""Окно из агрегатов базы (или пустое) плюс идущая сейчас операция."""
+	base = stats if stats is not None else WindowStats(window_s=window_s)
+	running = live_busy_s(live, now - timedelta(seconds=window_s), now)
+	return replace(base, busy_s=base.busy_s + running) if running else base
 
 
 class ActivityService:
@@ -392,50 +467,71 @@ class ActivityService:
 		"""
 		now = now or datetime.now(UTC)
 		await self.flush()
-		week_start = now - timedelta(seconds=WINDOW_WEEK_S)
 		async with self._db.session_factory() as session:
-			rows = (
-				(
-					await session.execute(
-						select(AccountOperation).where(AccountOperation.finished_at >= week_start)
-					)
-				)
-				.scalars()
-				.all()
-			)
+			windows = await self._window_aggregates(session, now)
 			last_seen = await self._last_operations(session)
-		by_owner: dict[LaneOwner, list[_Interval]] = {}
-		for row in rows:
-			owner = _owner_of(row.tg_account_id, row.bot_id)
-			if owner is None:
-				continue
-			by_owner.setdefault(owner, []).append(
-				_Interval(
-					row.kind,
-					as_utc(row.started_at),
-					as_utc(row.finished_at),
-					row.outcome,
-					row.wait_s,
-				)
-			)
 		lives = {
 			owner: LiveDto(state.busy_kind, state.busy_since, state.waiting, state.frozen_for_s)
 			for owner, state in self._gateway.live_states().items()
 		}
 		result: dict[LaneOwner, OwnerActivityDto] = {}
-		for owner in set(by_owner) | set(lives) | set(last_seen):
-			intervals = by_owner.get(owner, [])
+		for owner in set(windows) | set(lives) | set(last_seen):
 			live = lives.get(owner, LiveDto(None, None, 0, 0.0))
+			stats = windows.get(owner, {})
 			result[owner] = OwnerActivityDto(
 				owner=owner,
 				live=live,
-				last_hour=window_stats(
-					intervals, now - timedelta(seconds=WINDOW_HOUR_S), now, live
-				),
-				last_day=window_stats(intervals, now - timedelta(seconds=WINDOW_DAY_S), now, live),
-				last_week=window_stats(intervals, week_start, now, live),
+				last_hour=_with_live(stats.get("last_hour"), WINDOW_HOUR_S, live, now),
+				last_day=_with_live(stats.get("last_day"), WINDOW_DAY_S, live, now),
+				last_week=_with_live(stats.get("last_week"), WINDOW_WEEK_S, live, now),
 				last_operation_at=last_seen.get(owner),
 			)
+		return result
+
+	@staticmethod
+	async def _window_aggregates(
+		session: AsyncSession, now: datetime
+	) -> dict[LaneOwner, dict[str, WindowStats]]:
+		"""Окна час / сутки / неделя по каждому владельцу — одним запросом базы.
+
+		Выборка режется по самому широкому окну (неделя) — она ложится
+		на индекс по ``finished_at``; для каждого окна база считает число
+		операций, ошибок и флуд-лимитов по концу внутри окна и занятость —
+		сумму пересечений интервалов с окном (правило :func:`window_stats`).
+		Группировка идёт по строкам недели, а не по всей таблице, поэтому
+		дорогого случая из :meth:`_last_operations` здесь нет.
+
+		Владельцы без операций за неделю в ответе отсутствуют — снимок
+		дополняет их нулевыми окнами.
+		"""
+		now_bind = bindparam("now", now, type_=DateTime(timezone=True))
+		columns: list[Any] = [AccountOperation.tg_account_id, AccountOperation.bot_id]
+		for label, seconds in _WINDOWS:
+			start_bind = bindparam(
+				f"{label}_start", now - timedelta(seconds=seconds), type_=DateTime(timezone=True)
+			)
+			columns.extend(_window_columns(label, start_bind, now_bind))
+		week_start = now - timedelta(seconds=WINDOW_WEEK_S)
+		statement = (
+			select(*columns)
+			.where(AccountOperation.finished_at >= week_start)
+			.group_by(AccountOperation.tg_account_id, AccountOperation.bot_id)
+		)
+		result: dict[LaneOwner, dict[str, WindowStats]] = {}
+		for row in (await session.execute(statement)).mappings():
+			owner = _owner_of(row["tg_account_id"], row["bot_id"])
+			if owner is None:
+				continue
+			result[owner] = {
+				label: WindowStats(
+					operations=int(row[f"{label}_operations"]),
+					busy_s=round(float(row[f"{label}_busy_s"]), _BUSY_DIGITS),
+					window_s=seconds,
+					errors=int(row[f"{label}_errors"]),
+					floods=int(row[f"{label}_floods"]),
+				)
+				for label, seconds in _WINDOWS
+			}
 		return result
 
 	@staticmethod
