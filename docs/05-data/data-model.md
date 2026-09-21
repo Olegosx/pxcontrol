@@ -291,7 +291,7 @@
 | Поле | Тип | Назначение |
 |---|---|---|
 | `community_id` | FK→communities, ON DELETE CASCADE | сообщество |
-| `kind` | str | вид: `service_messages` / `deleted_accounts` / `reactions` (значения `TaskKind`) |
+| `kind` | str | вид: `service_messages` / `deleted_accounts` / `reactions` / `join_requests` (значения `TaskKind`) |
 | `enabled` | bool | расписание действует |
 | `params` | JSON | параметры вида (`TaskSpec.params_to_payload`) |
 | `schedule` | JSON | расписание (`Schedule.to_payload`): `kind` — `none` / `interval` (+ `min_minutes`, `max_minutes`) / `daily` (+ `times` списком «ЧЧ:ММ»); новая задача — `none` |

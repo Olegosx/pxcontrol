@@ -45,6 +45,7 @@ class TaskKind(StrEnum):
 	SERVICE_MESSAGES = "service_messages"  # служебные записи в ленте (ADR-0026)
 	DELETED_ACCOUNTS = "deleted_accounts"  # удалённые аккаунты среди участников
 	REACTIONS = "reactions"  # реакции на записи выбранными пользователями (ADR-0039)
+	JOIN_REQUESTS = "join_requests"  # приём заявок на вступление (ADR-0040)
 
 
 class TaskTrigger(StrEnum):

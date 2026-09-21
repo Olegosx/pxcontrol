@@ -1,6 +1,6 @@
 # Модуль «Шлюз Telegram»
 
-> Статус: 🟢 реализовано (в объёме текущих функций) · Обновлено: 2026-09-21 · Владелец: olegosx
+> Статус: 🟢 реализовано (в объёме текущих функций) · Обновлено: 2026-09-22 · Владелец: olegosx
 
 ## Назначение
 
@@ -125,6 +125,22 @@
 списком `ReactionEmoji`, `add_to_recent=False`. Отказы по записи
 (`REACTION_INVALID`, `REACTIONS_TOO_MANY`, `PREMIUM_ACCOUNT_REQUIRED`)
 переводятся в `UserbotReactionError` — пропуск записи, а не сбой.
+
+## Заявки на вступление ([ADR-0040](../02-architecture/decisions/0040-join-requests-task.md))
+
+Четыре userbot-операции задачи приёма заявок, приоритет `MAINTENANCE`:
+`userbot_join_requests_page` — страница ожидающих
+(`messages.getChatInviteImporters` с `requested`; первая страница —
+пустое смещение, дальше — «дата + заявитель» последней заявки, хеши
+заявителей запоминаются на время запуска; описание профиля приходит
+полем `about`, удалённость и хеш доступа — из `users`);
+`userbot_handle_join_request` — `messages.hideChatJoinRequest`
+с `approved`; `userbot_restrict_fully` — `channels.editBanned` со всеми
+запретами, кроме `view_messages` (бан), без срока;
+`userbot_has_personal_channel` — `users.getFullUser` →
+`personal_channel_id`. Отказы по заявке (`HIDE_REQUESTER_MISSING`,
+`USER_ALREADY_PARTICIPANT`, `INPUT_USER_DEACTIVATED`,
+`USER_CHANNELS_TOO_MUCH`) — `UserbotJoinRequestError`, пропуск.
 
 ## Дорожка аккаунта ([ADR-0024](../02-architecture/decisions/0024-telegram-account-lane.md))
 

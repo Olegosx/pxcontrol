@@ -74,6 +74,8 @@ from pxcontrol.engine.telegram.types import (
 	ChatReactions,
 	DeletedAccount,
 	ExecutorRef,
+	JoinRequest,
+	JoinRequestsPage,
 	OwnerKind,
 	ParticipantsPage,
 	ReactionsPage,
@@ -145,6 +147,20 @@ class _TasksPort(Protocol):
 	) -> None: ...
 
 	def userbot_premium(self, account_id: int | None) -> bool: ...
+
+	async def userbot_join_requests_page(
+		self, account_id: int, chat_id: str, offset: tuple[datetime, int] | None, limit: int
+	) -> JoinRequestsPage: ...
+
+	async def userbot_handle_join_request(
+		self, account_id: int, chat_id: str, request: JoinRequest, *, approve: bool
+	) -> None: ...
+
+	async def userbot_restrict_fully(
+		self, account_id: int, chat_id: str, request: JoinRequest
+	) -> None: ...
+
+	async def userbot_has_personal_channel(self, account_id: int, request: JoinRequest) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -756,9 +772,10 @@ class TasksService:
 		executor = spec.choose_executor(task.params, task.cursor, users)
 		if executor is None:
 			raise TaskError(
-				"Ни один из выбранных для задачи пользователей сейчас не может её "
-				"вести: они приостановлены, не состоят в сообществе или лишены нужного "
-				"права. Выберите других или верните этих в строй."
+				"Некому вести этот запуск: нужный исполнитель приостановлен, не состоит "
+				"в сообществе или лишён нужного права (реакции — у названных "
+				"пользователей; приём заявок с ограничением — ещё и право исключать). "
+				"Выберите других или верните этих в строй."
 			)
 		return community, executor
 

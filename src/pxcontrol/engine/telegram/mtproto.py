@@ -56,6 +56,8 @@ from pxcontrol.engine.telegram.types import (
 	DeletedAccount,
 	ForumTopicInfo,
 	HistoryMarks,
+	JoinRequest,
+	JoinRequestsPage,
 	MediaKind,
 	NamedSeries,
 	OutgoingPost,
@@ -168,6 +170,16 @@ class UserbotReactionError(UserbotUnavailableError):
 	``PREMIUM_ACCOUNT_REQUIRED`` (эмодзи только для Premium). Отказ
 	по одной записи — пропуск, а не конец прохода: остальные записи
 	реакцию получат.
+	"""
+
+
+class UserbotJoinRequestError(UserbotUnavailableError):
+	"""Заявку обработать не удалось — она уже разобрана или заявитель негоден (ADR-0040).
+
+	``HIDE_REQUESTER_MISSING`` (заявки уже нет), ``USER_ALREADY_PARTICIPANT``,
+	``INPUT_USER_DEACTIVATED`` (аккаунт удалён), ``USER_CHANNELS_TOO_MUCH``
+	(заявитель в предельном числе сообществ). Отказ по одной заявке —
+	пропуск, а не конец прохода.
 	"""
 
 
@@ -308,6 +320,14 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		| errors.PremiumAccountRequiredError,
 	):
 		return UserbotReactionError(f"Telegram не принял реакцию: {exc}")
+	if isinstance(
+		exc,
+		errors.HideRequesterMissingError
+		| errors.UserAlreadyParticipantError
+		| errors.InputUserDeactivatedError
+		| errors.UserChannelsTooMuchError,
+	):
+		return UserbotJoinRequestError(f"Telegram не дал обработать заявку: {exc}")
 	if isinstance(exc, errors.MessageDeleteForbiddenError):
 		# отказ в удалении — не сбой прохода, а пропуск записи (ADR-0026).
 		# Перевод живёт здесь, а не отдельной веткой except у операции:
@@ -792,6 +812,63 @@ def _service_message_id(produced: Any) -> int | None:
 	return int(message_id) if message_id is not None else None
 
 
+def _join_request_from(importer: Any, user: Any) -> JoinRequest:
+	"""Заявка из ``chatInviteImporter`` и карточки заявителя (чистая)."""
+	username = getattr(user, "username", None)
+	first = getattr(user, "first_name", None) or ""
+	last = getattr(user, "last_name", None) or ""
+	name = f"{first} {last}".strip()
+	return JoinRequest(
+		user_id=importer.user_id,
+		access_hash=getattr(user, "access_hash", None),
+		date=getattr(importer, "date", None),
+		bio=getattr(importer, "about", None),
+		deleted=bool(getattr(user, "deleted", False)),
+		label=f"@{username}" if username else (name or f"id {importer.user_id}"),
+	)
+
+
+def _input_user(request: JoinRequest) -> Any:
+	"""Ссылка на заявителя для запроса: id с хешем доступа."""
+	from telethon.tl.types import InputUser
+
+	return InputUser(request.user_id, request.access_hash or 0)
+
+
+#: Флаги ``chatBannedRights``, которые выставляет полное ограничение
+#: (ADR-0040): всё, кроме ``view_messages`` — тот означает бан.
+_RESTRICTED_FLAGS = (
+	"send_messages",
+	"send_media",
+	"send_stickers",
+	"send_gifs",
+	"send_games",
+	"send_inline",
+	"embed_links",
+	"send_polls",
+	"change_info",
+	"invite_users",
+	"pin_messages",
+	"manage_topics",
+	"send_photos",
+	"send_videos",
+	"send_roundvideos",
+	"send_audios",
+	"send_voices",
+	"send_docs",
+	"send_plain",
+	"edit_rank",
+	"send_reactions",
+)
+
+
+def _full_restriction() -> Any:
+	"""Полный набор запретов участнику, кроме бана (ADR-0040)."""
+	from telethon.tl.types import ChatBannedRights
+
+	return ChatBannedRights(until_date=None, **dict.fromkeys(_RESTRICTED_FLAGS, True))
+
+
 def _mine_reactions(reactions: Any) -> tuple[str, ...]:
 	"""Эмодзи реакций текущего аккаунта из ``messageReactions`` (чистая).
 
@@ -852,6 +929,10 @@ class MtprotoTransport:
 		self._premium = False
 		# одно переподключение за раз: параллельные операции ждут его итога
 		self._reconnect_lock = asyncio.Lock()
+		#: хеши доступа заявителей, встреченных в этом запуске: смещение
+		#: страницы заявок — «дата + пользователь», и пользователя нужно
+		#: адресовать с хешем (ADR-0040)
+		self._known_hashes: dict[int, int] = {}
 
 	@property
 	def premium(self) -> bool:
@@ -1969,6 +2050,126 @@ class MtprotoTransport:
 					add_to_recent=False,
 				)
 			)
+
+	async def join_requests_page(
+		self, chat_id: str, offset: tuple[datetime, int] | None, limit: int
+	) -> JoinRequestsPage:
+		"""Читает страницу ожидающих заявок на вступление (ADR-0040).
+
+		``messages.getChatInviteImporters`` с флагом ``requested``:
+		Telegram отдаёт заявки страницами со смещением «дата + заявитель»;
+		для первой страницы смещение пустое (``offset_date`` 0
+		и ``inputUserEmpty`` — документация формы первой страницы словами
+		не задаёт, проверяется живьём). Описание профиля заявителя
+		приходит вместе с заявкой (``about``), карточка пользователя
+		с хешем доступа и признаком удалённости — в том же ответе.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Нет права видеть заявки (нужен администратор).
+			UserbotFloodError: Флуд-лимит — проход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.messages import GetChatInviteImportersRequest
+		from telethon.tl.types import InputUser, InputUserEmpty
+
+		client, entity = await self._client_and_entity(chat_id)
+		offset_user: Any = InputUserEmpty()
+		offset_date = None
+		if offset is not None:
+			offset_date, user_id = offset
+			offset_user = InputUser(user_id, self._known_hashes.get(user_id, 0))
+		async with _mtproto_errors():
+			result = await client(
+				GetChatInviteImportersRequest(
+					peer=entity,
+					offset_date=offset_date,
+					offset_user=offset_user,
+					limit=limit,
+					requested=True,
+				)
+			)
+		users = {user.id: user for user in getattr(result, "users", [])}
+		requests = [
+			_join_request_from(importer, users.get(importer.user_id))
+			for importer in getattr(result, "importers", [])
+		]
+		for request in requests:
+			if request.access_hash is not None:
+				self._known_hashes[request.user_id] = request.access_hash
+		last = requests[-1] if requests else None
+		return JoinRequestsPage(
+			requests=requests,
+			total=int(getattr(result, "count", len(requests)) or 0),
+			next_offset=(last.date, last.user_id) if last is not None and last.date else None,
+		)
+
+	async def handle_join_request(
+		self, chat_id: str, request: JoinRequest, *, approve: bool
+	) -> None:
+		"""Одобряет или отклоняет заявку (``messages.hideChatJoinRequest``).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Нет права (подтверждённый отказ).
+			UserbotJoinRequestError: Заявки уже нет или заявитель негоден —
+				пропуск, а не конец прохода.
+			UserbotFloodError: Флуд-лимит — проход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.messages import HideChatJoinRequestRequest
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			await client(
+				HideChatJoinRequestRequest(
+					peer=entity, user_id=_input_user(request), approved=approve
+				)
+			)
+
+	async def restrict_fully(self, chat_id: str, request: JoinRequest) -> None:
+		"""Оставляет участника читать, запретив всё остальное (``channels.editBanned``).
+
+		Все флаги ``chatBannedRights`` выставлены, кроме ``view_messages``:
+		он означает бан. Срока нет — ограничение бессрочное. Обёртка
+		Telethon ``edit_permissions`` не знает гранулярных прав 2023 года
+		(фото, видео, реакции…), поэтому запрос собирается прямо.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Нет права исключать (подтверждённый отказ).
+			UserbotJoinRequestError: Заявитель негоден (удалён).
+			UserbotFloodError: Флуд-лимит — проход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.channels import EditBannedRequest
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			await client(
+				EditBannedRequest(
+					channel=entity,
+					participant=_input_user(request),
+					banned_rights=_full_restriction(),
+				)
+			)
+
+	async def has_personal_channel(self, request: JoinRequest) -> bool:
+		"""Есть ли у заявителя канал в профиле (``users.getFullUser``).
+
+		Один запрос на заявителя — поэтому проверка включается
+		отдельным флажком задачи (ADR-0040).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotUnavailableError: Отказы Telegram.
+		"""
+		from telethon.tl.functions.users import GetFullUserRequest
+
+		client = await self._connected_client()
+		async with _mtproto_errors():
+			full = await client(GetFullUserRequest(_input_user(request)))
+		return getattr(getattr(full, "full_user", None), "personal_channel_id", None) is not None
 
 	async def delete_messages(self, chat_id: str, message_ids: list[int]) -> int:
 		"""Удаляет сообщения сообщества; возвращает, сколько удалилось.

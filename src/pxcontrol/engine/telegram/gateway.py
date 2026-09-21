@@ -68,6 +68,8 @@ from pxcontrol.engine.telegram.types import (
 	ExecutorRef,
 	ForumTopicInfo,
 	HistoryMarks,
+	JoinRequest,
+	JoinRequestsPage,
 	LinkPreview,
 	MediaKind,
 	OutgoingPost,
@@ -725,6 +727,44 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			await transport.send_reaction(chat_id, message_id, emojis)
+
+	async def userbot_join_requests_page(
+		self, account_id: int, chat_id: str, offset: tuple[datetime, int] | None, limit: int
+	) -> JoinRequestsPage:
+		"""Читает страницу ожидающих заявок на вступление (ADR-0040).
+
+		Raises: см. :meth:`MtprotoTransport.join_requests_page`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			return await transport.join_requests_page(chat_id, offset, limit)
+
+	async def userbot_handle_join_request(
+		self, account_id: int, chat_id: str, request: JoinRequest, *, approve: bool
+	) -> None:
+		"""Одобряет или отклоняет заявку (ADR-0040).
+
+		Raises: см. :meth:`MtprotoTransport.handle_join_request`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			await transport.handle_join_request(chat_id, request, approve=approve)
+
+	async def userbot_restrict_fully(
+		self, account_id: int, chat_id: str, request: JoinRequest
+	) -> None:
+		"""Оставляет участника только читать (ADR-0040).
+
+		Raises: см. :meth:`MtprotoTransport.restrict_fully`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			await transport.restrict_fully(chat_id, request)
+
+	async def userbot_has_personal_channel(self, account_id: int, request: JoinRequest) -> bool:
+		"""Есть ли у заявителя канал в профиле — один запрос на заявителя (ADR-0040).
+
+		Raises: см. :meth:`MtprotoTransport.has_personal_channel`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			return await transport.has_personal_channel(request)
 
 	async def userbot_delete_messages(
 		self, account_id: int, chat_id: str, message_ids: list[int]

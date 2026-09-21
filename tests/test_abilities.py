@@ -144,3 +144,11 @@ def test_reacting_is_a_member_permission() -> None:
 	left = ExecutorRights(ParticipantStatus.LEFT, AdminRights(), MemberRights(send_reactions=True))
 	assert not can(left, ExecutorAction.REACT, CHANNEL)
 	assert ExecutorAction.REACT in ACTION_WORDS
+
+
+def test_approving_join_requests_needs_invite_right() -> None:
+	"""Заявки принимает администратор с правом приглашать (ADR-0040)."""
+	assert can(admin(invite_users=True), ExecutorAction.APPROVE_REQUESTS, GROUP)
+	assert not can(admin(ban_users=True), ExecutorAction.APPROVE_REQUESTS, GROUP)
+	assert not can(member(invite_users=True), ExecutorAction.APPROVE_REQUESTS, GROUP)
+	assert ExecutorAction.APPROVE_REQUESTS in ACTION_WORDS

@@ -30,7 +30,8 @@ class ExecutorAction(StrEnum):
 	Перечень ровно тот, у которого есть потребитель: публикация и кнопки
 	(маршруты постов), удаление и исключение (обслуживание), приглашение,
 	чтение ссылки-приглашения и назначение (ввод исполнителя), чтение
-	истории (обслуживание же), реакции (задача реакций, ADR-0039).
+	истории (обслуживание же), реакции (задача реакций, ADR-0039),
+	приём заявок на вступление (ADR-0040).
 	Новое действие — одна ветка в :func:`can` и один потребитель; заводить
 	их про запас в проекте не принято.
 	"""
@@ -45,6 +46,7 @@ class ExecutorAction(StrEnum):
 	PROMOTE = "promote"  # назначать администраторов (так входит бот в канал)
 	READ_HISTORY = "read_history"  # читать ленту и список участников
 	REACT = "react"  # ставить реакции на записи (задача реакций, ADR-0039)
+	APPROVE_REQUESTS = "approve_requests"  # принимать заявки на вступление (ADR-0040)
 
 
 def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> bool:
@@ -94,6 +96,10 @@ def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> 
 		ExecutorAction.DELETE_OTHERS: rights.admin.delete_messages,
 		ExecutorAction.BAN: rights.admin.ban_users,
 		ExecutorAction.INVITE_LINK: rights.admin.invite_users,
+		# заявки одобряет администратор с правом приглашать: в MTProto
+		# право не названо словами, у Bot API для тех же методов —
+		# can_invite_users (ADR-0040; проверяется живьём)
+		ExecutorAction.APPROVE_REQUESTS: rights.admin.invite_users,
 		ExecutorAction.PROMOTE: rights.admin.add_admins,
 	}[action]
 
@@ -146,6 +152,7 @@ ACTION_WORDS: dict[ExecutorAction, str] = {
 	ExecutorAction.PROMOTE: "назначать администраторов",
 	ExecutorAction.READ_HISTORY: "читать историю и участников",
 	ExecutorAction.REACT: "ставить реакции",
+	ExecutorAction.APPROVE_REQUESTS: "принимать заявки на вступление",
 }
 
 

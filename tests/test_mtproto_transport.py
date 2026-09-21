@@ -13,6 +13,7 @@ import pytest
 from pxcontrol.engine.telegram.mtproto import (
 	MtprotoTransport,
 	UserbotFloodError,
+	UserbotJoinRequestError,
 	UserbotMessageGoneError,
 	UserbotNotConnectedError,
 	UserbotReactionError,
@@ -28,6 +29,7 @@ from pxcontrol.engine.telegram.rights import (
 from pxcontrol.engine.telegram.types import (
 	ChatReactionsMode,
 	CommunityKind,
+	JoinRequest,
 	MediaKind,
 	OutgoingFile,
 	OutgoingPost,
@@ -1770,3 +1772,157 @@ async def test_send_reaction_refusals_become_reaction_error() -> None:
 		fake.send_error = error
 		with pytest.raises(UserbotReactionError):
 			await _transport(fake).send_reaction("-1001", 30, ["🦄"])
+
+
+# --- заявки на вступление (ADR-0040) -----------------------------------------------
+
+
+class _JoinRequestsClient(_MaintenanceClient):
+	"""Подставной клиент заявок: страницы заявителей, решения, ограничения."""
+
+	def __init__(self) -> None:
+		super().__init__()
+		self.importer_pages: list[tuple[list[Any], list[Any], int]] = []
+		self.importer_requests: list[Any] = []
+		self.decisions: list[tuple[int, int, bool | None]] = []
+		self.restrictions: list[Any] = []
+		self.personal_channel: int | None = None
+		self.decision_error: Exception | None = None
+
+	async def __call__(self, request: Any) -> Any:
+		name = type(request).__name__
+		if name == "GetChatInviteImportersRequest":
+			self.importer_requests.append(request)
+			if not self.importer_pages:
+				return SimpleNamespace(importers=[], users=[], count=0)
+			importers, users, count = self.importer_pages.pop(0)
+			return SimpleNamespace(importers=importers, users=users, count=count)
+		if name == "HideChatJoinRequestRequest":
+			if self.decision_error is not None:
+				raise self.decision_error
+			self.decisions.append(
+				(request.user_id.user_id, request.user_id.access_hash, request.approved)
+			)
+			return SimpleNamespace(updates=[])
+		if name == "EditBannedRequest":
+			self.restrictions.append(request)
+			return SimpleNamespace(updates=[])
+		if name == "GetFullUserRequest":
+			return SimpleNamespace(
+				full_user=SimpleNamespace(personal_channel_id=self.personal_channel)
+			)
+		return await super().__call__(request)
+
+
+def _importer(user_id: int, *, about: str | None = None) -> Any:
+	"""Заявка от пользователя (дата — сентябрь 2026)."""
+	return SimpleNamespace(
+		user_id=user_id, date=datetime(2026, 9, 2, tzinfo=UTC), about=about, requested=True
+	)
+
+
+def _join_request() -> JoinRequest:
+	"""Заявка с хешем доступа — как её отдаёт страница."""
+	return JoinRequest(user_id=11, access_hash=110, date=None, bio=None, deleted=False, label="@u")
+
+
+def _applicant(user_id: int, *, deleted: bool = False, username: str | None = "user") -> Any:
+	"""Карточка заявителя с хешем доступа."""
+	return SimpleNamespace(
+		id=user_id,
+		access_hash=user_id * 10,
+		deleted=deleted,
+		username=username,
+		first_name="Имя",
+		last_name=None,
+	)
+
+
+async def test_join_requests_page_reads_applicants_with_bio_and_hash() -> None:
+	"""Страница заявок: заявитель с хешем, био, удалённость, смещение продолжения."""
+	fake = _JoinRequestsClient()
+	fake.importer_pages = [
+		(
+			[_importer(11, about="привет, t.me/spam"), _importer(12)],
+			[_applicant(11), _applicant(12, deleted=True, username=None)],
+			7,
+		)
+	]
+	page = await _transport(fake).join_requests_page("-1001", None, 100)
+	assert page.total == 7
+	assert [(r.user_id, r.access_hash, r.bio, r.deleted) for r in page.requests] == [
+		(11, 110, "привет, t.me/spam", False),
+		(12, 120, None, True),
+	]
+	assert page.requests[0].label == "@user"
+	assert page.requests[1].label == "Имя"
+	assert page.next_offset == (datetime(2026, 9, 2, tzinfo=UTC), 12)
+	(request,) = fake.importer_requests
+	assert request.requested is True
+	assert type(request.offset_user).__name__ == "InputUserEmpty"
+
+
+async def test_join_requests_next_page_uses_last_applicant_as_offset() -> None:
+	"""Вторая страница адресуется датой и заявителем последней заявки — с хешем."""
+	fake = _JoinRequestsClient()
+	fake.importer_pages = [
+		([_importer(11)], [_applicant(11)], 2),
+		([_importer(12)], [_applicant(12)], 2),
+	]
+	transport = _transport(fake)
+	first = await transport.join_requests_page("-1001", None, 1)
+	await transport.join_requests_page("-1001", first.next_offset, 1)
+	second = fake.importer_requests[1]
+	assert (second.offset_user.user_id, second.offset_user.access_hash) == (11, 110)
+	assert second.offset_date == datetime(2026, 9, 2, tzinfo=UTC)
+
+
+async def test_handle_join_request_approves_and_declines_with_hash() -> None:
+	"""Одобрение и отклонение уходят с хешем доступа заявителя."""
+	fake = _JoinRequestsClient()
+	transport = _transport(fake)
+	request = JoinRequest(
+		user_id=11, access_hash=110, date=None, bio=None, deleted=False, label="@u"
+	)
+	await transport.handle_join_request("-1001", request, approve=True)
+	await transport.handle_join_request("-1001", request, approve=False)
+	assert fake.decisions == [(11, 110, True), (11, 110, False)]
+
+
+async def test_handle_join_request_missing_is_a_skip_error() -> None:
+	"""«Заявки уже нет» — отказ по заявке, а не сбой прохода."""
+	from telethon import errors
+
+	fake = _JoinRequestsClient()
+	fake.decision_error = errors.HideRequesterMissingError(request=None)
+	request = JoinRequest(
+		user_id=11, access_hash=110, date=None, bio=None, deleted=False, label="@u"
+	)
+	with pytest.raises(UserbotJoinRequestError):
+		await _transport(fake).handle_join_request("-1001", request, approve=True)
+
+
+async def test_restrict_fully_forbids_everything_but_reading() -> None:
+	"""Полное ограничение: все запреты выставлены, кроме view_messages, без срока."""
+	fake = _JoinRequestsClient()
+	request = JoinRequest(
+		user_id=11, access_hash=110, date=None, bio=None, deleted=False, label="@u"
+	)
+	await _transport(fake).restrict_fully("-1001", request)
+	(restriction,) = fake.restrictions
+	rights = restriction.banned_rights
+	assert rights.view_messages is None  # не бан
+	assert rights.until_date is None  # бессрочно
+	for flag in ("send_messages", "send_plain", "send_photos", "send_reactions", "invite_users"):
+		assert getattr(rights, flag) is True, flag
+
+
+async def test_has_personal_channel_reads_full_user() -> None:
+	"""Канал в профиле читается полной карточкой пользователя."""
+	fake = _JoinRequestsClient()
+	request = JoinRequest(
+		user_id=11, access_hash=110, date=None, bio=None, deleted=False, label="@u"
+	)
+	assert await _transport(fake).has_personal_channel(request) is False
+	fake.personal_channel = 777
+	assert await _transport(fake).has_personal_channel(request) is True

@@ -30,6 +30,8 @@ from pxcontrol.engine.services.tasks import (
 )
 from pxcontrol.engine.tasks import (
 	DeletedAccountsParams,
+	JoinRequestsParams,
+	JoinRequestsReport,
 	MembersReport,
 	ReactionChoice,
 	ReactionScope,
@@ -43,6 +45,7 @@ from pxcontrol.engine.tasks import (
 	TaskTrigger,
 )
 from pxcontrol.engine.tasks.deleted_accounts import members_summary
+from pxcontrol.engine.tasks.join_requests import join_requests_summary, profile_has_links
 from pxcontrol.engine.tasks.reactions import (
 	next_user,
 	pick_reaction,
@@ -64,6 +67,7 @@ from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotFloodError,
+	UserbotJoinRequestError,
 	UserbotReactionError,
 	service_message_kind,
 )
@@ -80,6 +84,8 @@ from pxcontrol.engine.telegram.types import (
 	CommunityKind,
 	DeletedAccount,
 	ExecutorRef,
+	JoinRequest,
+	JoinRequestsPage,
 	OwnerKind,
 	ParticipantsPage,
 	ReactablePost,
@@ -188,6 +194,7 @@ async def _community(
 	with_account: bool = True,
 	can_delete: bool = True,
 	can_ban: bool = True,
+	can_invite: bool = True,
 	chat_id: str = "-1001",
 ) -> int:
 	"""Сообщество с исполнителем-публикатором (или без исполнителей вовсе).
@@ -218,7 +225,11 @@ async def _community(
 					status=ParticipantStatus.ADMIN,
 					rights=ExecutorRights(
 						ParticipantStatus.ADMIN,
-						AdminRights(delete_messages=can_delete, ban_users=can_ban),
+						# право приглашать — для приёма заявок (ADR-0040); у прочих
+						# видов оно ничего не решает
+						AdminRights(
+							delete_messages=can_delete, ban_users=can_ban, invite_users=can_invite
+						),
 						ALL_MEMBER_RIGHTS,
 					).to_payload(),
 					checked_at=datetime.now(UTC),
@@ -1729,7 +1740,7 @@ async def test_reactions_refuse_when_no_named_user_is_capable(db: Database) -> N
 	service = _service(db, _ReactionsGateway())
 	community_id = await _community(db)
 	task = await service.task(community_id, TaskKind.REACTIONS)
-	with pytest.raises(TaskError, match="выбранных для задачи"):
+	with pytest.raises(TaskError, match="Некому вести"):
 		await service.run_now(task.id, _reaction_params(999))
 
 
@@ -1825,3 +1836,231 @@ def test_reactions_summary_and_reactor_label() -> None:
 		can_publish=False,
 	)
 	assert reactor_label(executor) == "@a (приостановлен)"
+
+
+# --- приём заявок (этап D, ADR-0040) ----------------------------------------------
+
+
+def _request(
+	user_id: int, *, bio: str | None = None, deleted: bool = False, label: str | None = None
+) -> JoinRequest:
+	return JoinRequest(
+		user_id=user_id,
+		access_hash=user_id * 10,
+		date=datetime.now(UTC),
+		bio=bio,
+		deleted=deleted,
+		label=label or f"@u{user_id}",
+	)
+
+
+class _JoinRequestsGateway(_FakeGateway):
+	"""Подставной шлюз заявок: страницы, решения, ограничения, каналы в профиле."""
+
+	def __init__(self, pages: list[JoinRequestsPage] | None = None) -> None:
+		super().__init__()
+		self.pages = pages or []
+		self.decisions: list[tuple[int, bool]] = []
+		self.restricted: list[int] = []
+		self.with_channel: set[int] = set()
+		self.profile_reads: list[int] = []
+		self.missing: set[int] = set()
+
+	async def userbot_join_requests_page(
+		self, account_id: int, chat_id: str, offset: tuple[datetime, int] | None, limit: int
+	) -> JoinRequestsPage:
+		self.requested.append(limit)
+		if not self.pages:
+			return JoinRequestsPage(requests=[], total=0, next_offset=None)
+		return self.pages.pop(0)
+
+	async def userbot_handle_join_request(
+		self, account_id: int, chat_id: str, request: JoinRequest, *, approve: bool
+	) -> None:
+		if request.user_id in self.missing:
+			raise UserbotJoinRequestError(
+				"Telegram не дал обработать заявку: HIDE_REQUESTER_MISSING"
+			)
+		self.decisions.append((request.user_id, approve))
+
+	async def userbot_restrict_fully(
+		self, account_id: int, chat_id: str, request: JoinRequest
+	) -> None:
+		self.restricted.append(request.user_id)
+
+	async def userbot_has_personal_channel(self, account_id: int, request: JoinRequest) -> bool:
+		self.profile_reads.append(request.user_id)
+		return request.user_id in self.with_channel
+
+
+def _requests_page(*requests: JoinRequest, total: int | None = None) -> JoinRequestsPage:
+	return JoinRequestsPage(
+		requests=list(requests),
+		total=total if total is not None else len(requests),
+		next_offset=None,
+	)
+
+
+async def _run_join(
+	service: TasksService, community_id: int, params: JoinRequestsParams, *, dry_run: bool = False
+) -> JoinRequestsReport:
+	"""Ставит запуск приёма заявок и возвращает отчёт."""
+	task = await service.task(community_id, TaskKind.JOIN_REQUESTS)
+	await service.run_now(task.id, params, dry_run=dry_run)
+	await service.settle()
+	item = (await service.state())[-1]
+	assert item.status is JobStatus.DONE, item.error
+	assert isinstance(item.report, JoinRequestsReport)
+	return item.report
+
+
+def test_profile_links_are_recognised() -> None:
+	"""Ссылка в описании: адрес, t.me, домен, @упоминание; пустое — нет."""
+	assert profile_has_links("пишите https://example.com")
+	assert profile_has_links("канал t.me/joinchat/abc")
+	assert profile_has_links("заходи на example.ru за скидкой")
+	assert profile_has_links("менеджер @sales_bot")
+	assert not profile_has_links("люблю котиков и кофе")
+	assert not profile_has_links(None)
+	assert not profile_has_links("")
+
+
+def test_join_requests_params_and_report_survive_json() -> None:
+	"""Параметры и отчёт приёма заявок переживают запись и чтение."""
+	from pxcontrol.engine.tasks import spec_of
+
+	spec = spec_of(TaskKind.JOIN_REQUESTS)
+	params = JoinRequestsParams(decline_deleted=False, restrict_bio_links=True, limit=7)
+	assert spec.params_from_payload(spec.params_to_payload(params)) == params
+	report = JoinRequestsReport(found=5, reviewed=5, approved=3, restricted=1, declined=2)
+	assert spec.report_from_payload(spec.report_to_payload(report)) == report
+	with pytest.raises(TaskError, match="Предел заявок"):
+		spec.validate(JoinRequestsParams(limit=0), dry_run=False)
+
+
+async def test_join_requests_pass_declines_deleted_and_approves_rest(db: Database) -> None:
+	"""Удалённые отклоняются, остальные принимаются; отчёт и журнал честны."""
+	gateway = _JoinRequestsGateway(
+		[_requests_page(_request(1), _request(2, deleted=True), _request(3))]
+	)
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	report = await _run_join(service, community_id, JoinRequestsParams())
+	assert (report.found, report.reviewed, report.approved, report.declined) == (3, 3, 2, 1)
+	assert gateway.decisions == [(1, True), (2, False), (3, True)]
+	assert gateway.restricted == []
+	task = await service.task(community_id, TaskKind.JOIN_REQUESTS)
+	(run,) = await service.runs(task.id)
+	assert "Принято: 2" in run.summary and "отклонено удалённых: 1" in run.summary
+
+
+async def test_join_requests_leave_deleted_alone_when_asked(db: Database) -> None:
+	"""Без флажка удалённые не трогаются — ни принять, ни отклонить."""
+	gateway = _JoinRequestsGateway([_requests_page(_request(2, deleted=True))])
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	report = await _run_join(service, community_id, JoinRequestsParams(decline_deleted=False))
+	assert (report.approved, report.declined) == (0, 0)
+	assert gateway.decisions == []
+
+
+async def test_join_requests_restrict_links_in_group_only(db: Database) -> None:
+	"""В группе заявитель со ссылкой в био принят с ограничением; в канале — как есть."""
+	page = [_requests_page(_request(1, bio="see t.me/spam"), _request(2, bio="просто человек"))]
+	gateway = _JoinRequestsGateway(list(page))
+	service = _service(db, gateway)
+	group_id = await _community(db)  # _community заводит группу
+	report = await _run_join(service, group_id, JoinRequestsParams(restrict_bio_links=True))
+	assert (report.approved, report.restricted) == (2, 1)
+	assert gateway.decisions == [(1, True), (2, True)]
+	assert gateway.restricted == [1]
+
+	gateway.pages = [_requests_page(_request(1, bio="see t.me/spam"))]
+	gateway.decisions.clear()
+	gateway.restricted.clear()
+	async with db.session_factory() as session:  # то же сообщество, но канал
+		community = await session.get(Community, group_id)
+		assert community is not None
+		community.kind = "channel"
+		await session.commit()
+	report = await _run_join(service, group_id, JoinRequestsParams(restrict_bio_links=True))
+	assert (report.approved, report.restricted) == (1, 0)
+	assert gateway.restricted == []
+
+
+async def test_join_requests_personal_channel_costs_one_read_per_applicant(db: Database) -> None:
+	"""Канал в профиле проверяется запросом на заявителя — только по флажку."""
+	gateway = _JoinRequestsGateway([_requests_page(_request(1), _request(2))])
+	gateway.with_channel = {2}
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	report = await _run_join(
+		service, community_id, JoinRequestsParams(restrict_personal_channel=True)
+	)
+	assert gateway.profile_reads == [1, 2]
+	assert gateway.restricted == [2]
+	assert report.restricted == 1
+
+
+async def test_join_requests_dry_run_counts_without_touching(db: Database) -> None:
+	"""Просмотр считает решения, но ничего не одобряет и не отклоняет."""
+	gateway = _JoinRequestsGateway(
+		[_requests_page(_request(1, bio="t.me/x"), _request(2, deleted=True), total=9)]
+	)
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	report = await _run_join(
+		service, community_id, JoinRequestsParams(restrict_bio_links=True), dry_run=True
+	)
+	assert (report.found, report.approved, report.restricted, report.declined) == (9, 1, 1, 1)
+	assert gateway.decisions == [] and gateway.restricted == []
+
+
+async def test_join_requests_respect_limit_and_skip_missing(db: Database) -> None:
+	"""Потолок за проход соблюдается; исчезнувшая заявка — пропуск, а не сбой."""
+	gateway = _JoinRequestsGateway([_requests_page(_request(1), _request(2), _request(3), total=3)])
+	gateway.missing = {1}
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	report = await _run_join(service, community_id, JoinRequestsParams(limit=2))
+	assert (report.reviewed, report.approved, report.skipped, report.limited) == (2, 1, 1, True)
+	assert gateway.decisions == [(2, True)]
+	assert gateway.requested == [2]  # читаем не больше потолка
+
+
+async def test_join_requests_need_invite_right_and_ban_right_for_restriction(db: Database) -> None:
+	"""Без права приглашать — отказ; с ограничением нужно ещё право исключать."""
+	from sqlalchemy import select
+
+	from pxcontrol.engine.db.models import CommunityExecutor as ExecutorRow
+
+	service = _service(db, _JoinRequestsGateway())
+	community_id = await _community(db, can_ban=False, can_invite=False)
+	task = await service.task(community_id, TaskKind.JOIN_REQUESTS)
+	with pytest.raises(TaskError, match="принимать заявки"):
+		await service.run_now(task.id, JoinRequestsParams())
+	async with db.session_factory() as session:  # выдаём право приглашать, но не исключать
+		row = (
+			await session.execute(
+				select(ExecutorRow).where(ExecutorRow.community_id == community_id)
+			)
+		).scalar_one()
+		row.rights = ExecutorRights(
+			ParticipantStatus.ADMIN, AdminRights(invite_users=True), ALL_MEMBER_RIGHTS
+		).to_payload()
+		await session.commit()
+	await service.run_now(task.id, JoinRequestsParams())  # без ограничения — можно
+	await service.settle()
+	with pytest.raises(TaskError, match="Некому вести"):
+		await service.run_now(task.id, JoinRequestsParams(restrict_bio_links=True))
+
+
+def test_join_requests_summary_texts() -> None:
+	"""Итог приёма заявок одной строкой — для запуска и для просмотра."""
+	report = JoinRequestsReport(
+		found=4, reviewed=4, approved=3, restricted=1, declined=1, skipped=0
+	)
+	text = join_requests_summary(report, dry_run=False)
+	assert "Принято: 3" in text and "ограничением: 1" in text and "отклонено удалённых: 1" in text
+	assert "к приёму 3" in join_requests_summary(report, dry_run=True)
+	assert join_requests_summary(JoinRequestsReport(), dry_run=True) == "Заявок на вступление нет."

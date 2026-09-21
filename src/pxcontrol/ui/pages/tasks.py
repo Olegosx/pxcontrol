@@ -52,6 +52,8 @@ from pxcontrol.engine.services.communities import CommunityDto, ExecutorDto
 from pxcontrol.engine.services.tasks import TaskDto, TaskJobDto, TaskRunDto
 from pxcontrol.engine.tasks import (
 	DeletedAccountsParams,
+	JoinRequestsParams,
+	JoinRequestsReport,
 	MembersReport,
 	ReactionChoice,
 	ReactionScope,
@@ -65,6 +67,7 @@ from pxcontrol.engine.tasks import (
 	TaskParams,
 	TaskTrigger,
 	deleted_accounts,
+	join_requests,
 	reactions,
 	service_messages,
 )
@@ -76,6 +79,7 @@ from pxcontrol.engine.tasks.schedule import (
 )
 from pxcontrol.engine.telegram.types import (
 	ChatReactions,
+	CommunityKind,
 	ExecutorRef,
 	OwnerKind,
 	ReactionOption,
@@ -125,6 +129,7 @@ KIND_TITLES: dict[TaskKind, str] = {
 	TaskKind.SERVICE_MESSAGES: service_messages.TITLE.noun,
 	TaskKind.DELETED_ACCOUNTS: deleted_accounts.TITLE.noun,
 	TaskKind.REACTIONS: reactions.TITLE.noun,
+	TaskKind.JOIN_REQUESTS: join_requests.TITLE.noun,
 }
 
 
@@ -815,6 +820,128 @@ class _ReactionsSection(_TaskSection):
 			self._label.setText(reactions.reactions_summary(report, dry_run=item.dry_run))
 
 
+class _JoinRequestsSection(_TaskSection):
+	"""Раздел «приём заявок»: удалённые, ссылки в профиле, потолок, запуск.
+
+	Правила ограничения есть только у групп: в канале ограничить
+	участника нечем, поэтому у канала эти флажки неактивны с объяснением.
+	"""
+
+	kind = TaskKind.JOIN_REQUESTS
+
+	def __init__(self, panel: TasksPanel, page_parent: QWidget) -> None:
+		super().__init__(panel, page_parent)
+		is_group = panel.community.kind is CommunityKind.GROUP
+		box = QVBoxLayout(self)
+		box.setContentsMargins(0, 0, 0, 0)
+		box.setSpacing(density.spacing().row_spacing)
+		hint = BodyLabel(join_requests.TITLE.hint, self)
+		hint.setWordWrap(True)
+		box.addWidget(hint)
+		self._decline_deleted = CheckBox("Отклонять заявки удалённых аккаунтов", self)
+		self._decline_deleted.setChecked(True)
+		box.addWidget(self._decline_deleted)
+		self._restrict_bio = CheckBox(
+			"Принимать с полным ограничением, если в описании профиля есть ссылка", self
+		)
+		self._restrict_channel = CheckBox(
+			"…и если в профиле указан канал (один запрос к Telegram на заявителя)", self
+		)
+		for check in (self._restrict_bio, self._restrict_channel):
+			check.setEnabled(is_group)
+			if not is_group:
+				check.setToolTip(
+					"В канале ограничить участника нечем — правило действует в группах"
+				)
+			box.addWidget(check)
+		if not is_group:
+			note = CaptionLabel(
+				"Ограничение прав есть только у групп; в канале заявки принимаются как есть.", self
+			)
+			note.setWordWrap(True)
+			box.addWidget(note)
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Разбирать за проход не больше:", self))
+		self._limit = SpinBox(self)
+		self._limit.setRange(*join_requests.LIMIT_RANGE)
+		self._limit.setValue(join_requests.DEFAULT_LIMIT)
+		row.addWidget(self._limit)
+		row.addStretch()
+		preview = self.run_button("Посмотреть заявки", self)
+		preview.setToolTip("Прочитать ожидающие заявки и посчитать решения — ничего не меняется")
+		preview.clicked.connect(lambda: self.launch(dry_run=True, status_text="Просмотр идёт…"))
+		row.addWidget(preview)
+		run = self.run_button("Разобрать заявки", self)
+		run.clicked.connect(self._on_run)
+		row.addWidget(run)
+		box.addLayout(row)
+		self._label = BodyLabel("Просмотр ещё не выполнялся.", self)
+		self._label.setWordWrap(True)
+		box.addWidget(self._label)
+		box.addStretch()
+		box.addWidget(self.schedule_block(self))
+		box.addLayout(self.journal_row(self))
+
+	def _on_run(self) -> None:
+		"""Подтверждение и обычный запуск: одобрение необратимо."""
+		params = self.params()
+		if not confirm_delete(
+			self,
+			f"Разобрать заявки в «{self._panel.community.title}»?\n\n"
+			f"{self._rules_text(params)} За проход — не больше {params.limit}. "
+			"Одобрение и отклонение необратимы.",
+			accept_text="Разобрать",
+		):
+			return
+		self.launch(dry_run=False, status_text="Приём идёт…")
+
+	@staticmethod
+	def _rules_text(params: JoinRequestsParams) -> str:
+		"""Правила задачи словами — для подтверждений."""
+		rules = ["остальных принять"]
+		if params.decline_deleted:
+			rules.insert(0, "удалённые аккаунты отклонить")
+		if params.restrict_bio_links:
+			rules.append("со ссылкой в описании — принять с полным ограничением")
+		if params.restrict_personal_channel:
+			rules.append("с каналом в профиле — принять с полным ограничением")
+		return "; ".join(rules).capitalize() + "."
+
+	def apply_params(self, params: TaskParams) -> None:
+		if not isinstance(params, JoinRequestsParams):
+			return
+		self._decline_deleted.setChecked(params.decline_deleted)
+		self._restrict_bio.setChecked(params.restrict_bio_links)
+		self._restrict_channel.setChecked(params.restrict_personal_channel)
+		self._limit.setValue(params.limit)
+
+	def params(self) -> JoinRequestsParams:
+		return JoinRequestsParams(
+			decline_deleted=self._decline_deleted.isChecked(),
+			restrict_bio_links=self._restrict_bio.isChecked(),
+			restrict_personal_channel=self._restrict_channel.isChecked(),
+			limit=self._limit.value(),
+		)
+
+	def set_status(self, text: str) -> None:
+		self._label.setText(text)
+
+	def confirm_schedule(self, schedule: Schedule) -> bool:
+		params = self.params()
+		return confirm_delete(
+			self,
+			f"Включить приём заявок в «{self._panel.community.title}» по расписанию "
+			f"({schedule_text(schedule)})?\n\n{self._rules_text(params)} Каждый запуск "
+			f"разберёт не больше {params.limit} заявок без дополнительного подтверждения.",
+			accept_text="Включить",
+		)
+
+	def show_report(self, item: TaskJobDto) -> None:
+		report = item.report
+		if isinstance(report, JoinRequestsReport):
+			self._label.setText(join_requests.join_requests_summary(report, dry_run=item.dry_run))
+
+
 class _ScheduleEditor(QWidget):
 	"""Форма расписания раздела: вид, границы, включено, сохранение.
 
@@ -968,6 +1095,7 @@ class TasksPanel(QWidget):
 			_ServiceMessagesSection(self, self),
 			_DeletedAccountsSection(self, self),
 			_ReactionsSection(self, self),
+			_JoinRequestsSection(self, self),
 		]
 		for section in self._sections:
 			self._add_page(str(section.kind), KIND_TITLES[section.kind], section)

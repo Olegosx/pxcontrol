@@ -379,6 +379,48 @@ class ReactionsPage:
 
 
 @dataclass(frozen=True)
+class JoinRequest:
+	"""Заявка на вступление в сообщество (ADR-0040).
+
+	Ссылка на заявителя несёт хеш доступа — тот же урок, что
+	у :class:`DeletedAccount`: без хеша Telegram пользователя не опознаёт,
+	а кеш клиента живёт в памяти сессии.
+
+	Attributes:
+		user_id: идентификатор заявителя в Telegram.
+		access_hash: хеш доступа из того же ответа; None — не пришёл.
+		date: когда подана заявка.
+		bio: описание профиля заявителя (Telegram отдаёт его вместе
+			с заявкой); None — пусто.
+		deleted: аккаунт заявителя удалён.
+		label: как показать заявителя человеку (@имя или имя).
+	"""
+
+	user_id: int
+	access_hash: int | None
+	date: datetime | None
+	bio: str | None
+	deleted: bool
+	label: str
+
+
+@dataclass(frozen=True)
+class JoinRequestsPage:
+	"""Страница ожидающих заявок и место продолжения.
+
+	Attributes:
+		requests: заявки страницы.
+		total: сколько заявок всего, по мнению Telegram.
+		next_offset: (дата, id заявителя) последней заявки — с неё
+			читать дальше; None — список кончился.
+	"""
+
+	requests: list[JoinRequest]
+	total: int
+	next_offset: tuple[datetime, int] | None
+
+
+@dataclass(frozen=True)
 class PublishedMessage:
 	"""Вышедший пост ленты сообщества, прочитанный транспортом.
 
