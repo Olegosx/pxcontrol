@@ -91,12 +91,36 @@ def publisher_ready(community: Community, kind: OwnerKind) -> bool:
 	return can(executor_rights(row), ExecutorAction.PUBLISH, CommunityKind(community.kind))
 
 
+def user_rows(community: Community) -> list[CommunityExecutor]:
+	"""Строки пула, за которыми стоит пользователь (не бот)."""
+	return [row for row in community.executors if row.tg_account_id is not None]
+
+
+def publishing_users(community: Community) -> list[CommunityExecutor]:
+	"""Пользователи пула, способные публиковать сейчас (ADR-0036).
+
+	Пул публикаторов, а не один назначенный: не приостановлены человеком
+	(ADR-0029) и по последнему снимку прав могут публиковать в сообществе
+	такого вида (ADR-0035). Публикатор по умолчанию среди них —
+	предпочтение диспетчера, а не единственный маршрут. Порядок — порядок
+	пула. Связи ``executors → tg_account`` должны быть подгружены.
+	"""
+	kind = CommunityKind(community.kind)
+	return [
+		row
+		for row in user_rows(community)
+		if not executor_paused(row) and can(executor_rights(row), ExecutorAction.PUBLISH, kind)
+	]
+
+
 def community_capabilities(community: Community) -> PublishCapabilities:
-	"""Чем это сообщество может публиковать (ADR-0011, ADR-0035).
+	"""Чем это сообщество может публиковать (ADR-0011, ADR-0035, ADR-0036).
 
 	Одна точка на весь движок и интерфейс: подготовка публикации, дозор
 	кнопок, дашборд и формы спрашивают её, а не собирают правило заново.
-	Связи ``executors`` и учётки исполнителей должны быть подгружены.
+	Userbot-путь открыт, когда в пуле есть хоть один способный
+	пользователь (:func:`publishing_users`); бот-путь — по назначенному
+	боту. Связи ``executors`` и учётки исполнителей должны быть подгружены.
 	"""
 	bot_ready = publisher_ready(community, OwnerKind.BOT)
 	markup_edit = False
@@ -106,33 +130,49 @@ def community_capabilities(community: Community) -> PublishCapabilities:
 			executor_rights(row), ExecutorAction.EDIT_OTHERS, CommunityKind(community.kind)
 		)
 	return publish_capabilities(
-		bot_ready, publisher_ready(community, OwnerKind.USER), markup_edit=markup_edit
+		bot_ready, bool(publishing_users(community)), markup_edit=markup_edit
 	)
 
 
-def publisher_paused(community: Community) -> bool:
-	"""Есть ли у сообщества **приостановленный** публикатор (ADR-0029).
+def _capable_by_rights(row: CommunityExecutor, kind: CommunityKind) -> bool:
+	"""Мог бы публиковать по правам, если бы не пауза."""
+	return can(executor_rights(row), ExecutorAction.PUBLISH, kind)
 
-	Зовут это только из ветки «публиковать некем», чтобы отличить
-	«нет публикатора» от «публикатор на паузе»: в первом случае человеку
-	нужно назначить нового, во втором — возобновить прежнего.
+
+def publisher_paused(community: Community) -> bool:
+	"""Публиковать некому **только из-за паузы** (ADR-0029, ADR-0036).
+
+	Истинно, когда способного публикатора нет, но среди приостановленных
+	есть тот, кто по правам мог бы: дашборд показывает «публикатор
+	приостановлен» вместо «нет публикатора» — назначать нового не нужно,
+	нужно возобновить прежнего. Пока сообщество публикует хоть кем-то,
+	пауза одного из пула — не состояние сообщества.
 	"""
-	rows = (publisher_row(community, OwnerKind.USER), publisher_row(community, OwnerKind.BOT))
-	return any(row is not None and executor_paused(row) for row in rows)
+	caps = community_capabilities(community)
+	if caps.userbot or caps.bot:
+		return False
+	kind = CommunityKind(community.kind)
+	rows = [*user_rows(community), publisher_row(community, OwnerKind.BOT)]
+	return any(
+		row is not None and executor_paused(row) and _capable_by_rights(row, kind) for row in rows
+	)
 
 
 def publisher_incapable(community: Community) -> bool:
-	"""Назначен, не на паузе — и по правам публиковать не может (ADR-0035).
+	"""Публиковать некому из-за **прав**, а не из-за паузы или пустого пула (ADR-0035).
 
 	Третья причина ожидания рядом с «выключено» и «приостановлен»:
 	права в Telegram меняет владелец сообщества, и приложение узнаёт
 	об этом перепроверкой доступов. Пост в таком случае ждёт, а не падает.
+	Истинно, когда способных нет, а в пуле есть не приостановленный
+	пользователь или назначенный бот, лишённый права публиковать.
 	"""
+	caps = community_capabilities(community)
+	if caps.userbot or caps.bot:
+		return False
 	kind = CommunityKind(community.kind)
-	for owner_kind in (OwnerKind.USER, OwnerKind.BOT):
-		row = publisher_row(community, owner_kind)
-		if row is None or executor_paused(row):
-			continue
-		if not can(executor_rights(row), ExecutorAction.PUBLISH, kind):
-			return True
-	return False
+	rows = [*user_rows(community), publisher_row(community, OwnerKind.BOT)]
+	return any(
+		row is not None and not executor_paused(row) and not _capable_by_rights(row, kind)
+		for row in rows
+	)

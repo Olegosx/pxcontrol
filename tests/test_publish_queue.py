@@ -30,6 +30,7 @@ from pxcontrol.engine.services.publish_queue import (
 	QueueItemDto,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotScheduleFullError,
@@ -37,6 +38,7 @@ from pxcontrol.engine.telegram.mtproto import (
 from pxcontrol.engine.telegram.rich_text import TextEntity, TextStyle
 from pxcontrol.engine.telegram.types import (
 	TELEGRAM_MAX_SCHEDULED,
+	ExecutorRef,
 	MediaKind,
 	OutgoingPost,
 	TelegramFloodError,
@@ -57,6 +59,9 @@ class _SlowGateway:
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return False
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]:
+		return {}
 
 	async def userbot_publish(
 		self,

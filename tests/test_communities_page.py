@@ -411,8 +411,11 @@ def test_card_state_publisher_paused_between_errors_and_no_publisher() -> None:
 	"""Пауза публикатора: своя плашка без действий; ошибки главнее, «нет публикатора» — ниже."""
 	from dataclasses import replace
 
-	# приостановленный публикатор приходит из движка уже «не готовым»
-	paused = replace(_community(), default_account_paused=True, userbot_ready=False)
+	# приостановленный публикатор приходит из движка уже «не готовым»,
+	# и причину «некому только из-за паузы» движок тоже считает сам
+	paused = replace(
+		_community(), default_account_paused=True, userbot_ready=False, publisher_paused=True
+	)
 	assert card_state(paused, QueueCounts()) is CardState.PUBLISHER_PAUSED
 	assert state_badge_text(CardState.PUBLISHER_PAUSED, QueueCounts()) == "публикатор приостановлен"
 	assert card_actions(paused, QueueCounts()) == ()
@@ -427,6 +430,7 @@ def test_card_state_publisher_paused_between_errors_and_no_publisher() -> None:
 		default_bot_paused=True,
 		userbot_ready=False,
 		bot_ready=False,
+		publisher_paused=True,
 	)
 	assert card_state(both, QueueCounts()) is CardState.PUBLISHER_PAUSED
 	rows = [

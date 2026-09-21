@@ -31,14 +31,21 @@ from pxcontrol.engine.services.community_rights import (
 	publisher_incapable,
 	publisher_paused,
 	publisher_row,
+	publishing_users,
 )
+from pxcontrol.engine.services.dispatch import Candidate, rank
 from pxcontrol.engine.services.publish_route import (
+	PostRequirements,
 	PublishRoute,
+	bot_shortfall,
 	choose_route,
 	markup_blocker,
 	poll_blocker,
 	post_markup_blocker,
+	post_requirements,
 	route_uses_userbot,
+	text_over_limit,
+	userbot_shortfall,
 )
 from pxcontrol.engine.services.settings import (
 	COMMUNITY_ENABLED,
@@ -50,6 +57,7 @@ from pxcontrol.engine.services.settings import (
 )
 from pxcontrol.engine.services.video import prune_empty_dirs, video_base_dir
 from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.markup import PostMarkup, validate_markup
 from pxcontrol.engine.telegram.mtproto import UserbotMessageGoneError, UserbotUnavailableError
 from pxcontrol.engine.telegram.poll import PollDraft, validate_poll
@@ -68,6 +76,7 @@ from pxcontrol.engine.telegram.types import (
 	TEXT_LENGTH_LIMIT,
 	BotRef,
 	CommunityKind,
+	ExecutorRef,
 	ForumTopicInfo,
 	LinkPreview,
 	MediaKind,
@@ -79,8 +88,6 @@ from pxcontrol.engine.telegram.types import (
 	ScheduledMessage,
 	TelegramFloodError,
 	limit_gb,
-	limit_mb,
-	telegram_text_length,
 	text_length_limit,
 	userbot_max_file_bytes,
 )
@@ -253,19 +260,9 @@ def check_text_length(text: str, limit: int, with_media: bool) -> None:
 	Raises:
 		PostError: Текст длиннее предела.
 	"""
-	length = telegram_text_length(text)
-	if length <= limit:
-		return
-	if with_media:
-		raise PostError(
-			f"Подпись к файлу длиннее предела Telegram: {length} символов "
-			f"при {limit}. Сократите подпись или отправьте текст "
-			"отдельным постом."
-		)
-	raise PostError(
-		f"Текст поста длиннее предела Telegram: {length} символов при {limit}. "
-		"Сократите текст или разбейте его на несколько постов."
-	)
+	reason = text_over_limit(text, limit, with_media)
+	if reason is not None:
+		raise PostError(reason)
 
 
 def text_preview(text: str, limit: int) -> str:
@@ -507,6 +504,8 @@ class _PostPort(Protocol):
 
 	def userbot_premium(self, account_id: int | None) -> bool: ...
 
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]: ...
+
 	async def bot_send_text(
 		self,
 		bot: BotRef,
@@ -656,12 +655,15 @@ class PublishPlan:
 			несколько — альбом).
 		route: каким путём уходит пост (ADR-0031): публикатор, бот
 			или «публикатор отправил — бот дорисовал кнопки».
+		publisher: id userbot-аккаунта, выбранного диспетчером под этот
+			пост (ADR-0036); None — пост везёт бот.
 	"""
 
 	draft: PostDraft
 	community: Community
 	files: tuple[MediaFile, ...]
 	route: PublishRoute
+	publisher: int | None = None
 
 	@property
 	def single_path(self) -> str | None:
@@ -1197,14 +1199,16 @@ class PostsService:
 			scheduled=draft.when is not None,
 			markup_first=draft.markup_first,
 		)
-		self._check_transport(route, draft, community.default_tg_account_id)
+		publisher = self._pick_publisher(community, draft, route)
 		files = tuple(
 			replace(file, path=self._apply_rename(file.path, file.rename_to), rename_to=None)
 			if file.rename_to
 			else file
 			for file in draft.media
 		)
-		return PublishPlan(draft=draft, community=community, files=files, route=route)
+		return PublishPlan(
+			draft=draft, community=community, files=files, route=route, publisher=publisher
+		)
 
 	@staticmethod
 	def _markup_blocker(community: Community, draft: PostDraft, over_bot_limit: bool) -> str | None:
@@ -1300,48 +1304,38 @@ class PostsService:
 			blocker = rule(community)
 		return community, blocker
 
-	def _base_limits(self, community: Community) -> TextLimits:
-		"""Пределы длины публикатора сообщества (с учётом его Premium)."""
-		premium = community.default_tg_account_id is not None and self._gateway.userbot_premium(
-			community.default_tg_account_id
+	def _pool_premium(self, community: Community) -> bool:
+		"""Есть ли Premium хоть у одного способного публикатора пула (ADR-0036).
+
+		Пределы сообщества для подсказок — по лучшему из пула: пост,
+		который под силу Premium-аккаунту, диспетчер ему и поручит.
+		"""
+		return any(
+			self._gateway.userbot_premium(row.tg_account_id) for row in publishing_users(community)
 		)
+
+	def _base_limits(self, community: Community) -> TextLimits:
+		"""Пределы длины публикаторов сообщества (по лучшему Premium пула)."""
+		premium = self._pool_premium(community)
 		return TextLimits(
 			text=text_length_limit(premium, with_media=False),
 			caption=text_length_limit(premium, with_media=True),
 		)
 
-	def _draft_limits(
-		self, community: Community, draft: PostDraft, over_bot_limit: bool
-	) -> TextLimits:
-		"""Пределы длины, действующие **на этом черновике**.
-
-		Не «пределы сообщества»: пост с кнопками уходит ботом даже там,
-		где у публикатора Premium, и предел у него базовый. Считать
-		по сообществу значило бы принять в очередь пост, который упадёт
-		при отправке, — а у отложенного это случится часы спустя,
-		карточкой с ошибкой.
-		"""
-		route = choose_route(
-			community_capabilities(community),
-			with_markup=bool(draft.markup),
-			media_over_bot_limit=over_bot_limit,
-			scheduled=draft.when is not None,
-			markup_first=draft.markup_first,
-		)
-		return self._base_limits(community).on_route(route)
-
 	async def check_draft_rules(self, draft: PostDraft) -> None:
 		"""Проверяет черновик по правилам его сообщества — до постановки.
 
 		Одна точка на три правила, которые зависят от сообщества и от
-		того, кто повезёт пост: предел длины текста (по маршруту),
-		кнопки и опрос. Отказ обязан всплыть под рукой у человека,
-		при нажатии «Отправить», а не через час, когда пост дождётся
-		своей минуты.
+		того, кто повезёт пост: кнопки, опрос и требования поста
+		к перевозчику (предел длины, размер файла — по пулу
+		публикаторов, ADR-0036). Отказ обязан всплыть под рукой
+		у человека, при нажатии «Отправить», а не через час, когда пост
+		дождётся своей минуты.
 
 		Raises:
-			PostError: Сообщество не найдено, текст длиннее предела
-				маршрута, кнопки или опрос этому сообществу недоступны.
+			PostError: Сообщество не найдено, никто из пула пост
+				не повезёт (текст длиннее предела, файл больше лимита),
+				кнопки или опрос этому сообществу недоступны.
 		"""
 		community = await self._get_community(draft.community_id)
 		over_bot_limit = self._over_bot_limit(draft)
@@ -1355,8 +1349,21 @@ class PostsService:
 				blocker = self._poll_blocker(community, draft)
 			if blocker is not None:
 				raise PostError(blocker)
-		limits = self._draft_limits(community, draft, over_bot_limit)
-		check_text_length(draft.text, limits.for_draft(draft), draft.with_media)
+		route = choose_route(
+			community_capabilities(community),
+			with_markup=bool(draft.markup),
+			media_over_bot_limit=over_bot_limit,
+			scheduled=draft.when is not None,
+			markup_first=draft.markup_first,
+		)
+		requirements = self._requirements(draft, route)
+		if route_uses_userbot(route):
+			if not self._publishers(community, requirements):
+				raise PostError(self._pool_shortfall(community, requirements))
+			return
+		reason = bot_shortfall(requirements)
+		if reason is not None:
+			raise PostError(reason)
 
 	def _over_bot_limit(self, draft: PostDraft) -> bool:
 		"""Файл черновика не по силам боту (лимит заливки — 50 МБ).
@@ -1389,7 +1396,7 @@ class PostsService:
 			message_id = await self._publish_bot(plan.community, draft, plan.files)
 			markup_error = None
 		else:
-			message_id = await self._publish_userbot(plan.community, draft, plan.files, on_progress)
+			message_id = await self._publish_userbot(plan, draft, on_progress)
 			markup_error = None
 			if plan.route is PublishRoute.USERBOT_MARKUP and draft.when is not None:
 				# поста ещё нет в канале: его опубликует сервер Telegram,
@@ -1463,47 +1470,82 @@ class PostsService:
 			if file.kind is MediaKind.VIDEO:
 				await self._move_to_published(file.path)
 
-	def _check_transport(
-		self, route: PublishRoute, draft: PostDraft, account_id: int | None
-	) -> None:
-		"""Проверки транспорта, способные отклонить черновик.
+	def _requirements(self, draft: PostDraft, route: PublishRoute) -> PostRequirements:
+		"""Требования черновика к перевозчику (ADR-0036).
 
-		Выполняются до побочных эффектов публикации (переименование файла):
-		отклонённый черновик не должен менять ничего на диске.
-		``account_id`` — привязанный userbot-аккаунт канала (ADR-0019):
-		лимит файла зависит от Premium именно этого аккаунта. Пределы
-		берутся по **маршруту**, а не по возможностям сообщества: пост
-		с кнопками может уйти ботом даже там, где есть публикатор,
-		и тогда действуют базовые пределы бота (ADR-0031).
+		Raises:
+			PostError: Файл исчез или недоступен.
+		"""
+		return post_requirements(
+			file_sizes=[self._file_size(file.path) for file in draft.media],
+			text=draft.text,
+			with_media=draft.with_media,
+			scheduled=draft.when is not None,
+			route=route,
+		)
 
-		Наличие публикатора здесь не проверяется: это свойство
-		сообщества, а не черновика, и живёт оно в одной точке —
-		:meth:`publish_blocker` (её зовёт подготовка до этих проверок).
+	def _publishers(self, community: Community, requirements: PostRequirements) -> list[Candidate]:
+		"""Пользователи пула, которым этот пост по силам, — в порядке диспетчера (ADR-0036).
+
+		Способность — по снимку прав (:func:`publishing_users`), пригодность —
+		по требованиям поста и Premium аккаунта, порядок — по живой
+		занятости дорожек (:func:`rank`): свободный раньше занятого
+		загрузкой, публикатор по умолчанию — при равенстве.
+		"""
+		live = self._gateway.live_states()
+		candidates: list[Candidate] = []
+		for row in publishing_users(community):
+			owner = ExecutorRef(OwnerKind.USER, int(row.tg_account_id or 0))
+			premium = self._gateway.userbot_premium(owner.id)
+			if userbot_shortfall(requirements, premium=premium) is not None:
+				continue
+			candidates.append(
+				Candidate(
+					owner,
+					preferred=owner.id == community.default_tg_account_id,
+					premium=premium,
+					live=live.get(owner),
+				)
+			)
+		return rank(candidates)
+
+	def _pool_shortfall(self, community: Community, requirements: PostRequirements) -> str:
+		"""Почему никто из пула этот пост не повезёт — текст человеку (ADR-0036).
+
+		Причина называется по лучшему из пула: если Premium-аккаунта нет,
+		человек должен узнать, что дело в подписке, а не в самом Telegram.
+		"""
+		premium = self._pool_premium(community)
+		reason = userbot_shortfall(requirements, premium=premium) or (
+			"Никто из публикаторов пула этот пост не повезёт."
+		)
+		if premium:
+			return f"{reason} Уменьшите файл (например, битрейтом на странице «Видео»)."
+		return f"{reason} Публикатора с Premium в пуле «{community.title}» нет."
+
+	def _pick_publisher(
+		self, community: Community, draft: PostDraft, route: PublishRoute
+	) -> int | None:
+		"""Кто везёт пост: аккаунт от диспетчера или None для бот-пути (ADR-0036).
+
+		Выполняется до побочных эффектов публикации (переименование файла):
+		отклонённый черновик не должен менять ничего на диске. Пределы
+		берутся по **маршруту**: пост с кнопками может уйти ботом даже
+		там, где есть публикатор, и тогда действуют базовые пределы бота
+		(ADR-0031). Наличие публикатора здесь не проверяется — это
+		свойство сообщества, и живёт оно в :meth:`publish_blocker`.
 
 		Raises:
 			PostNotReadyError: Отложенный пост, а userbot-публикатора нет.
-			PostError: Текст длиннее предела или файл больше лимита
-				выбранного транспорта.
+			PostError: Никто из пула пост не повезёт (текст длиннее
+				предела, файл больше лимита) или бот его не поднимет.
 		"""
-		with_media = draft.with_media
-		biggest = max((self._file_size(file.path) for file in draft.media), default=0)
-		premium = route_uses_userbot(route) and self._gateway.userbot_premium(account_id)
-		# длина — по тому же правилу, что при постановке: у бота подписки
-		# не бывает, и `on_route` сводит его к базовым пределам
-		limits = TextLimits(
-			text=text_length_limit(premium, with_media=False),
-			caption=text_length_limit(premium, with_media=True),
-		).on_route(route)
-		check_text_length(draft.text, limits.for_draft(draft), with_media)
+		requirements = self._requirements(draft, route)
 		if route_uses_userbot(route):
-			limit = userbot_max_file_bytes(premium)
-			if biggest > limit:
-				raise PostError(
-					f"Файл больше {limit_gb(limit)} ГБ — лимит Telegram на файл "
-					"для этого аккаунта. Уменьшите файл (например, битрейтом "
-					"на странице «Видео»)."
-				)
-			return
+			candidates = self._publishers(community, requirements)
+			if not candidates:
+				raise PostError(self._pool_shortfall(community, requirements))
+			return candidates[0].owner.id
 		if draft.when is not None:
 			# поправимо человеком (вернуть userbot в доступы), поэтому
 			# очередь такой пост придержит, а не похоронит ошибкой
@@ -1511,12 +1553,10 @@ class PostsService:
 				"Отложенные посты требуют userbot-админа в сообществе — "
 				"через бота доступно только «сейчас»."
 			)
-		if biggest > BOT_MAX_FILE_BYTES:
-			raise PostError(
-				f"Файл больше {limit_mb(BOT_MAX_FILE_BYTES)} МБ — лимит "
-				"отправки ботом. Добавьте userbot администратором канала "
-				"или уменьшите файл."
-			)
+		reason = bot_shortfall(requirements)
+		if reason is not None:
+			raise PostError(reason)
+		return None
 
 	@staticmethod
 	def _file_size(media_path: str) -> int:
@@ -1532,23 +1572,20 @@ class PostsService:
 			raise PostError(f"Файл недоступен: {exc.strerror or exc} — {media_path}") from exc
 
 	async def _publish_userbot(
-		self,
-		community: Community,
-		draft: PostDraft,
-		files: tuple[MediaFile, ...],
-		on_progress: ProgressCallback | None,
+		self, plan: PublishPlan, draft: PostDraft, on_progress: ProgressCallback | None
 	) -> int:
-		"""Полный путь через userbot: из сессии аккаунта канала (ADR-0019).
+		"""Полный путь через userbot: из сессии выбранного аккаунта (ADR-0019, ADR-0036).
 
-		Лимит размера файла проверен раньше (:meth:`_check_transport`);
-		сюда канал приходит только с привязкой (маршрутизация ``publish``).
+		Публикатора выбрал диспетчер при подготовке (:meth:`_pick_publisher`),
+		там же проверен лимит размера файла.
 
 		Returns:
 			Номер вышедшего поста (у отложенного — номер записи
 			в очереди отложенных сервера): по нему бот дорисовывает
 			кнопки (ADR-0031).
 		"""
-		if community.default_tg_account_id is None:  # publish() сюда без умолчания не приводит
+		community, files = plan.community, plan.files
+		if plan.publisher is None:  # prepare_publish сюда без публикатора не приводит
 			raise PostError("У сообщества нет userbot-публикатора — проверьте доступы.")
 		with tempfile.TemporaryDirectory() as tmp:
 			# миниатюра — только у одиночного видео: в альбоме Telegram
@@ -1573,7 +1610,7 @@ class PostsService:
 				topic_id=draft.topic_id,
 			)
 			return await self._gateway.userbot_publish(
-				community.default_tg_account_id, community.tg_chat_id, post, on_progress
+				plan.publisher, community.tg_chat_id, post, on_progress
 			)
 
 	async def _publish_bot(
@@ -1960,9 +1997,7 @@ class PostsService:
 			PostError: Сообщество не найдено.
 		"""
 		community = await self._get_community(community_id)
-		return userbot_max_file_bytes(
-			self._gateway.userbot_premium(community.default_tg_account_id)
-		)
+		return userbot_max_file_bytes(self._pool_premium(community))
 
 	async def text_limits(self, community_id: int) -> TextLimits:
 		"""Пределы длины текста, действующие в сообществе.

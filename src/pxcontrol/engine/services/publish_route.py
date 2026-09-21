@@ -19,10 +19,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pxcontrol.engine.telegram.types import BOT_MAX_FILE_BYTES, CommunityKind, limit_mb
+from pxcontrol.engine.telegram.types import (
+	BOT_MAX_FILE_BYTES,
+	CommunityKind,
+	limit_gb,
+	limit_mb,
+	telegram_text_length,
+	text_length_limit,
+	userbot_max_file_bytes,
+)
 
 
 @dataclass(frozen=True)
@@ -267,3 +276,108 @@ def route_uses_userbot(route: PublishRoute) -> bool:
 	базовые, а у публикатора — по Premium его аккаунта (ADR-0019).
 	"""
 	return route is not PublishRoute.BOT
+
+
+@dataclass(frozen=True)
+class PostRequirements:
+	"""Что пост требует от того, кто его повезёт (ADR-0036).
+
+	Считается от черновика один раз и спрашивается дважды: при постановке
+	(есть ли в пуле хоть кто-то подходящий — отказ должен всплыть под
+	рукой у человека) и при отправке (кому из подходящих поручить).
+
+	Attributes:
+		file_bytes: самое большое вложение (0 — без файлов).
+		text: текст поста или подпись к файлу.
+		with_media: текст идёт подписью — предел у неё меньше.
+		scheduled: нужна серверная отложка — её создаёт только
+			пользователь (ADR-0010).
+		route: кто везёт пост (ADR-0031); у бота пределы базовые.
+	"""
+
+	file_bytes: int
+	text: str
+	with_media: bool
+	scheduled: bool
+	route: PublishRoute
+
+
+def post_requirements(
+	*,
+	file_sizes: Sequence[int],
+	text: str,
+	with_media: bool,
+	scheduled: bool,
+	route: PublishRoute,
+) -> PostRequirements:
+	"""Требования поста по его содержимому — чистая свёртка (ADR-0036)."""
+	return PostRequirements(
+		file_bytes=max(file_sizes, default=0),
+		text=text,
+		with_media=with_media,
+		scheduled=scheduled,
+		route=route,
+	)
+
+
+def text_over_limit(text: str, limit: int, with_media: bool) -> str | None:
+	"""Чем текст длиннее предела Telegram (None — укладывается).
+
+	Длина считается так же, как её считает Telegram
+	(:func:`telegram_text_length`) — иначе счётчик в интерфейсе
+	и проверка расходились бы на эмодзи. Одна формулировка на все
+	проверки: постановку, отправку и правку вышедшего поста.
+	"""
+	length = telegram_text_length(text)
+	if length <= limit:
+		return None
+	if with_media:
+		return (
+			f"Подпись к файлу длиннее предела Telegram: {length} символов "
+			f"при {limit}. Сократите подпись или отправьте текст "
+			"отдельным постом."
+		)
+	return (
+		f"Текст поста длиннее предела Telegram: {length} символов при {limit}. "
+		"Сократите текст или разбейте его на несколько постов."
+	)
+
+
+def userbot_shortfall(requirements: PostRequirements, *, premium: bool) -> str | None:
+	"""Почему пользователь с такой подпиской этот пост не повезёт (None — повезёт).
+
+	Пределы пользователя — по его Premium (ADR-0019): файл 2000 МиБ
+	против 4000, подпись 1024 знака против 4096. Формулировка называет
+	предел, в который упёрлись, — человеку решать, уменьшать ли файл
+	или искать публикатора с подпиской.
+	"""
+	limit = userbot_max_file_bytes(premium)
+	if requirements.file_bytes > limit:
+		return (
+			f"Файл больше {limit_gb(limit)} ГБ — лимит Telegram на файл для "
+			f"аккаунта {'с Premium' if premium else 'без Premium'}."
+		)
+	return text_over_limit(
+		requirements.text,
+		text_length_limit(premium, requirements.with_media),
+		requirements.with_media,
+	)
+
+
+def bot_shortfall(requirements: PostRequirements) -> str | None:
+	"""Почему бот этот пост не повезёт (None — повезёт).
+
+	Отложку здесь не проверяют: у бота её не бывает вовсе, и это
+	не «предел», а причина подождать пользователя — её называет
+	подготовка публикации, у которой есть для этого свой исход.
+	"""
+	if requirements.file_bytes > BOT_MAX_FILE_BYTES:
+		return (
+			f"Файл больше {limit_mb(BOT_MAX_FILE_BYTES)} МБ — лимит отправки ботом. "
+			"Добавьте userbot администратором канала или уменьшите файл."
+		)
+	return text_over_limit(
+		requirements.text,
+		text_length_limit(False, requirements.with_media),
+		requirements.with_media,
+	)

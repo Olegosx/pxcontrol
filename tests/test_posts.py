@@ -36,6 +36,7 @@ from pxcontrol.engine.services.posts import (
 from pxcontrol.engine.services.publish_route import PublishCapabilities, post_markup_blocker
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import BotError
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.markup import (
 	ButtonKind,
 	MarkupError,
@@ -55,10 +56,12 @@ from pxcontrol.engine.telegram.types import (
 	CAPTION_LENGTH_LIMIT,
 	BotRef,
 	CommunityKind,
+	ExecutorRef,
 	ForumTopicInfo,
 	LinkPreview,
 	MediaKind,
 	OutgoingPost,
+	OwnerKind,
 	PublishedMessage,
 	PublishedPage,
 	ScheduledMessage,
@@ -92,6 +95,8 @@ class _FakeGateway:
 		self.published: list[tuple[int, str, OutgoingPost]] = []
 		self.userbot_ok = True
 		self.premium_ids: set[int] = set()
+		#: живое состояние дорожек для диспетчера (ADR-0036)
+		self.lanes: dict[ExecutorRef, LaneLiveState] = {}
 		# отложки: чтение одной записи, журнал действий и признак «уже нет»
 		self.scheduled_by_id: dict[int, ScheduledMessage] = {}
 		self.scheduled_reads: list[tuple[int, str, int]] = []
@@ -112,6 +117,9 @@ class _FakeGateway:
 
 	def userbot_premium(self, account_id: int | None) -> bool:
 		return account_id in self.premium_ids
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]:
+		return dict(self.lanes)
 
 	async def bot_send_poll(
 		self,
@@ -693,8 +701,9 @@ async def test_publish_userbot_rejects_oversized_file(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 	"""Файл больше лимита аккаунта отклоняется до загрузки; Premium — щедрее."""
+	# правило «файл по силам ли аккаунту» живёт в чистом модуле маршрутов
 	monkeypatch.setattr(
-		"pxcontrol.engine.services.posts.userbot_max_file_bytes",
+		"pxcontrol.engine.services.publish_route.userbot_max_file_bytes",
 		lambda premium: 20 if premium else 10,
 	)
 	big = tmp_path / "big.bin"
@@ -2247,3 +2256,112 @@ def test_poll_draft_names_its_kind() -> None:
 	draft = PostDraft(1, poll=PollDraft("Вопрос", ("А", "Б")))
 	assert draft.media_kind is MediaKind.POLL
 	assert not draft.with_media and not draft.is_album
+
+
+# --- публикатор из пула: диспетчер (ADR-0036) ----------------------------------------
+
+
+async def _extra_publisher(db: Database, community_id: int, label: str = "@extra") -> int:
+	"""Второй способный публикатор в пуле сообщества — не умолчание."""
+	async with db.session_factory() as session:
+		extra = TgAccount(label=label, phone=f"+79{len(label):02d}", session="s")
+		session.add(extra)
+		await session.flush()
+		session.add(community_executor(community_id, account_id=extra.id))
+		await session.commit()
+		return int(extra.id)
+
+
+async def test_big_file_goes_to_premium_publisher_from_pool(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Файл не по силам умолчанию без Premium — его везёт Premium-аккаунт пула."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.publish_route.userbot_max_file_bytes",
+		lambda premium: 20 if premium else 10,
+	)
+	big = tmp_path / "big.bin"
+	big.write_bytes(b"x" * 11)
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	extra = await _extra_publisher(db, community_id)
+	gateway.premium_ids = {extra}
+	draft = PostDraft(community_id, media=(MediaFile(str(big), MediaKind.DOCUMENT),))
+	await service.check_draft_rules(draft)  # постановка тоже смотрит на пул
+	await service.publish(draft)
+	assert [account for account, _chat, _post in gateway.published] == [extra]
+
+
+async def test_pool_shortfall_names_missing_premium(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Никто из пула не тянет файл: причина говорит про Premium, а не про «аккаунт»."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.publish_route.userbot_max_file_bytes",
+		lambda premium: 20 if premium else 10,
+	)
+	big = tmp_path / "big.bin"
+	big.write_bytes(b"x" * 11)
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	await _extra_publisher(db, community_id)
+	draft = PostDraft(community_id, media=(MediaFile(str(big), MediaKind.DOCUMENT),))
+	with pytest.raises(PostError, match="Premium в пуле"):
+		await service.check_draft_rules(draft)
+	with pytest.raises(PostError, match="Premium в пуле"):
+		await service.publish(draft)
+	assert gateway.published == []
+
+
+async def test_default_publisher_preferred_when_free(db: Database) -> None:
+	"""Умолчание — предпочтение: при равных условиях везёт оно."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	await _extra_publisher(db, community_id)
+	default_id = await _bound_account(db, community_id)
+	await service.publish(PostDraft(community_id, text="кто везёт"))
+	assert [account for account, _chat, _post in gateway.published] == [default_id]
+
+
+async def test_uploading_default_yields_to_free_pool_member(db: Database) -> None:
+	"""Умолчание грузит файл в другое сообщество — пост везёт свободный из пула."""
+	from pxcontrol.engine.telegram.lane import LaneLiveState, WorkKind
+
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	extra = await _extra_publisher(db, community_id)
+	default_id = await _bound_account(db, community_id)
+	assert default_id is not None
+	gateway.lanes[ExecutorRef(OwnerKind.USER, default_id)] = LaneLiveState(
+		WorkKind.PUBLISH, datetime.now(UTC), 0, 0.0
+	)
+	await service.publish(PostDraft(community_id, text="в обход занятого"))
+	assert [account for account, _chat, _post in gateway.published] == [extra]
+
+
+async def test_pool_publishes_without_default(db: Database) -> None:
+	"""Умолчание не назначено, но способный пользователь в пуле есть — пост уходит им."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, userbot_assigned=False, with_bot=False)
+	extra = await _extra_publisher(db, community_id)
+	assert await service.publish_blocker(community_id) is None
+	await service.publish(PostDraft(community_id, text="без умолчания"))
+	assert [account for account, _chat, _post in gateway.published] == [extra]
+
+
+async def test_text_limits_follow_best_premium_in_pool(db: Database) -> None:
+	"""Пределы длины для подсказок — по лучшему Premium пула, а не по умолчанию."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	extra = await _extra_publisher(db, community_id)
+	base = await service.text_limits(community_id)
+	assert (base.text, base.caption) == (4096, 1024)
+	gateway.premium_ids = {extra}
+	premium = await service.text_limits(community_id)
+	assert (premium.text, premium.caption) == (8192, 4096)

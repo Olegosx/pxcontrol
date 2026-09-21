@@ -13,14 +13,23 @@ import pytest
 
 from pxcontrol.engine.services.publish_route import (
 	PublishRoute,
+	bot_shortfall,
 	choose_route,
 	markup_blocker,
 	poll_blocker,
 	polls_are_anonymous_only,
+	post_requirements,
 	publish_capabilities,
 	route_uses_userbot,
+	text_over_limit,
+	userbot_shortfall,
 )
-from pxcontrol.engine.telegram.types import CommunityKind
+from pxcontrol.engine.telegram.types import (
+	BOT_MAX_FILE_BYTES,
+	CAPTION_LENGTH_LIMIT,
+	CommunityKind,
+	userbot_max_file_bytes,
+)
 
 BOTH = publish_capabilities(bot_assigned=True, userbot_assigned=True, markup_edit=True)
 NO_EDIT = publish_capabilities(bot_assigned=True, userbot_assigned=True)
@@ -192,3 +201,93 @@ def test_channel_polls_are_anonymous_only() -> None:
 	assert poll_blocker(True, title="Канал", kind=CommunityKind.CHANNEL) is None
 	# в группе открытые голоса разрешены — там правило не действует
 	assert poll_blocker(False, title="Группа", kind=CommunityKind.GROUP) is None
+
+
+# --- требования поста к перевозчику (ADR-0036) --------------------------------------
+
+
+def test_requirements_take_the_biggest_file() -> None:
+	"""Размер — по самому большому вложению; без файлов — ноль."""
+	req = post_requirements(
+		file_sizes=[10, 300, 20],
+		text="",
+		with_media=True,
+		scheduled=False,
+		route=PublishRoute.USERBOT,
+	)
+	assert req.file_bytes == 300
+	empty = post_requirements(
+		file_sizes=[], text="т", with_media=False, scheduled=True, route=PublishRoute.USERBOT
+	)
+	assert empty.file_bytes == 0 and empty.scheduled
+
+
+def test_userbot_shortfall_depends_on_premium() -> None:
+	"""Файл между пределами без Premium и с ним: везёт только Premium-аккаунт."""
+	big = userbot_max_file_bytes(False) + 1
+	req = post_requirements(
+		file_sizes=[big], text="", with_media=True, scheduled=False, route=PublishRoute.USERBOT
+	)
+	reason = userbot_shortfall(req, premium=False)
+	assert reason is not None and "без Premium" in reason
+	assert userbot_shortfall(req, premium=True) is None
+	# слишком большой даже для Premium — причина называет предел Premium
+	huge = post_requirements(
+		file_sizes=[userbot_max_file_bytes(True) + 1],
+		text="",
+		with_media=True,
+		scheduled=False,
+		route=PublishRoute.USERBOT,
+	)
+	reason = userbot_shortfall(huge, premium=True)
+	assert reason is not None and "с Premium" in reason
+
+
+def test_userbot_shortfall_checks_caption_by_premium() -> None:
+	"""Подпись длиннее базового предела проходит только у Premium."""
+	req = post_requirements(
+		file_sizes=[1],
+		text="a" * (CAPTION_LENGTH_LIMIT + 1),
+		with_media=True,
+		scheduled=False,
+		route=PublishRoute.USERBOT,
+	)
+	assert userbot_shortfall(req, premium=False) is not None
+	assert userbot_shortfall(req, premium=True) is None
+
+
+def test_bot_shortfall_uses_base_limits() -> None:
+	"""У бота подписки не бывает: файл до 50 МБ, подпись базовая."""
+	fine = post_requirements(
+		file_sizes=[BOT_MAX_FILE_BYTES],
+		text="ок",
+		with_media=True,
+		scheduled=False,
+		route=PublishRoute.BOT,
+	)
+	assert bot_shortfall(fine) is None
+	big = post_requirements(
+		file_sizes=[BOT_MAX_FILE_BYTES + 1],
+		text="",
+		with_media=True,
+		scheduled=False,
+		route=PublishRoute.BOT,
+	)
+	reason = bot_shortfall(big)
+	assert reason is not None and "ботом" in reason
+	long = post_requirements(
+		file_sizes=[1],
+		text="a" * (CAPTION_LENGTH_LIMIT + 1),
+		with_media=True,
+		scheduled=False,
+		route=PublishRoute.BOT,
+	)
+	assert bot_shortfall(long) is not None
+
+
+def test_text_over_limit_counts_like_telegram() -> None:
+	"""Эмодзи — за два: приложение откажет раньше сервера, а не позже."""
+	assert text_over_limit("a" * 10, 10, with_media=False) is None
+	assert text_over_limit("😀" * 6, 10, with_media=False) is not None
+	reason = text_over_limit("a" * 11, 10, with_media=True)
+	assert reason is not None and reason.startswith("Подпись")

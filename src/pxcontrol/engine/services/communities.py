@@ -44,6 +44,7 @@ from pxcontrol.engine.services.community_rights import (
 	executor_paused,
 	executor_rights,
 	publisher_incapable,
+	publisher_paused,
 	publisher_row,
 )
 from pxcontrol.engine.services.executor_join import ExecutorJoiner, JoinOutcome
@@ -247,9 +248,11 @@ class CommunityDto:
 	userbot_ready: bool = False
 	bot_ready: bool = False
 	markup_edit: bool = False
-	# публикатор назначен и не на паузе, но по правам публиковать
-	# не может — отдельная причина, не «нет публикатора» (ADR-0035)
+	# публиковать некому из-за прав (ADR-0035) либо только из-за паузы
+	# (ADR-0029) — обе причины считает движок по пулу одной точкой
+	# (``community_rights``), интерфейс правило не пересобирает
 	publisher_incapable: bool = False
+	publisher_paused: bool = False
 
 	@property
 	def userbot_assigned(self) -> bool:
@@ -273,20 +276,6 @@ class CommunityDto:
 		return publish_capabilities(
 			self.bot_ready, self.userbot_ready, markup_edit=self.markup_edit
 		)
-
-	@property
-	def publisher_paused(self) -> bool:
-		"""Публиковать некому только из-за паузы (ADR-0029).
-
-		Истинно, когда действующего публикатора нет, но назначенный есть
-		и приостановлен: дашборд показывает «публикатор приостановлен»
-		вместо «нет публикатора» — назначать нового не нужно, нужно
-		возобновить прежнего.
-		"""
-		caps = self.capabilities
-		if caps.userbot or caps.bot:
-			return False
-		return self.default_account_paused or self.default_bot_paused
 
 
 @dataclass(frozen=True)
@@ -1163,4 +1152,5 @@ class CommunitiesService:
 			bot_ready=caps.bot,
 			markup_edit=caps.markup_edit,
 			publisher_incapable=publisher_incapable(community),
+			publisher_paused=publisher_paused(community),
 		)
