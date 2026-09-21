@@ -175,17 +175,17 @@ def test_card_actions_by_state() -> None:
 	)
 	assert card_actions(_community(enabled=False), QueueCounts(planned=9)) == (
 		CardAction.ENABLE,
-		CardAction.MAINTENANCE,
+		CardAction.TASKS,
 	)
 	assert card_actions(_community(kind=CommunityKind.GROUP), QueueCounts(planned=1)) == (
 		CardAction.PUBLISH,
-		CardAction.MAINTENANCE,
+		CardAction.TASKS,
 	)
 
 
-def test_maintenance_needs_userbot() -> None:
-	assert action_available(CardAction.MAINTENANCE, _community(userbot=True))
-	assert not action_available(CardAction.MAINTENANCE, _community(userbot=False, bot=True))
+def test_tasks_need_userbot() -> None:
+	assert action_available(CardAction.TASKS, _community(userbot=True))
+	assert not action_available(CardAction.TASKS, _community(userbot=False, bot=True))
 	assert action_available(CardAction.PUBLISH, _community(userbot=False, bot=True))
 
 

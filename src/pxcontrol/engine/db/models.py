@@ -427,6 +427,68 @@ class CommunityAnalyticsRow(Base):
 	payload: Mapped[Any] = mapped_column(JSON)
 
 
+class CommunityTask(TimestampMixin, Base):
+	"""Задача сообщества: вид, параметры, расписание (ADR-0038).
+
+	Сохранённая настройка на пару «сообщество + вид» — ровно одна
+	(``uq_community_task_kind``). Заводится при первом обращении к виду
+	в сообществе с умолчаниями вида. ``params`` — JSON параметров вида
+	(формат — его спецификация), ``schedule`` — расписание (формат —
+	``Schedule.to_payload``), ``cursor`` — состояние вида между
+	запусками (например, кто из исполнителей следующий), ``enabled`` —
+	расписание действует. Моменты ``next_run_at`` / ``last_run_at``
+	ведёт планировщик; следующий момент **хранится**, а не считается
+	на лету: случайный интервал вытягивается один раз, и перезапуск
+	приложения его не сдвигает. Живёт и умирает с сообществом.
+	"""
+
+	__tablename__ = "community_tasks"
+	__table_args__ = (UniqueConstraint("community_id", "kind", name="uq_community_task_kind"),)
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
+	# вид задачи — значения TaskKind
+	kind: Mapped[str] = mapped_column(String(32))
+	enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
+	params: Mapped[Any] = mapped_column(JSON)
+	schedule: Mapped[Any] = mapped_column(JSON)
+	cursor: Mapped[Any | None] = mapped_column(JSON, default=None)
+	next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
+class TaskRun(Base):
+	"""Запуск задачи сообщества — строка журнала (ADR-0038).
+
+	Заводится **в начале** запуска со значением ``running`` и дописывается
+	в конце: если приложение упало посреди работы, в журнале остаётся
+	честное «начат, не завершён». ``trigger`` — кто запустил
+	(``TaskTrigger``), ``outcome`` — исход (``RunOutcome``), исполнитель —
+	ровно одна из двух ссылок видом и id (как у операций, ADR-0030;
+	пусто, пока исполнитель не выбран или выбрать не удалось),
+	``report`` — отчёт вида в JSON, ``events`` — события запуска списком
+	пар «когда, что». Живёт и умирает с задачей (CASCADE); строки старше
+	срока хранения убирает планировщик.
+	"""
+
+	__tablename__ = "task_runs"
+	__table_args__ = (Index("ix_task_runs_task_started", "task_id", "started_at"),)
+
+	id: Mapped[int] = mapped_column(primary_key=True)
+	task_id: Mapped[int] = mapped_column(ForeignKey("community_tasks.id", ondelete="CASCADE"))
+	trigger: Mapped[str] = mapped_column(String(16))
+	dry_run: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
+	# вид исполнителя — значения OwnerKind; NULL в обеих — не выбран
+	executor_kind: Mapped[str | None] = mapped_column(String(8), default=None)
+	executor_id: Mapped[int | None] = mapped_column(Integer, default=None)
+	started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+	finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+	outcome: Mapped[str] = mapped_column(String(16))
+	report: Mapped[Any | None] = mapped_column(JSON, default=None)
+	events: Mapped[Any | None] = mapped_column(JSON, default=None)
+	error: Mapped[str | None] = mapped_column(Text, default=None)
+
+
 class PublishQueueItem(TimestampMixin, Base):
 	"""Элемент очереди отправки: черновик, ждущий отправки (ADR-0016).
 

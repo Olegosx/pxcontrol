@@ -152,8 +152,10 @@
   ([ADR-0016](decisions/0016-persistent-publish-queue.md)),
   `video_queue` — очередь обработки видео, одиночной и пакетной
   ([ADR-0014](decisions/0014-video-processing-queue.md)),
-  `maintenance` — обслуживание сообществ: чистка служебных записей
-  и удалённых аккаунтов ([ADR-0026](decisions/0026-community-maintenance.md))),
+  `tasks` — задачи сообщества: уборка в ленте и участниках по кнопке
+  и по расписанию, журнал запусков ([ADR-0038](decisions/0038-community-tasks.md),
+  правила уборки — [ADR-0026](decisions/0026-community-maintenance.md));
+  виды задач — пакет `engine/tasks/` по одному контракту),
   модель данных, шлюз Telegram.
 - **Каркас заданий** (`engine/jobs.py`,
   [ADR-0025](decisions/0025-job-queue-framework.md)) — общий жизненный

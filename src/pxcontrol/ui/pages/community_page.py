@@ -13,7 +13,7 @@
 - **Участники** — исполнители сообщества (тело диалога «Участники…»):
   пул userbot-аккаунтов с ролями и публикатором по умолчанию и бот
   сообщества, назначаемый и отвязываемый здесь же;
-- **Обслуживание** — уборка (тело окна обслуживания);
+- **Задачи** — уборка и журнал запусков (тело окна задач, ADR-0038);
 - **Настройки** — активность, пресет и времена, проверка доступов,
   удаление. Публикаторов здесь нет намеренно: всё, кто публикует, —
   на вкладке «Участники», одним местом.
@@ -107,7 +107,7 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
-	MAINTENANCE_UNAVAILABLE,
+	TASKS_UNAVAILABLE,
 	community_queue_counts,
 	executors_count,
 	header_state_text,
@@ -123,7 +123,6 @@ from pxcontrol.ui.pages.executor_text import (
 	remove_executor_text,
 )
 from pxcontrol.ui.pages.list_view import ListPage, PagerRow, paginate, step_page
-from pxcontrol.ui.pages.maintenance import MaintenancePanel, open_maintenance
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
 	QueueFilter,
@@ -134,6 +133,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 )
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.scheduled_panel import ScheduledPanel, scheduled_subtitle
+from pxcontrol.ui.pages.tasks import TasksPanel, open_tasks
 from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher, QueueWatchers
 
 #: Размер логотипа в шапке страницы (пиксели).
@@ -149,14 +149,14 @@ TAB_OVERVIEW = "overview"
 TAB_QUEUE = "queue"
 TAB_SCHEDULED = "scheduled"
 TAB_MEMBERS = "members"
-TAB_MAINTENANCE = "maintenance"
+TAB_TASKS = "tasks"
 TAB_SETTINGS = "settings"
-_TABS = (TAB_OVERVIEW, TAB_QUEUE, TAB_SCHEDULED, TAB_MEMBERS, TAB_MAINTENANCE, TAB_SETTINGS)
+_TABS = (TAB_OVERVIEW, TAB_QUEUE, TAB_SCHEDULED, TAB_MEMBERS, TAB_TASKS, TAB_SETTINGS)
 
-#: Вкладки, чьё тело сложено по снимку сообщества: «Обслуживание»
+#: Вкладки, чьё тело сложено по снимку сообщества: «Задачи»
 #: решает по нему, есть ли userbot-публикатор, «Участники» держат
 #: список аккаунтов на момент сборки. Свежий снимок их пересобирает.
-_SNAPSHOT_TABS = (TAB_MEMBERS, TAB_MAINTENANCE)
+_SNAPSHOT_TABS = (TAB_MEMBERS, TAB_TASKS)
 
 
 def community_route_key(community_id: int) -> str:
@@ -171,7 +171,7 @@ def tab_title(key: str, count: int | None = None) -> str:
 		TAB_QUEUE: "Очередь",
 		TAB_SCHEDULED: "Отложено",
 		TAB_MEMBERS: "Участники",
-		TAB_MAINTENANCE: "Обслуживание",
+		TAB_TASKS: "Задачи",
 		TAB_SETTINGS: "Настройки",
 	}
 	title = titles[key]
@@ -882,8 +882,8 @@ class CommunityPage(ScrollArea):
 		parent: QWidget | None = None,
 	) -> None:
 		"""``watchers`` — наблюдатели очередей при главном окне (ADR-0034):
-		вкладке «Очередь» нужен наблюдатель отправки, «Обслуживанию» —
-		обслуживания."""
+		вкладке «Очередь» нужен наблюдатель отправки, «Задачам» —
+		задач."""
 		super().__init__(parent)
 		self.setObjectName(community_route_key(community.id))
 		self._worker = worker
@@ -913,9 +913,9 @@ class CommunityPage(ScrollArea):
 		"""Обновляет страницу свежим снимком (синхронизация главного окна).
 
 		Тела вкладок строятся один раз и живут до конца сеанса, а часть
-		из них сложена по снимку: «Обслуживание» решает по нему, есть ли
+		из них сложена по снимку: «Задачи» решают по нему, есть ли
 		userbot-публикатор, «Участники» держат список аккаунтов на момент
-		сборки. Назначили публикатора на «Участниках» — «Обслуживание»
+		сборки. Назначили публикатора на «Участниках» — «Задачи»
 		до перезапуска твердило бы, что его нет; отвязали — наоборот,
 		осталось бы рабочим. Поэтому такие тела снимаются: следующее
 		открытие соберёт их по свежему снимку. Видимая вкладка
@@ -1031,12 +1031,12 @@ class CommunityPage(ScrollArea):
 		recheck = Action("Проверить доступы", menu)
 		recheck.triggered.connect(self._recheck)
 		menu.addAction(recheck)
-		maintenance = Action("Обслуживание…", menu)
-		maintenance.setEnabled(self._community.userbot_assigned)
+		tasks = Action("Задачи…", menu)
+		tasks.setEnabled(self._community.userbot_assigned)
 		if not self._community.userbot_assigned:
-			maintenance.setToolTip(MAINTENANCE_UNAVAILABLE)
-		maintenance.triggered.connect(self._on_open_maintenance)
-		menu.addAction(maintenance)
+			tasks.setToolTip(TASKS_UNAVAILABLE)
+		tasks.triggered.connect(self._on_open_tasks)
+		menu.addAction(tasks)
 		menu.addSeparator()
 		delete = Action(FluentIcon.DELETE, "Удалить из приложения…", menu)
 		delete.triggered.connect(self._on_delete)
@@ -1102,8 +1102,8 @@ class CommunityPage(ScrollArea):
 			return scheduled
 		if key == TAB_MEMBERS:
 			return self._members_tab()
-		if key == TAB_MAINTENANCE:
-			return self._maintenance_tab()
+		if key == TAB_TASKS:
+			return self._tasks_tab()
 		if key == TAB_SETTINGS:
 			box = QWidget(self)
 			self._settings_rows = QVBoxLayout(box)
@@ -1128,16 +1128,16 @@ class CommunityPage(ScrollArea):
 		read_executors(self._worker, self, mount, self._show_error)
 		return holder
 
-	def _maintenance_tab(self) -> QWidget:
-		"""Вкладка «Обслуживание»: панель или объяснение, почему нельзя."""
+	def _tasks_tab(self) -> QWidget:
+		"""Вкладка «Задачи»: панель или объяснение, почему нельзя."""
 		if self._community.userbot_assigned:
-			return MaintenancePanel(self._worker, self._watchers.maintenance, self._community, self)
+			return TasksPanel(self._worker, self._watchers.tasks, self._community, self)
 		box = QWidget(self)
 		layout = QVBoxLayout(box)
 		layout.setContentsMargins(0, 24, 0, 0)
 		layout.setSpacing(density.spacing().row_spacing)
 		hint = BodyLabel(
-			"Обслуживание доступно только сообществу с userbot-публикатором: "
+			"Задачи доступны только сообществу с userbot-публикатором: "
 			"боту недоступны история ленты и список участников.",
 			box,
 		)
@@ -1309,9 +1309,9 @@ class CommunityPage(ScrollArea):
 		self._show_error(message)
 		self._refresh()
 
-	def _on_open_maintenance(self) -> None:
-		"""Меню «…» → окно обслуживания (та же панель, что во вкладке)."""
-		open_maintenance(self._worker, self._watchers.maintenance, self._community, self)
+	def _on_open_tasks(self) -> None:
+		"""Меню «…» → окно задач (та же панель, что во вкладке)."""
+		open_tasks(self._worker, self._watchers.tasks, self._community, self)
 
 	def _recheck(self) -> None:
 		"""Перепроверяет оба способа администрирования."""

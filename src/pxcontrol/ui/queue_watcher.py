@@ -311,10 +311,10 @@ class QueueWatchers:
 	Attributes:
 		publish: очередь отправки постов (ADR-0016).
 		video: очередь обработки видео (ADR-0014).
-		maintenance: очередь обслуживания сообществ (ADR-0026).
+		tasks: очередь задач сообщества (ADR-0038).
 	"""
 
 	def __init__(self, worker: EngineWorker, host: QWidget) -> None:
 		self.publish = QueueWatcher(worker, host, service=lambda: worker.engine.publish_queue)
 		self.video = QueueWatcher(worker, host, service=lambda: worker.engine.video_queue)
-		self.maintenance = QueueWatcher(worker, host, service=lambda: worker.engine.maintenance)
+		self.tasks = QueueWatcher(worker, host, service=lambda: worker.engine.tasks)

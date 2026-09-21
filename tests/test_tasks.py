@@ -1,4 +1,10 @@
-"""Обслуживание сообществ (ADR-0026): просмотр и чистка служебных записей."""
+"""Задачи сообщества (ADR-0038): виды, постановка, очередь, журнал запусков.
+
+Тесты двух видов (служебные записи, удалённые аккаунты) перенесены
+из тестов обслуживания (ADR-0026) без правок по смыслу; сверх них —
+журнал запусков, замок «одна задача на сообщество» и параллельность
+между сообществами.
+"""
 
 from __future__ import annotations
 
@@ -12,14 +18,31 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, CommunityExecutor, TgAccount
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunitiesService
-from pxcontrol.engine.services.maintenance import (
+from pxcontrol.engine.services.tasks import (
+	EVENTS_CAP,
+	TaskDto,
+	TaskJobDto,
+	TasksService,
+	_TaskJob,
+)
+from pxcontrol.engine.tasks import (
+	DeletedAccountsParams,
+	MembersReport,
+	RunOutcome,
+	ServiceMessagesParams,
+	ServiceReport,
+	TaskError,
+	TaskKind,
+	TaskTrigger,
+)
+from pxcontrol.engine.tasks.deleted_accounts import members_summary
+from pxcontrol.engine.tasks.service_messages import (
+	DEFAULT_DELETE_LIMIT,
 	DEFAULT_DEPTH,
 	PAGE_SIZE,
-	MaintenanceError,
-	MaintenanceService,
-	MembersReport,
-	ServiceReport,
+	kind_title,
 	selectable_kinds,
+	service_summary,
 )
 from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import (
@@ -142,11 +165,12 @@ async def _community(
 	with_account: bool = True,
 	can_delete: bool = True,
 	can_ban: bool = True,
+	chat_id: str = "-1001",
 ) -> int:
 	"""Сообщество с исполнителем-публикатором (или без исполнителей вовсе).
 
-	Права задаются строке пула, а не ответу зонда: обслуживание читает
-	их из снимка (ADR-0035, этап E) и в Telegram перед проходом не ходит.
+	Права задаются строке пула, а не ответу зонда: задачи читают их
+	из снимка (ADR-0035, этап E) и в Telegram перед запуском не ходят.
 	"""
 	async with db.session_factory() as session:
 		account_id = None
@@ -157,7 +181,7 @@ async def _community(
 			account_id = account.id
 		community = Community(
 			title="Группа",
-			tg_chat_id="-1001",
+			tg_chat_id=chat_id,
 			kind="group",
 			default_tg_account_id=account_id,
 		)
@@ -182,9 +206,55 @@ async def _community(
 		return community.id
 
 
-def _service(db: Database, gateway: _FakeGateway) -> MaintenanceService:
-	"""Сервис обслуживания поверх подставного шлюза."""
-	return MaintenanceService(gateway, CommunitiesService(db, gateway))  # type: ignore[arg-type]
+def _service(db: Database, gateway: _FakeGateway) -> TasksService:
+	"""Сервис задач поверх подставного шлюза."""
+	return TasksService(db, gateway, CommunitiesService(db, gateway))  # type: ignore[arg-type]
+
+
+async def _scan_service(
+	service: TasksService, community_id: int, depth: int = DEFAULT_DEPTH
+) -> int:
+	"""Ставит просмотр служебных записей (запуск «без изменений»)."""
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	return await service.run_now(task.id, ServiceMessagesParams(depth=depth), dry_run=True)
+
+
+async def _clean_service(
+	service: TasksService,
+	community_id: int,
+	kinds: list[ServiceMessageKind],
+	*,
+	depth: int = DEFAULT_DEPTH,
+	delete_limit: int = DEFAULT_DELETE_LIMIT,
+) -> int:
+	"""Ставит чистку служебных записей выбранных видов."""
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	params = ServiceMessagesParams(depth=depth, kinds=tuple(kinds), delete_limit=delete_limit)
+	return await service.run_now(task.id, params)
+
+
+async def _scan_members(service: TasksService, community_id: int) -> int:
+	"""Ставит поиск удалённых аккаунтов (запуск «без изменений»)."""
+	task = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	return await service.run_now(task.id, DeletedAccountsParams(), dry_run=True)
+
+
+async def _clean_members(service: TasksService, community_id: int, *, limit: int = 20) -> int:
+	"""Ставит исключение удалённых аккаунтов."""
+	task = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	return await service.run_now(task.id, DeletedAccountsParams(kick_limit=limit))
+
+
+def _service_report(item: TaskJobDto) -> ServiceReport:
+	"""Отчёт по служебным записям завершённого задания."""
+	assert isinstance(item.report, ServiceReport)
+	return item.report
+
+
+def _members_report(item: TaskJobDto) -> MembersReport:
+	"""Отчёт по участникам завершённого задания."""
+	assert isinstance(item.report, MembersReport)
+	return item.report
 
 
 # --- перевод действий Telegram в виды -----------------------------------------
@@ -268,6 +338,50 @@ def test_protected_kind_is_never_selectable() -> None:
 	assert chosen == (ServiceMessageKind.MEMBERS,)  # и дубли схлопнуты
 
 
+# --- задачи: строка и параметры --------------------------------------------------
+
+
+async def test_task_is_created_once_with_defaults(db: Database) -> None:
+	"""Задача заводится при первом обращении и дальше возвращается та же."""
+	service = _service(db, _FakeGateway())
+	community_id = await _community(db)
+	first = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	second = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	assert first.id == second.id
+	assert first.params == ServiceMessagesParams()
+	assert first.enabled is False and first.next_run_at is None
+	assert [task.kind for task in await service.list_tasks(community_id)] == [
+		TaskKind.SERVICE_MESSAGES
+	]
+
+
+async def test_task_for_unknown_community_is_rejected(db: Database) -> None:
+	"""Задачу нельзя завести сообществу, которого нет."""
+	service = _service(db, _FakeGateway())
+	with pytest.raises(TaskError):
+		await service.task(999, TaskKind.SERVICE_MESSAGES)
+
+
+async def test_run_now_saves_params(db: Database) -> None:
+	"""Запуск сохраняет параметры формы: следующий раз форма откроется с ними."""
+	service = _service(db, _FakeGateway())
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	await service.run_now(task.id, ServiceMessagesParams(depth=300, delete_limit=7), dry_run=True)
+	await service.settle()
+	saved = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	assert saved.params == ServiceMessagesParams(depth=300, delete_limit=7)
+
+
+async def test_save_params_checks_ranges(db: Database) -> None:
+	"""Негодные параметры не сохраняются — с понятным текстом."""
+	service = _service(db, _FakeGateway())
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	with pytest.raises(TaskError, match="Предел исключений"):
+		await service.save_params(task.id, DeletedAccountsParams(kick_limit=0))
+
+
 # --- просмотр ------------------------------------------------------------------
 
 
@@ -284,14 +398,14 @@ async def test_scan_counts_kinds_without_touching_anything(db: Database) -> None
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	job_id = await service.scan_service_messages(community_id)
+	job_id = await _scan_service(service, community_id)
 	await service.settle()
 	item = next(i for i in await service.state() if i.id == job_id)
 	assert item.status is JobStatus.DONE
-	assert item.service is not None
-	assert item.service.found == {ServiceMessageKind.MEMBERS: 2, ServiceMessageKind.PINS: 1}
-	assert item.service.scanned == PAGE_SIZE + 10
-	assert item.service.exhausted is True  # история кончилась на второй странице
+	report = _service_report(item)
+	assert report.found == {ServiceMessageKind.MEMBERS: 2, ServiceMessageKind.PINS: 1}
+	assert report.scanned == PAGE_SIZE + 10
+	assert report.exhausted is True  # история кончилась на второй странице
 	assert gateway.deleted == []  # просмотр ничего не трогает
 
 
@@ -301,33 +415,32 @@ async def test_scan_stops_at_depth(db: Database) -> None:
 	gateway = _FakeGateway(pages)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.scan_service_messages(community_id, depth=PAGE_SIZE * 3)
+	await _scan_service(service, community_id, depth=PAGE_SIZE * 3)
 	await service.settle()
-	item = (await service.state())[0]
-	assert item.service is not None
-	assert item.service.scanned == PAGE_SIZE * 3
+	report = _service_report((await service.state())[0])
+	assert report.scanned == PAGE_SIZE * 3
 	assert len(gateway.requested) == 3  # ровно три запроса, не десять
-	assert item.service.exhausted is False  # история не кончилась — просто хватит
+	assert report.exhausted is False  # история не кончилась — просто хватит
 
 
 async def test_depth_out_of_range_is_rejected(db: Database) -> None:
 	"""Негодная глубина отклоняется до постановки, с понятным текстом."""
 	service = _service(db, _FakeGateway())
 	community_id = await _community(db)
-	with pytest.raises(MaintenanceError, match="Глубина просмотра"):
-		await service.scan_service_messages(community_id, depth=7)
+	with pytest.raises(TaskError, match="Глубина просмотра"):
+		await _scan_service(service, community_id, depth=7)
 
 
 async def test_community_without_executors_is_rejected(db: Database) -> None:
-	"""Без исполнителя-пользователя обслуживание недоступно — и объясняет почему.
+	"""Без исполнителя-пользователя задачи недоступны — и объясняют почему.
 
 	Бот тут не годится по существу: ни списка участников, ни чужой
 	истории Bot API не отдаёт (ADR-0026, п. 8).
 	"""
 	service = _service(db, _FakeGateway())
 	community_id = await _community(db, with_account=False)
-	with pytest.raises(MaintenanceError, match="только пользователи"):
-		await service.scan_service_messages(community_id)
+	with pytest.raises(TaskError, match="только пользователи"):
+		await _scan_service(service, community_id)
 
 
 # --- чистка ---------------------------------------------------------------------
@@ -349,12 +462,11 @@ async def test_clean_removes_only_chosen_kinds(db: Database) -> None:
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	await _clean_service(service, community_id, [ServiceMessageKind.MEMBERS])
 	await service.settle()
 	item = (await service.state())[0]
 	assert item.status is JobStatus.DONE
-	assert item.service is not None
-	assert item.service.deleted == 2
+	assert _service_report(item).deleted == 2
 	assert gateway.deleted == [[100, 102]]  # закрепление осталось на месте
 
 
@@ -368,12 +480,11 @@ async def test_clean_respects_delete_limit(db: Database) -> None:
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS], delete_limit=3)
+	await _clean_service(service, community_id, [ServiceMessageKind.MEMBERS], delete_limit=3)
 	await service.settle()
-	item = (await service.state())[0]
-	assert item.service is not None
-	assert item.service.deleted == 3
-	assert item.service.limited is True
+	report = _service_report((await service.state())[0])
+	assert report.deleted == 3
+	assert report.limited is True
 	assert gateway.deleted == [[100, 101, 102]]
 
 
@@ -383,37 +494,29 @@ async def test_clean_counts_refused_as_skipped(db: Database) -> None:
 	gateway.undeletable = {101}
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	await _clean_service(service, community_id, [ServiceMessageKind.MEMBERS])
 	await service.settle()
 	item = (await service.state())[0]
 	assert item.status is JobStatus.DONE  # проход не провалился
-	assert item.service is not None
-	assert (item.service.deleted, item.service.skipped) == (1, 1)
+	report = _service_report(item)
+	assert (report.deleted, report.skipped) == (1, 1)
 
 
 async def test_clean_requires_delete_right(db: Database) -> None:
 	"""Без права удалять чистка не начинается — по снимку прав, без зонда.
 
-	Прежде право спрашивалось живым запросом перед каждым проходом;
-	теперь оно уже хранится (ADR-0035), и обслуживание ищет в пуле того,
-	кому удалять разрешено.
+	Право уже хранится (ADR-0035), и задача ищет в пуле того, кому
+	удалять разрешено; отказ звучит при нажатии, а не в журнале.
 	"""
 	service = _service(db, _FakeGateway())
 	community_id = await _community(db, can_delete=False)
-	with pytest.raises(MaintenanceError, match="удалять чужие сообщения"):
-		await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	with pytest.raises(TaskError, match="удалять чужие сообщения"):
+		await _clean_service(service, community_id, [ServiceMessageKind.MEMBERS])
 	assert await service.state() == []  # задание даже не поставлено
 
 
-async def test_maintenance_takes_a_capable_executor_not_only_publisher(
-	db: Database,
-) -> None:
-	"""Право есть у другого исполнителя пула — работу делает он (ADR-0035, этап E).
-
-	Прежде обслуживание знало только публикатора и отказывало, даже когда
-	в пуле был администратор с нужным правом. Теперь работу берёт
-	способный, а публикатор идёт первым, когда способен сам.
-	"""
+async def test_task_takes_a_capable_executor_not_only_publisher(db: Database) -> None:
+	"""Право есть у другого исполнителя пула — работу делает он (ADR-0035, этап E)."""
 	from pxcontrol.engine.db.models import CommunityExecutor as ExecutorRow
 
 	gateway = _FakeGateway([_page(kinds=[ServiceMessageKind.MEMBERS])])
@@ -438,20 +541,14 @@ async def test_maintenance_takes_a_capable_executor_not_only_publisher(
 		)
 		await session.commit()
 		helper_id = helper.id
-	await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	await _clean_service(service, community_id, [ServiceMessageKind.MEMBERS])
 	await service.settle()
 	assert gateway.deleted, "чистка прошла — нашёлся способный исполнитель"
 	assert gateway.used_accounts == [helper_id], "работала не публикатор, а способный"
 
 
 async def test_unread_rights_are_clarified_by_a_probe(db: Database) -> None:
-	"""Снимка прав не было — уточняем живым зондом, а не отказываем (ADR-0035).
-
-	Строки, пережившие миграцию, несут только то, что подтверждала
-	прежняя модель: право публиковать есть, прав удалять и исключать
-	нет — не потому, что их отобрали, а потому, что их никто не читал.
-	Отказ по такому снимку был бы неправдой.
-	"""
+	"""Снимка прав не было — уточняем живым зондом, а не отказываем (ADR-0035)."""
 	from sqlalchemy import select
 
 	from pxcontrol.engine.db.models import CommunityExecutor as ExecutorRow
@@ -468,7 +565,7 @@ async def test_unread_rights_are_clarified_by_a_probe(db: Database) -> None:
 		row.rights = ExecutorRights(ParticipantStatus.ADMIN).to_payload()
 		row.checked_at = None
 		await session.commit()
-	await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	await _clean_service(service, community_id, [ServiceMessageKind.MEMBERS])
 	await service.settle()
 	assert gateway.deleted, "зонд подтвердил права — чистка пошла"
 
@@ -477,8 +574,8 @@ async def test_clean_without_kinds_is_rejected(db: Database) -> None:
 	"""Пустой набор видов (или только защищённые) — отказ до постановки."""
 	service = _service(db, _FakeGateway())
 	community_id = await _community(db)
-	with pytest.raises(MaintenanceError, match="не выбрано|Не выбрано"):
-		await service.clean_service_messages(community_id, [ServiceMessageKind.PROTECTED])
+	with pytest.raises(TaskError, match="не выбрано|Не выбрано"):
+		await _clean_service(service, community_id, [ServiceMessageKind.PROTECTED])
 
 
 async def test_flood_stops_the_pass(db: Database) -> None:
@@ -493,12 +590,12 @@ async def test_flood_stops_the_pass(db: Database) -> None:
 	gateway = _FloodingGateway()
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.scan_service_messages(community_id)
+	await _scan_service(service, community_id)
 	await service.settle()
 	item = (await service.state())[0]
 	assert item.status is JobStatus.ERROR
 	assert item.error is not None and "подождать" in item.error
-	assert item.service is None  # неполный отчёт не сохраняется
+	assert item.report is None  # неполный отчёт не сохраняется
 
 
 async def test_cancel_stops_between_pages(db: Database) -> None:
@@ -516,7 +613,7 @@ async def test_cancel_stops_between_pages(db: Database) -> None:
 	gateway = _SlowGateway()
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	job_id = await service.scan_service_messages(community_id)
+	job_id = await _scan_service(service, community_id)
 	while not gateway.requested:
 		await asyncio.sleep(0)
 	await service.cancel(job_id)
@@ -528,7 +625,7 @@ async def test_cancel_stops_between_pages(db: Database) -> None:
 
 
 async def test_scan_and_clean_queue_up(db: Database) -> None:
-	"""Задания идут по очереди — одно обращение к аккаунту за раз."""
+	"""Задания одного сообщества идут по очереди — одна задача за раз."""
 	gateway = _FakeGateway(
 		[
 			_page(kinds=[ServiceMessageKind.MEMBERS], scanned=1),
@@ -537,12 +634,12 @@ async def test_scan_and_clean_queue_up(db: Database) -> None:
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	first = await service.scan_service_messages(community_id, depth=DEFAULT_DEPTH)
-	second = await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	first = await _scan_service(service, community_id)
+	second = await _clean_service(service, community_id, [ServiceMessageKind.MEMBERS])
 	await service.settle()
 	items = {item.id: item for item in await service.state()}
-	assert items[first].service is not None
-	assert items[second].service is not None
+	assert isinstance(items[first].report, ServiceReport)
+	assert isinstance(items[second].report, ServiceReport)
 	assert all(item.status is JobStatus.DONE for item in items.values())
 
 
@@ -569,30 +666,268 @@ async def test_interrupted_clean_leaves_a_trace_in_the_log(
 	gateway = _SlowGateway()
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	job_id = await service.clean_service_messages(community_id, [ServiceMessageKind.MEMBERS])
+	job_id = await _clean_service(service, community_id, [ServiceMessageKind.MEMBERS])
 	while len(gateway.requested) < 2:
 		await asyncio.sleep(0)
-	with caplog.at_level("INFO", logger="pxcontrol.engine.services.maintenance"):
+	with caplog.at_level("INFO", logger="pxcontrol.engine.services.tasks"):
 		await service.cancel(job_id)
 		release.set()
 		await service.settle()
 
 	item = (await service.state())[0]
 	assert item.status is JobStatus.CANCELLED
-	assert item.service is None  # неполный отчёт не сохраняется
+	assert item.report is None  # неполный отчёт не сохраняется
 	# зато в журнале осталось, сколько записей успели удалить
 	summaries = [msg for r in caplog.records if "удалено" in (msg := r.getMessage())]
 	assert len(summaries) == 1
 	assert re.search(r"удалено ([1-9]\d*)", summaries[0])
+	# и в журнале запусков — тоже: отмена записана с событиями
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	(run,) = await service.runs(task.id)
+	assert run.outcome is RunOutcome.CANCELLED
+	assert any("удалено" in text for _at, text in run.events)
 
 
-# --- тексты интерфейса (чистые функции окна) ------------------------------------
+# --- журнал запусков ---------------------------------------------------------------
+
+
+async def test_run_is_recorded_in_journal(db: Database) -> None:
+	"""Каждый запуск оставляет строку: кто, чьими руками, чем кончилось."""
+	gateway = _FakeGateway([_page(kinds=[ServiceMessageKind.MEMBERS], scanned=1)])
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	await _scan_service(service, community_id)
+	await service.settle()
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	(run,) = await service.runs(task.id)
+	assert run.trigger is TaskTrigger.MANUAL
+	assert run.dry_run is True
+	assert run.outcome is RunOutcome.DONE
+	assert run.finished_at is not None and run.finished_at >= run.started_at
+	assert run.executor_label == "@ub"  # чьими руками шла работа
+	assert "Найдено служебных записей: 1" in run.summary
+	assert any("исполнитель" in text for _at, text in run.events)
+	assert task.last_run_at is not None
+
+
+async def test_failed_run_is_recorded_with_reason(db: Database) -> None:
+	"""Запуск с ошибкой попадает в журнал с причиной."""
+
+	class _FloodingGateway(_FakeGateway):
+		async def userbot_service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+
+	service = _service(db, _FloodingGateway())
+	community_id = await _community(db)
+	await _scan_service(service, community_id)
+	await service.settle()
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	(run,) = await service.runs(task.id)
+	assert run.outcome is RunOutcome.ERROR
+	assert run.error is not None and "подождать" in run.error
+	assert run.summary == ""  # отчёта нет — и строка честно пуста
+
+
+async def test_engine_stop_is_recorded_as_interrupted(db: Database) -> None:
+	"""Остановка движка посреди запуска — исход «прервано», а не «отменено»."""
+	release = asyncio.Event()
+
+	class _SlowGateway(_FakeGateway):
+		async def userbot_service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			self.requested.append(offset_id)
+			await release.wait()
+			return _page(kinds=[ServiceMessageKind.MEMBERS], scanned=1, next_offset_id=90)
+
+	gateway = _SlowGateway()
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	await _scan_service(service, community_id)
+	while not gateway.requested:
+		await asyncio.sleep(0)
+	stopping = asyncio.create_task(service.shutdown())
+	await asyncio.sleep(0)
+	release.set()
+	await stopping
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	(run,) = await service.runs(task.id)
+	assert run.outcome is RunOutcome.INTERRUPTED
+
+
+async def test_retry_opens_a_new_journal_row(db: Database) -> None:
+	"""Повтор после ошибки — новый запуск в журнале, старый остаётся."""
+	calls = 0
+
+	class _FlakyGateway(_FakeGateway):
+		async def userbot_service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			nonlocal calls
+			calls += 1
+			if calls == 1:
+				raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+			return _page(kinds=[], scanned=1)
+
+	service = _service(db, _FlakyGateway())
+	community_id = await _community(db)
+	job_id = await _scan_service(service, community_id)
+	await service.settle()
+	await service.retry(job_id)
+	await service.settle()
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	runs = await service.runs(task.id)
+	assert [run.outcome for run in runs] == [RunOutcome.DONE, RunOutcome.ERROR]  # новые сверху
+
+
+def test_run_events_are_capped() -> None:
+	"""Событий у запуска не больше предела; вытесняются ранние, не последние."""
+	from pxcontrol.engine.services.communities import CommunityDto
+
+	community = CommunityDto(
+		id=1,
+		title="Группа",
+		username=None,
+		tg_chat_id="-1001",
+		default_bot_id=None,
+		default_bot_label=None,
+		enabled=True,
+	)
+	task = TaskDto(
+		id=1,
+		community_id=1,
+		kind=TaskKind.SERVICE_MESSAGES,
+		params=ServiceMessagesParams(),
+		enabled=False,
+		schedule={"kind": "none"},
+		next_run_at=None,
+		last_run_at=None,
+	)
+	job = _TaskJob(1, task, community, dry_run=True, trigger=TaskTrigger.MANUAL)
+	for number in range(EVENTS_CAP + 20):
+		TasksService._log(job, f"событие {number}")
+	assert len(job.events) == EVENTS_CAP
+	assert job.events[-1][1] == f"событие {EVENTS_CAP + 19}"
+
+
+# --- очередь: замок сообщества и параллельность -----------------------------------
+
+
+async def test_one_task_per_community_at_a_time(db: Database) -> None:
+	"""В одном сообществе задачи идут по одной: вторая ждёт первую."""
+	release = asyncio.Event()
+
+	class _SlowGateway(_FakeGateway):
+		async def userbot_service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			self.requested.append(offset_id)
+			await release.wait()
+			return _page(kinds=[], scanned=1)
+
+	gateway = _SlowGateway()
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	await _scan_service(service, community_id)
+	await _scan_members(service, community_id)
+	while not gateway.requested:
+		await asyncio.sleep(0)
+	for _ in range(5):
+		await asyncio.sleep(0)
+	statuses = sorted(item.status for item in await service.state())
+	assert statuses == [JobStatus.PENDING, JobStatus.RUNNING]  # вторая не начата
+	release.set()
+	await service.settle()
+	assert all(item.status is JobStatus.DONE for item in await service.state())
+
+
+async def test_tasks_of_different_communities_run_side_by_side(db: Database) -> None:
+	"""Задачи разных сообществ не ждут друг друга (слоты очереди, ADR-0036)."""
+	release = asyncio.Event()
+
+	class _SlowGateway(_FakeGateway):
+		async def userbot_service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			self.requested.append(offset_id)
+			await release.wait()
+			return _page(kinds=[], scanned=1)
+
+	gateway = _SlowGateway()
+	service = _service(db, gateway)
+	first = await _community(db, chat_id="-1001")
+	second = await _community(db, chat_id="-1002")
+	await _scan_service(service, first)
+	await _scan_service(service, second)
+	while len(gateway.requested) < 2:
+		await asyncio.sleep(0)
+	assert {item.status for item in await service.state()} == {JobStatus.RUNNING}
+	release.set()
+	await service.settle()
+
+
+async def test_deleting_community_stops_its_tasks(db: Database) -> None:
+	"""Удаление сообщества снимает его задания.
+
+	Задание держит снимок сообщества и работает по его ``tg_chat_id``,
+	от строки в БД не завися: без снятия уборка продолжала бы удалять
+	записи в Telegram для сущности, которой в приложении уже нет.
+	"""
+	release = asyncio.Event()
+
+	class _SlowGateway(_FakeGateway):
+		async def userbot_service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			self.requested.append(offset_id)
+			await release.wait()
+			return _page(kinds=[ServiceMessageKind.MEMBERS], scanned=1, next_offset_id=90)
+
+	gateway = _SlowGateway()
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	running = await _scan_service(service, community_id)
+	waiting = await _scan_service(service, community_id)
+	while not gateway.requested:
+		await asyncio.sleep(0)
+
+	await service.drop_community(community_id)
+	release.set()
+	await service.settle()
+
+	items = {item.id: item for item in await service.state()}
+	assert items[waiting].status is JobStatus.CANCELLED  # ждавшее снято сразу
+	assert items[running].status is JobStatus.CANCELLED  # идущее остановлено
+	assert len(gateway.requested) == 1  # вторая страница не запрашивалась
+
+
+async def test_task_rows_die_with_community(db: Database) -> None:
+	"""Задачи и журнал уходят каскадом вместе с сообществом."""
+	from sqlalchemy import func, select
+
+	from pxcontrol.engine.db.models import CommunityTask, TaskRun
+
+	gateway = _FakeGateway([_page(kinds=[], scanned=1)])
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	await _scan_service(service, community_id)
+	await service.settle()
+	await CommunitiesService(db, gateway).delete_community(community_id)  # type: ignore[arg-type]
+	async with db.session_factory() as session:
+		tasks = (
+			await session.execute(select(func.count()).select_from(CommunityTask))
+		).scalar_one()
+		runs = (await session.execute(select(func.count()).select_from(TaskRun))).scalar_one()
+	assert (tasks, runs) == (0, 0)
+
+
+# --- тексты (чистые функции) -------------------------------------------------------
 
 
 def test_service_summary_tells_what_was_seen() -> None:
 	"""Итог просмотра называет число, глубину и границу по дате."""
-	from pxcontrol.ui.pages.maintenance import service_summary
-
 	moment = datetime(2026, 3, 12, 10, 30, tzinfo=UTC)
 	report = ServiceReport(
 		found={ServiceMessageKind.MEMBERS: 12},
@@ -608,8 +943,6 @@ def test_service_summary_tells_what_was_seen() -> None:
 
 def test_service_summary_says_history_is_over() -> None:
 	"""Кончившаяся история — отдельная формулировка, а не «просмотрено N»."""
-	from pxcontrol.ui.pages.maintenance import service_summary
-
 	report = ServiceReport(
 		found={ServiceMessageKind.PINS: 3}, scanned=42, oldest_date=None, exhausted=True
 	)
@@ -618,15 +951,11 @@ def test_service_summary_says_history_is_over() -> None:
 
 def test_service_summary_for_empty_result() -> None:
 	"""Пустой результат не притворяется находкой."""
-	from pxcontrol.ui.pages.maintenance import service_summary
-
 	assert "не найдено" in service_summary(ServiceReport(scanned=500))
 
 
 def test_service_summary_reports_skipped_and_limit() -> None:
 	"""Итог чистки честен про пропуски и про упёршийся потолок."""
-	from pxcontrol.ui.pages.maintenance import service_summary
-
 	text = service_summary(ServiceReport(deleted=40, skipped=2, scanned=900, limited=True))
 	assert "40" in text
 	assert "не дал удалить: 2" in text
@@ -635,11 +964,69 @@ def test_service_summary_reports_skipped_and_limit() -> None:
 
 def test_every_kind_has_human_title() -> None:
 	"""У каждого вида есть человеческое название — без «ServiceMessageKind.OTHER»."""
-	from pxcontrol.ui.pages.maintenance import kind_title
-
 	for kind in ServiceMessageKind:
 		title = kind_title(kind)
 		assert title and not title.startswith("ServiceMessageKind")
+
+
+def test_report_survives_json_round_trip() -> None:
+	"""Отчёт переживает запись в журнал и чтение обратно без потерь."""
+	from pxcontrol.engine.tasks import spec_of
+
+	spec = spec_of(TaskKind.SERVICE_MESSAGES)
+	report = ServiceReport(
+		found={ServiceMessageKind.MEMBERS: 2, ServiceMessageKind.PINS: 1},
+		scanned=300,
+		deleted=2,
+		limited=True,
+		oldest_date=datetime(2026, 3, 12, 10, 30, tzinfo=UTC),
+	)
+	assert spec.report_from_payload(spec.report_to_payload(report)) == report
+	members = spec_of(TaskKind.DELETED_ACCOUNTS)
+	original = MembersReport(found=3, scanned=10, total=10, removed=2, skipped=1, capped=False)
+	assert members.report_from_payload(members.report_to_payload(original)) == original
+
+
+def test_params_survive_json_round_trip_and_ignore_junk() -> None:
+	"""Параметры переживают запись и чтение; битое значение — к умолчанию."""
+	from pxcontrol.engine.tasks import spec_of
+
+	spec = spec_of(TaskKind.SERVICE_MESSAGES)
+	params = ServiceMessagesParams(depth=500, kinds=(ServiceMessageKind.PINS,), delete_limit=9)
+	assert spec.params_from_payload(spec.params_to_payload(params)) == params
+	junk = spec.params_from_payload({"depth": "много", "kinds": ["pins", "нет такого"]})
+	assert junk == ServiceMessagesParams(kinds=(ServiceMessageKind.PINS,))
+
+
+def test_journal_texts_for_ui() -> None:
+	"""Строки журнала: кто запустил, исход с итогом или причиной, события."""
+	from pxcontrol.engine.services.tasks import TaskRunDto
+	from pxcontrol.ui.pages.tasks import run_events_text, run_kind_text, run_result_text
+
+	at = datetime(2026, 3, 12, 10, 30, tzinfo=UTC)
+
+	def run(outcome: RunOutcome, *, summary: str = "", error: str | None = None) -> TaskRunDto:
+		return TaskRunDto(
+			id=1,
+			task_id=1,
+			kind=TaskKind.SERVICE_MESSAGES,
+			trigger=TaskTrigger.MANUAL,
+			dry_run=True,
+			executor=None,
+			executor_label=None,
+			started_at=at,
+			finished_at=at,
+			outcome=outcome,
+			summary=summary,
+			error=error,
+			events=((at, "исполнитель — @ub"),),
+		)
+
+	assert run_kind_text(run(RunOutcome.DONE)) == "вручную · без изменений"
+	assert run_result_text(run(RunOutcome.DONE, summary="Найдено: 3")) == "готово — Найдено: 3"
+	assert run_result_text(run(RunOutcome.ERROR, error="флуд")) == "ошибка: флуд"
+	assert run_result_text(run(RunOutcome.INTERRUPTED)) == "прервано остановкой"
+	assert "исполнитель — @ub" in run_events_text(run(RunOutcome.DONE))
 
 
 # --- удалённые аккаунты ---------------------------------------------------------
@@ -668,33 +1055,27 @@ async def test_scan_members_finds_deleted_without_kicking(db: Database) -> None:
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.scan_deleted_accounts(community_id)
+	await _scan_members(service, community_id)
 	await service.settle()
 	item = (await service.state())[0]
 	assert item.status is JobStatus.DONE
-	assert item.members is not None
-	assert (item.members.found, item.members.scanned, item.members.total) == (3, 350, 350)
-	assert item.members.exhausted is True
-	assert item.members.capped is False  # список отдан целиком
+	report = _members_report(item)
+	assert (report.found, report.scanned, report.total) == (3, 350, 350)
+	assert report.exhausted is True
+	assert report.capped is False  # список отдан целиком
 	assert gateway.kicked == []
 
 
 async def test_scan_members_notices_telegram_cap(db: Database) -> None:
-	"""Если Telegram отдал меньше, чем участников, — это видно в отчёте.
-
-	Тот самый предел выдачи, который при проектировании был лишь
-	предположением (ADR-0026): теперь он не угадывается, а фиксируется.
-	"""
+	"""Если Telegram отдал меньше, чем участников, — это видно в отчёте."""
 	gateway = _FakeGateway(
 		member_pages=[_members(deleted=[], scanned=200, next_offset=None, total=10_000)]
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.scan_deleted_accounts(community_id)
+	await _scan_members(service, community_id)
 	await service.settle()
-	item = (await service.state())[0]
-	assert item.members is not None
-	assert item.members.capped is True
+	assert _members_report((await service.state())[0]).capped is True
 
 
 async def test_clean_members_respects_limit(db: Database) -> None:
@@ -707,33 +1088,27 @@ async def test_clean_members_respects_limit(db: Database) -> None:
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.clean_deleted_accounts(community_id, limit=2)
+	await _clean_members(service, community_id, limit=2)
 	await service.settle()
-	item = (await service.state())[0]
-	assert item.members is not None
-	assert item.members.removed == 2
-	assert item.members.limited is True
+	report = _members_report((await service.state())[0])
+	assert report.removed == 2
+	assert report.limited is True
 	assert gateway.kicked == [11, 12]
 
 
 async def test_clean_members_sweeps_its_own_service_notes(db: Database) -> None:
-	"""Чистка убирает записи «удалил участника», которые сама породила.
-
-	Иначе уборка мёртвых душ производила бы ровно тот мусор, который
-	убирает первый вид обслуживания (ADR-0026).
-	"""
+	"""Чистка убирает записи «удалил участника», которые сама породила."""
 	gateway = _FakeGateway(
 		member_pages=[_members(deleted=[11, 12], scanned=10, next_offset=None, total=10)]
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.clean_deleted_accounts(community_id, limit=10)
+	await _clean_members(service, community_id, limit=10)
 	await service.settle()
-	item = (await service.state())[0]
-	assert item.members is not None
-	assert item.members.removed == 2
+	report = _members_report((await service.state())[0])
+	assert report.removed == 2
 	assert gateway.deleted == [[9011, 9012]]  # одной пачкой, а не по одной
-	assert item.members.service_left == 0
+	assert report.service_left == 0
 
 
 async def test_clean_members_reports_notes_left_without_delete_right(db: Database) -> None:
@@ -743,11 +1118,10 @@ async def test_clean_members_reports_notes_left_without_delete_right(db: Databas
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db, can_delete=False)
-	await service.clean_deleted_accounts(community_id, limit=10)
+	await _clean_members(service, community_id, limit=10)
 	await service.settle()
-	item = (await service.state())[0]
-	assert item.members is not None
-	assert (item.members.removed, item.members.service_left) == (1, 1)
+	report = _members_report((await service.state())[0])
+	assert (report.removed, report.service_left) == (1, 1)
 	assert gateway.deleted == []  # без права даже не пробуем
 
 
@@ -755,8 +1129,8 @@ async def test_clean_members_requires_ban_right(db: Database) -> None:
 	"""Без права исключать чистка не начинается (по снимку прав)."""
 	service = _service(db, _FakeGateway())
 	community_id = await _community(db, can_ban=False)
-	with pytest.raises(MaintenanceError, match="исключать участников"):
-		await service.clean_deleted_accounts(community_id)
+	with pytest.raises(TaskError, match="исключать участников"):
+		await _clean_members(service, community_id)
 	assert await service.state() == []
 
 
@@ -767,73 +1141,29 @@ async def test_kick_limit_allows_single_account(db: Database) -> None:
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.clean_deleted_accounts(community_id, limit=1)
+	await _clean_members(service, community_id, limit=1)
 	await service.settle()
-	item = (await service.state())[0]
-	assert item.members is not None
-	assert item.members.removed == 1
+	assert _members_report((await service.state())[0]).removed == 1
 
 
 async def test_kick_limit_zero_is_rejected(db: Database) -> None:
 	"""Ноль исключений — не проход, а недоразумение: отказ с объяснением."""
 	service = _service(db, _FakeGateway())
 	community_id = await _community(db)
-	with pytest.raises(MaintenanceError, match="Предел исключений"):
-		await service.clean_deleted_accounts(community_id, limit=0)
+	with pytest.raises(TaskError, match="Предел исключений"):
+		await _clean_members(service, community_id, limit=0)
 
 
 def test_members_summary_mentions_cap_and_leftovers() -> None:
 	"""Итог по участникам честен про предел выдачи и оставшиеся записи."""
-	from pxcontrol.ui.pages.maintenance import members_summary
-
 	capped = members_summary(MembersReport(found=0, scanned=200, total=10_000, capped=True))
 	assert "список не отдаёт" in capped
 	left = members_summary(MembersReport(found=3, removed=3, service_left=3))
 	assert "осталось в ленте: 3" in left
 
 
-async def test_deleting_community_stops_its_maintenance(db: Database) -> None:
-	"""Удаление сообщества снимает его задания обслуживания.
-
-	Задание держит снимок сообщества и работает по его ``tg_chat_id``,
-	от строки в БД не завися: без снятия уборка продолжала бы удалять
-	записи в Telegram для сущности, которой в приложении уже нет.
-	"""
-	release = asyncio.Event()
-
-	class _SlowGateway(_FakeGateway):
-		async def userbot_service_messages_page(
-			self, account_id: int, chat_id: str, offset_id: int, limit: int
-		) -> ServiceMessagesPage:
-			self.requested.append(offset_id)
-			await release.wait()
-			return _page(kinds=[ServiceMessageKind.MEMBERS], scanned=1, next_offset_id=90)
-
-	gateway = _SlowGateway()
-	service = _service(db, gateway)
-	community_id = await _community(db)
-	running = await service.scan_service_messages(community_id)
-	waiting = await service.scan_service_messages(community_id)
-	while not gateway.requested:
-		await asyncio.sleep(0)
-
-	await service.drop_community(community_id)
-	release.set()
-	await service.settle()
-
-	items = {item.id: item for item in await service.state()}
-	assert items[waiting].status is JobStatus.CANCELLED  # ждавшее снято сразу
-	assert items[running].status is JobStatus.CANCELLED  # идущее остановлено
-	assert len(gateway.requested) == 1  # вторая страница не запрашивалась
-
-
 async def test_clean_members_skips_account_telegram_refuses(db: Database) -> None:
-	"""Отказ по одной учётке — пропуск, а не конец прохода (ADR-0026).
-
-	Telegram может не дать исключить конкретного участника (он
-	администратор, ссылка устарела). Ронять из-за этого всю уборку
-	нельзя: остальные мёртвые души убрать всё ещё можно.
-	"""
+	"""Отказ по одной учётке — пропуск, а не конец прохода (ADR-0026)."""
 
 	class _PickyGateway(_FakeGateway):
 		async def userbot_kick_participant(
@@ -848,19 +1178,34 @@ async def test_clean_members_skips_account_telegram_refuses(db: Database) -> Non
 	)
 	service = _service(db, gateway)
 	community_id = await _community(db)
-	await service.clean_deleted_accounts(community_id, limit=10)
+	await _clean_members(service, community_id, limit=10)
 	await service.settle()
 	item = (await service.state())[0]
 	assert item.status is JobStatus.DONE  # проход не провалился
-	assert item.members is not None
-	assert (item.members.removed, item.members.skipped) == (2, 1)
+	report = _members_report(item)
+	assert (report.removed, report.skipped) == (2, 1)
 	assert gateway.kicked == [11, 13]
+
+
+async def test_members_report_reaches_stats_hook(db: Database) -> None:
+	"""Итог по удалённым аккаунтам уходит крючком в кэш статистики (ADR-0027)."""
+	recorded: list[tuple[int, int, int]] = []
+
+	async def hook(community_id: int, found: int, removed: int, at: datetime) -> None:
+		recorded.append((community_id, found, removed))
+
+	gateway = _FakeGateway(
+		member_pages=[_members(deleted=[11, 12], scanned=10, next_offset=None, total=10)]
+	)
+	service = TasksService(db, gateway, CommunitiesService(db, gateway), on_members_report=hook)  # type: ignore[arg-type]
+	community_id = await _community(db)
+	await _clean_members(service, community_id, limit=1)
+	await service.settle()
+	assert recorded == [(community_id, 2, 1)]
 
 
 def test_members_summary_reports_refusals() -> None:
 	"""Итог по участникам называет и отказы Telegram."""
-	from pxcontrol.ui.pages.maintenance import members_summary
-
 	text = members_summary(MembersReport(found=3, removed=2, skipped=1))
 	assert "Исключено удалённых аккаунтов: 2" in text
 	assert "не дал исключить: 1" in text

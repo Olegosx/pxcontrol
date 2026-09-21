@@ -13,7 +13,6 @@ from pxcontrol.engine.services.activity import ActivityService
 from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.communities import CommunitiesService
 from pxcontrol.engine.services.community_stats import CommunityStatsService
-from pxcontrol.engine.services.maintenance import MaintenanceService
 from pxcontrol.engine.services.markups import MarkupsService
 from pxcontrol.engine.services.posts import PostsService
 from pxcontrol.engine.services.publish_queue import PublishQueue
@@ -23,6 +22,7 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 	SettingsService,
 )
+from pxcontrol.engine.services.tasks import TasksService
 from pxcontrol.engine.services.video import VideoService
 from pxcontrol.engine.services.video_queue import ProcessingQueue
 from pxcontrol.engine.telegram.gateway import TelegramGateway
@@ -54,10 +54,12 @@ class Engine:
 			self.db, self.gateway, self.settings, profile_sync=self.accounts.sync_profile
 		)
 		self.community_stats = CommunityStatsService(self.db, self.gateway, self.settings)
-		# обслуживание сообществ (ADR-0026): чистка служебных записей;
-		# итог прохода по удалённым аккаунтам уходит в кэш статистики
-		# крючком — очередь обслуживания о кэше не знает (ADR-0027)
-		self.maintenance = MaintenanceService(
+		# задачи сообщества (ADR-0038): чистка служебных записей и удалённых
+		# аккаунтов, журнал запусков; итог прохода по удалённым аккаунтам
+		# уходит в кэш статистики крючком — очередь задач о кэше не знает
+		# (ADR-0027)
+		self.tasks = TasksService(
+			self.db,
 			self.gateway,
 			self.communities,
 			on_members_report=self.community_stats.record_members_report,
@@ -138,15 +140,15 @@ class Engine:
 		"""Удаляет сообщество вместе с его работой в очередях.
 
 		Порядок: сначала очереди (ожидающая отправка снимается с возвратом
-		файлов в результаты, активная обрывается; задания обслуживания
-		снимаются — иначе уборка продолжала бы удалять записи и исключать
-		участников в Telegram для сущности, которой в приложении уже нет),
-		затем строка сообщества — каскад БД подчищает настройки и остатки
-		строк очереди. Связка живёт здесь, чтобы ``CommunitiesService``
-		не зависел от очередей.
+		файлов в результаты, активная обрывается; задания задач снимаются —
+		иначе уборка продолжала бы удалять записи и исключать участников
+		в Telegram для сущности, которой в приложении уже нет), затем
+		строка сообщества — каскад БД подчищает настройки, задачи с их
+		журналом и остатки строк очереди. Связка живёт здесь, чтобы
+		``CommunitiesService`` не зависел от очередей.
 		"""
 		await self.publish_queue.drop_community(community_id)
-		await self.maintenance.drop_community(community_id)
+		await self.tasks.drop_community(community_id)
 		# файл аватара каскад БД не видит — убирается движком до строки
 		await self.community_stats.drop(community_id)
 		await self.communities.delete_community(community_id)
@@ -206,7 +208,7 @@ class Engine:
 		steps = (
 			self.community_stats.shutdown,
 			self.markups.shutdown,
-			self.maintenance.shutdown,
+			self.tasks.shutdown,
 			self.publish_queue.shutdown,
 			self.video_queue.shutdown,
 			self.video.shutdown,

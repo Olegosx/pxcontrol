@@ -104,7 +104,7 @@ from pxcontrol.ui.pages.common import (
 from pxcontrol.ui.pages.community_page import open_members
 from pxcontrol.ui.pages.community_state import (
 	ACTION_LABELS,
-	MAINTENANCE_UNAVAILABLE,
+	TASKS_UNAVAILABLE,
 	CardAction,
 	CardState,
 	action_available,
@@ -115,7 +115,7 @@ from pxcontrol.ui.pages.community_state import (
 	subtitle_text,
 )
 from pxcontrol.ui.pages.dashboard import GridSection, Section, SectionHeader, SectionStack
-from pxcontrol.ui.pages.maintenance import open_maintenance
+from pxcontrol.ui.pages.tasks import open_tasks
 from pxcontrol.ui.queue_watcher import QueueView, QueueWatchers
 
 logger = logging.getLogger(__name__)
@@ -444,7 +444,7 @@ class CommunityCard(CardWidget):
 			button.setFont(font_px(_ACTION_FONT_PX))
 			if not action_available(action, community):
 				button.setEnabled(False)
-				button.setToolTip(MAINTENANCE_UNAVAILABLE)
+				button.setToolTip(TASKS_UNAVAILABLE)
 			button.clicked.connect(partial(on_action, action, community))
 			layout.addWidget(button)
 		layout.addStretch()
@@ -678,7 +678,7 @@ class _Table(TableWidget):
 			item = Action(ACTION_LABELS[action], menu)
 			if not action_available(action, community):
 				item.setEnabled(False)
-				item.setToolTip(MAINTENANCE_UNAVAILABLE)
+				item.setToolTip(TASKS_UNAVAILABLE)
 			item.triggered.connect(partial(self._on_action, action, community))
 			menu.addAction(item)
 		viewport = self.viewport()
@@ -925,8 +925,8 @@ class CommunitiesPage(ScrollArea):
 	) -> None:
 		"""``watchers`` — наблюдатели очередей при главном окне (ADR-0034):
 		очередь отправки даёт числа карточек и сводки (страница — её
-		постоянный зритель), очередь обслуживания уходит окну
-		«Обслуживание» с карточки."""
+		постоянный зритель), очередь задач уходит окну «Задачи»
+		с карточки."""
 		super().__init__(parent)
 		self.setObjectName("communities")
 		self._worker = worker
@@ -1220,8 +1220,8 @@ class CommunitiesPage(ScrollArea):
 				self.reload,
 				self._show_error,
 			)
-		elif action is CardAction.MAINTENANCE:
-			open_maintenance(self._worker, self._watchers.maintenance, community, self)
+		elif action is CardAction.TASKS:
+			open_tasks(self._worker, self._watchers.tasks, community, self)
 
 	def _open_errors(self) -> None:
 		"""Плашка ошибок сводки: очередь отправки с фильтром «ошибки»."""

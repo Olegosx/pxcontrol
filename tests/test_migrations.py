@@ -28,6 +28,8 @@ EXPECTED_TABLES = {
 	"community_analytics",
 	"account_operations",
 	"post_markups",
+	"community_tasks",
+	"task_runs",
 }
 
 

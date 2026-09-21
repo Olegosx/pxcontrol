@@ -71,7 +71,7 @@
 2. выполняется `Engine.stop()` — в обратном порядке:
    опрос статистики (`community_stats.shutdown`, ADR-0027) →
    дозор клавиатур (`markups.shutdown`, ADR-0031) →
-   очередь обслуживания (`maintenance.shutdown`, ADR-0026) →
+   очередь задач сообщества (`tasks.shutdown`, ADR-0038) →
    очередь отправки (`publish_queue.shutdown`, ADR-0016) →
    очередь обработки видео (`video_queue.shutdown`, ADR-0014) →
    сервис видео (`video.shutdown` — временные кадры) →

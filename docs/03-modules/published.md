@@ -153,4 +153,4 @@ Telegram (проверено живьём 15.09.2026):
 
 - [Маршруты публикации и правки](publishing-routes.md) ·
   [Кнопки под постом](telegram-buttons.md)
-- [Ожидание публикации](scheduler.md) · [Обслуживание](maintenance.md)
+- [Ожидание публикации](scheduler.md) · [Задачи сообщества](tasks.md)

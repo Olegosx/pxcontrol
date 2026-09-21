@@ -26,8 +26,8 @@ from pxcontrol.ui.pages.common import (
 	queue_counts,
 )
 
-#: Подсказка неактивного «Обслуживания» — одна на дашборд и страницу.
-MAINTENANCE_UNAVAILABLE = "Нужен userbot-публикатор: боту история и участники недоступны"
+#: Подсказка неактивных «Задач» — одна на дашборд и страницу.
+TASKS_UNAVAILABLE = "Нужен userbot-публикатор: боту история и участники недоступны"
 
 
 class CardState(StrEnum):
@@ -124,7 +124,7 @@ class CardAction(StrEnum):
 	QUEUE = "queue"  # «Публикация» → «Очередь» с фильтром по сообществу
 	ASSIGN_PUBLISHER = "assign_publisher"  # диалог «Участники…»
 	ENABLE = "enable"  # включить сообщество
-	MAINTENANCE = "maintenance"  # окно обслуживания (ADR-0026)
+	TASKS = "tasks"  # окно задач сообщества (ADR-0038)
 
 
 #: Подписи действий (кнопка карточки и пункт меню строки — одни и те же).
@@ -134,7 +134,7 @@ ACTION_LABELS: dict[CardAction, str] = {
 	CardAction.QUEUE: "Очередь",
 	CardAction.ASSIGN_PUBLISHER: "Назначить публикатора",
 	CardAction.ENABLE: "Включить",
-	CardAction.MAINTENANCE: "Обслуживание",
+	CardAction.TASKS: "Задачи",
 }
 
 
@@ -144,12 +144,12 @@ def card_actions(community: CommunityDto, counts: QueueCounts) -> tuple[CardActi
 	Порядок проверок — от самого ограничивающего состояния: выключенному
 	сначала нужно включиться, сообществу без публикатора — публикатор
 	(остальные действия без него бессмысленны); у группы вместо
-	«Отложено» — «Обслуживание» (уборка нужна именно группам);
+	«Отложено» — «Задачи» (уборка нужна именно группам);
 	непустая очередь заслуживает кнопки «Очередь» вместо «Отложено».
 	"""
 	state = card_state(community, counts)
 	if state is CardState.DISABLED:
-		return (CardAction.ENABLE, CardAction.MAINTENANCE)
+		return (CardAction.ENABLE, CardAction.TASKS)
 	if state is CardState.NO_PUBLISHER:
 		return (CardAction.ASSIGN_PUBLISHER,)
 	if state is CardState.PUBLISHER_PAUSED:
@@ -158,7 +158,7 @@ def card_actions(community: CommunityDto, counts: QueueCounts) -> tuple[CardActi
 		# чтобы не звать назначать нового публикатора вместо возврата прежнего
 		return ()
 	if community.kind is CommunityKind.GROUP:
-		return (CardAction.PUBLISH, CardAction.MAINTENANCE)
+		return (CardAction.PUBLISH, CardAction.TASKS)
 	if counts.planned + counts.errors > 0:
 		return (CardAction.PUBLISH, CardAction.QUEUE)
 	return (CardAction.PUBLISH, CardAction.SCHEDULE)
@@ -167,11 +167,11 @@ def card_actions(community: CommunityDto, counts: QueueCounts) -> tuple[CardActi
 def action_available(action: CardAction, community: CommunityDto) -> bool:
 	"""Доступно ли действие сообществу прямо сейчас.
 
-	Обслуживание умеет только userbot (ADR-0026): без публикатора-userbot
-	кнопка показывается, но неактивна — с той же подсказкой, что
-	на странице сообщества.
+	Задачи ведут только пользователи (ADR-0026, ADR-0038): без
+	публикатора-userbot кнопка показывается, но неактивна — с той же
+	подсказкой, что на странице сообщества.
 	"""
-	if action is CardAction.MAINTENANCE:
+	if action is CardAction.TASKS:
 		return community.userbot_assigned
 	return True
 
