@@ -64,7 +64,7 @@ from pxcontrol.ui.pages.common import (
 	show_warning,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, MarkupState, markup_state
-from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
+from pxcontrol.ui.pages.post_target import CommunityChoice, IdentityChoice, TopicChoice
 from pxcontrol.ui.pages.publish_batch import BatchEditor
 from pxcontrol.ui.pages.publish_stages import PublishStage
 from pxcontrol.ui.pages.stage_page import StagePage
@@ -149,6 +149,8 @@ class BatchStagePage(StagePage):
 		self._topics = TopicChoice(
 			self, layout, self._worker, self._community, on_failed=self._on_topics_failed
 		)
+		# лицо публикации — общее на весь пакет, как тема (ADR-0036)
+		self._identity = IdentityChoice(self, layout, self._worker, self._community.is_stale)
 
 	def _build_source(self, layout: QVBoxLayout) -> None:
 		"""Строка источника: выбор готовой папки и подпись выбранного."""
@@ -450,6 +452,7 @@ class BatchStagePage(StagePage):
 		"""
 		community = self._community.current()
 		self._topics.update_for(community)
+		self._identity.update_for(community)
 		if community is None:
 			self._caps_hint.setText("")
 		elif community.capabilities.userbot:
@@ -563,6 +566,7 @@ class BatchStagePage(StagePage):
 				self._topics.topic_id(),
 				self._markup.markup(),
 				self._markup.markup_first(),
+				identity=self._identity.identity(),
 			)
 		except ValueError as exc:  # страховка: validate это уже проверил
 			self._error.fail(str(exc))

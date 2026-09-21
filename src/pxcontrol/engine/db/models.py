@@ -453,6 +453,10 @@ class PublishQueueItem(TimestampMixin, Base):
 	when: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 	# тема форума (id корневого сообщения темы); NULL — общая лента (ADR-0021)
 	topic_id: Mapped[int | None] = mapped_column(Integer)
+	# лицо публикации (ADR-0036): NULL в обеих — от имени сообщества;
+	# иначе явно названный исполнитель (вид — значения OwnerKind, и его id)
+	identity_kind: Mapped[str | None] = mapped_column(String(8), default=None)
+	identity_id: Mapped[int | None] = mapped_column(Integer, default=None)
 	# pending — готов к отправке; waiting — ждёт слота отложек; error
 	status: Mapped[str] = mapped_column(String(16))
 	error: Mapped[str | None] = mapped_column(Text)

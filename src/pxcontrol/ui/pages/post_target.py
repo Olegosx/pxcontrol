@@ -24,14 +24,16 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.communities import CommunityDto, ExecutorDto
 from pxcontrol.engine.services.settings import PUBLISH_LAST_COMMUNITY_ID
-from pxcontrol.engine.telegram.types import ForumTopicInfo
+from pxcontrol.engine.telegram.types import CommunityKind, ExecutorRef, ForumTopicInfo
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	closed_topics_hint,
 	community_combo_label,
+	identity_label,
+	identity_row,
 	noop,
 	topic_label,
 	topic_row,
@@ -222,3 +224,93 @@ class TopicChoice:
 		self._box.setVisible(False)
 		if self._on_failed is not None:
 			self._on_failed(message)
+
+
+def selectable_identities(executors: list[ExecutorDto]) -> list[ExecutorDto]:
+	"""Кого можно назвать лицом поста: не на паузе и способен публиковать."""
+	return [executor for executor in executors if not executor.paused and executor.can_publish]
+
+
+class IdentityChoice:
+	"""Ряд «От имени»: сообщество (умолчание) или названный исполнитель (ADR-0036).
+
+	Показывается только у группы: в канале пост всегда от имени канала,
+	и выбирать нечего. Список исполнителей читается у движка по пулу
+	сообщества; пока он не пришёл (или ряд скрыт), лицом остаётся
+	запасное — то, что у поста было (правка) или сообщество (новый пост).
+	"""
+
+	def __init__(
+		self,
+		page: QWidget,
+		layout: QVBoxLayout,
+		worker: EngineWorker,
+		is_stale: Callable[[int], bool],
+	) -> None:
+		"""Args:
+		page: страница-владелец (владелец колбэков движка).
+		layout: компоновка, в которую встаёт ряд.
+		worker: мост к движку.
+		is_stale: устарел ли ответ движка для сообщества с этим id
+			(человек успел выбрать другое).
+		"""
+		self._page = page
+		self._worker = worker
+		self._is_stale = is_stale
+		row = identity_row(page, layout)
+		self._box, self._combo, self._hint = row.box, row.combo, row.hint
+		self._box.setVisible(False)
+		self._fallback: ExecutorRef | None = None
+		self._wanted: ExecutorRef | None = None
+
+	def update_for(self, community: CommunityDto | None, keep: ExecutorRef | None = None) -> None:
+		"""Показывает и наполняет ряд под выбранное сообщество.
+
+		``keep`` — лицо, которое пост уже несёт (правка): оно предвыбирается,
+		а пока список не пришёл, остаётся запасным ответом.
+		"""
+		self._fallback = keep
+		self._wanted = keep
+		if community is None or community.kind is not CommunityKind.GROUP:
+			self._box.setVisible(False)
+			self._combo.set_items([], label=identity_label)
+			return
+		self._box.setVisible(True)
+		self._hint.setText("")
+		self._combo.set_items([], label=identity_label)
+		run_in_engine(
+			self._worker,
+			self._worker.engine.communities.list_executors(community.id),
+			self._page,
+			partial(self._show, community.id),
+			partial(self._failed, community.id),
+		)
+
+	def identity(self) -> ExecutorRef | None:
+		"""Названное лицо; ряд скрыт — запасное; «Сообщество» — None."""
+		if not self._box.isVisibleTo(self._page):
+			return self._fallback
+		executor = self._combo.selected()
+		if executor is not None:
+			return executor.owner
+		return self._wanted if self._combo.count() == 0 else None
+
+	def _show(self, community_id: int, executors: list[ExecutorDto]) -> None:
+		"""Наполняет список и предвыбирает прежнее лицо, если оно ещё годится."""
+		if self._is_stale(community_id):
+			return
+		items = selectable_identities(executors)
+		self._combo.set_items(items, label=identity_label, key=lambda e: e.owner)
+		wanted = self._wanted
+		self._wanted = None
+		if wanted is not None and not self._combo.select(lambda e: e.owner == wanted):
+			# названный раньше исполнитель приостановлен или лишён прав:
+			# молчать нельзя — сохранение сменит лицо поста на сообщество
+			self._hint.setText("Прежний исполнитель недоступен — пост уйдёт от имени сообщества.")
+
+	def _failed(self, community_id: int, message: str) -> None:
+		"""Список не прочитался — ряд скрыт, лицо остаётся запасным."""
+		if self._is_stale(community_id):
+			return
+		self._box.setVisible(False)
+		self._hint.setText(message)

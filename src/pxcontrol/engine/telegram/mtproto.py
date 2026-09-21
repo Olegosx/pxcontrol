@@ -207,6 +207,18 @@ def _map_login_error(exc: Exception) -> str:
 	return f"Не удалось войти: {exc}"
 
 
+def _send_as(peer: int, post: OutgoingPost) -> int | None:
+	"""От чьего имени уходит пост: сам чат при лице «сообщество», иначе умолчание.
+
+	Явный ``send_as`` вместо умолчания аккаунта (ADR-0036): умолчание
+	выставляет клиент администратора и может указывать на его канал,
+	а намерение приложения — «от имени группы» — должно быть названо им
+	самим. Недопустимый выбор Telegram отвергает ``SEND_AS_PEER_INVALID``,
+	и отказ переводится в понятный текст (:func:`_translate_error`).
+	"""
+	return peer if post.as_community else None
+
+
 def _translate_error(exc: Exception) -> UserbotUnavailableError:
 	"""Переводит исключение операции userbot в доменную ошибку.
 
@@ -217,6 +229,8 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 
 	if isinstance(exc, errors.ChatAdminRequiredError):
 		return UserbotAccessError(_NOT_ADMIN_TEXT)
+	if isinstance(exc, errors.SendAsPeerInvalidError):
+		return UserbotAccessError(_SEND_AS_TEXT)
 	if isinstance(
 		exc,
 		errors.InviteHashInvalidError
@@ -342,6 +356,10 @@ _SESSION_EXPIRED_TEXT = (
 )
 _NOT_ADMIN_TEXT = (
 	"Userbot не администратор канала — добавьте аккаунт администратором с правом публиковать."
+)
+_SEND_AS_TEXT = (
+	"Telegram не дал опубликовать от имени группы: у аккаунта нет права «анонимность» "
+	"(или его отозвали). Перепроверьте доступы сообщества или укажите исполнителя явно."
 )
 
 
@@ -1003,6 +1021,7 @@ class MtprotoTransport:
 					schedule=post.when,
 					reply_to=post.topic_id,
 					link_preview=not post.preview.disabled,
+					send_as=_send_as(peer, post),
 					**styling,
 				)
 			elif post.is_album:
@@ -1020,6 +1039,7 @@ class MtprotoTransport:
 					progress_callback=_progress,
 					thumb=single.thumb_path,
 					reply_to=post.topic_id,
+					send_as=_send_as(peer, post),
 				)
 		# альбом возвращает список сообщений — номер берём у первого:
 		# по нему пост узнаётся в ленте, и к нему привязана подпись
@@ -1081,7 +1101,9 @@ class MtprotoTransport:
 			solution=poll.explanation or None,
 			solution_entities=[] if poll.explanation else None,
 		)
-		return await client.send_file(peer, media, schedule=post.when, reply_to=post.topic_id)
+		return await client.send_file(
+			peer, media, schedule=post.when, reply_to=post.topic_id, send_as=_send_as(peer, post)
+		)
 
 	async def _send_album(
 		self,
@@ -1114,6 +1136,7 @@ class MtprotoTransport:
 			force_document=kinds == {MediaKind.DOCUMENT},
 			progress_callback=progress,
 			reply_to=post.topic_id,
+			send_as=_send_as(peer, post),
 		)
 
 	async def _send_with_preview(
@@ -1162,6 +1185,7 @@ class MtprotoTransport:
 				else types.InputReplyToMessage(reply_to_msg_id=post.topic_id)
 			),
 			schedule_date=post.when,
+			send_as=(await client.get_input_entity(peer) if post.as_community else None),
 		)
 		result = await client(request)
 		return SimpleNamespace(id=sent_message_id(result, random_id))

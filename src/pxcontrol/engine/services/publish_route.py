@@ -26,6 +26,7 @@ from enum import StrEnum
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CommunityKind,
+	OwnerKind,
 	limit_gb,
 	limit_mb,
 	telegram_text_length,
@@ -164,6 +165,57 @@ def markup_blocker(
 		)
 	if not caps.userbot:
 		return f"Такой пост отправляет публикатор ({why}), а у «{title}» его нет."
+	return None
+
+
+def identity_blocker(
+	*,
+	kind: CommunityKind,
+	identity: OwnerKind | None,
+	route: PublishRoute,
+	with_markup: bool,
+	title: str,
+) -> str | None:
+	"""Что мешает этому посту уйти названным лицом на этом маршруте (None — ничего).
+
+	Правило ADR-0036, п. 3. Спорен только бот-путь: на нём пост уходит
+	от имени бота. Лицо «сообщество» (``identity`` — None) в **группе**
+	бот подменил бы: пост ждёт анонимного администратора либо явного
+	выбора исполнителя; исключение — пост **с кнопками**, его в группе
+	отправить может только бот (ADR-0031), и об этом человеку говорит
+	:func:`identity_note`. Явно названный **пользователь** с бот-путём
+	несовместим вовсе: кнопки без бота не поставить, а пост от имени
+	бота — не то, что назвал человек. Названный **бот** — сам выбор
+	человека. В канале лицо «сообщество» бот не подменяет: пост там
+	всегда от имени канала.
+	"""
+	if route is not PublishRoute.BOT:
+		return None
+	if identity is OwnerKind.BOT:
+		return None
+	if identity is OwnerKind.USER:
+		return (
+			"Пост назначен пользователю, а этот маршрут отправляет бот: кнопки "
+			"без него не поставить. Снимите кнопки или выберите лицо «сообщество»."
+		)
+	if kind is CommunityKind.GROUP and not with_markup:
+		return (
+			f"В группе «{title}» от имени группы публикует только администратор "
+			"с правом «анонимность», а бот пишет от своего имени. Выдайте право "
+			"аккаунту из пула и перепроверьте доступы — или укажите исполнителя явно."
+		)
+	return None
+
+
+def identity_note(*, kind: CommunityKind, as_community: bool, route: PublishRoute) -> str | None:
+	"""Чем пост отступит от лица «сообщество» (None — ничем).
+
+	Единственный законный отступ (ADR-0036, п. 3): пост с кнопками
+	в группе отправляет сам бот — от своего имени. Человек должен
+	прочитать это до нажатия, а не увидеть в ленте.
+	"""
+	if kind is CommunityKind.GROUP and as_community and route is PublishRoute.BOT:
+		return "В группе кнопки ставит только бот — этот пост уйдёт от имени бота, не группы."
 	return None
 
 

@@ -74,12 +74,11 @@ from pxcontrol.ui.pages.common import (
 	kind_segments,
 	noop,
 	plural,
-	status_caption,
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, MarkupState, markup_state
 from pxcontrol.ui.pages.media_picker import MediaPicker, over_bot_limit
 from pxcontrol.ui.pages.poll_editor import PollEditor
-from pxcontrol.ui.pages.post_target import CommunityChoice, TopicChoice
+from pxcontrol.ui.pages.post_target import CommunityChoice, IdentityChoice, TopicChoice
 from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.publish_queue_edit import mount_queue_item_editor
 from pxcontrol.ui.pages.publish_queue_view import (
@@ -105,18 +104,19 @@ _QUEUE_MAX_CARDS = 20
 
 
 def _actor_note(community: CommunityDto) -> str:
-	"""Приписка «от чьего имени» для групп (ADR-0022): в группе пост
-	выходит от имени аккаунта, участнику действует медленный режим."""
-	if community.kind is not CommunityKind.GROUP or not community.default_account_label:
+	"""Приписка «от чьего имени» для групп (ADR-0036, п. 3).
+
+	По умолчанию пост уходит от имени группы — его публикует администратор
+	с правом «анонимность»; иное лицо человек называет в ряду «От имени».
+	Пост с кнопками в группе отправляет бот, и уйдёт он от имени бота —
+	об этом сказано до нажатия, а не после выхода в ленту.
+	"""
+	if community.kind is not CommunityKind.GROUP:
 		return ""
-	actor = community.default_account_label
-	status = community.default_status
-	if status is not None and not status.administers:
-		return (
-			f" Пост уйдёт от имени {actor} ({status_caption(status)}) — "
-			"действует медленный режим группы."
-		)
-	return f" Пост уйдёт от имени {actor} (админ)."
+	return (
+		" В группе пост уходит от имени группы (публикует анонимный администратор); "
+		"иное лицо — в ряду «От имени». Пост с кнопками отправляет бот — от своего имени."
+	)
 
 
 class PublishPage(StagePage):
@@ -163,6 +163,8 @@ class PublishPage(StagePage):
 		self._topics = TopicChoice(
 			self, layout, self._worker, self._community, on_failed=self._on_topics_failed
 		)
+		# лицо публикации (ADR-0036): ряд виден только у группы
+		self._identity = IdentityChoice(self, layout, self._worker, self._community.is_stale)
 		# поле с оформлением (ADR-0033): человек выделяет текст и жмёт
 		# стиль, разметка живёт сущностями рядом с видимым текстом
 		self._post_text = RichPostEdit(self)
@@ -417,6 +419,7 @@ class PublishPage(StagePage):
 		)
 		caps = community.capabilities
 		self._topics.update_for(community)
+		self._identity.update_for(community)
 		if caps.userbot:
 			# лимит зависит от Premium userbot — узнаём у движка
 			self._caps_hint.setText(
@@ -680,6 +683,7 @@ class PublishPage(StagePage):
 				topic_id=self._topics.topic_id(),
 				markup=self._markup.markup(),
 				markup_first=self._markup.markup_first(),
+				identity=self._identity.identity(),
 			)
 		is_text = self._kind is MediaKind.NONE
 		# видимый текст и его разметка — одной точкой, чтобы они
@@ -701,6 +705,7 @@ class PublishPage(StagePage):
 			preview=self._preview.preview() if is_text else LinkPreview(),
 			markup=self._markup.markup(),
 			markup_first=self._markup.markup_first(),
+			identity=self._identity.identity(),
 		)
 
 	def _on_enqueued(self, _item_id: object = None) -> None:

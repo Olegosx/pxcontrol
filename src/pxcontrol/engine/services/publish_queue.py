@@ -57,7 +57,9 @@ from pxcontrol.engine.telegram.poll import poll_from_json, poll_to_json
 from pxcontrol.engine.telegram.rich_text import rich_from_json, rich_to_json
 from pxcontrol.engine.telegram.types import (
 	TELEGRAM_MAX_SCHEDULED,
+	ExecutorRef,
 	MediaKind,
+	OwnerKind,
 	TelegramFloodError,
 	preview_from_json,
 	preview_to_json,
@@ -167,6 +169,13 @@ class _PublishJob(Job):
 			media_path=self.draft.media[0].path if self.draft.media else None,
 			files=len(self.draft.media),
 		)
+
+
+def _identity_from_row(kind: str | None, owner_id: int | None) -> ExecutorRef | None:
+	"""Лицо публикации из колонок строки (ADR-0036): пусто — от имени сообщества."""
+	if kind is None or owner_id is None:
+		return None
+	return ExecutorRef(OwnerKind(kind), owner_id)
 
 
 def _draft_title(draft: PostDraft) -> str:
@@ -326,6 +335,7 @@ class PublishQueue:
 					markup_first=row.markup_first,
 					entities=rich_from_json(row.text, row.entities, source).entities,
 					preview=preview_from_json(row.preview),
+					identity=_identity_from_row(row.identity_kind, row.identity_id),
 				)
 			)
 			item = _PublishJob(row.id, draft, titles[row.community_id])
@@ -392,6 +402,8 @@ class PublishQueue:
 					markup_first=draft.markup_first,
 					entities=rich_to_json(draft.rich),
 					preview=preview_to_json(draft.preview),
+					identity_kind=draft.identity.kind.value if draft.identity else None,
+					identity_id=draft.identity.id if draft.identity else None,
 					status=self._initial_status(draft).value,
 				)
 				for draft in stashed
@@ -976,6 +988,8 @@ class PublishQueue:
 					markup_first=draft.markup_first,
 					entities=rich_to_json(draft.rich),
 					preview=preview_to_json(draft.preview),
+					identity_kind=draft.identity.kind.value if draft.identity else None,
+					identity_id=draft.identity.id if draft.identity else None,
 					status=status.value,
 					error=None,
 				)

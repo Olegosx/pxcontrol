@@ -122,3 +122,15 @@ def test_bot_admin_rights_ask_no_more_than_needed() -> None:
 def test_rule_is_total(action: ExecutorAction) -> None:
 	"""На любое действие правило отвечает, а не падает: ветка есть у каждого."""
 	assert can(admin(), action, CHANNEL) in (True, False)
+
+
+def test_publishing_as_community_needs_anonymity_in_groups() -> None:
+	"""От имени группы публикует только анонимный администратор; в канале — как обычно."""
+	action = ExecutorAction.PUBLISH_AS_COMMUNITY
+	assert can(admin(post_messages=True), action, CHANNEL)
+	assert not can(admin(anonymous=True), action, CHANNEL), "в канале нужно право публиковать"
+	assert can(admin(anonymous=True), action, GROUP)
+	assert not can(admin(), action, GROUP), "неанонимный администратор пишет от себя"
+	assert not can(member(send_plain=True), action, GROUP), "участник от имени группы не пишет"
+	# обычная публикация в группе участнику по-прежнему доступна
+	assert can(member(send_plain=True), ExecutorAction.PUBLISH, GROUP)

@@ -207,3 +207,29 @@ def test_markup_notice_warns_about_sender_and_delay() -> None:
 	assert markup_notice(PublishRoute.USERBOT, "Паблишер") == ""
 	# бот без названия — всё равно понятная фраза
 	assert "бот" in markup_notice(PublishRoute.BOT, None)
+
+
+def test_identity_choices_and_labels() -> None:
+	"""Лицом поста можно назвать только того, кто не на паузе и способен публиковать."""
+	from pxcontrol.engine.services.communities import ExecutorDto
+	from pxcontrol.engine.telegram.rights import ExecutorRights, ParticipantStatus
+	from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind
+	from pxcontrol.ui.pages.common import identity_label
+	from pxcontrol.ui.pages.post_target import selectable_identities
+
+	def executor(number: int, *, paused: bool = False, can_publish: bool = True) -> ExecutorDto:
+		return ExecutorDto(
+			owner=ExecutorRef(OwnerKind.USER, number),
+			label=f"@u{number}",
+			status=ParticipantStatus.ADMIN,
+			rights=ExecutorRights(ParticipantStatus.ADMIN),
+			is_default=False,
+			paused=paused,
+			can_publish=can_publish,
+		)
+
+	chosen = selectable_identities(
+		[executor(1), executor(2, paused=True), executor(3, can_publish=False)]
+	)
+	assert [e.owner.id for e in chosen] == [1]
+	assert identity_label(executor(1)) == "@u1 (админ)"

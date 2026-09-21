@@ -41,6 +41,7 @@ class _FakeClient:
 		self.me_premium = False
 		self.sent: list[tuple[Any, str, Any]] = []
 		self.previews: list[bool] = []
+		self.sent_as: list[Any] = []
 		self.files: list[dict[str, Any]] = []
 		# сущность и права для check_community (тесты задают под сценарий)
 		self.entity: Any = None
@@ -80,6 +81,7 @@ class _FakeClient:
 	) -> None:
 		self.sent.append((entity, text, schedule, reply_to))
 		self.previews.append(link_preview)
+		self.sent_as.append(kwargs.get("send_as"))
 
 	async def send_file(self, entity: Any, file: str, **kwargs: Any) -> None:
 		progress = kwargs.pop("progress_callback", None)
@@ -1559,3 +1561,29 @@ async def test_promote_passes_exactly_the_named_rights() -> None:
 	request = client.requests[-1]
 	assert request.admin_rights.post_messages is True
 	assert request.admin_rights.ban_users is False
+
+
+async def test_publish_as_community_passes_send_as() -> None:
+	"""Лицо «сообщество» уходит явным send_as самим чатом; без него — умолчание (ADR-0036)."""
+	fake = _FakeClient()
+	transport = _transport(fake)
+	await transport.start()
+	await transport.publish("-1001234", OutgoingPost(text="от группы", as_community=True))
+	await transport.publish("-1001234", OutgoingPost(text="от себя"))
+	assert fake.sent_as == [-1001234, None]
+	await transport.publish(
+		"-1001234",
+		OutgoingPost(files=(OutgoingFile("v.mp4", MediaKind.VIDEO),), as_community=True),
+	)
+	assert fake.files[-1]["send_as"] == -1001234
+
+
+def test_send_as_refusal_is_a_confirmed_access_error() -> None:
+	"""SEND_AS_PEER_INVALID — подтверждённый отказ с понятной причиной."""
+	from telethon import errors
+
+	from pxcontrol.engine.telegram.mtproto import UserbotAccessError, _translate_error
+
+	translated = _translate_error(errors.SendAsPeerInvalidError(request=None))
+	assert isinstance(translated, UserbotAccessError)
+	assert "анонимность" in str(translated)

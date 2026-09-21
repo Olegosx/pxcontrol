@@ -123,6 +123,7 @@ def community_executor(
 	status: ParticipantStatus = ParticipantStatus.ADMIN,
 	can_edit: bool = False,
 	can_publish: bool = True,
+	anonymous: bool | None = None,
 ) -> CommunityExecutor:
 	"""Строка исполнителя сообщества для тестов (ADR-0035).
 
@@ -130,10 +131,16 @@ def community_executor(
 	с правом ``post_messages``, в группе — участник, которому разрешён
 	текст. ``can_publish=False`` даёт исполнителя, который состоит,
 	но публиковать не может, — им проверяется новая причина ожидания.
+	``anonymous`` — право администратора «анонимность» (ADR-0036: в группе
+	от имени группы публикует только он); None — администратор группы
+	анонимен, как заведено у владельца, неанонимного заводят явно.
 	"""
+	if anonymous is None:
+		anonymous = kind == "group" and status.administers and can_publish
 	admin = AdminRights(
 		post_messages=can_publish and kind == "channel" and status.administers,
 		edit_messages=can_edit,
+		anonymous=anonymous,
 	)
 	allowed = ALL_MEMBER_RIGHTS if status.administers else MemberRights(send_plain=can_publish)
 	rights = ExecutorRights(status, admin, allowed)

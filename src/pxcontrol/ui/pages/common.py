@@ -69,7 +69,7 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine.jobs import JobStatus
-from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.communities import CommunityDto, ExecutorDto
 from pxcontrol.engine.services.publish_queue import QueueItemDto
 from pxcontrol.engine.services.schedule_plan import parse_hhmm
 from pxcontrol.engine.services.video import video_dialog_filter
@@ -232,6 +232,50 @@ class TopicRow:
 	box: QWidget
 	combo: DtoComboBox[ForumTopicInfo]
 	hint: CaptionLabel
+
+
+@dataclass(frozen=True)
+class IdentityRow:
+	"""Ряд выбора лица публикации: коробка ряда, список исполнителей и подпись."""
+
+	box: QWidget
+	combo: DtoComboBox[ExecutorDto]
+	hint: CaptionLabel
+
+
+#: Служебный первый пункт ряда «От имени» — умолчание ADR-0036.
+IDENTITY_COMMUNITY_LABEL = "Сообщество (по умолчанию)"
+
+IDENTITY_TOOLTIP = (
+	"От чьего имени уйдёт пост. По умолчанию — от имени группы: его публикует "
+	"администратор с правом «анонимность». Назовите исполнителя, если пост должен "
+	"уйти от имени конкретного аккаунта или бота."
+)
+
+
+def identity_row(parent: QWidget, layout: QVBoxLayout) -> IdentityRow:
+	"""Собирает ряд выбора лица публикации (ADR-0036, п. 3).
+
+	Общий для форм поста, пакета и правки в очереди — расходиться им
+	незачем. Наполнение и правила видимости (только группы) — забота
+	вызывающего.
+	"""
+	box = QWidget(parent)
+	row = QHBoxLayout(box)
+	row.setContentsMargins(0, 0, 0, 0)
+	row.addWidget(BodyLabel("От имени:", box))
+	combo: DtoComboBox[ExecutorDto] = DtoComboBox(box, placeholder=IDENTITY_COMMUNITY_LABEL)
+	combo.setToolTip(IDENTITY_TOOLTIP)
+	row.addWidget(combo, stretch=1)
+	hint = CaptionLabel("", box)
+	row.addWidget(hint)
+	layout.addWidget(box)
+	return IdentityRow(box, combo, hint)
+
+
+def identity_label(executor: ExecutorDto) -> str:
+	"""Пункт списка «От имени»: имя исполнителя и его участие."""
+	return f"{executor.label} ({status_caption(executor.status)})"
 
 
 def topic_row(parent: QWidget, layout: QVBoxLayout, *, tooltip: str = "") -> TopicRow:

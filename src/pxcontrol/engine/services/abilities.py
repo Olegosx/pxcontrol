@@ -36,6 +36,7 @@ class ExecutorAction(StrEnum):
 	"""
 
 	PUBLISH = "publish"  # опубликовать пост
+	PUBLISH_AS_COMMUNITY = "publish_as_community"  # опубликовать от имени сообщества (ADR-0036)
 	EDIT_OTHERS = "edit_others"  # править чужие сообщения (кнопки, ADR-0031)
 	DELETE_OTHERS = "delete_others"  # удалять чужие сообщения (ADR-0026)
 	BAN = "ban"  # исключать участников (чистка удалённых аккаунтов)
@@ -63,6 +64,8 @@ def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> 
 	"""
 	if action is ExecutorAction.PUBLISH:
 		return _can_publish(rights, kind)
+	if action is ExecutorAction.PUBLISH_AS_COMMUNITY:
+		return _can_publish_as_community(rights, kind)
 	if action is ExecutorAction.READ_HISTORY:
 		# ленту и участников видит тот, кто состоит: отдельного права
 		# на чтение Telegram не выдаёт
@@ -103,11 +106,27 @@ def _can_publish(rights: ExecutorRights, kind: CommunityKind) -> bool:
 	return rights.status.administers or rights.allowed.send_plain
 
 
+def _can_publish_as_community(rights: ExecutorRights, kind: CommunityKind) -> bool:
+	"""Публикация **от имени сообщества** (ADR-0036).
+
+	В **канале** это обычная публикация: пост там всегда от имени канала.
+	В **группе** от имени группы публикует только администратор с правом
+	``anonymous`` — по правилам Telegram он «может публиковать только
+	от имени группы или своих каналов»; участник и неанонимный
+	администратор публикуют от своего имени, и группу в ``send_as``
+	им не дают (core.telegram.org/api/rights, сверено 21.09.2026).
+	"""
+	if kind is CommunityKind.CHANNEL:
+		return _can_publish(rights, kind)
+	return rights.status.administers and rights.admin.anonymous
+
+
 #: Что сказать человеку, когда способного исполнителя в пуле нет.
 #: Текст один на все действия: отличается только само действие, а совет
 #: одинаков — выдать право в Telegram и перепроверить доступы.
 ACTION_WORDS: dict[ExecutorAction, str] = {
 	ExecutorAction.PUBLISH: "публиковать",
+	ExecutorAction.PUBLISH_AS_COMMUNITY: "публиковать от имени сообщества",
 	ExecutorAction.EDIT_OTHERS: "править чужие сообщения",
 	ExecutorAction.DELETE_OTHERS: "удалять чужие сообщения",
 	ExecutorAction.BAN: "исключать участников",

@@ -981,7 +981,12 @@ async def test_topic_passes_to_bot(db: Database) -> None:
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	community_id = await _add_community(db, userbot_assigned=False, forum=True)
-	await service.publish(PostDraft(community_id, text="в тему", topic_id=7))
+	async with db.session_factory() as session:
+		community = await session.get(Community, community_id)
+		assert community is not None and community.default_bot_id is not None
+		bot = ExecutorRef(OwnerKind.BOT, community.default_bot_id)
+	# в группе от имени группы бот не пишет (ADR-0036) — бота называют явно
+	await service.publish(PostDraft(community_id, text="в тему", topic_id=7, identity=bot))
 	assert gateway.sent_topics == [7]
 
 
@@ -2263,13 +2268,26 @@ def test_poll_draft_names_its_kind() -> None:
 # --- публикатор из пула: диспетчер (ADR-0036) ----------------------------------------
 
 
-async def _extra_publisher(db: Database, community_id: int, label: str = "@extra") -> int:
-	"""Второй способный публикатор в пуле сообщества — не умолчание."""
+async def _extra_publisher(
+	db: Database,
+	community_id: int,
+	label: str = "@extra",
+	*,
+	kind: str = "channel",
+	anonymous: bool | None = None,
+) -> int:
+	"""Второй способный публикатор в пуле сообщества — не умолчание.
+
+	``kind`` — вид сообщества (права собираются под него), ``anonymous`` —
+	право «анонимность» у администратора группы (ADR-0036).
+	"""
 	async with db.session_factory() as session:
 		extra = TgAccount(label=label, phone=f"+79{len(label):02d}", session="s")
 		session.add(extra)
 		await session.flush()
-		session.add(community_executor(community_id, account_id=extra.id))
+		session.add(
+			community_executor(community_id, account_id=extra.id, kind=kind, anonymous=anonymous)
+		)
 		await session.commit()
 		return int(extra.id)
 
@@ -2470,3 +2488,108 @@ async def test_bot_from_pool_publishes_without_default_bot(db: Database) -> None
 	assert await service.publish_blocker(community_id) is None
 	await service.publish(PostDraft(community_id, text="ботом из пула"))
 	assert gateway.sent == [("777:BBB", "-1001", "ботом из пула")]
+
+
+# --- лицо публикации (ADR-0036, этап D) ---------------------------------------------
+
+
+async def _set_anonymous(db: Database, community_id: int, account_id: int, value: bool) -> None:
+	"""Переписывает право «анонимность» у администратора группы в снимке прав."""
+	from pxcontrol.engine.telegram.rights import ExecutorRights
+
+	async with db.session_factory() as session:
+		row = (
+			await session.execute(
+				select(CommunityExecutor).where(
+					CommunityExecutor.community_id == community_id,
+					CommunityExecutor.tg_account_id == account_id,
+				)
+			)
+		).scalar_one()
+		rights = ExecutorRights.from_payload(ParticipantStatus(row.status), row.rights)
+		row.rights = replace(rights, admin=replace(rights.admin, anonymous=value)).to_payload()
+		await session.commit()
+
+
+async def test_group_post_goes_as_community_by_anonymous_admin(db: Database) -> None:
+	"""В группе по умолчанию пост уходит от имени группы: анонимный администратор, явный send_as."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, forum=True)
+	default_id = await _bound_account(db, community_id)
+	assert default_id is not None
+	# второй администратор — неанонимный: от имени группы он не пишет
+	await _extra_publisher(db, community_id, kind="group", anonymous=False)
+	await service.publish(PostDraft(community_id, text="от имени группы"))
+	assert [(account, post.as_community) for account, _chat, post in gateway.published] == [
+		(default_id, True)
+	]
+
+
+async def test_channel_post_never_sets_send_as(db: Database) -> None:
+	"""В канале пост и так от имени канала — флаг send_as не ставится."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	await service.publish(PostDraft(community_id, text="в канал"))
+	assert [post.as_community for _a, _c, post in gateway.published] == [False]
+
+
+async def test_group_without_anonymous_admin_waits(db: Database) -> None:
+	"""Нет анонимного администратора — пост от имени группы ждёт, а не уходит от чужого имени."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, forum=True)
+	default_id = await _bound_account(db, community_id)
+	assert default_id is not None
+	await _set_anonymous(db, community_id, default_id, False)
+	assert await service.publish_blocker(community_id) is None, "публиковать есть кому"
+	with pytest.raises(PostNotReadyError, match="анонимность"):
+		await service.publish(PostDraft(community_id, text="от имени группы"))
+	assert gateway.published == []
+	# при постановке — честный отказ под рукой у человека
+	with pytest.raises(PostError, match="анонимность"):
+		await service.check_draft_rules(PostDraft(community_id, text="от имени группы"))
+
+
+async def test_named_executor_publishes_himself_without_send_as(db: Database) -> None:
+	"""Явно названный исполнитель везёт пост сам, от своего имени."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, forum=True)
+	member = await _extra_publisher(db, community_id, kind="group", anonymous=False)
+	draft = PostDraft(community_id, text="от себя", identity=ExecutorRef(OwnerKind.USER, member))
+	await service.check_draft_rules(draft)
+	await service.publish(draft)
+	assert [(account, post.as_community) for account, _chat, post in gateway.published] == [
+		(member, False)
+	]
+
+
+async def test_named_paused_executor_makes_post_wait(db: Database) -> None:
+	"""Названный исполнитель на паузе — пост ждёт его, а не уходит соседом."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	extra = await _extra_publisher(db, community_id)
+	async with db.session_factory() as session:
+		account = await session.get(TgAccount, extra)
+		assert account is not None
+		account.paused = True
+		await session.commit()
+	draft = PostDraft(community_id, text="жду его", identity=ExecutorRef(OwnerKind.USER, extra))
+	with pytest.raises(PostNotReadyError, match="приостановлен"):
+		await service.publish(draft)
+	assert gateway.published == []
+
+
+async def test_bot_route_in_group_as_community_waits_unless_markup(db: Database) -> None:
+	"""Бот без кнопок в группе от имени группы — подмена лица: пост ждёт; с кнопками — уходит."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, forum=True, userbot_assigned=False)
+	with pytest.raises(PostNotReadyError, match="от своего имени"):
+		await service.publish(PostDraft(community_id, text="ботом"))
+	assert gateway.sent == []
+	await service.publish(PostDraft(community_id, text="с кнопками", markup=_markup("Сайт")))
+	assert [text for _token, _chat, text in gateway.sent] == ["с кнопками"]

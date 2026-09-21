@@ -29,8 +29,11 @@ from pxcontrol.engine.services.abilities import ExecutorAction
 from pxcontrol.engine.services.captions import filename_complaint
 from pxcontrol.engine.services.community_rights import (
 	bot_ref,
+	capabilities_for,
 	capable_rows,
 	community_capabilities,
+	executor_label,
+	executor_owner,
 	executor_paused,
 	publisher_incapable,
 	publisher_paused,
@@ -42,6 +45,7 @@ from pxcontrol.engine.services.publish_route import (
 	PublishRoute,
 	bot_shortfall,
 	choose_route,
+	identity_blocker,
 	markup_blocker,
 	poll_blocker,
 	post_markup_blocker,
@@ -327,6 +331,11 @@ class PostDraft:
 			видны с первой секунды, но приложение в это время должно
 			работать. По умолчанию важнее публикация: отложку держит
 			сервер Telegram, а кнопки бот дорисует после выхода.
+		identity: **лицо публикации** (ADR-0036): None — от имени
+			сообщества (в канале пост и так от имени канала, в группе
+			его публикует анонимный администратор с явным ``send_as``);
+			иначе — явно названный человеком исполнитель, и пост уйдёт
+			им или будет ждать его, а не тихо уйдёт соседом по пулу.
 	"""
 
 	community_id: int
@@ -343,6 +352,12 @@ class PostDraft:
 	#: превью ссылки у текстового поста (ADR-0033, подача C3):
 	#: выключить, крупное, над текстом. У поста с вложением его не бывает
 	preview: LinkPreview = field(default_factory=LinkPreview)
+	identity: ExecutorRef | None = None
+
+	@property
+	def as_community(self) -> bool:
+		"""Пост уходит от имени сообщества (лицо не названо явно)."""
+		return self.identity is None
 
 	@property
 	def rich(self) -> RichText:
@@ -1190,7 +1205,7 @@ class PostsService:
 		)
 		if blocker is not None:
 			raise PostError(blocker)
-		caps = community_capabilities(community)
+		caps = capabilities_for(community, draft.identity)
 		blocker = self._poll_blocker(community, draft)
 		if blocker is not None:
 			raise PostError(blocker)
@@ -1218,7 +1233,7 @@ class PostsService:
 		if not draft.markup:
 			return None
 		return markup_blocker(
-			community_capabilities(community),
+			capabilities_for(community, draft.identity),
 			title=community.title,
 			kind=CommunityKind(community.kind),
 			scheduled=draft.when is not None,
@@ -1350,17 +1365,32 @@ class PostsService:
 			if blocker is not None:
 				raise PostError(blocker)
 		route = choose_route(
-			community_capabilities(community),
+			capabilities_for(community, draft.identity),
 			with_markup=bool(draft.markup),
 			media_over_bot_limit=over_bot_limit,
 			scheduled=draft.when is not None,
 			markup_first=draft.markup_first,
 		)
+		named = draft.identity
+		if (
+			named is not None
+			and named.kind is OwnerKind.USER
+			and not self._identity_candidates(community, named)
+		):
+			raise PostError(self._identity_shortfall(community, named))
+		blocker = self._identity_blocker(community, draft, route)
+		if blocker is not None:
+			raise PostError(blocker)
 		requirements = self._requirements(draft, route)
 		if route_uses_userbot(route):
-			if not self._publishers(community, requirements):
-				raise PostError(self._pool_shortfall(community, requirements))
+			capable = self._identity_candidates(community, named)
+			if not capable:
+				raise PostError(self._identity_shortfall(community, named))
+			if not self._fitting(capable, requirements):
+				raise PostError(self._pool_shortfall(community, requirements, capable))
 			return
+		if named is not None and self._bot_for(community, ExecutorAction.PUBLISH, named) is None:
+			raise PostError(self._identity_shortfall(community, named))
 		reason = bot_shortfall(requirements)
 		if reason is not None:
 			raise PostError(reason)
@@ -1481,35 +1511,95 @@ class PostsService:
 			route=route,
 		)
 
-	def _publishers(self, community: Community, requirements: PostRequirements) -> list[int]:
-		"""Аккаунты пула, которым этот пост по силам, — в порядке диспетчера (ADR-0036).
+	def _identity_candidates(
+		self, community: Community, identity: ExecutorRef | None
+	) -> list[CommunityExecutor]:
+		"""Пользователи пула, способные нести это лицо, — в порядке диспетчера (ADR-0036).
 
-		Способность и порядок — :func:`ranked_executors` (снимок прав,
-		живая занятость дорожек, предпочтение умолчания); пригодность —
-		по требованиям поста и Premium аккаунта. Отбор идёт после
-		ранжирования и порядок сохраняет.
+		Лицо «сообщество»: в канале — любой публикующий администратор,
+		в группе — только анонимный администратор
+		(``PUBLISH_AS_COMMUNITY``). Названный пользователь — он один,
+		если способен публиковать. Названный бот пользователем не бывает.
 		"""
-		ranked = ranked_executors(
-			community, ExecutorAction.PUBLISH, self._gateway.live_states(), kind=OwnerKind.USER
-		)
+		live = self._gateway.live_states()
+		if identity is None:
+			return ranked_executors(
+				community, ExecutorAction.PUBLISH_AS_COMMUNITY, live, kind=OwnerKind.USER
+			)
+		if identity.kind is not OwnerKind.USER:
+			return []
+		return [
+			row
+			for row in ranked_executors(
+				community, ExecutorAction.PUBLISH, live, kind=OwnerKind.USER
+			)
+			if executor_owner(row) == identity
+		]
+
+	def _fitting(
+		self, rows: Sequence[CommunityExecutor], requirements: PostRequirements
+	) -> list[int]:
+		"""Аккаунты из списка, которым пост по силам (порядок сохраняется).
+
+		Пригодность — по требованиям поста и Premium аккаунта; отбор идёт
+		после ранжирования диспетчером, поэтому первый и есть выбор.
+		"""
 		return [
 			int(row.tg_account_id or 0)
-			for row in ranked
+			for row in rows
 			if userbot_shortfall(
 				requirements, premium=self._gateway.userbot_premium(row.tg_account_id)
 			)
 			is None
 		]
 
-	def _bot_for(self, community: Community, action: ExecutorAction) -> BotRef | None:
+	def _identity_shortfall(self, community: Community, identity: ExecutorRef | None) -> str:
+		"""Почему некому нести это лицо — текст человеку; пост ждёт (ADR-0036)."""
+		if identity is None:
+			return (
+				f"В группе «{community.title}» от имени группы публикует только "
+				"администратор с правом «анонимность». Выдайте право аккаунту из пула "
+				"и перепроверьте доступы — или укажите исполнителя явно; пост ждёт."
+			)
+		rows = [row for row in community.executors if executor_owner(row) == identity]
+		label = executor_label(rows[0]) if rows else "исполнитель"
+		if rows and executor_paused(rows[0]):
+			return (
+				f"Исполнитель поста {label} приостановлен — пост ждёт, пока его "
+				"возобновят в разделе «Пользователи и боты»."
+			)
+		return (
+			f"Исполнитель поста {label} сейчас публиковать в «{community.title}» "
+			"не может (вышел или лишён прав) — проверьте его на вкладке «Участники»; "
+			"пост ждёт."
+		)
+
+	def _identity_blocker(
+		self, community: Community, draft: PostDraft, route: PublishRoute
+	) -> str | None:
+		"""Препятствие по лицу поста на выбранном маршруте (ADR-0036, п. 3)."""
+		return identity_blocker(
+			kind=CommunityKind(community.kind),
+			identity=draft.identity.kind if draft.identity is not None else None,
+			route=route,
+			with_markup=bool(draft.markup),
+			title=community.title,
+		)
+
+	def _bot_for(
+		self, community: Community, action: ExecutorAction, identity: ExecutorRef | None = None
+	) -> BotRef | None:
 		"""Бот пула, способный на действие, — первый по диспетчеру (None — нет).
 
 		Одна точка для отправки ботом, дорисовки и правки кнопок (ADR-0036):
-		бот берётся из пула по правам, а не из назначения.
+		бот берётся из пула по правам, а не из назначения. Явно названный
+		бот (``identity``) сужает выбор до себя.
 		"""
 		ranked = ranked_executors(
 			community, action, self._gateway.live_states(), kind=OwnerKind.BOT
 		)
+		if identity is not None and identity.kind is OwnerKind.BOT:
+			ranked = [row for row in ranked if executor_owner(row) == identity]
 		return bot_ref(ranked[0]) if ranked else None
 
 	def _user_for(self, community: Community, action: ExecutorAction) -> int | None:
@@ -1519,13 +1609,18 @@ class PostsService:
 		)
 		return int(ranked[0].tg_account_id or 0) if ranked else None
 
-	def _pool_shortfall(self, community: Community, requirements: PostRequirements) -> str:
-		"""Почему никто из пула этот пост не повезёт — текст человеку (ADR-0036).
+	def _pool_shortfall(
+		self,
+		community: Community,
+		requirements: PostRequirements,
+		rows: Sequence[CommunityExecutor],
+	) -> str:
+		"""Почему никто из способных этот пост не повезёт — текст человеку (ADR-0036).
 
-		Причина называется по лучшему из пула: если Premium-аккаунта нет,
+		Причина называется по лучшему из них: если Premium-аккаунта нет,
 		человек должен узнать, что дело в подписке, а не в самом Telegram.
 		"""
-		premium = self._pool_premium(community)
+		premium = any(self._gateway.userbot_premium(row.tg_account_id) for row in rows)
 		reason = userbot_shortfall(requirements, premium=premium) or (
 			"Никто из публикаторов пула этот пост не повезёт."
 		)
@@ -1543,19 +1638,47 @@ class PostsService:
 		берутся по **маршруту**: пост с кнопками может уйти ботом даже
 		там, где есть публикатор, и тогда действуют базовые пределы бота
 		(ADR-0031). Наличие публикатора здесь не проверяется — это
-		свойство сообщества, и живёт оно в :meth:`publish_blocker`.
+		свойство сообщества, и живёт оно в :meth:`publish_blocker`;
+		здесь решается, кто способен нести **лицо** поста.
+
+		Порядок: сперва «может ли названный исполнитель вообще» (иначе
+		пост ждёт его), затем препятствие по лицу на маршруте
+		(для лица «сообщество» — ждать анонимного администратора, для
+		названного пользователя — конфликт с кнопками, это ошибка),
+		затем требования поста.
 
 		Raises:
-			PostNotReadyError: Отложенный пост, а userbot-публикатора нет.
-			PostError: Никто из пула пост не повезёт (текст длиннее
+			PostNotReadyError: Некому нести лицо поста (нет анонимного
+				администратора, названный исполнитель не может) или
+				отложенный пост, а userbot-публикатора нет — поправимо
+				человеком, пост ждёт.
+			PostError: Названный пользователь несовместим с бот-путём,
+				никто из способных пост не повезёт (текст длиннее
 				предела, файл больше лимита) или бот его не поднимет.
 		"""
+		named = draft.identity
+		if (
+			named is not None
+			and named.kind is OwnerKind.USER
+			and not self._identity_candidates(community, named)
+		):
+			raise PostNotReadyError(self._identity_shortfall(community, named))
+		blocker = self._identity_blocker(community, draft, route)
+		if blocker is not None:
+			if named is not None:
+				raise PostError(blocker)
+			raise PostNotReadyError(blocker)
 		requirements = self._requirements(draft, route)
 		if route_uses_userbot(route):
-			candidates = self._publishers(community, requirements)
-			if not candidates:
-				raise PostError(self._pool_shortfall(community, requirements))
-			return candidates[0]
+			capable = self._identity_candidates(community, named)
+			if not capable:
+				raise PostNotReadyError(self._identity_shortfall(community, named))
+			fitting = self._fitting(capable, requirements)
+			if not fitting:
+				raise PostError(self._pool_shortfall(community, requirements, capable))
+			return fitting[0]
+		if named is not None and self._bot_for(community, ExecutorAction.PUBLISH, named) is None:
+			raise PostNotReadyError(self._identity_shortfall(community, named))
 		if draft.when is not None:
 			# поправимо человеком (вернуть userbot в доступы), поэтому
 			# очередь такой пост придержит, а не похоронит ошибкой
@@ -1618,6 +1741,11 @@ class PostsService:
 				),
 				when=draft.when,
 				topic_id=draft.topic_id,
+				# от имени группы — только явным send_as (ADR-0036): в канале
+				# пост и так от имени канала, флаг там не ставится
+				as_community=(
+					CommunityKind(community.kind) is CommunityKind.GROUP and draft.as_community
+				),
 			)
 			return await self._gateway.userbot_publish(
 				plan.publisher, community.tg_chat_id, post, on_progress
@@ -1635,7 +1763,7 @@ class PostsService:
 		Returns:
 			Номер вышедшего поста.
 		"""
-		bot = self._bot_for(community, ExecutorAction.PUBLISH)
+		bot = self._bot_for(community, ExecutorAction.PUBLISH, draft.identity)
 		if bot is None:  # prepare_publish сюда без способного бота не приводит
 			raise PostError("У сообщества нет бота, способного публиковать, — проверьте доступы.")
 		if draft.poll is not None:

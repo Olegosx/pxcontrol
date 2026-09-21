@@ -172,6 +172,37 @@ def community_capabilities(community: Community) -> PublishCapabilities:
 	)
 
 
+def capabilities_for(community: Community, identity: ExecutorRef | None) -> PublishCapabilities:
+	"""Возможности публикации под названное лицо поста (ADR-0036, п. 3).
+
+	Лицо «сообщество» (None) — возможности всего пула. Явно названный
+	исполнитель сужает свой вид до себя: пост уйдёт им или будет ждать,
+	а не тихо уйдёт соседом. Бот сообщества при названном пользователе
+	остаётся — кнопки к его посту дорисует любой бот с правом.
+	"""
+	if identity is None:
+		return community_capabilities(community)
+	kind = CommunityKind(community.kind)
+	rows = [
+		row
+		for row in capable_rows(community, ExecutorAction.PUBLISH)
+		if executor_owner(row) == identity
+	]
+	if identity.kind is OwnerKind.USER:
+		return publish_capabilities(
+			bool(capable_rows(community, ExecutorAction.PUBLISH, OwnerKind.BOT)),
+			bool(rows),
+			markup_edit=bool(capable_rows(community, ExecutorAction.EDIT_OTHERS, OwnerKind.BOT)),
+		)
+	return publish_capabilities(
+		bool(rows),
+		False,
+		markup_edit=any(
+			can(executor_rights(row), ExecutorAction.EDIT_OTHERS, kind) for row in rows
+		),
+	)
+
+
 def _capable_by_rights(row: CommunityExecutor, kind: CommunityKind) -> bool:
 	"""Мог бы публиковать по правам, если бы не пауза."""
 	return can(executor_rights(row), ExecutorAction.PUBLISH, kind)

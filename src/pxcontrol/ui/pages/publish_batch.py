@@ -65,7 +65,7 @@ from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.rich_text import RichText, trimmed
-from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT, MediaKind
+from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT, ExecutorRef, MediaKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -283,6 +283,7 @@ class BatchEditor(QWidget):
 		topic_id: int | None = None,
 		markup: PostMarkup | None = None,
 		markup_first: bool = False,
+		identity: ExecutorRef | None = None,
 	) -> list[PostDraft]:
 		"""Черновики отмеченных строк (время — в UTC, как у формы поста).
 
@@ -321,6 +322,7 @@ class BatchEditor(QWidget):
 					topic_id=topic_id,
 					markup=markup,
 					markup_first=markup_first,
+					identity=identity,
 				)
 			)
 		return result

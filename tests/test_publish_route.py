@@ -15,6 +15,8 @@ from pxcontrol.engine.services.publish_route import (
 	PublishRoute,
 	bot_shortfall,
 	choose_route,
+	identity_blocker,
+	identity_note,
 	markup_blocker,
 	poll_blocker,
 	polls_are_anonymous_only,
@@ -28,6 +30,7 @@ from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CAPTION_LENGTH_LIMIT,
 	CommunityKind,
+	OwnerKind,
 	userbot_max_file_bytes,
 )
 
@@ -291,3 +294,52 @@ def test_text_over_limit_counts_like_telegram() -> None:
 	assert text_over_limit("😀" * 6, 10, with_media=False) is not None
 	reason = text_over_limit("a" * 11, 10, with_media=True)
 	assert reason is not None and reason.startswith("Подпись")
+
+
+# --- лицо публикации (ADR-0036, п. 3) -------------------------------------------------
+
+
+def _blocked(
+	kind: CommunityKind, identity: OwnerKind | None, route: PublishRoute, with_markup: bool
+) -> str | None:
+	return identity_blocker(
+		kind=kind, identity=identity, route=route, with_markup=with_markup, title="Чат"
+	)
+
+
+def test_identity_blocker_only_for_group_bot_route_without_markup() -> None:
+	"""Бот без кнопок в группе от имени группы — подмена лица, а не маршрут."""
+	blocked = _blocked(CommunityKind.GROUP, None, PublishRoute.BOT, False)
+	assert blocked is not None and "анонимность" in blocked
+	assert _blocked(CommunityKind.GROUP, None, PublishRoute.BOT, True) is None, (
+		"кнопки в группе ставит только бот — законный отступ"
+	)
+	assert _blocked(CommunityKind.CHANNEL, None, PublishRoute.BOT, False) is None, (
+		"в канале пост всегда от имени канала"
+	)
+	assert _blocked(CommunityKind.GROUP, None, PublishRoute.USERBOT, False) is None
+
+
+def test_identity_blocker_for_named_executors() -> None:
+	"""Названный пользователь с бот-путём несовместим; названный бот — выбор человека."""
+	conflict = _blocked(CommunityKind.GROUP, OwnerKind.USER, PublishRoute.BOT, True)
+	assert conflict is not None and "кнопки" in conflict
+	assert _blocked(CommunityKind.CHANNEL, OwnerKind.USER, PublishRoute.BOT, True) is not None
+	assert _blocked(CommunityKind.GROUP, OwnerKind.USER, PublishRoute.USERBOT, False) is None
+	assert _blocked(CommunityKind.GROUP, OwnerKind.BOT, PublishRoute.BOT, False) is None
+
+
+def test_identity_note_warns_about_bot_in_group() -> None:
+	"""Отступ от лица «сообщество» человек читает до нажатия."""
+	note = identity_note(kind=CommunityKind.GROUP, as_community=True, route=PublishRoute.BOT)
+	assert note is not None and "от имени бота" in note
+	assert (
+		identity_note(kind=CommunityKind.GROUP, as_community=True, route=PublishRoute.USERBOT)
+		is None
+	)
+	assert (
+		identity_note(kind=CommunityKind.CHANNEL, as_community=True, route=PublishRoute.BOT) is None
+	)
+	assert (
+		identity_note(kind=CommunityKind.GROUP, as_community=False, route=PublishRoute.BOT) is None
+	)

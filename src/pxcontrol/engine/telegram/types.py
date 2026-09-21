@@ -822,6 +822,11 @@ class OutgoingPost:
 		when: момент публикации (None — «сейчас»).
 		topic_id: тема форума (id корневого сообщения темы;
 			None — общая лента, для каналов и обычных групп всегда None).
+		as_community: опубликовать **от имени сообщества** (ADR-0036):
+			транспорт передаёт ``send_as`` самим чатом, а не полагается
+			на умолчание, выставленное в чужом клиенте. Имеет смысл
+			только в группе от анонимного администратора — в канале
+			пост и так от имени канала, и флаг там не ставится.
 	"""
 
 	text: str = ""
@@ -831,6 +836,7 @@ class OutgoingPost:
 	poll: PollDraft | None = None
 	when: datetime | None = None
 	topic_id: int | None = None
+	as_community: bool = False
 
 	@property
 	def single(self) -> OutgoingFile | None:

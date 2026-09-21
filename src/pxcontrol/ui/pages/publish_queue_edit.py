@@ -56,6 +56,7 @@ from pxcontrol.ui.pages.common import (
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, markup_state
 from pxcontrol.ui.pages.media_picker import MediaPicker, over_bot_limit
 from pxcontrol.ui.pages.poll_editor import PollEditor
+from pxcontrol.ui.pages.post_target import IdentityChoice
 from pxcontrol.ui.pages.preview_row import PreviewRow
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
 
@@ -131,6 +132,10 @@ class QueueItemEditor(QWidget):
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(_FORM_SPACING)
 		self._build_topic_row(layout, topics, topics_error)
+		# лицо публикации (ADR-0036): ряд виден только у группы, список
+		# исполнителей читается у движка; пока не пришёл — лицо прежнее
+		self._identity = IdentityChoice(self, layout, self._worker, lambda _id: False)
+		self._identity.update_for(self._community, keep=self._draft.identity)
 		self._build_kind_segments(layout)
 		self._build_file_row(layout)
 		self._build_poll_block(layout)
@@ -382,6 +387,7 @@ class QueueItemEditor(QWidget):
 				topic_id=self._selected_topic_id(),
 				markup=self._markup.markup(),
 				markup_first=self._markup.markup_first(),
+				identity=self._identity.identity(),
 			)
 		is_text = self._kind is MediaKind.NONE
 		rich = trimmed(self._post_text.rich())
@@ -401,6 +407,7 @@ class QueueItemEditor(QWidget):
 			topic_id=self._selected_topic_id(),
 			markup=self._markup.markup(),
 			markup_first=self._markup.markup_first(),
+			identity=self._identity.identity(),
 		)
 
 	def _selected_topic_id(self) -> int | None:

@@ -41,6 +41,7 @@ from pxcontrol.engine.telegram.types import (
 	ExecutorRef,
 	MediaKind,
 	OutgoingPost,
+	OwnerKind,
 	TelegramFloodError,
 )
 from tests.conftest import community_executor
@@ -1722,3 +1723,32 @@ async def test_markup_first_waits_for_its_minute_not_a_slot(
 	async with db.session_factory() as session:
 		row = await session.get(PublishQueueItem, item)
 		assert row is not None and row.markup_first is True
+
+
+async def test_identity_persisted_and_restored(db: Database, make_queue: QueueFactory) -> None:
+	"""Лицо публикации элемента очереди переживает перезапуск (ADR-0036)."""
+	gateway = _SlotGateway()
+	gateway.release.set()
+	gateway.scheduled = [_future(600 + i) for i in range(TELEGRAM_MAX_SCHEDULED)]
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	async with db.session_factory() as session:
+		community = await session.get(Community, community_id)
+		assert community is not None and community.default_tg_account_id is not None
+		named = ExecutorRef(OwnerKind.USER, community.default_tg_account_id)
+	item = await queue.enqueue(
+		PostDraft(community_id, text="от него", when=_future(120), identity=named)
+	)
+	plain = await queue.enqueue(PostDraft(community_id, text="от сообщества", when=_future(130)))
+	await _wait_status(queue, item, JobStatus.WAITING)
+	async with db.session_factory() as session:
+		row = await session.get(PublishQueueItem, item)
+		assert row is not None and (row.identity_kind, row.identity_id) == ("user", named.id)
+		other = await session.get(PublishQueueItem, plain)
+		assert other is not None and (other.identity_kind, other.identity_id) == (None, None)
+	await queue.shutdown()
+
+	restarted = make_queue(gateway)  # «перезапуск приложения»
+	await restarted.load()
+	drafts = {i.id: i.draft for i in restarted._jobs.all()}  # noqa: SLF001 — восстановленный черновик
+	assert drafts[item].identity == named and drafts[plain].identity is None
