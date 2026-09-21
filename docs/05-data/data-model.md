@@ -294,7 +294,7 @@
 | `kind` | str | вид: `service_messages` / `deleted_accounts` (значения `TaskKind`) |
 | `enabled` | bool | расписание действует |
 | `params` | JSON | параметры вида (`TaskSpec.params_to_payload`) |
-| `schedule` | JSON | расписание; новая задача — `{"kind": "none"}` (только по требованию) |
+| `schedule` | JSON | расписание (`Schedule.to_payload`): `kind` — `none` / `interval` (+ `min_minutes`, `max_minutes`) / `daily` (+ `times` списком «ЧЧ:ММ»); новая задача — `none` |
 | `cursor` | JSON? | состояние вида между запусками (кто из исполнителей следующий); NULL — нет |
 | `next_run_at` | datetime? | следующий запуск по расписанию; NULL — не назначен |
 | `last_run_at` | datetime? | когда задача запускалась в последний раз |

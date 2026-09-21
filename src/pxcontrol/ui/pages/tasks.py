@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import Qt
@@ -33,10 +34,13 @@ from qfluentwidgets import (
 	BodyLabel,
 	CaptionLabel,
 	CheckBox,
+	ComboBox,
+	LineEdit,
 	PushButton,
 	SegmentedWidget,
 	SpinBox,
 	StrongBodyLabel,
+	SwitchButton,
 	TableWidget,
 	TextEdit,
 )
@@ -51,11 +55,18 @@ from pxcontrol.engine.tasks import (
 	RunOutcome,
 	ServiceMessagesParams,
 	ServiceReport,
+	TaskError,
 	TaskKind,
 	TaskParams,
 	TaskTrigger,
 	deleted_accounts,
 	service_messages,
+)
+from pxcontrol.engine.tasks.schedule import (
+	INTERVAL_MINUTES_RANGE,
+	Schedule,
+	ScheduleKind,
+	schedule_text,
 )
 from pxcontrol.engine.telegram.types import ServiceMessageKind
 from pxcontrol.ui import density
@@ -96,6 +107,31 @@ TRIGGER_WORDS: dict[TaskTrigger, str] = {
 
 #: Сколько запусков читать в журнал за раз.
 RUNS_SHOWN = 100
+
+#: Виды расписания в порядке показа и их подписи в выпадающем списке.
+SCHEDULE_KINDS: tuple[tuple[ScheduleKind, str], ...] = (
+	(ScheduleKind.NONE, "Только по требованию"),
+	(ScheduleKind.INTERVAL, "С интервалом (минуты, случайно в промежутке)"),
+	(ScheduleKind.DAILY, "В моменты суток (ЧЧ:ММ через запятую)"),
+)
+
+
+def next_run_text(task: TaskDto) -> str:
+	"""Строка о расписании под формой: что задано и когда следующий запуск."""
+	text = schedule_text(task.schedule)
+	if task.schedule.kind is ScheduleKind.NONE:
+		return f"Расписание: {text}"
+	if not task.enabled:
+		return f"Расписание выключено ({text})"
+	if task.next_run_at is None:
+		return f"Расписание: {text} — следующий запуск не назначен"
+	return f"Расписание: {text} — следующий запуск {format_local(task.next_run_at)}"
+
+
+def parse_times(text: str) -> tuple[str, ...]:
+	"""Моменты суток из поля «через запятую» (пустые куски пропускаются)."""
+	return tuple(token.strip() for token in text.split(",") if token.strip())
+
 
 #: Высота строки таблицы журнала и кегль (как у списка дашборда).
 _TABLE_ROW_HEIGHT = 34
@@ -140,15 +176,26 @@ class _TaskSection(QWidget):
 		self._panel = panel
 		self._task: TaskDto | None = None
 		self._run_buttons: list[PushButton] = []
+		self._schedule: _ScheduleEditor
 
 	# --- контракт раздела ------------------------------------------------------------
 
 	def mount(self, task: TaskDto) -> None:
-		"""Принимает строку задачи: параметры — в форму, кнопки — включить."""
+		"""Принимает строку задачи: параметры и расписание — в форму, кнопки — включить."""
 		self._task = task
 		self.apply_params(task.params)
+		self._schedule.present(task)
 		for button in self._run_buttons:
 			button.setEnabled(True)
+
+	def confirm_schedule(self, schedule: Schedule) -> bool:
+		"""Подтверждение включения расписания — один раз при сохранении.
+
+		Обычный запуск по расписанию необратим (удаляет, исключает),
+		а спросить перед каждым ночным запуском некого (ADR-0038);
+		раздел перечисляет, что именно будет делаться.
+		"""
+		raise NotImplementedError
 
 	def apply_params(self, params: TaskParams) -> None:
 		"""Раскладывает сохранённые параметры по полям формы."""
@@ -188,6 +235,20 @@ class _TaskSection(QWidget):
 		button.clicked.connect(self._open_journal)
 		row.addWidget(button)
 		return row
+
+	def schedule_block(self, parent: QWidget) -> QWidget:
+		"""Блок расписания: вид, границы, включено, «Сохранить расписание»."""
+		self._schedule = _ScheduleEditor(parent, on_save=self._on_save_schedule)
+		self._run_buttons.append(self._schedule.save_button)
+		return self._schedule
+
+	def _on_save_schedule(self, schedule: Schedule, enabled: bool) -> None:
+		"""Сохраняет расписание через панель (с подтверждением при включении)."""
+		if self._task is None:
+			return
+		if enabled and not self.confirm_schedule(schedule):
+			return
+		self._panel.save_schedule(self, self._task, schedule, enabled=enabled)
 
 	def _open_journal(self) -> None:
 		"""Открывает окно журнала запусков этой задачи."""
@@ -245,6 +306,7 @@ class _ServiceMessagesSection(_TaskSection):
 		self._error = ErrorLabel(self)
 		box.addWidget(self._error)
 		box.addLayout(self._clean_row())
+		box.addWidget(self.schedule_block(self))
 		box.addLayout(self.journal_row(self))
 
 	def _clean_row(self) -> QHBoxLayout:
@@ -286,6 +348,23 @@ class _ServiceMessagesSection(_TaskSection):
 
 	def set_status(self, text: str) -> None:
 		self._label.setText(text)
+
+	def confirm_schedule(self, schedule: Schedule) -> bool:
+		params = self.params()
+		chosen = service_messages.selectable_kinds(params.kinds)
+		if not chosen:
+			self._error.fail("Для чистки по расписанию отметьте хотя бы один вид записей.")
+			return False
+		self._error.succeed()
+		names = "\n".join(f"— {service_messages.kind_title(kind)};" for kind in chosen)
+		return confirm_delete(
+			self,
+			f"Включить чистку служебных записей в «{self._panel.community.title}» "
+			f"по расписанию ({schedule_text(schedule)})?\n\n{names}\n\n"
+			f"Каждый запуск удалит не больше {params.delete_limit} записей без "
+			"дополнительного подтверждения. Удаление необратимо.",
+			accept_text="Включить",
+		)
 
 	def _on_clean(self) -> None:
 		"""Спрашивает подтверждение и ставит чистку записей."""
@@ -380,6 +459,7 @@ class _DeletedAccountsSection(_TaskSection):
 		self._kick_button.clicked.connect(self._on_clean)
 		kick.addWidget(self._kick_button)
 		box.addLayout(kick)
+		box.addWidget(self.schedule_block(self))
 		box.addLayout(self.journal_row(self))
 
 	def apply_params(self, params: TaskParams) -> None:
@@ -391,6 +471,17 @@ class _DeletedAccountsSection(_TaskSection):
 
 	def set_status(self, text: str) -> None:
 		self._label.setText(text)
+
+	def confirm_schedule(self, schedule: Schedule) -> bool:
+		limit = self._kick_limit.value()
+		return confirm_delete(
+			self,
+			f"Включить исключение удалённых аккаунтов из «{self._panel.community.title}» "
+			f"по расписанию ({schedule_text(schedule)})?\n\n"
+			f"Каждый запуск исключит не больше {limit} без дополнительного "
+			"подтверждения. Исключение необратимо и уменьшает число участников.",
+			accept_text="Включить",
+		)
 
 	def _on_clean(self) -> None:
 		"""Спрашивает подтверждение и ставит исключение."""
@@ -415,6 +506,113 @@ class _DeletedAccountsSection(_TaskSection):
 		self._label.setText(deleted_accounts.members_summary(report))
 		# после исключения числа устарели: пусть поищет заново
 		self._kick_button.setEnabled(report.removed == 0 and report.found > 0)
+
+
+class _ScheduleEditor(QWidget):
+	"""Форма расписания раздела: вид, границы, включено, сохранение.
+
+	Поля вида показываются по выбранному виду: у интервала — две границы
+	в минутах (равные — интервал постоянный), у моментов суток — строка
+	«ЧЧ:ММ» через запятую (формат тот же, что у времён публикации).
+	Подпись под формой — сохранённое расписание и следующий запуск.
+	"""
+
+	def __init__(self, parent: QWidget, *, on_save: Callable[[Schedule, bool], None]) -> None:
+		super().__init__(parent)
+		self._on_save = on_save
+		box = QVBoxLayout(self)
+		box.setContentsMargins(0, 0, 0, 0)
+		box.setSpacing(density.spacing().row_spacing)
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Расписание:", self))
+		self._kind = ComboBox(self)
+		for kind, title in SCHEDULE_KINDS:
+			self._kind.addItem(title, userData=kind)
+		self._kind.currentIndexChanged.connect(self._on_kind)
+		row.addWidget(self._kind, stretch=1)
+		self._switch = SwitchButton(self)
+		self._switch.setOnText("включено")
+		self._switch.setOffText("выключено")
+		row.addWidget(self._switch)
+		box.addLayout(row)
+		self._interval = QWidget(self)
+		interval = QHBoxLayout(self._interval)
+		interval.setContentsMargins(0, 0, 0, 0)
+		interval.addWidget(BodyLabel("Пауза между запусками от", self._interval))
+		self._min = SpinBox(self._interval)
+		self._min.setRange(*INTERVAL_MINUTES_RANGE)
+		interval.addWidget(self._min)
+		interval.addWidget(BodyLabel("до", self._interval))
+		self._max = SpinBox(self._interval)
+		self._max.setRange(*INTERVAL_MINUTES_RANGE)
+		interval.addWidget(self._max)
+		interval.addWidget(BodyLabel("мин — случайно в промежутке", self._interval))
+		interval.addStretch()
+		box.addWidget(self._interval)
+		self._daily = QWidget(self)
+		daily = QHBoxLayout(self._daily)
+		daily.setContentsMargins(0, 0, 0, 0)
+		daily.addWidget(BodyLabel("В моменты суток:", self._daily))
+		self._times = LineEdit(self._daily)
+		self._times.setPlaceholderText("04:00, 16:30…")
+		daily.addWidget(self._times, stretch=1)
+		box.addWidget(self._daily)
+		footer = QHBoxLayout()
+		self._caption = CaptionLabel("", self)
+		self._caption.setWordWrap(True)
+		footer.addWidget(self._caption, stretch=1)
+		self.save_button = PushButton("Сохранить расписание", self)
+		self.save_button.setEnabled(False)
+		self.save_button.clicked.connect(self._save)
+		footer.addWidget(self.save_button)
+		box.addLayout(footer)
+		self._error = ErrorLabel(self)
+		box.addWidget(self._error)
+		self._on_kind()
+
+	def present(self, task: TaskDto) -> None:
+		"""Раскладывает сохранённое расписание по полям и обновляет подпись."""
+		schedule = task.schedule
+		for index, (kind, _title) in enumerate(SCHEDULE_KINDS):
+			if kind is schedule.kind:
+				self._kind.setCurrentIndex(index)
+		self._min.setValue(schedule.min_minutes)
+		self._max.setValue(schedule.max_minutes)
+		self._times.setText(", ".join(schedule.times))
+		self._switch.setChecked(task.enabled)
+		self._caption.setText(next_run_text(task))
+		self._error.succeed()
+		self._on_kind()
+
+	def schedule(self) -> Schedule:
+		"""Расписание из полей формы (без проверки — её делает движок)."""
+		kind = self._kind.currentData()
+		return Schedule(
+			kind=kind if isinstance(kind, ScheduleKind) else ScheduleKind.NONE,
+			min_minutes=self._min.value(),
+			max_minutes=self._max.value(),
+			times=parse_times(self._times.text()),
+		)
+
+	def _on_kind(self, *_args: object) -> None:
+		"""Показывает поля выбранного вида, прячет остальные."""
+		kind = self._kind.currentData()
+		self._interval.setVisible(kind is ScheduleKind.INTERVAL)
+		self._daily.setVisible(kind is ScheduleKind.DAILY)
+
+	def _save(self) -> None:
+		"""Проверяет расписание и отдаёт его владельцу."""
+		schedule = self.schedule()
+		enabled = self._switch.isChecked()
+		try:
+			schedule.validate()
+			if enabled and schedule.kind is ScheduleKind.NONE:
+				raise TaskError("Выберите расписание — «только по требованию» включать нечего.")
+		except TaskError as exc:
+			self._error.fail(str(exc))
+			return
+		self._error.succeed()
+		self._on_save(schedule, enabled)
 
 
 class TasksPanel(QWidget):
@@ -534,6 +732,18 @@ class TasksPanel(QWidget):
 		"""Запоминает, какой раздел ждёт исхода этого задания."""
 		self._jobs[job_id] = section
 		section.set_status(text)
+
+	def save_schedule(
+		self, section: _TaskSection, task: TaskDto, schedule: Schedule, *, enabled: bool
+	) -> None:
+		"""Сохраняет расписание задачи и показывает разделу свежую строку."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.tasks.save_schedule(task.id, schedule, enabled=enabled),
+			self,
+			section.mount,
+			self._show_error,
+		)
 
 	def open_journal(self, task: TaskDto) -> None:
 		"""Открывает окно журнала запусков задачи."""

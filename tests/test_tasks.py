@@ -9,8 +9,9 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -36,6 +37,7 @@ from pxcontrol.engine.tasks import (
 	TaskTrigger,
 )
 from pxcontrol.engine.tasks.deleted_accounts import members_summary
+from pxcontrol.engine.tasks.schedule import Schedule, ScheduleKind, next_run, schedule_text
 from pxcontrol.engine.tasks.service_messages import (
 	DEFAULT_DELETE_LIMIT,
 	DEFAULT_DEPTH,
@@ -1209,3 +1211,250 @@ def test_members_summary_reports_refusals() -> None:
 	text = members_summary(MembersReport(found=3, removed=2, skipped=1))
 	assert "Исключено удалённых аккаунтов: 2" in text
 	assert "не дал исключить: 1" in text
+
+
+# --- расписание (этап B) ---------------------------------------------------------
+
+
+class _FixedRandom(random.Random):
+	"""Источник случайности, отдающий нижнюю границу: тесты предсказуемы."""
+
+	def uniform(self, a: float, b: float) -> float:
+		return a
+
+
+def _scheduled_service(db: Database, gateway: _FakeGateway) -> TasksService:
+	"""Сервис задач с предсказуемым интервалом и зоной UTC."""
+	return TasksService(  # type: ignore[arg-type]
+		db, gateway, CommunitiesService(db, gateway), tz=UTC, rng=_FixedRandom()
+	)
+
+
+def test_schedule_survives_json_round_trip_and_ignores_junk() -> None:
+	"""Расписание переживает запись и чтение; битое — к умолчаниям."""
+	interval = Schedule(ScheduleKind.INTERVAL, min_minutes=35, max_minutes=96)
+	assert Schedule.from_payload(interval.to_payload()) == interval
+	daily = Schedule(ScheduleKind.DAILY, times=("04:00", "16:30"))
+	assert Schedule.from_payload(daily.to_payload()) == daily
+	assert Schedule.from_payload({"kind": "weekly"}).kind is ScheduleKind.NONE
+	assert Schedule.from_payload("мусор") == Schedule()
+	junk = Schedule.from_payload({"kind": "daily", "times": ["04:00", "25:99", 7]})
+	assert junk.times == ("04:00",)
+
+
+def test_schedule_validation_names_the_problem() -> None:
+	"""Перевёрнутый интервал, пустые и битые моменты — отказ с текстом."""
+	with pytest.raises(TaskError, match="верхняя граница меньше"):
+		Schedule(ScheduleKind.INTERVAL, min_minutes=90, max_minutes=30).validate()
+	with pytest.raises(TaskError, match="Интервал"):
+		Schedule(ScheduleKind.INTERVAL, min_minutes=0, max_minutes=30).validate()
+	with pytest.raises(TaskError, match="хотя бы один момент"):
+		Schedule(ScheduleKind.DAILY).validate()
+	with pytest.raises(TaskError, match="ЧЧ:ММ"):
+		Schedule(ScheduleKind.DAILY, times=("4 утра",)).validate()
+	Schedule().validate()  # «только по требованию» всегда годится
+
+
+def test_next_run_interval_is_drawn_once_within_bounds() -> None:
+	"""Интервал — от конца запуска, случайно в границах; равные границы — точно."""
+	after = datetime(2026, 3, 12, 10, 0, tzinfo=UTC)
+	schedule = Schedule(ScheduleKind.INTERVAL, min_minutes=35, max_minutes=96)
+	moment = next_run(schedule, after, UTC, random.Random(7))
+	assert moment is not None
+	assert after + timedelta(minutes=35) <= moment <= after + timedelta(minutes=96)
+	fixed = Schedule(ScheduleKind.INTERVAL, min_minutes=60, max_minutes=60)
+	assert next_run(fixed, after, UTC, random.Random(7)) == after + timedelta(hours=1)
+	assert next_run(Schedule(), after, UTC) is None
+
+
+def test_next_run_daily_takes_nearest_moment_after_now() -> None:
+	"""Ближайший момент суток сегодня, иначе первый по порядку завтра."""
+	schedule = Schedule(ScheduleKind.DAILY, times=("16:30", "04:00"))
+	morning = datetime(2026, 3, 12, 10, 0, tzinfo=UTC)
+	assert next_run(schedule, morning, UTC) == datetime(2026, 3, 12, 16, 30, tzinfo=UTC)
+	evening = datetime(2026, 3, 12, 20, 0, tzinfo=UTC)
+	assert next_run(schedule, evening, UTC) == datetime(2026, 3, 13, 4, 0, tzinfo=UTC)
+	exact = datetime(2026, 3, 12, 16, 30, tzinfo=UTC)  # ровно в момент — уже прошёл
+	assert next_run(schedule, exact, UTC) == datetime(2026, 3, 13, 4, 0, tzinfo=UTC)
+
+
+def test_schedule_text_reads_naturally() -> None:
+	"""Расписание по-русски: интервал, постоянный интервал, моменты, ничего."""
+	assert "35–96 мин" in schedule_text(Schedule(ScheduleKind.INTERVAL, 35, 96))
+	assert schedule_text(Schedule(ScheduleKind.INTERVAL, 60, 60)) == "каждые 60 мин"
+	assert schedule_text(Schedule(ScheduleKind.DAILY, times=("04:00",))) == "ежедневно в 04:00"
+	assert schedule_text(Schedule()) == "только по требованию"
+
+
+async def test_save_schedule_assigns_next_run_and_disable_clears_it(db: Database) -> None:
+	"""Включение назначает следующий запуск; выключение снимает его."""
+	service = _scheduled_service(db, _FakeGateway())
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	before = datetime.now(UTC)
+	saved = await service.save_schedule(
+		task.id, Schedule(ScheduleKind.INTERVAL, 35, 96), enabled=True
+	)
+	assert saved.enabled is True
+	assert saved.next_run_at is not None
+	assert saved.next_run_at >= before + timedelta(minutes=35) - timedelta(seconds=1)
+	disabled = await service.save_schedule(
+		task.id, Schedule(ScheduleKind.INTERVAL, 35, 96), enabled=False
+	)
+	assert disabled.enabled is False and disabled.next_run_at is None
+
+
+async def test_enabling_without_a_schedule_is_rejected(db: Database) -> None:
+	"""«Только по требованию» включать нечего — отказ с объяснением."""
+	service = _scheduled_service(db, _FakeGateway())
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	with pytest.raises(TaskError, match="Выберите расписание"):
+		await service.save_schedule(task.id, Schedule(), enabled=True)
+
+
+async def test_enabling_clean_schedule_requires_chosen_kinds(db: Database) -> None:
+	"""Чистка по расписанию без видов записей — пустая работа: отказ при сохранении."""
+	service = _scheduled_service(db, _FakeGateway())
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	await service.save_params(task.id, ServiceMessagesParams(kinds=()))
+	with pytest.raises(TaskError, match="Не выбрано"):
+		await service.save_schedule(
+			task.id, Schedule(ScheduleKind.DAILY, times=("04:00",)), enabled=True
+		)
+
+
+async def test_scheduler_starts_due_task_and_reschedules(db: Database) -> None:
+	"""Тик планировщика ставит запуск по сроку, а конец запуска назначает новый."""
+	gateway = _FakeGateway(member_pages=[])
+	service = _scheduled_service(db, gateway)
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	await service.save_schedule(task.id, Schedule(ScheduleKind.INTERVAL, 1, 1), enabled=True)
+	assert await service.run_due(datetime.now(UTC)) == 0  # срок ещё не наступил
+	later = datetime.now(UTC) + timedelta(hours=1)
+	assert await service.run_due(later) == 1
+	await service.settle()
+	(run,) = await service.runs(task.id)
+	assert run.trigger is TaskTrigger.SCHEDULE
+	assert run.dry_run is False
+	assert run.outcome is RunOutcome.DONE
+	fresh = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	assert fresh.next_run_at is not None
+	assert fresh.next_run_at > run.finished_at  # следующий — от конца запуска
+	assert await service.run_due(datetime.now(UTC)) == 0  # и он ещё не наступил
+
+
+async def test_scheduler_skips_disabled_community(db: Database) -> None:
+	"""Выключенное сообщество не запускается по расписанию."""
+	from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
+
+	service = _scheduled_service(db, _FakeGateway())
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	await service.save_schedule(task.id, Schedule(ScheduleKind.INTERVAL, 1, 1), enabled=True)
+	await SettingsService(db).set_for(COMMUNITY_ENABLED, community_id, False)
+	assert await service.run_due(datetime.now(UTC) + timedelta(hours=1)) == 0
+
+
+async def test_scheduler_does_not_stack_on_running_task(db: Database) -> None:
+	"""Пока идёт запуск задачи, тик не ставит второй."""
+	release = asyncio.Event()
+
+	class _SlowGateway(_FakeGateway):
+		async def userbot_service_messages_page(
+			self, account_id: int, chat_id: str, offset_id: int, limit: int
+		) -> ServiceMessagesPage:
+			self.requested.append(offset_id)
+			await release.wait()
+			return _page(kinds=[], scanned=1)
+
+	gateway = _SlowGateway()
+	service = _scheduled_service(db, gateway)
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	await service.save_schedule(task.id, Schedule(ScheduleKind.INTERVAL, 1, 1), enabled=True)
+	await _scan_service(service, community_id)  # ручной запуск уже идёт
+	while not gateway.requested:
+		await asyncio.sleep(0)
+	assert await service.run_due(datetime.now(UTC) + timedelta(hours=1)) == 0
+	release.set()
+	await service.settle()
+	assert len(await service.state()) == 1
+
+
+async def test_scheduled_error_leaves_queue_but_stays_in_journal(db: Database) -> None:
+	"""Ошибка запуска по расписанию не копится карточками: её «повтор» — следующий срок."""
+
+	class _FloodingGateway(_FakeGateway):
+		async def userbot_participants_page(
+			self, account_id: int, chat_id: str, offset: int, limit: int
+		) -> ParticipantsPage:
+			raise UserbotFloodError("Telegram просит подождать 30 с.", retry_after_s=30)
+
+	service = _scheduled_service(db, _FloodingGateway())
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	await service.save_schedule(task.id, Schedule(ScheduleKind.INTERVAL, 1, 1), enabled=True)
+	assert await service.run_due(datetime.now(UTC) + timedelta(hours=1)) == 1
+	await service.settle()
+	assert await service.state() == []  # карточки с ошибкой в панели нет
+	(run,) = await service.runs(task.id)
+	assert run.outcome is RunOutcome.ERROR and run.error is not None
+	fresh = await service.task(community_id, TaskKind.DELETED_ACCOUNTS)
+	assert fresh.next_run_at is not None  # следующий срок назначен
+
+
+async def test_prune_removes_runs_older_than_retention(db: Database) -> None:
+	"""Журнал старше срока хранения убирается, свежий остаётся."""
+	from pxcontrol.engine.db.models import TaskRun
+
+	gateway = _FakeGateway([_page(kinds=[], scanned=1)])
+	service = _scheduled_service(db, gateway)
+	community_id = await _community(db)
+	await _scan_service(service, community_id)
+	await service.settle()
+	task = await service.task(community_id, TaskKind.SERVICE_MESSAGES)
+	async with db.session_factory() as session:
+		session.add(
+			TaskRun(
+				task_id=task.id,
+				trigger="manual",
+				started_at=datetime.now(UTC) - timedelta(days=100),
+				outcome="done",
+			)
+		)
+		await session.commit()
+	assert len(await service.runs(task.id)) == 2
+	assert await service.prune_runs(datetime.now(UTC)) == 1
+	assert len(await service.runs(task.id)) == 1
+
+
+def test_schedule_texts_for_ui() -> None:
+	"""Подпись под формой: вид, включено ли, следующий запуск; разбор моментов."""
+	from pxcontrol.ui.pages.tasks import next_run_text, parse_times
+
+	def task(schedule: Schedule, *, enabled: bool, next_at: datetime | None) -> TaskDto:
+		return TaskDto(
+			id=1,
+			community_id=1,
+			kind=TaskKind.SERVICE_MESSAGES,
+			params=ServiceMessagesParams(),
+			enabled=enabled,
+			schedule=schedule,
+			next_run_at=next_at,
+			last_run_at=None,
+		)
+
+	at = datetime(2026, 3, 12, 10, 30, tzinfo=UTC)
+	assert next_run_text(task(Schedule(), enabled=False, next_at=None)) == (
+		"Расписание: только по требованию"
+	)
+	off = next_run_text(
+		task(Schedule(ScheduleKind.DAILY, times=("04:00",)), enabled=False, next_at=None)
+	)
+	assert off.startswith("Расписание выключено")
+	on = next_run_text(task(Schedule(ScheduleKind.INTERVAL, 35, 96), enabled=True, next_at=at))
+	assert "следующий запуск" in on and "2026" in on
+	assert parse_times(" 04:00, 16:30 ,,") == ("04:00", "16:30")

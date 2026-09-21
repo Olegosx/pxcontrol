@@ -63,6 +63,7 @@ class Engine:
 			self.gateway,
 			self.communities,
 			on_members_report=self.community_stats.record_members_report,
+			settings=self.settings,
 		)
 		# обещанные клавиатуры (ADR-0031): хранилище кнопок, которые ещё
 		# нельзя применить, и дозор, который ставит их после выхода поста
@@ -193,6 +194,9 @@ class Engine:
 		# дозор кнопок (ADR-0031): ставит обещанное отложенным постам
 		# после их выхода; идёт по дорожкам с фоновым приоритетом
 		self.markups.start_polling()
+		# планировщик задач сообщества (ADR-0038): ставит запуски
+		# по расписанию; идёт по дорожкам с приоритетом обслуживания
+		self.tasks.start_scheduler()
 		logger.info("Движок запущен.")
 
 	async def stop(self) -> None:

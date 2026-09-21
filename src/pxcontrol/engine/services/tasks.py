@@ -20,17 +20,27 @@ ADR-0025), темп обращений к Telegram — дорожка аккау
 **в момент запуска** по свежему снимку прав и живой занятости дорожек
 (диспетчер, ADR-0036); при постановке лишь проверяется, что способный
 в пуле есть, — отказ должен звучать сразу, а не через час в журнале.
+
+**Планировщик** — одна периодическая задача движка с тиком в минуту
+(:class:`~pxcontrol.engine.periodic.PeriodicTask`, как у опроса
+статистики): берёт задачи с наступившим сроком и ставит их запуск.
+Следующий момент **хранится** в задаче и пересчитывается после каждого
+запуска — любого, по кнопке или по расписанию: пауза между проходами
+считается от конца последнего. Пропущенные за время выключения
+запуски догоняются один раз. Журнал старше срока хранения убирается
+раз в сутки.
 """
 
 from __future__ import annotations
 
 import logging
+import random
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any, Protocol
+from datetime import UTC, datetime, timedelta, tzinfo
+from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pxcontrol.engine.db.database import Database
@@ -38,6 +48,7 @@ from pxcontrol.engine.db.models import Bot, CommunityTask, TaskRun, TgAccount
 from pxcontrol.engine.db.types import as_utc, as_utc_optional
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
+from pxcontrol.engine.periodic import PeriodicTask
 from pxcontrol.engine.services.abilities import ACTION_WORDS, ExecutorAction
 from pxcontrol.engine.services.accounts import account_display
 from pxcontrol.engine.services.communities import (
@@ -45,6 +56,7 @@ from pxcontrol.engine.services.communities import (
 	CommunityDto,
 	ExecutorDto,
 )
+from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.tasks import (
 	MembersReport,
 	RunEvent,
@@ -57,6 +69,7 @@ from pxcontrol.engine.tasks import (
 	TaskTrigger,
 	spec_of,
 )
+from pxcontrol.engine.tasks.schedule import Schedule, ScheduleKind, next_run
 from pxcontrol.engine.telegram.types import (
 	DeletedAccount,
 	ExecutorRef,
@@ -79,8 +92,21 @@ PARALLEL_TASKS = 3
 #: без края; сотни — это уже подробнее, чем нужно для разбора.
 EVENTS_CAP = 500
 
-#: Расписание новой задачи: только по требованию (планировщик — ADR-0038).
-_SCHEDULE_NONE: dict[str, Any] = {"kind": "none"}
+#: Шаг планировщика: как часто проверять, кому пора. Минута — с запасом
+#: мельче любого интервала; сама проверка без сети дешёвая.
+SCHEDULER_TICK_S = 60
+
+#: Срок хранения журнала запусков, дни — как у истории статистики
+#: (ADR-0027): разбирать инцидент старше квартала уже не по чему.
+RUNS_KEEP_DAYS = 90
+
+#: Как часто убирать журнал старше срока хранения: раз в сутки —
+#: уборка это пишущая транзакция, а хранение измеряется месяцами.
+PRUNE_EVERY = timedelta(days=1)
+
+#: Сколько ждать планировщик при остановке движка (ADR-0020): между
+#: постановками он выходит сразу, сама постановка — запись в базу.
+_SHUTDOWN_TIMEOUT_S = 10.0
 
 
 class _TasksPort(Protocol):
@@ -117,7 +143,7 @@ class TaskDto:
 		kind: вид.
 		params: параметры вида (типизированная структура).
 		enabled: расписание действует.
-		schedule: расписание в виде JSON-словаря (типизация — этап B).
+		schedule: расписание.
 		next_run_at: следующий запуск по расписанию; None — не назначен.
 		last_run_at: когда задача запускалась в последний раз.
 	"""
@@ -127,7 +153,7 @@ class TaskDto:
 	kind: TaskKind
 	params: TaskParams
 	enabled: bool
-	schedule: dict[str, Any]
+	schedule: Schedule
 	next_run_at: datetime | None
 	last_run_at: datetime | None
 
@@ -249,15 +275,32 @@ class TasksService:
 		gateway: _TasksPort,
 		communities: CommunitiesService,
 		on_members_report: Callable[[int, int, int, datetime], Awaitable[None]] | None = None,
+		settings: SettingsService | None = None,
+		tz: tzinfo | None = None,
+		rng: random.Random | None = None,
 	) -> None:
 		"""``on_members_report`` — крючок «запомни итог прохода по удалённым
 		аккаунтам» (сообщество, найдено, исключено, когда): движок передаёт
 		запись в кэш статистики, чтобы «Обзор» показывал число мёртвых душ
-		и дату прохода (ADR-0027). Сбой крючка задание не роняет."""
+		и дату прохода (ADR-0027). Сбой крючка задание не роняет.
+		``settings`` — общий сервис настроек (None — свой, для тестов):
+		планировщик пропускает выключенные сообщества; ``tz`` — зона
+		моментов суток (None — местная; тесты передают UTC); ``rng`` —
+		источник случайности интервалов (тесты передают свой)."""
 		self._db = db
 		self._gateway = gateway
 		self._communities = communities
 		self._on_members_report = on_members_report
+		self._settings = settings if settings is not None else SettingsService(db)
+		self._tz: tzinfo = tz if tz is not None else (datetime.now(UTC).astimezone().tzinfo or UTC)
+		self._rng = rng if rng is not None else random.Random()
+		self._pruned_at: datetime | None = None
+		self._scheduler = PeriodicTask(
+			self.run_due,
+			name="Планировщик задач",
+			interval_s=SCHEDULER_TICK_S,
+			shutdown_timeout_s=_SHUTDOWN_TIMEOUT_S,
+		)
 		self._jobs: JobQueue[_TaskJob] = JobQueue(
 			self._run_job,
 			name="Задачи",
@@ -287,7 +330,7 @@ class TasksService:
 					kind=str(kind),
 					enabled=False,
 					params=spec.params_to_payload(spec.default_params()),
-					schedule=dict(_SCHEDULE_NONE),
+					schedule=Schedule().to_payload(),
 				)
 				session.add(row)
 				await session.commit()
@@ -325,6 +368,135 @@ class TasksService:
 			await session.commit()
 			await session.refresh(row)
 			return _task_dto(row)
+
+	async def save_schedule(self, task_id: int, schedule: Schedule, *, enabled: bool) -> TaskDto:
+		"""Сохраняет расписание и назначает следующий запуск.
+
+		Включить можно только настоящее расписание («только по требованию»
+		с включённым флагом — противоречие, и оно отклоняется). Включение
+		проверяет сохранённые параметры под **обычный** запуск: чистка
+		по расписанию без выбранных видов записей была бы пустой работой,
+		и честнее сказать об этом при сохранении. Следующий момент
+		считается от «сейчас» и хранится; выключение его снимает.
+
+		Raises:
+			TaskError: Задача не найдена, расписание негодно, включается
+				«только по требованию» или параметры не годятся для запуска.
+		"""
+		schedule.validate()
+		if enabled and schedule.kind is ScheduleKind.NONE:
+			raise TaskError("Выберите расписание — «только по требованию» включать нечего.")
+		async with self._db.session_factory() as session:
+			row = await self._task_in_session(session, task_id)
+			if enabled:
+				spec = spec_of(TaskKind(row.kind))
+				spec.validate(spec.params_from_payload(row.params), dry_run=False)
+			row.schedule = schedule.to_payload()
+			row.enabled = enabled
+			row.next_run_at = (
+				next_run(schedule, datetime.now(UTC), self._tz, self._rng) if enabled else None
+			)
+			await session.commit()
+			await session.refresh(row)
+			logger.info(
+				"Задача id=%s: расписание %s, %s; следующий запуск %s.",
+				row.id,
+				schedule.kind,
+				"включено" if enabled else "выключено",
+				row.next_run_at,
+			)
+			return _task_dto(row)
+
+	# --- планировщик ------------------------------------------------------------
+
+	def start_scheduler(self) -> None:
+		"""Запускает планировщик (при старте движка)."""
+		self._scheduler.start()
+
+	async def run_due(self, now: datetime | None = None) -> int:
+		"""Один тик планировщика: ставит запуски задач с наступившим сроком.
+
+		Задача с идущим или ждущим заданием (по кнопке или прошлый тик)
+		не удваивается: срок останется в прошлом, и следующий тик после
+		конца задания поставит её — а конец задания и так пересчитает
+		срок по расписанию. Выключенное сообщество пропускается; отказ
+		«некому» при постановке не гасит тик — он остаётся исходом
+		задания в журнале, чтобы человек его увидел.
+
+		Returns:
+			Сколько запусков поставлено.
+		"""
+		now = now if now is not None else datetime.now(UTC)
+		enabled = await self._settings.get_for_all(COMMUNITY_ENABLED)
+		async with self._db.session_factory() as session:
+			rows = (
+				(
+					await session.execute(
+						select(CommunityTask)
+						.where(CommunityTask.enabled.is_(True))
+						.where(CommunityTask.next_run_at.is_not(None))
+						.where(CommunityTask.next_run_at <= now)
+						.order_by(CommunityTask.next_run_at)
+					)
+				)
+				.scalars()
+				.all()
+			)
+			due = [_task_dto(row) for row in rows]
+		queued = {job.task.id for job in self._jobs.all() if not job.status.finished()}
+		started = 0
+		for task in due:
+			if self._scheduler.stopping:
+				break
+			if task.id in queued:
+				continue
+			if not enabled.get(task.community_id, COMMUNITY_ENABLED.default):
+				continue
+			try:
+				community = await self._community(task.community_id)
+			except TaskError:
+				logger.warning(
+					"Планировщик: сообщество id=%s задачи id=%s не найдено.",
+					task.community_id,
+					task.id,
+				)
+				continue
+			self._put(
+				_TaskJob(
+					self._jobs.new_id(),
+					task,
+					community,
+					dry_run=False,
+					trigger=TaskTrigger.SCHEDULE,
+				)
+			)
+			started += 1
+		await self._prune_if_due(now)
+		return started
+
+	async def _prune_if_due(self, now: datetime) -> None:
+		"""Убирает журнал старше срока хранения — не чаще раза в сутки."""
+		if self._pruned_at is not None and now - self._pruned_at < PRUNE_EVERY:
+			return
+		self._pruned_at = now
+		await self.prune_runs(now)
+
+	async def prune_runs(self, now: datetime, keep_days: int = RUNS_KEEP_DAYS) -> int:
+		"""Удаляет запуски, начатые раньше срока хранения.
+
+		Returns:
+			Сколько строк убрано.
+		"""
+		threshold = now - timedelta(days=keep_days)
+		async with self._db.session_factory() as session:
+			result = await session.execute(delete(TaskRun).where(TaskRun.started_at < threshold))
+			await session.commit()
+		# число задетых строк — у курсора результата; типизация SQLAlchemy
+		# знает его только у CursorResult, а execute объявлен шире
+		removed = int(getattr(result, "rowcount", 0) or 0)
+		if removed:
+			logger.info("Журнал задач: убрано %d запусков старше %d дней.", removed, keep_days)
+		return removed
 
 	async def run_now(self, task_id: int, params: TaskParams, *, dry_run: bool = False) -> int:
 		"""Сохраняет параметры и ставит запуск задачи по требованию.
@@ -483,7 +655,12 @@ class TasksService:
 		await self._jobs.wait_idle()
 
 	async def shutdown(self) -> None:
-		"""Гасит очередь при остановке движка (ADR-0020)."""
+		"""Гасит планировщик, затем очередь при остановке движка (ADR-0020).
+
+		Планировщик — первым: после него новых заданий не появится,
+		а очередь доигрывает начатое своим путём.
+		"""
+		await self._scheduler.shutdown()
 		await self._jobs.shutdown()
 
 	# --- постановка ---------------------------------------------------------------
@@ -702,7 +879,18 @@ class TasksService:
 			task_row = await session.get(CommunityTask, job.task.id)
 			if task_row is not None:
 				task_row.last_run_at = now
+				# следующий момент — от конца этого запуска, каким бы он
+				# ни был: пауза между проходами считается между ними
+				if task_row.enabled:
+					task_row.next_run_at = next_run(
+						Schedule.from_payload(task_row.schedule), now, self._tz, self._rng
+					)
 			await session.commit()
+		if job.trigger is TaskTrigger.SCHEDULE and status is JobStatus.ERROR:
+			# у запуска по расписанию «повторить» — это следующий срок,
+			# а карточка с ошибкой копилась бы в панели каждый интервал;
+			# причина уже в журнале запусков — оттуда её и читают
+			self._jobs.remove(job)
 
 	# --- строки ---------------------------------------------------------------------
 
@@ -741,7 +929,7 @@ def _task_dto(row: CommunityTask) -> TaskDto:
 		kind=kind,
 		params=spec_of(kind).params_from_payload(row.params),
 		enabled=row.enabled,
-		schedule=dict(row.schedule) if isinstance(row.schedule, dict) else dict(_SCHEDULE_NONE),
+		schedule=Schedule.from_payload(row.schedule),
 		next_run_at=as_utc_optional(row.next_run_at),
 		last_run_at=as_utc_optional(row.last_run_at),
 	)
