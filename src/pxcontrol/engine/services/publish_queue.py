@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Hashable
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -32,6 +32,8 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import PublishQueueItem
 from pxcontrol.engine.db.types import as_utc_optional
 from pxcontrol.engine.jobs import Job, JobCancelled, JobDeferred, JobQueue, JobStatus
+from pxcontrol.engine.services.abilities import ExecutorAction
+from pxcontrol.engine.services.community_rights import capable_rows, executor_owner
 from pxcontrol.engine.services.markups import MarkupsService
 from pxcontrol.engine.services.posts import (
 	MIN_SCHEDULE_AHEAD,
@@ -41,6 +43,7 @@ from pxcontrol.engine.services.posts import (
 	PostNotReadyError,
 	PostsService,
 	PublishOutcome,
+	PublishPlan,
 	media_from_json,
 	media_to_json,
 	refresh_draft_media,
@@ -61,11 +64,21 @@ from pxcontrol.engine.telegram.types import (
 	MediaKind,
 	OwnerKind,
 	TelegramFloodError,
+	Urgency,
 	preview_from_json,
 	preview_to_json,
+	urgency,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Потолок одновременных загрузок (ADR-0036, п. 7): одна долгая плюс одна
+#: полоса для коротких. Общий ресурс здесь — канал связи владельца:
+#: N параллельных загрузок делят его на N и не ускоряют ничего, зато любая
+#: может застрять и держать полосу. Значение, как зазор дорожки
+#: (ADR-0024, п. 8), подлежит проверке живьём и в настройки не выносится,
+#: пока потребность не доказана (ADR-0013).
+PARALLEL_UPLOADS = 2
 
 #: Длина превью текста поста в заголовке элемента очереди.
 _TITLE_PREVIEW_CHARS = 60
@@ -108,6 +121,8 @@ class QueueItemDto:
 			пока пост ждёт слота, это единственный способ увидеть, что
 			именно уйдёт (файл уже уехал из «Готовых видео»).
 		files: сколько файлов у поста (больше одного — альбом).
+		sender: кто везёт пост — имя исполнителя, выбранного диспетчером
+			при подготовке (ADR-0036); None — ещё не выбран.
 	"""
 
 	id: int
@@ -121,6 +136,7 @@ class QueueItemDto:
 	note: str | None = None
 	media_path: str | None = None
 	files: int = 0
+	sender: str | None = None
 
 	@property
 	def scheduled(self) -> bool:
@@ -153,6 +169,31 @@ class _PublishJob(Job):
 		# после такого выдерживается щадящая пауза, иначе очередь,
 		# накопившаяся за простой приложения, ушла бы залпом
 		self.catchup = False
+		# одна загрузка на сообщество (ADR-0036): замок каркаса; щадящая
+		# пауза догона удерживает его же — соседние сообщества не ждут
+		self.locks = frozenset({_community_key(draft.community_id)})
+		# кто везёт пост — известно после подготовки; наблюдаемое поле:
+		# карточка показывает отправителя, пока идёт загрузка
+		self._sender: str | None = None
+
+	@property
+	def sender(self) -> str | None:
+		"""Имя исполнителя, везущего пост (наблюдаемое; None — не выбран)."""
+		return self._sender
+
+	@sender.setter
+	def sender(self, value: str | None) -> None:
+		self._set_observed("_sender", value)
+
+	def hint_candidates(self, candidates: frozenset[ExecutorRef]) -> None:
+		"""Подсказка каркасу, кто мог бы повезти пост (ADR-0036).
+
+		Пока все кандидаты удержаны (флуд-лимит, обрыв связи), задание
+		не берётся — вместо того чтобы занять полосу и ждать на чужой
+		дорожке. Истина — свежий подбор при отправке; устаревшая подсказка
+		влияет только на очерёдность.
+		"""
+		self.alternatives = frozenset(_executor_key(ref) for ref in candidates)
 
 	def dto(self) -> QueueItemDto:
 		"""Снимок элемента для интерфейса."""
@@ -168,7 +209,40 @@ class _PublishJob(Job):
 			note=self.card_note(),
 			media_path=self.draft.media[0].path if self.draft.media else None,
 			files=len(self.draft.media),
+			sender=self.sender,
 		)
+
+
+def _community_key(community_id: int) -> tuple[str, int]:
+	"""Ключ замка «одна загрузка на сообщество» (ADR-0036)."""
+	return ("community", community_id)
+
+
+def _executor_key(ref: ExecutorRef) -> tuple[str, ExecutorRef]:
+	"""Ключ удержания исполнителя после флуд-лимита или обрыва связи."""
+	return ("executor", ref)
+
+
+def _send_order(item: _PublishJob) -> tuple[bool, int]:
+	"""Порядок выбора из готовых: срочные раньше плановых, затем постановка.
+
+	Срочность — одно понятие с дорожкой (:func:`urgency`, ADR-0036):
+	пост «сейчас» и догон не стоят за выпущенными из ожидания отложками
+	на неделю вперёд.
+	"""
+	planned = urgency(item.draft.when, datetime.now(UTC)) is Urgency.PLANNED
+	return (planned, item.id)
+
+
+def _hold_executor(plan: PublishPlan | None) -> frozenset[Hashable] | None:
+	"""Что удержать после флуд-лимита или обрыва связи: исполнителя плана.
+
+	Пауза принадлежит исполнителю, а не очереди (ADR-0036): посты других
+	исполнителей идут дальше, а посты с тем же единственным кандидатом
+	каркас не берёт, пока удержание не снято. Плана нет (сорвалась
+	подготовка) — удерживается только само задание.
+	"""
+	return frozenset({_executor_key(plan.executor)}) if plan is not None else None
 
 
 def _identity_from_row(kind: str | None, owner_id: int | None) -> ExecutorRef | None:
@@ -293,11 +367,15 @@ class PublishQueue:
 			# точка подмены в тестах: настоящие паузы (флуд, догон)
 			# растянули бы прогон на минуты
 			sleep=lambda seconds: self._sleep(seconds),
+			# параллельно между исполнителями, последовательно внутри
+			# сообщества (замок задания), срочные раньше плановых (ADR-0036)
+			concurrency=PARALLEL_UPLOADS,
+			order=_send_order,
 		)
 		self._sleep: Callable[[float], Coroutine[Any, Any, None]] = self._wait_stop
-		# задача передачи активного элемента — единственное, что можно
+		# задачи передачи идущих элементов — единственное, что можно
 		# рвать отменой: подготовка ходит в БД и обрываться не должна
-		self._transmit: asyncio.Task[PublishOutcome] | None = None
+		self._transmits: dict[int, asyncio.Task[PublishOutcome]] = {}
 		self._watcher: asyncio.Task[None] | None = None
 		self._slot_check: asyncio.Task[None] | None = None
 
@@ -316,9 +394,11 @@ class PublishQueue:
 				.all()
 			)
 		titles: dict[int, str] = {}
+		hints: dict[int, frozenset[ExecutorRef]] = {}
 		for row in rows:
 			if row.community_id not in titles:
 				titles[row.community_id] = await self._posts.community_title(row.community_id)
+				hints[row.community_id] = await self._posts.publish_candidates(row.community_id)
 			# имя владельца записи — в разборы: по «не разобралось»
 			# без него нельзя понять, у какого поста пропали кнопки
 			# или оформление, а в очереди их сотни
@@ -341,6 +421,7 @@ class PublishQueue:
 			item = _PublishJob(row.id, draft, titles[row.community_id])
 			item.status = JobStatus(row.status)
 			item.error = row.error
+			item.hint_candidates(hints[row.community_id])
 			self._jobs.add(item)
 		if rows:
 			logger.info("Очередь отправки восстановлена: элементов %d.", len(rows))
@@ -378,10 +459,12 @@ class PublishQueue:
 		if not drafts:
 			raise PostError("Пакет пуст — отправлять нечего.")
 		titles: dict[int, str] = {}
+		hints: dict[int, frozenset[ExecutorRef]] = {}
 		for draft in drafts:
 			self._posts.validate_draft(draft)
 			if draft.community_id not in titles:
 				titles[draft.community_id] = await self._posts.community_title(draft.community_id)
+				hints[draft.community_id] = await self._posts.publish_candidates(draft.community_id)
 			# правила сообщества — при постановке, а не при отправке: отказ
 			# должен всплыть под рукой у человека, а не через час, когда
 			# пост дождётся своей минуты (ADR-0031). Предел длины среди
@@ -418,6 +501,7 @@ class PublishQueue:
 		for row, draft in zip(rows, stashed, strict=True):
 			item = _PublishJob(row.id, draft, titles[draft.community_id])
 			item.status = JobStatus(row.status)
+			item.hint_candidates(hints[draft.community_id])
 			self._jobs.add(item)
 			ids.append(item.id)
 			logger.info(
@@ -439,8 +523,9 @@ class PublishQueue:
 		сразу после неё. Общая точка для «Отмены» и ``drop_community``.
 		"""
 		self._jobs.request_cancel(item)
-		if self._jobs.active_id == item.id and self._transmit is not None:
-			self._transmit.cancel()
+		transmit = self._transmits.get(item.id)
+		if transmit is not None:
+			transmit.cancel()
 
 	async def cancel(self, item_id: int) -> None:
 		"""Отменяет элемент: ожидающий убирается, отправляющийся обрывается."""
@@ -704,8 +789,8 @@ class PublishQueue:
 		повторно. Задача, не завершившаяся за страховочный таймаут,
 		отменяется — последнее средство.
 		"""
-		if self._transmit is not None:
-			self._transmit.cancel()
+		for transmit in list(self._transmits.values()):
+			transmit.cancel()
 		await self._jobs.shutdown()
 		for task in (self._watcher, self._slot_check):
 			if task is not None:
@@ -1163,8 +1248,16 @@ class PublishQueue:
 			# снимок для интерфейса честен: карточка и итоговая плашка
 			# показывают «сейчас», а не несуществующую отложку
 			item.draft = draft
+		plan: PublishPlan | None = None
 		try:
 			plan = await self._posts.prepare_publish(draft)
+			item.sender = plan.executor_label
+			item.hint_candidates(
+				frozenset(
+					executor_owner(row)
+					for row in capable_rows(plan.community, ExecutorAction.PUBLISH)
+				)
+			)
 			if item.cancel_requested:
 				# отмена пришла на подготовке: сети ещё не было,
 				# обрывать нечего — исход тот же, что у обрыва передачи
@@ -1174,11 +1267,11 @@ class PublishQueue:
 				# PENDING в БД и уйдёт после перезапуска (ADR-0020)
 				raise asyncio.CancelledError
 			task = asyncio.create_task(self._posts.transmit(plan, on_progress=_on_progress))
-			self._transmit = task
+			self._transmits[item.id] = task
 			try:
 				outcome = await task
 			finally:
-				self._transmit = None
+				self._transmits.pop(item.id, None)
 			# кнопки могут остаться «на потом» в двух случаях: пост уже
 			# в канале, а правка не прошла (пометка на карточке — ошибкой
 			# это быть не может, повтор опубликовал бы пост второй раз),
@@ -1224,6 +1317,7 @@ class PublishQueue:
 				JobStatus.PENDING,
 				note=f"{exc} Очередь ждёт и повторит сама.",
 				delay_s=OFFLINE_RETRY_S,
+				hold=_hold_executor(plan),
 			) from exc
 		except UserbotScheduleFullError as exc:
 			# гонка: слоты заняли руками из клиента Telegram между
@@ -1241,6 +1335,7 @@ class PublishQueue:
 				JobStatus.PENDING,
 				note=f"{exc} Очередь ждёт и повторит сама.",
 				delay_s=exc.retry_after_s,
+				hold=_hold_executor(plan),
 			) from exc
 		except Exception as exc:
 			if item.cancel_requested:

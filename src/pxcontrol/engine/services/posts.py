@@ -672,15 +672,30 @@ class PublishPlan:
 			несколько — альбом).
 		route: каким путём уходит пост (ADR-0031): публикатор, бот
 			или «публикатор отправил — бот дорисовал кнопки».
-		publisher: id userbot-аккаунта, выбранного диспетчером под этот
-			пост (ADR-0036); None — пост везёт бот.
+		executor: кто везёт пост — исполнитель, выбранный диспетчером
+			(ADR-0036): userbot-аккаунт на маршрутах публикатора, бот
+			на бот-пути. Ключ общий с пулом, дорожкой и учётом: по нему
+			очередь удерживает исполнителя после флуд-лимита.
 	"""
 
 	draft: PostDraft
 	community: Community
 	files: tuple[MediaFile, ...]
 	route: PublishRoute
-	publisher: int | None = None
+	executor: ExecutorRef
+
+	@property
+	def publisher(self) -> int | None:
+		"""id userbot-аккаунта-перевозчика (None — пост везёт бот)."""
+		return self.executor.id if self.executor.kind is OwnerKind.USER else None
+
+	@property
+	def executor_label(self) -> str:
+		"""Человеческое имя перевозчика — для карточки очереди."""
+		for row in self.community.executors:
+			if executor_owner(row) == self.executor:
+				return executor_label(row)
+		return "исполнитель"
 
 	@property
 	def single_path(self) -> str | None:
@@ -1130,6 +1145,21 @@ class PostsService:
 		await self.settle_published(plan)
 		return outcome
 
+	async def publish_candidates(self, community_id: int) -> frozenset[ExecutorRef]:
+		"""Исполнители, способные публиковать в сообществе, — подсказка очереди (ADR-0036).
+
+		Очередь отправки не берёт пост, пока все его кандидаты удержаны
+		(флуд-лимит, обрыв связи); истина о том, кто повезёт, — свежий
+		подбор при отправке, подсказка решает только очерёдность.
+
+		Raises:
+			PostError: Сообщество не найдено.
+		"""
+		community = await self._get_community(community_id)
+		return frozenset(
+			executor_owner(row) for row in capable_rows(community, ExecutorAction.PUBLISH)
+		)
+
 	async def publish_blocker(self, community_id: int) -> str | None:
 		"""Что мешает сообществу принять пост прямо сейчас (None — ничего).
 
@@ -1216,7 +1246,7 @@ class PostsService:
 			scheduled=draft.when is not None,
 			markup_first=draft.markup_first,
 		)
-		publisher = self._pick_publisher(community, draft, route)
+		executor = self._pick_publisher(community, draft, route)
 		files = tuple(
 			replace(file, path=self._apply_rename(file.path, file.rename_to), rename_to=None)
 			if file.rename_to
@@ -1224,7 +1254,7 @@ class PostsService:
 			for file in draft.media
 		)
 		return PublishPlan(
-			draft=draft, community=community, files=files, route=route, publisher=publisher
+			draft=draft, community=community, files=files, route=route, executor=executor
 		)
 
 	@staticmethod
@@ -1423,7 +1453,7 @@ class PostsService:
 		markup_pending = False
 		if plan.route is PublishRoute.BOT:
 			# бот отправляет сам — кнопки уходят вместе с постом
-			message_id = await self._publish_bot(plan.community, draft, plan.files)
+			message_id = await self._publish_bot(plan, draft)
 			markup_error = None
 		else:
 			message_id = await self._publish_userbot(plan, draft, on_progress)
@@ -1630,8 +1660,8 @@ class PostsService:
 
 	def _pick_publisher(
 		self, community: Community, draft: PostDraft, route: PublishRoute
-	) -> int | None:
-		"""Кто везёт пост: аккаунт от диспетчера или None для бот-пути (ADR-0036).
+	) -> ExecutorRef:
+		"""Кто везёт пост: исполнитель от диспетчера — аккаунт или бот (ADR-0036).
 
 		Выполняется до побочных эффектов публикации (переименование файла):
 		отклонённый черновик не должен менять ничего на диске. Пределы
@@ -1676,9 +1706,14 @@ class PostsService:
 			fitting = self._fitting(capable, requirements)
 			if not fitting:
 				raise PostError(self._pool_shortfall(community, requirements, capable))
-			return fitting[0]
-		if named is not None and self._bot_for(community, ExecutorAction.PUBLISH, named) is None:
-			raise PostNotReadyError(self._identity_shortfall(community, named))
+			return ExecutorRef(OwnerKind.USER, fitting[0])
+		bot = self._bot_for(community, ExecutorAction.PUBLISH, named)
+		if bot is None:
+			raise PostNotReadyError(
+				self._identity_shortfall(community, named)
+				if named is not None
+				else f"У «{community.title}» нет бота, способного публиковать, — пост ждёт."
+			)
 		if draft.when is not None:
 			# поправимо человеком (вернуть userbot в доступы), поэтому
 			# очередь такой пост придержит, а не похоронит ошибкой
@@ -1689,7 +1724,7 @@ class PostsService:
 		reason = bot_shortfall(requirements)
 		if reason is not None:
 			raise PostError(reason)
-		return None
+		return ExecutorRef(OwnerKind.BOT, bot.id)
 
 	@staticmethod
 	def _file_size(media_path: str) -> int:
@@ -1751,19 +1786,22 @@ class PostsService:
 				plan.publisher, community.tg_chat_id, post, on_progress
 			)
 
-	async def _publish_bot(
-		self, community: Community, draft: PostDraft, files: tuple[MediaFile, ...]
-	) -> int:
+	async def _publish_bot(self, plan: PublishPlan, draft: PostDraft) -> int:
 		"""Путь через бота: текст и медиа до 50 МБ, только «сейчас».
 
 		Он же — путь поста с кнопками (ADR-0031): бот ставит их своему
 		посту сам, одним вызовом и с первой секунды. Отложенность
-		и лимит размера проверены раньше (:meth:`_check_transport`).
+		и лимит размера проверены раньше (:meth:`_pick_publisher`), там же
+		выбран и сам бот — по плану публикации.
 
 		Returns:
 			Номер вышедшего поста.
 		"""
-		bot = self._bot_for(community, ExecutorAction.PUBLISH, draft.identity)
+		community, files = plan.community, plan.files
+		bot = next(
+			(bot_ref(row) for row in community.executors if executor_owner(row) == plan.executor),
+			None,
+		)
 		if bot is None:  # prepare_publish сюда без способного бота не приводит
 			raise PostError("У сообщества нет бота, способного публиковать, — проверьте доступы.")
 		if draft.poll is not None:

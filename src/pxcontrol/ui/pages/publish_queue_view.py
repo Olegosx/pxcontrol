@@ -94,6 +94,10 @@ def queue_subtitle(item: QueueItemDto, *, with_community: bool = True) -> str:
 	# в строке прогресса, где оно и уместно вместе с процентами
 	status = f"ошибка: {item.error}" if item.status is JobStatus.ERROR else None
 	subtitle = f"публикация: {when_text}" + (f" · {status}" if status else "")
+	if item.status is JobStatus.RUNNING and item.sender:
+		# кто везёт пост — решает диспетчер при подготовке (ADR-0036),
+		# и карточка называет его, пока идёт загрузка
+		subtitle += f" · отправляет {item.sender}"
 	if with_community:
 		subtitle = f"{item.community_title} · {subtitle}"
 	if item.note:

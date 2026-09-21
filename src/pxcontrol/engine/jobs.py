@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Hashable
 from contextlib import suppress
 from enum import StrEnum
 from typing import Any, Generic, TypeVar
@@ -111,13 +111,26 @@ class JobDeferred(Exception):  # noqa: N818 — сигнал исхода, а н
 			PENDING — вернуться в очередь).
 		note: пометка состояния для карточки на время ожидания.
 		delay_s: пауза перед возвратом к работе (0 — без паузы).
+		hold: что удерживать на время паузы (ADR-0036): ключи ресурсов,
+			которые задания называют в ``locks`` или ``alternatives``, —
+			например, исполнитель под флуд-лимитом. None — удерживается
+			только само задание; соседи, которым этот ресурс не нужен,
+			идут дальше, а не ждут за чужой паузой.
 	"""
 
-	def __init__(self, status: JobStatus, *, note: str | None = None, delay_s: float = 0.0) -> None:
+	def __init__(
+		self,
+		status: JobStatus,
+		*,
+		note: str | None = None,
+		delay_s: float = 0.0,
+		hold: frozenset[Hashable] | None = None,
+	) -> None:
 		super().__init__(f"задание отложено: {status}")
 		self.status = status
 		self.note = note
 		self.delay_s = delay_s
+		self.hold = hold
 
 
 class Job:
@@ -152,6 +165,16 @@ class Job:
 		self._warning: str | None = None
 		#: отмену запросил человек — отличает её от остановки движка
 		self.cancel_requested = False
+		#: ресурсы, которые задание занимает целиком, пока идёт (ADR-0036):
+		#: второе задание с тем же ключом не начнётся — так очередь
+		#: отправки держит «одну загрузку на сообщество». Удержание
+		#: ключа (пауза после флуда, щадящий догон) тоже останавливает
+		#: только задания с этим ключом
+		self.locks: frozenset[Hashable] = frozenset()
+		#: ресурсы, из которых заданию хватит любого свободного (кандидаты
+		#: в исполнители): задание не начнётся, пока удержаны **все**;
+		#: пусто — ограничения нет
+		self.alternatives: frozenset[Hashable] = frozenset()
 		#: кому сообщать об изменении наблюдаемых полей (ставит очередь)
 		self._on_change: Callable[[], None] | None = None
 
@@ -221,12 +244,17 @@ _J = TypeVar("_J", bound=Job)
 
 
 class JobQueue(Generic[_J]):
-	"""Последовательный исполнитель заданий одной очереди.
+	"""Исполнитель заданий одной очереди: по одному или несколькими слотами.
 
-	Задания выполняются строго по одному: и кодирование, и обращения
-	к Telegram — работы, которые от параллельности не выигрывают
+	По умолчанию задания идут строго по одному: кодирование
+	и обслуживание — работы, которые от параллельности не выигрывают
 	(x264 сам занимает все ядра; темп запросов к аккаунту держит
-	дорожка шлюза, ADR-0024).
+	дорожка шлюза, ADR-0024). Очередь отправки просит несколько слотов
+	(ADR-0036): загрузки в разные сообщества разными исполнителями
+	независимы, а «одну загрузку на сообщество» держат **замки**
+	заданий (:attr:`Job.locks`). Паузы — флуд-лимит, обрыв связи,
+	щадящий догон — это **удержания** ключей, а не сон воркера: пока
+	удержан один исполнитель или одно сообщество, остальные работают.
 
 	Все методы вызываются в цикле событий движка, поэтому состояние
 	не требует блокировок. Исключение — ``job.progress``
@@ -245,6 +273,8 @@ class JobQueue(Generic[_J]):
 		ready: Callable[[_J], bool] | None = None,
 		sleep: Callable[[float], Coroutine[Any, Any, None]] | None = None,
 		record: Callable[[_J, JobStatus, str | None], Coroutine[Any, Any, None]] | None = None,
+		concurrency: int = 1,
+		order: Callable[[_J], Any] | None = None,
 	) -> None:
 		"""Args:
 		execute: исполнитель одного задания. Ошибку переводит сам
@@ -278,6 +308,13 @@ class JobQueue(Generic[_J]):
 			оставляет хранилище в состоянии «не доделано» — это
 			переживаемо, в отличие от обратного (ADR-0016). Очередь
 			без хранилища крючка не передаёт.
+		concurrency: сколько заданий может идти одновременно (не меньше
+			одного). Замки заданий (:attr:`Job.locks`) и удержания
+			действуют поверх: слот свободен, а задание всё равно ждёт,
+			если его ресурс занят.
+		order: ключ порядка выбора среди готовых (меньше — раньше);
+			None — порядок постановки. Правило предметное: очередь
+			отправки берёт срочные посты раньше плановых (ADR-0036).
 		"""
 		self._execute = execute
 		self._record = record
@@ -287,6 +324,8 @@ class JobQueue(Generic[_J]):
 		self._sleep = sleep
 		self._cancel_pending_on_shutdown = cancel_pending_on_shutdown
 		self._shutdown_timeout_s = shutdown_timeout_s
+		self._concurrency = max(1, concurrency)
+		self._order = order
 		self._jobs: list[_J] = []
 		self._next_id = 1
 		#: версия состояния очереди: растёт при смене состава и наблюдаемых
@@ -296,8 +335,12 @@ class JobQueue(Generic[_J]):
 		self._listeners: list[Callable[[int], None]] = []
 		self._notify_scheduled = False
 		self._worker: asyncio.Task[None] | None = None
-		#: номер задания, выполняющегося прямо сейчас (None — нет такого)
-		self._active_id: int | None = None
+		#: идущие задания: номер → задача выполнения
+		self._running: dict[int, asyncio.Task[None]] = {}
+		#: удержанные ключи ресурсов → задача, которая их отпустит
+		self._holds: dict[Hashable, asyncio.Task[None]] = {}
+		#: будильник воркера: новое задание, конец задания, отпущенный ключ
+		self._wake: asyncio.Event | None = None
 		# кооперативная остановка (ADR-0020): задачи выходят в безопасных
 		# точках, запросы к БД не обрываются посреди работы
 		self._stop = asyncio.Event()
@@ -398,9 +441,13 @@ class JobQueue(Generic[_J]):
 		return self._stop.is_set()
 
 	@property
-	def active_id(self) -> int | None:
-		"""Номер задания, выполняющегося прямо сейчас (None — нет такого)."""
-		return self._active_id
+	def active_ids(self) -> frozenset[int]:
+		"""Номера заданий, выполняющихся прямо сейчас."""
+		return frozenset(self._running)
+
+	def held(self, key: Hashable) -> bool:
+		"""Удержан ли ключ ресурса (пауза после флуда, обрыва, догона)."""
+		return key in self._holds
 
 	# --- выполнение -----------------------------------------------------------
 
@@ -443,9 +490,16 @@ class JobQueue(Generic[_J]):
 		self.ensure_worker()
 
 	def ensure_worker(self) -> None:
-		"""Запускает фоновую задачу выполнения, если она не крутится."""
+		"""Запускает фоновую задачу выполнения, если она не крутится, и будит её."""
 		if self._worker is None or self._worker.done():
 			self._worker = asyncio.create_task(self._run())
+			return
+		self._wake_up()
+
+	def _wake_up(self) -> None:
+		"""Будит воркер: состав или ресурсы изменились — пора пересмотреть готовых."""
+		if self._wake is not None:
+			self._wake.set()
 
 	async def wait_idle(self) -> None:
 		"""Дожидается простоя очереди (детерминированная точка для тестов).
@@ -461,17 +515,23 @@ class JobQueue(Generic[_J]):
 		"""Гасит очередь при остановке движка (ADR-0020).
 
 		Взводится событие остановки: воркер выходит между заданиями,
-		а начатое задание доигрывается своим путём — флаг отмены ему
+		а начатые задания доигрываются своим путём — флаг отмены им
 		здесь не взводится (см. комментарий ниже: отмена человеком
-		и остановка движка — разные исходы). Задание, не завершившееся
-		за отведённый срок, отменяется жёстко — последнее средство.
+		и остановка движка — разные исходы). Удержания снимаются:
+		досиживать чужую паузу при выходе незачем. Задание,
+		не завершившееся за отведённый срок, отменяется жёстко —
+		последнее средство.
 		"""
 		self._stop.set()
 		if self._cancel_pending_on_shutdown:
 			for job in self._jobs:
 				if job.status is JobStatus.PENDING:
 					job.status = JobStatus.CANCELLED
-		# флаг отмены активному заданию здесь не взводится: он значит
+		for hold in list(self._holds.values()):
+			hold.cancel()
+		self._holds.clear()
+		self._wake_up()
+		# флаг отмены активным заданиям здесь не взводится: он значит
 		# «отмену запросил человек», и исход у неё другой (задание
 		# покидает очередь). Остановку движка исполнитель узнаёт
 		# по `stopping`, а сетевую часть рвёт сама очередь — её
@@ -491,7 +551,7 @@ class JobQueue(Generic[_J]):
 			await asyncio.wait_for(self._stop.wait(), timeout=seconds)
 
 	async def _pause(self, seconds: float) -> None:
-		"""Держит паузу очереди (флуд, щадящий темп) — подменяемо в тестах.
+		"""Держит паузу (флуд, щадящий темп) — подменяемо в тестах.
 
 		Отдельно от :meth:`wait_stop`: то — чистое ожидание остановки,
 		и подменять его нельзя, иначе подмена зациклилась бы на себе.
@@ -501,26 +561,108 @@ class JobQueue(Generic[_J]):
 			return
 		await self.wait_stop(seconds)
 
+	# --- воркер ---------------------------------------------------------------
+
 	async def _run(self) -> None:
-		"""Выполняет задания по одному, пока есть готовые.
+		"""Раздаёт готовые задания по слотам, пока есть что делать.
 
-		Остановка движка выводит из цикла между заданиями; начатое
-		задание доигрывается своим путём — его обрывает запрос отмены
-		из :meth:`shutdown`, а не отмена воркера.
+		Цикл спит на будильнике: его будят новое задание, конец идущего
+		и отпущенный ключ. Остановка движка выводит из цикла, когда
+		идущие задания доиграют своим путём — их отмена приходит
+		из :meth:`shutdown` запросом, а не отменой воркера.
 		"""
-		while not self.stopping and (job := self._next_pending()) is not None:
-			await self._run_one(job)
+		self._wake = asyncio.Event()
+		try:
+			while True:
+				if not self.stopping:
+					self._start_ready()
+				idle = not self._running
+				if idle and (self.stopping or (not self._holds and not self._eligible())):
+					break
+				self._wake.clear()
+				await self._wake.wait()
+		finally:
+			self._wake = None
 
-	def _next_pending(self) -> _J | None:
-		"""Первое задание, готовое к выполнению.
+	def _start_ready(self) -> None:
+		"""Занимает свободные слоты готовыми заданиями.
 
-		Задание, которое очередь придерживает (``ready``), пропускается:
-		причина у неё предметная, каркасу знать её незачем.
+		Между выбором задания и переводом его в ``RUNNING`` нет точки
+		приостановки — гарантия для предметных правил готовности
+		(``ready``): успевший взвести признак не опоздал.
 		"""
-		for job in self._jobs:
-			if job.status is JobStatus.PENDING and (self._ready is None or self._ready(job)):
-				return job
-		return None
+		while len(self._running) < self._concurrency:
+			job = self._next_ready()
+			if job is None:
+				return
+			job.status = JobStatus.RUNNING
+			self._running[job.id] = asyncio.create_task(self._run_one(job))
+
+	def _next_ready(self) -> _J | None:
+		"""Первое готовое задание в порядке выбора (None — готовых нет)."""
+		eligible = self._eligible()
+		if not eligible:
+			return None
+		if self._order is not None:
+			eligible.sort(key=self._order)
+		return eligible[0]
+
+	def _eligible(self) -> list[_J]:
+		"""Задания, которые можно начать прямо сейчас, в порядке постановки.
+
+		Готово задание, которое ждёт своей очереди, не придержано
+		очередью (``ready``), не удержано само и чьи ресурсы свободны:
+		ни один замок не занят идущим заданием и не удержан, а из
+		альтернатив (кандидатов) хоть одна не удержана.
+		"""
+		locked: set[Hashable] = set()
+		for job_id in self._running:
+			running = self.get(job_id)
+			if running is not None:
+				locked.update(running.locks)
+		return [
+			job
+			for job in self._jobs
+			if job.status is JobStatus.PENDING
+			and (self._ready is None or self._ready(job))
+			and not self.held(_own(job))
+			and not any(key in locked or self.held(key) for key in job.locks)
+			and (not job.alternatives or any(not self.held(key) for key in job.alternatives))
+		]
+
+	def _hold(
+		self, keys: frozenset[Hashable], seconds: float, *, note_of: _J | None = None
+	) -> None:
+		"""Удерживает ключи на срок; по истечении отпускает и будит воркер.
+
+		Удержание — задача, а не отметка времени: пауза идёт через
+		:meth:`_pause`, которую подменяют тесты и прерывает остановка.
+		Повторное удержание того же ключа продлевает его: прежняя задача
+		снимается, чтобы не отпустить ключ раньше нового срока.
+		``note_of`` — задание, чью пометку снять, когда пауза кончится.
+		"""
+		for key in keys:
+			previous = self._holds.pop(key, None)
+			if previous is not None:
+				previous.cancel()
+		task = asyncio.create_task(self._release_later(keys, seconds, note_of))
+		for key in keys:
+			self._holds[key] = task
+
+	async def _release_later(
+		self, keys: frozenset[Hashable], seconds: float, note_of: _J | None
+	) -> None:
+		"""Отпускает ключи после паузы (тело задачи удержания)."""
+		try:
+			await self._pause(seconds)
+		finally:
+			task = asyncio.current_task()
+			for key in keys:
+				if self._holds.get(key) is task:
+					del self._holds[key]
+			if note_of is not None:
+				note_of.note = None
+			self._wake_up()
 
 	async def _run_one(self, job: _J) -> None:
 		"""Выполняет одно задание и записывает исход в его статус.
@@ -535,11 +677,10 @@ class JobQueue(Generic[_J]):
 		Об отмене исполнитель сообщает броском :class:`JobCancelled` —
 		в том числе когда её причиной была отмена его собственной
 		сетевой задачи. Отмена, дошедшая до каркаса, означает другое:
-		движок останавливается или сносится цикл событий.
+		сносится цикл событий — исход недоделанного задания запишет
+		следующий запуск.
 		"""
-		job.status = JobStatus.RUNNING
 		task = asyncio.create_task(self._execute(job))
-		self._active_id = job.id
 		try:
 			await task
 		except JobCancelled:
@@ -548,11 +689,6 @@ class JobQueue(Generic[_J]):
 		except JobDeferred as deferred:
 			await self._defer(job, deferred)
 		except asyncio.CancelledError:
-			# отменили сам воркер: остановка движка или снос цикла
-			# событий. Отмену, запрошенную человеком, исполнитель
-			# сообщает броском JobCancelled — сюда она не доходит.
-			# Очередь не продолжается, а исход недоделанного задания
-			# запишет следующий запуск: в памяти его дописывать некому
 			task.cancel()
 			raise
 		except Exception as exc:  # noqa: BLE001 — исход задания, не очереди
@@ -561,9 +697,10 @@ class JobQueue(Generic[_J]):
 		else:
 			await self._apply(job, JobStatus.DONE)
 			job.progress = 1.0
-			await self._cool_down(job)
+			self._cool_down(job)
 		finally:
-			self._active_id = None
+			self._running.pop(job.id, None)
+			self._wake_up()
 
 	async def _apply(self, job: _J, status: JobStatus, error: str | None = None) -> None:
 		"""Переводит задание в новый статус, сперва сохранив исход.
@@ -595,32 +732,47 @@ class JobQueue(Generic[_J]):
 		job.error = error
 
 	async def _defer(self, job: _J, deferred: JobDeferred) -> None:
-		"""Возвращает задание в ожидание (и держит паузу, если просили).
+		"""Возвращает задание в ожидание и удерживает, что просили.
 
-		Пауза идёт после записи статуса: карточка всё это время
-		показывает пометку состояния, а остановка движка прерывает
-		ожидание, не заставляя `shutdown` досиживать чужой срок.
+		Статус записывается сразу: карточка всё время паузы показывает
+		пометку состояния. Сама пауза — удержание ключей (ADR-0036):
+		названных в отсрочке (исполнитель под флуд-лимитом) или самого
+		задания; соседи, которым эти ресурсы не нужны, идут дальше.
+		Остановка движка прерывает удержание, не заставляя `shutdown`
+		досиживать чужой срок.
 		"""
 		await self._apply(job, deferred.status)
 		job.progress = 0.0
 		job.note = deferred.note
 		logger.info("%s id=%s: отложено (%s).", self._name, job.id, deferred.status)
-		if deferred.delay_s > 0:
-			try:
-				await self._pause(deferred.delay_s)
-			finally:
-				job.note = None
+		if deferred.delay_s > 0 and not self.stopping:
+			keys = deferred.hold if deferred.hold else frozenset({_own(job)})
+			self._hold(keys, deferred.delay_s, note_of=job)
 
-	async def _cool_down(self, job: _J) -> None:
-		"""Держит паузу перед следующим заданием, если очередь так просит.
+	def _cool_down(self, job: _J) -> None:
+		"""Удерживает ресурсы задания после успеха, если очередь так просит.
 
 		Пауза идёт при уже записанном исходе: карточка показывает
-		«готово», а не мнимую работу. Ждать незачем, если следующего
-		задания нет.
+		«готово», а не мнимую работу. Удерживаются замки задания
+		(у очереди отправки — сообщество: щадящий догон не должен
+		выглядеть залпом, ADR-0016), а у задания без замков — вся
+		очередь. Ждать незачем, если следующего задания нет.
 		"""
-		if self._cooldown is None:
+		if self._cooldown is None or self.stopping:
 			return
 		delay = self._cooldown(job)
-		if delay > 0 and self._next_pending() is not None:
-			logger.info("%s: пауза %.0f с перед следующим заданием.", self._name, delay)
-			await self._pause(delay)
+		if delay <= 0 or not any(
+			other.status is JobStatus.PENDING and other.id != job.id for other in self._jobs
+		):
+			return
+		logger.info("%s: пауза %.0f с перед следующим заданием.", self._name, delay)
+		self._hold(job.locks or frozenset({_QUEUE}), delay)
+
+
+#: Ключ удержания всей очереди — для заданий без замков.
+_QUEUE = object()
+
+
+def _own(job: Job) -> Hashable:
+	"""Личный ключ задания: его удержание останавливает только его."""
+	return ("job", job.id)

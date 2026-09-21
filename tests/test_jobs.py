@@ -144,7 +144,7 @@ async def test_executor_reports_its_own_cancellation() -> None:
 	job = _put(queue, "загрузка")
 	queue.ensure_worker()
 	await started.wait()
-	assert queue.active_id == job.id
+	assert queue.active_ids == {job.id}
 	queue.request_cancel(job)
 	inner[0].cancel()  # очередь рвёт свою сетевую часть сама
 	await queue.wait_idle()
@@ -607,3 +607,134 @@ async def test_failing_listener_does_not_break_others() -> None:
 	_put(queue, "два")
 	await asyncio.sleep(0)
 	assert seen == [queue.version - 1]  # после отписки уведомлений нет
+
+
+# --- слоты, замки, удержания (ADR-0036, этап E) ---------------------------------------
+
+
+async def test_concurrency_runs_jobs_in_parallel_up_to_the_limit() -> None:
+	"""Два слота — два задания идут одновременно, третье ждёт слота."""
+	release = asyncio.Event()
+	inside = 0
+	peak = 0
+
+	async def execute(job: _TestJob) -> None:
+		nonlocal inside, peak
+		inside += 1
+		peak = max(peak, inside)
+		await release.wait()
+		inside -= 1
+
+	queue = _queue(execute, concurrency=2)
+	for label in ("раз", "два", "три"):
+		_put(queue, label)
+	queue.ensure_worker()
+	for _ in range(5):
+		await asyncio.sleep(0)
+	assert len(queue.active_ids) == 2 and peak == 2
+	release.set()
+	await queue.wait_idle()
+	assert [job.status for job in queue.all()] == [JobStatus.DONE] * 3
+
+
+async def test_locks_serialize_jobs_with_the_same_key() -> None:
+	"""Замок: задания с одним ключом идут по одному, с разными — параллельно."""
+	release = asyncio.Event()
+	running: list[str] = []
+
+	async def execute(job: _TestJob) -> None:
+		running.append(job.label)
+		await release.wait()
+
+	queue = _queue(execute, concurrency=3)
+	first = _put(queue, "А-1")
+	second = _put(queue, "А-2")
+	other = _put(queue, "Б-1")
+	first.locks = second.locks = frozenset({("community", "А")})
+	other.locks = frozenset({("community", "Б")})
+	queue.ensure_worker()
+	for _ in range(5):
+		await asyncio.sleep(0)
+	assert running == ["А-1", "Б-1"], "второй пост в «А» ждёт первого, «Б» идёт рядом"
+	release.set()
+	await queue.wait_idle()
+	assert running == ["А-1", "Б-1", "А-2"]
+
+
+async def test_hold_stops_only_jobs_that_need_the_key() -> None:
+	"""Удержание ключа (исполнитель под флудом) не трогает задания с другими кандидатами."""
+	slept: list[float] = []
+	resume = asyncio.Event()
+	attempts: dict[str, int] = {}
+
+	async def sleep(seconds: float) -> None:
+		slept.append(seconds)
+		await resume.wait()
+
+	async def execute(job: _TestJob) -> None:
+		attempts[job.label] = attempts.get(job.label, 0) + 1
+		if job.label == "флуд" and attempts[job.label] == 1:
+			raise JobDeferred(JobStatus.PENDING, delay_s=17, hold=frozenset({"П1"}))
+
+	queue = _queue(execute, sleep=sleep)
+	flooded = _put(queue, "флуд")
+	same = _put(queue, "тем же")
+	other = _put(queue, "другим")
+	flooded.alternatives = same.alternatives = frozenset({"П1"})
+	other.alternatives = frozenset({"П1", "П2"})
+	queue.ensure_worker()
+	for _ in range(10):
+		await asyncio.sleep(0)
+	assert slept == [17]
+	assert flooded.status is JobStatus.PENDING and same.status is JobStatus.PENDING
+	assert other.status is JobStatus.DONE, "у него есть свободный кандидат"
+	assert queue.held("П1") and not queue.held("П2")
+	resume.set()
+	await queue.wait_idle()
+	assert flooded.status is JobStatus.DONE and same.status is JobStatus.DONE
+	assert attempts == {"флуд": 2, "тем же": 1, "другим": 1}
+
+
+async def test_order_key_picks_urgent_before_planned() -> None:
+	"""Ключ порядка: готовые берутся не по постановке, а по срочности."""
+	order: list[str] = []
+
+	async def execute(job: _TestJob) -> None:
+		order.append(job.label)
+
+	queue = _queue(execute, order=lambda job: (not job.label.startswith("срочно"), job.id))
+	_put(queue, "план-1")
+	_put(queue, "план-2")
+	_put(queue, "срочно-3")
+	queue.ensure_worker()
+	await queue.wait_idle()
+	assert order == ["срочно-3", "план-1", "план-2"]
+
+
+async def test_cooldown_holds_the_job_locks_not_the_queue() -> None:
+	"""Щадящая пауза удерживает замок задания: соседнее сообщество не ждёт."""
+	paused: list[float] = []
+	resume = asyncio.Event()
+	order: list[str] = []
+
+	async def execute(job: _TestJob) -> None:
+		order.append(job.label)
+
+	async def sleep(seconds: float) -> None:
+		paused.append(seconds)
+		await resume.wait()
+
+	queue = _queue(execute, cooldown=lambda job: 30.0, sleep=sleep, concurrency=2)
+	first = _put(queue, "А-1")
+	second = _put(queue, "А-2")
+	other = _put(queue, "Б-1")
+	first.locks = second.locks = frozenset({"А"})
+	other.locks = frozenset({"Б"})
+	queue.ensure_worker()
+	for _ in range(10):
+		await asyncio.sleep(0)
+	assert order[:2] == ["А-1", "Б-1"] and second.status is JobStatus.PENDING
+	assert queue.held("А")
+	resume.set()
+	await queue.wait_idle()
+	assert order == ["А-1", "Б-1", "А-2"]

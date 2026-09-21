@@ -1752,3 +1752,102 @@ async def test_identity_persisted_and_restored(db: Database, make_queue: QueueFa
 	await restarted.load()
 	drafts = {i.id: i.draft for i in restarted._jobs.all()}  # noqa: SLF001 — восстановленный черновик
 	assert drafts[item].identity == named and drafts[plain].identity is None
+
+
+# --- параллельно между исполнителями, по одному на сообщество (ADR-0036, этап E) ------
+
+
+async def test_two_communities_upload_in_parallel_one_each(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Разные сообщества с разными публикаторами грузят одновременно; внутри одного — по одному."""
+	gateway = _SlowGateway()
+	queue = make_queue(gateway)
+	first = await _add_community(db, tg_chat_id="-1001", title="А")
+	second = await _add_community(db, tg_chat_id="-1002", title="Б")
+	a1 = await queue.enqueue(PostDraft(first, text="А-1"))
+	a2 = await queue.enqueue(PostDraft(first, text="А-2"))
+	b1 = await queue.enqueue(PostDraft(second, text="Б-1"))
+	await _wait_status(queue, a1, JobStatus.RUNNING)
+	await _wait_status(queue, b1, JobStatus.RUNNING)
+	items = {item.id: item for item in await queue.state()}
+	assert items[a2].status is JobStatus.PENDING, "второй пост в «А» ждёт первого"
+	assert items[a1].sender and items[b1].sender, "карточка называет отправителя"
+	gateway.release.set()
+	for item_id in (a1, a2, b1):
+		await _wait_status(queue, item_id, JobStatus.DONE)
+	assert sorted(post.text for post in gateway.published) == ["А-1", "А-2", "Б-1"]
+
+
+async def test_flood_of_one_publisher_does_not_stop_the_other(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Флуд-лимит удерживает исполнителя, а не очередь: чужой пост уходит."""
+
+	class _FloodFirstChat(_SlowGateway):
+		def __init__(self) -> None:
+			super().__init__()
+			self.flooded = True
+
+		async def userbot_publish(
+			self,
+			account_id: int,
+			chat_id: str,
+			post: OutgoingPost,
+			on_progress: ProgressCallback | None = None,
+		) -> int:
+			if chat_id == "-1001" and self.flooded:
+				self.flooded = False
+				raise TelegramFloodError("Telegram просит подождать 40 с.", retry_after_s=40)
+			return await super().userbot_publish(account_id, chat_id, post, on_progress)
+
+	gateway = _FloodFirstChat()
+	gateway.release.set()
+	queue = make_queue(gateway)
+	paused: list[float] = []
+	resume = asyncio.Event()
+
+	async def _controlled(seconds: float) -> None:
+		paused.append(seconds)
+		await resume.wait()
+
+	queue._sleep = _controlled  # noqa: SLF001 — пауза под управлением теста
+	first = await _add_community(db, tg_chat_id="-1001", title="А")
+	second = await _add_community(db, tg_chat_id="-1002", title="Б")
+	a1 = await queue.enqueue(PostDraft(first, text="А-1"))
+	a2 = await queue.enqueue(PostDraft(first, text="А-2"))
+	b1 = await queue.enqueue(PostDraft(second, text="Б-1"))
+	await _wait_status(queue, a1, JobStatus.PENDING, note="повторит сама")
+	await _wait_status(queue, b1, JobStatus.DONE)
+	assert paused == [40.0]
+	items = {item.id: item for item in await queue.state()}
+	assert items[a2].status is JobStatus.PENDING, "тот же исполнитель удержан — второй пост ждёт"
+	assert [post.text for post in gateway.published] == ["Б-1"]
+	resume.set()
+	await _wait_status(queue, a1, JobStatus.DONE)
+	await _wait_status(queue, a2, JobStatus.DONE)
+	assert sorted(post.text for post in gateway.published) == ["А-1", "А-2", "Б-1"]
+
+
+async def test_due_post_goes_before_released_planned_ones(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Пост «сейчас» не стоит за выпущенными из ожидания отложками."""
+	gateway = _SlotGateway()
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	planned = [
+		await queue.enqueue(PostDraft(community_id, text=f"план-{i}", when=_future(300 + i)))
+		for i in range(3)
+	]
+	# слоты свободны: первый плановый уже грузится, остальные готовы и ждут
+	await _wait_status(queue, planned[0], JobStatus.RUNNING)
+	for item_id in planned[1:]:
+		await _wait_status(queue, item_id, JobStatus.PENDING)
+	now_post = await queue.enqueue(PostDraft(community_id, text="сейчас"))
+	gateway.release.set()
+	await _wait_status(queue, now_post, JobStatus.DONE)
+	for item_id in planned:
+		await _wait_status(queue, item_id, JobStatus.DONE)
+	sent = [post.text for post in gateway.published]
+	assert sent.index("сейчас") == 1, "срочный ушёл сразу за тем, что уже грузилось"
