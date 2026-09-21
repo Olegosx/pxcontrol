@@ -34,7 +34,7 @@ Telegram описывает права тремя слоями (https://core.tel
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from enum import StrEnum
 from typing import Any, TypeVar
 
@@ -316,19 +316,31 @@ def userbot_rights(perms: Any, default_banned: Any = None) -> ExecutorRights:
 	"""
 	status = _mtproto_status(perms)
 	if status.administers:
+		granted = getattr(getattr(perms, "participant", None), "admin_rights", None)
 		admin = (
-			ALL_ADMIN_RIGHTS
+			_creator_rights(bool(getattr(granted, "anonymous", False)))
 			if status is ParticipantStatus.CREATOR
-			else _restore(
-				AdminRights,
-				_granted_by(getattr(getattr(perms, "participant", None), "admin_rights", None)),
-			)
+			else _restore(AdminRights, _granted_by(granted))
 		)
 		return ExecutorRights(status, admin, ALL_MEMBER_RIGHTS)
 	if not status.in_community:
 		return ExecutorRights(status)
 	personal = getattr(getattr(perms, "participant", None), "banned_rights", None)
 	return ExecutorRights(status, NO_ADMIN_RIGHTS, _allowed_after(default_banned, personal))
+
+
+def _creator_rights(anonymous: bool) -> AdminRights:
+	"""Права владельца: всё, кроме анонимности, — она по факту (ADR-0036).
+
+	Урезать права владельца в Telegram нельзя, и библиотеки отвечают
+	про него ровно присланное (ADR-0035, п. 4) — поэтому все флаги
+	выставлены. Исключение одно, проверенное живьём 21.09.2026:
+	**анонимность** — не право, а переключатель «оставаться анонимным»,
+	и у владельца он по умолчанию выключен. Записать её как выданную
+	значило бы обещать публикацию от имени группы там, где сервер
+	ответит ``SEND_AS_PEER_INVALID``.
+	"""
+	return replace(ALL_ADMIN_RIGHTS, anonymous=anonymous)
 
 
 def _granted_by(admin_rights: Any) -> list[str]:
@@ -451,7 +463,7 @@ def bot_rights(member: Any, permissions: Any = None) -> ExecutorRights:
 	status = _bot_status(member)
 	if status.administers:
 		admin = (
-			ALL_ADMIN_RIGHTS
+			_creator_rights(_bot_allows(member, "is_anonymous"))
 			if status is ParticipantStatus.CREATOR
 			else AdminRights(
 				**{ours: _bot_allows(member, theirs) for ours, theirs in _BOT_ADMIN_NAMES.items()}

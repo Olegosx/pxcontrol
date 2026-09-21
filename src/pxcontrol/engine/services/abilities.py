@@ -118,6 +118,10 @@ def _can_publish_as_community(rights: ExecutorRights, kind: CommunityKind) -> bo
 	"""
 	if kind is CommunityKind.CHANNEL:
 		return _can_publish(rights, kind)
+	# правило о правах пользователя: бот с тем же флагом «анонимность»
+	# всё равно пишет от своего имени (живая проверка 21.09.2026),
+	# поэтому кандидатов на лицо «сообщество» подбор ограничивает
+	# пользователями
 	return rights.status.administers and rights.admin.anonymous
 
 

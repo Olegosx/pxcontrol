@@ -114,6 +114,11 @@ def test_creator_may_everything_even_with_empty_flags() -> None:
 	assert rights.status is ParticipantStatus.CREATOR
 	assert rights.admin.post_messages and rights.admin.delete_messages and rights.admin.ban_users
 	assert rights.allowed.send_plain and rights.allowed.send_reactions
+	# анонимность — не право, а переключатель: у владельца по факту
+	# (живая проверка 21.09.2026: создатель не анонимен, send_as отвергнут)
+	assert rights.admin.anonymous is False
+	anonymous = ChannelParticipantCreator(user_id=1, admin_rights=admin_rights(anonymous=True))
+	assert userbot_rights(perms(anonymous)).admin.anonymous is True
 
 
 def test_admin_gets_exactly_granted_flags_and_ignores_restrictions() -> None:
@@ -198,6 +203,8 @@ def test_bot_owner_may_everything() -> None:
 	rights = bot_rights(ChatMemberOwner(user=user(), is_anonymous=False))
 	assert rights.status is ParticipantStatus.CREATOR
 	assert rights.admin.edit_messages and rights.allowed.send_reactions
+	assert rights.admin.anonymous is False, "анонимность владельца — по факту, не по званию"
+	assert bot_rights(ChatMemberOwner(user=user(), is_anonymous=True)).admin.anonymous is True
 
 
 def test_bot_admin_maps_every_flag_by_name() -> None:
