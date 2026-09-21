@@ -1587,3 +1587,15 @@ def test_send_as_refusal_is_a_confirmed_access_error() -> None:
 	translated = _translate_error(errors.SendAsPeerInvalidError(request=None))
 	assert isinstance(translated, UserbotAccessError)
 	assert "анонимность" in str(translated)
+
+
+def test_default_client_never_sleeps_on_flood_itself() -> None:
+	"""Клиент Telethon не прячет короткие флуд-лимиты (ADR-0038, этап E).
+
+	По умолчанию библиотека сама ждёт до 60 с внутри запроса; тогда
+	дорожка аккаунта не замораживается, а учёт активности не видит
+	лимита. Порог — ноль: любой флуд-лимит доходит до дорожки.
+	"""
+	from pxcontrol.engine.telegram.mtproto import _default_client
+
+	assert _default_client(1, "hash").flood_sleep_threshold == 0

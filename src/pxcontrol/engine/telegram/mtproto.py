@@ -183,11 +183,18 @@ class UserbotFloodError(TelegramFloodError, UserbotUnavailableError):
 
 
 def _default_client(api_id: int, api_hash: str, session: str | None = None) -> Any:
-	"""Создаёт клиента Telethon (пустая сессия — для входа)."""
+	"""Создаёт клиента Telethon (пустая сессия — для входа).
+
+	Порог автосна при флуд-лимите — ноль (ADR-0038, этап E): по умолчанию
+	библиотека сама молча ждёт внутри запроса, если сервер попросил
+	меньше 60 с, и ни дорожка аккаунта (ADR-0024), ни учёт активности
+	(ADR-0030) о лимите не узнают. Заморозку решает дорожка: каждый
+	флуд-лимит должен дойти до неё исключением.
+	"""
 	from telethon import TelegramClient
 	from telethon.sessions import StringSession
 
-	return TelegramClient(StringSession(session), api_id, api_hash)
+	return TelegramClient(StringSession(session), api_id, api_hash, flood_sleep_threshold=0)
 
 
 def _map_login_error(exc: Exception) -> str:
