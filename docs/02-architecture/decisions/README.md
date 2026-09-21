@@ -56,6 +56,7 @@
 | [0034](0034-queue-change-notifications.md) | Уведомления об изменении очередей вместо опроса | accepted |
 | [0035](0035-community-executors-and-rights.md) | Исполнители сообщества: пул обоих видов, полные права снимком, ввод в сообщество | accepted |
 | [0036](0036-executor-dispatch-and-urgency.md) | Диспетчер исполнителей и приоритет по срочности | accepted |
+| [0037](0037-premium-ceiling-and-marker.md) | Пределы по потолку Premium и пометка «только через Premium» | accepted |
 
 ## Как добавить запись
 

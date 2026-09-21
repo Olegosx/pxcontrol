@@ -35,7 +35,7 @@ from pxcontrol.engine.services.settings import (
 	SettingKey,
 	SettingsService,
 )
-from pxcontrol.engine.telegram.types import limit_gb, userbot_max_file_bytes
+from pxcontrol.engine.telegram.types import USERBOT_PREMIUM_MAX_FILE_BYTES, limit_gb
 from pxcontrol.engine.video import ProcessingOptions, process
 from pxcontrol.engine.video.constants import (
 	AUDIO_KBPS,
@@ -90,7 +90,8 @@ class BitrateAdvice:
 	"""Рекомендация битрейта для исходника больше лимита Telegram.
 
 	Attributes:
-		limit_gb: лимит аккаунта в целых ГБ (2; 4 — с Premium).
+		limit_gb: потолок Telegram на файл в целых ГБ (4 — предел аккаунта
+			с Premium, ADR-0037).
 		kbps: битрейт видео, дающий размер «лимит минус 1 %».
 	"""
 
@@ -493,18 +494,16 @@ class VideoService:
 		ffmpeg_path: FfmpegSource,
 		settings: SettingsService | None = None,
 		processor: Callable[[ProcessingOptions, ProgressCallback | None], None] = process,
-		userbot_premium: Callable[[], bool] = lambda: False,
 	) -> None:
 		"""``settings`` — общий сервис настроек движка; None — свой
 		экземпляр поверх той же БД (для тестов это эквивалентно:
-		настройки каналов не кэшируются). ``userbot_premium`` — провайдер
-		статуса Premium userbot (определяет лимит файла для рекомендации
-		битрейта)."""
+		настройки каналов не кэшируются). Лимит файла для рекомендации
+		битрейта — потолок Telegram, предел аккаунта с Premium
+		(ADR-0037): о Premium конкретного публикатора обработка не знает."""
 		self._db = db
 		self._ffmpeg = ffmpeg_source(ffmpeg_path)  # провайдер: путь из настроек
 		self._settings = settings if settings is not None else SettingsService(db)
 		self._processor = processor  # подменяется в тестах
-		self._userbot_premium = userbot_premium
 		self._candidates_dir: str | None = None  # партия кадров-кандидатов
 
 	def _bitrate_for(
@@ -530,8 +529,8 @@ class VideoService:
 		"""Рекомендация битрейта, если исходник больше лимита Telegram.
 
 		None — файла нет, он не читается ffprobe (подсказка вспомогательная)
-		или укладывается в лимит аккаунта (2000/4000 МиБ по статусу
-		Premium). Длительность считается после обрезки краёв.
+		или укладывается в потолок Telegram (4000 МиБ — предел аккаунта
+		с Premium, ADR-0037). Длительность считается после обрезки краёв.
 
 		Raises:
 			VideoError: Даже минимальный битрейт не впишет видео в лимит.
@@ -540,7 +539,7 @@ class VideoService:
 		# is_file/stat — обращения к диску: вне цикла событий движка
 		if not await asyncio.to_thread(path.is_file):
 			return None
-		limit = userbot_max_file_bytes(self._userbot_premium())
+		limit = USERBOT_PREMIUM_MAX_FILE_BYTES
 		if (await asyncio.to_thread(path.stat)).st_size <= limit:
 			return None
 		try:
@@ -583,7 +582,7 @@ class VideoService:
 				"Подсказки по исходнику: файл %s не прочитан.", source_path, exc_info=True
 			)
 			return None
-		limit = userbot_max_file_bytes(self._userbot_premium())
+		limit = USERBOT_PREMIUM_MAX_FILE_BYTES
 		bitrate: BitrateAdvice | None = None
 		if (await asyncio.to_thread(path.stat)).st_size > limit:
 			try:

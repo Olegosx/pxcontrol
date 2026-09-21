@@ -39,13 +39,13 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import CaptionLine, TemplateDto, TitleParseRules
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import TextLimits
+from pxcontrol.engine.services.posts import PREMIUM_LIMITS, TextLimits
 from pxcontrol.engine.services.settings import PUBLISH_TIMES, TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
+	USERBOT_PREMIUM_MAX_FILE_BYTES,
 	limit_mb,
-	text_length_limit,
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -68,12 +68,6 @@ from pxcontrol.ui.pages.post_target import CommunityChoice, IdentityChoice, Topi
 from pxcontrol.ui.pages.publish_batch import BatchEditor
 from pxcontrol.ui.pages.publish_stages import PublishStage
 from pxcontrol.ui.pages.stage_page import StagePage
-
-#: Пределы, пока сообщество не ответило: базовые — они не обещают лишнего.
-_BASE_LIMITS = TextLimits(
-	text=text_length_limit(premium=False, with_media=False),
-	caption=text_length_limit(premium=False, with_media=True),
-)
 
 
 @dataclass
@@ -381,26 +375,12 @@ class BatchStagePage(StagePage):
 	def _rules_loaded(self, setup: _BatchSetup, tokens: list[str]) -> None:
 		"""Правила разбора получены — остались пределы текста сообщества."""
 		setup.title_rules = TitleParseRules.from_tokens(tokens)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.posts.text_limits(setup.community.id),
-			self,
-			partial(self._limits_loaded, setup),
-			self._show_error,
-		)
-
-	def _limits_loaded(self, setup: _BatchSetup, limits: TextLimits) -> None:
-		"""Пределы текста получены — осталась граница размера файла."""
-		setup.limits = limits
+		# пределы — потолок Telegram (ADR-0037): кто повезёт, решит
+		# диспетчер; файл сверх обычного предела строка пометит
+		setup.limits = PREMIUM_LIMITS
 		caps = setup.community.capabilities
 		if caps.userbot:
-			run_in_engine(
-				self._worker,
-				self._worker.engine.posts.userbot_limit_bytes(setup.community.id),
-				self,
-				partial(self._mount_editor, setup),
-				self._show_error,
-			)
+			self._mount_editor(setup, USERBOT_PREMIUM_MAX_FILE_BYTES)
 		else:
 			# запасной бот-путь: лимит 50 МБ и только «сейчас» (ADR-0011)
 			self._mount_editor(setup, BOT_MAX_FILE_BYTES)
@@ -502,7 +482,7 @@ class BatchStagePage(StagePage):
 		limits = self._setup.limits if self._setup is not None else None
 		return markup_state(
 			community,
-			limits or _BASE_LIMITS,
+			limits or PREMIUM_LIMITS,
 			# у пакета каждая строка — свой пост с одним файлом:
 			# альбомов здесь не бывает
 			scheduled=self._scheduled(),
@@ -527,7 +507,7 @@ class BatchStagePage(StagePage):
 		"""
 		state = self._markup_state()
 		if state is None:
-			return _BASE_LIMITS.caption
+			return PREMIUM_LIMITS.caption
 		return state.limits.caption
 
 	def _refresh_markup(self) -> None:

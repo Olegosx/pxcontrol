@@ -125,6 +125,9 @@ class QueueItemDto:
 		files: сколько файлов у поста (больше одного — альбом).
 		sender: кто везёт пост — имя исполнителя, выбранного диспетчером
 			при подготовке (ADR-0036); None — ещё не выбран.
+		needs_premium: пост повезёт только аккаунт с Premium — файл
+			больше 2000 МиБ или подпись длиннее базового предела
+			(ADR-0037); карточка называет это словами.
 	"""
 
 	id: int
@@ -139,6 +142,7 @@ class QueueItemDto:
 	media_path: str | None = None
 	files: int = 0
 	sender: str | None = None
+	needs_premium: bool = False
 
 	@property
 	def scheduled(self) -> bool:
@@ -177,6 +181,9 @@ class _PublishJob(Job):
 		# кто везёт пост — известно после подготовки; наблюдаемое поле:
 		# карточка показывает отправителя, пока идёт загрузка
 		self._sender: str | None = None
+		# повезёт только Premium (ADR-0037): считается от содержимого
+		# при постановке, загрузке и правке — вместе с черновиком
+		self.needs_premium = False
 
 	@property
 	def sender(self) -> str | None:
@@ -212,6 +219,7 @@ class _PublishJob(Job):
 			media_path=self.draft.media[0].path if self.draft.media else None,
 			files=len(self.draft.media),
 			sender=self.sender,
+			needs_premium=self.needs_premium,
 		)
 
 
@@ -424,6 +432,7 @@ class PublishQueue:
 			item.status = JobStatus(row.status)
 			item.error = row.error
 			item.hint_candidates(hints[row.community_id])
+			item.needs_premium = self._posts.needs_premium(draft)
 			self._jobs.add(item)
 		if rows:
 			logger.info("Очередь отправки восстановлена: элементов %d.", len(rows))
@@ -504,6 +513,7 @@ class PublishQueue:
 			item = _PublishJob(row.id, draft, titles[draft.community_id])
 			item.status = JobStatus(row.status)
 			item.hint_candidates(hints[draft.community_id])
+			item.needs_premium = self._posts.needs_premium(draft)
 			self._jobs.add(item)
 			ids.append(item.id)
 			logger.info(
@@ -645,6 +655,7 @@ class PublishQueue:
 					# прежнее вложение больше не принадлежит очереди
 					await self._posts.unstash_from_queue(file.path)
 			item.draft = stashed
+			item.needs_premium = self._posts.needs_premium(stashed)
 			# черновик — не поле каркаса, а карточка показывает его заголовок,
 			# вложение и время: без явной пометки правка без смены статуса
 			# осталась бы для интерфейса невидимой (ADR-0034)

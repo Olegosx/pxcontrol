@@ -571,10 +571,8 @@ async def test_bitrate_advice_only_for_oversized(
 	from pxcontrol.engine.services.video import BitrateAdvice
 	from pxcontrol.engine.video.probe import VideoInfo
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.userbot_max_file_bytes",
-		lambda premium: 200_000_000 if premium else 2_000_000,
-	)
+	# потолок — предел Premium (ADR-0037); в тесте он уменьшен
+	monkeypatch.setattr("pxcontrol.engine.services.video.USERBOT_PREMIUM_MAX_FILE_BYTES", 2_000_000)
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.probe_video",
 		lambda _p, _b: VideoInfo(1920, 1080, 100.0, 25.0, True),
@@ -584,13 +582,7 @@ async def test_bitrate_advice_only_for_oversized(
 	big = tmp_path / "big.mp4"
 	big.write_bytes(b"x" * 2_500_000)
 
-	premium = False
-	service = VideoService(
-		db,
-		"ffmpeg",
-		processor=FakeProcessor(),
-		userbot_premium=lambda: premium,
-	)
+	service = VideoService(db, "ffmpeg", processor=FakeProcessor())
 	# файл в лимите — совета нет; несуществующий путь — тоже
 	assert await service.bitrate_advice(str(small)) is None
 	assert await service.bitrate_advice(str(tmp_path / "нет.mp4")) is None
@@ -599,8 +591,10 @@ async def test_bitrate_advice_only_for_oversized(
 	assert isinstance(advice, BitrateAdvice)
 	expected = int(2_000_000 * 0.99 * 8 / 50.0 / 1000) - 192
 	assert advice.kbps == expected
-	# Premium поднимает лимит — большой файл перестаёт требовать совета
-	premium = True
+	# лимит совета — потолок Telegram, о Premium публикатора обработка не знает
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.video.USERBOT_PREMIUM_MAX_FILE_BYTES", 200_000_000
+	)
 	assert await service.bitrate_advice(str(big)) is None
 
 
@@ -786,9 +780,8 @@ async def test_source_advice_reports_frame_and_bitrate(
 	from pxcontrol.engine.services.video import SourceAdvice
 	from pxcontrol.engine.video.probe import VideoInfo
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.userbot_max_file_bytes", lambda _premium: 2_000_000
-	)
+	# потолок — предел Premium (ADR-0037); в тесте он уменьшен
+	monkeypatch.setattr("pxcontrol.engine.services.video.USERBOT_PREMIUM_MAX_FILE_BYTES", 2_000_000)
 	probes: list[str] = []
 
 	def _probe(path: str, _b: str) -> VideoInfo:
@@ -801,7 +794,7 @@ async def test_source_advice_reports_frame_and_bitrate(
 	small.write_bytes(b"x" * 1_000_000)
 	big = tmp_path / "big.mp4"
 	big.write_bytes(b"x" * 2_500_000)
-	service = VideoService(db, "ffmpeg", processor=FakeProcessor(), userbot_premium=lambda: False)
+	service = VideoService(db, "ffmpeg", processor=FakeProcessor())
 
 	advice = await service.source_advice(str(small))
 	assert isinstance(advice, SourceAdvice)
@@ -823,16 +816,15 @@ async def test_source_advice_keeps_frame_when_bitrate_impossible(
 	"""
 	from pxcontrol.engine.video.probe import VideoInfo
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.video.userbot_max_file_bytes", lambda _premium: 2_000_000
-	)
+	# потолок — предел Premium (ADR-0037); в тесте он уменьшен
+	monkeypatch.setattr("pxcontrol.engine.services.video.USERBOT_PREMIUM_MAX_FILE_BYTES", 2_000_000)
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.probe_video",
 		lambda _p, _b: VideoInfo(640, 480, 10**9, 25.0, True),  # вечное видео
 	)
 	source = tmp_path / "вечное.mp4"
 	source.write_bytes(b"x" * 2_500_000)
-	service = VideoService(db, "ffmpeg", processor=FakeProcessor(), userbot_premium=lambda: False)
+	service = VideoService(db, "ffmpeg", processor=FakeProcessor())
 
 	advice = await service.source_advice(str(source))
 	assert advice is not None

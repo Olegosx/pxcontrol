@@ -45,6 +45,7 @@ from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.publish_route import file_needs_premium
 from pxcontrol.engine.services.settings import COMMUNITY_DEFAULT_PRESET
 from pxcontrol.engine.services.video import (
 	BitrateAdvice,
@@ -131,6 +132,9 @@ def processed_title(item: VideoFile) -> str:
 def processed_subtitle(item: VideoFile) -> str:
 	"""Подпись карточки: подпапка (если файл в ней), размер, дата изменения."""
 	parts = [human_size(item.size_bytes), format_local(item.modified_at)]
+	if file_needs_premium(item.size_bytes):
+		# файл сверх обычного предела повезёт только Premium (ADR-0037)
+		parts.append("только через Premium")
 	subdir = Path(item.name).parent.as_posix()
 	if subdir != ".":
 		parts.insert(0, f"подпапка «{subdir}»")

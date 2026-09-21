@@ -26,7 +26,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.communities import CommunityDto
-from pxcontrol.engine.services.posts import PostDraft, TextLimits
+from pxcontrol.engine.services.posts import PREMIUM_LIMITS, PostDraft, TextLimits
 from pxcontrol.engine.services.publish_route import poll_blocker
 from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.rich_text import trimmed
@@ -227,7 +227,9 @@ class QueueItemEditor(QWidget):
 		is_text = self._kind is MediaKind.NONE
 		# предел зависит от маршрута: пост с кнопками отправит бот,
 		# а у него пределы базовые (ADR-0031)
-		self._counter.set_limit(state.limits.text if is_text else state.limits.caption)
+		self._counter.set_limit(
+			state.limits.text if is_text else state.limits.caption, with_media=not is_text
+		)
 
 	def _build_topic_row(
 		self, layout: QVBoxLayout, topics: list[ForumTopicInfo], topics_error: str
@@ -493,13 +495,8 @@ def mount_queue_item_editor(
 		)
 
 	def with_community(draft: PostDraft, community: CommunityDto) -> None:
-		run_in_engine(
-			worker,
-			worker.engine.posts.text_limits(community.id),
-			page,
-			lambda limits: with_limits(draft, community, limits),
-			fail,
-		)
+		# пределы — потолок Telegram (ADR-0037), у движка их спрашивать незачем
+		with_limits(draft, community, PREMIUM_LIMITS)
 
 	def with_draft(draft: PostDraft) -> None:
 		run_in_engine(

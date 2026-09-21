@@ -107,6 +107,10 @@ def test_counter_text_within_limit() -> None:
 def test_counter_text_names_the_overflow() -> None:
 	"""Превышение названо числом: «сократите» без цифры заставляет считать самому."""
 	assert counter_text(1100, 1024) == "1100 / 1024 — на 76 больше предела Telegram"
+	# сверх обычного предела, но в потолке Premium — пометка словами (ADR-0037)
+	assert counter_text(1100, 4096, premium_from=1024) == "1100 / 4096 · только через Premium"
+	assert counter_text(1000, 4096, premium_from=1024) == "1000 / 4096"
+	assert counter_text(4097, 4096, premium_from=1024).endswith("больше предела Telegram")
 
 
 def test_checked_or_single_treats_lonely_item_as_chosen() -> None:

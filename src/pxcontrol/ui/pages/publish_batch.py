@@ -50,6 +50,7 @@ from pxcontrol.engine.services.captions import (
 )
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import MediaFile, PostDraft
+from pxcontrol.engine.services.publish_route import file_needs_premium
 from pxcontrol.engine.services.schedule_plan import (
 	DAYS_STEP_RANGE,
 	DEFAULT_HOURS_STEP,
@@ -65,7 +66,12 @@ from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.rich_text import RichText, trimmed
-from pxcontrol.engine.telegram.types import CAPTION_LENGTH_LIMIT, ExecutorRef, MediaKind
+from pxcontrol.engine.telegram.types import (
+	BOT_MAX_FILE_BYTES,
+	CAPTION_LENGTH_LIMIT,
+	ExecutorRef,
+	MediaKind,
+)
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -149,6 +155,8 @@ class _BatchRow:
 		caption: RichText,
 		oversized: bool,
 		caption_limit: int = CAPTION_LENGTH_LIMIT,
+		*,
+		premium_only: bool = False,
 	) -> None:
 		self.video = video
 		self.card = CardWidget(editor)
@@ -166,7 +174,9 @@ class _BatchRow:
 		head.addWidget(self.check)
 		label = f"{video.name} — {human_size(video.size_bytes)}"
 		if oversized:
-			label += " · ⚠ больше лимита сообщества"
+			label += " · ⚠ больше лимита Telegram"
+		elif premium_only:
+			label += " · только через Premium"
 		title = StrongBodyLabel(label, self.card)
 		title.setWordWrap(True)
 		head.addWidget(title, stretch=1)
@@ -628,7 +638,16 @@ class BatchEditor(QWidget):
 				else RichText("")
 			)
 			oversized = limit_bytes is not None and video.size_bytes > limit_bytes
-			row = _BatchRow(self, video, caption, oversized, caption_limit)
+			# пометка «только через Premium» (ADR-0037) — у userbot-пути:
+			# бот-путь с его 50 МБ такого файла не примет вовсе
+			premium_only = (
+				limit_bytes is not None
+				and limit_bytes > BOT_MAX_FILE_BYTES
+				and file_needs_premium(video.size_bytes)
+			)
+			row = _BatchRow(
+				self, video, caption, oversized, caption_limit, premium_only=premium_only
+			)
 			row.check.stateChanged.connect(self._update_summary)
 			# время строки меняет маршрут пакета (отложенный пост уходит
 			# иначе) — экрану нужно знать о правке сразу

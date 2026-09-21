@@ -37,7 +37,6 @@ from pxcontrol.engine.services.community_rights import (
 	executor_paused,
 	publisher_incapable,
 	publisher_paused,
-	publishing_users,
 	ranked_executors,
 )
 from pxcontrol.engine.services.publish_route import (
@@ -47,6 +46,7 @@ from pxcontrol.engine.services.publish_route import (
 	choose_route,
 	identity_blocker,
 	markup_blocker,
+	needs_premium,
 	poll_blocker,
 	post_markup_blocker,
 	post_requirements,
@@ -93,9 +93,7 @@ from pxcontrol.engine.telegram.types import (
 	PublishedPage,
 	ScheduledMessage,
 	TelegramFloodError,
-	limit_gb,
 	text_length_limit,
-	userbot_max_file_bytes,
 )
 from pxcontrol.engine.video.constants import preview_path
 from pxcontrol.engine.video.ffmpeg import (
@@ -235,6 +233,16 @@ class TextLimits:
 	def for_draft(self, draft: PostDraft) -> int:
 		"""Предел, действующий для этого черновика."""
 		return self.caption if draft.with_media else self.text
+
+
+#: Пределы длины по потолку Telegram — у аккаунта с Premium (ADR-0037).
+#: Интерфейс показывает их всегда: кто повезёт пост, решает диспетчер
+#: при отправке, а пост сверх обычных пределов помечается «только через
+#: Premium».
+PREMIUM_LIMITS = TextLimits(
+	text=text_length_limit(premium=True, with_media=False),
+	caption=text_length_limit(premium=True, with_media=True),
+)
 
 
 def check_schedule_ahead(when: datetime | None) -> None:
@@ -1349,24 +1357,6 @@ class PostsService:
 			blocker = rule(community)
 		return community, blocker
 
-	def _pool_premium(self, community: Community) -> bool:
-		"""Есть ли Premium хоть у одного способного публикатора пула (ADR-0036).
-
-		Пределы сообщества для подсказок — по лучшему из пула: пост,
-		который под силу Premium-аккаунту, диспетчер ему и поручит.
-		"""
-		return any(
-			self._gateway.userbot_premium(row.tg_account_id) for row in publishing_users(community)
-		)
-
-	def _base_limits(self, community: Community) -> TextLimits:
-		"""Пределы длины публикаторов сообщества (по лучшему Premium пула)."""
-		premium = self._pool_premium(community)
-		return TextLimits(
-			text=text_length_limit(premium, with_media=False),
-			caption=text_length_limit(premium, with_media=True),
-		)
-
 	async def check_draft_rules(self, draft: PostDraft) -> None:
 		"""Проверяет черновик по правилам его сообщества — до постановки.
 
@@ -1411,13 +1401,17 @@ class PostsService:
 		blocker = self._identity_blocker(community, draft, route)
 		if blocker is not None:
 			raise PostError(blocker)
-		requirements = self._requirements(draft, route)
+		requirements = self._requirements(draft)
 		if route_uses_userbot(route):
 			capable = self._identity_candidates(community, named)
 			if not capable:
 				raise PostError(self._identity_shortfall(community, named))
 			if not self._fitting(capable, requirements):
-				raise PostError(self._pool_shortfall(community, requirements, capable))
+				# принимаем и то, что повезёт только Premium: пост подождёт
+				# такого публикатора (ADR-0037); за потолок — отказ
+				ceiling = self._over_ceiling(requirements)
+				if ceiling is not None:
+					raise PostError(ceiling)
 			return
 		if named is not None and self._bot_for(community, ExecutorAction.PUBLISH, named) is None:
 			raise PostError(self._identity_shortfall(community, named))
@@ -1527,7 +1521,7 @@ class PostsService:
 			if file.kind is MediaKind.VIDEO:
 				await self._move_to_published(file.path)
 
-	def _requirements(self, draft: PostDraft, route: PublishRoute) -> PostRequirements:
+	def _requirements(self, draft: PostDraft) -> PostRequirements:
 		"""Требования черновика к перевозчику (ADR-0036).
 
 		Raises:
@@ -1537,9 +1531,19 @@ class PostsService:
 			file_sizes=[self._file_size(file.path) for file in draft.media],
 			text=draft.text,
 			with_media=draft.with_media,
-			scheduled=draft.when is not None,
-			route=route,
 		)
+
+	def needs_premium(self, draft: PostDraft) -> bool:
+		"""Повезёт ли пост только Premium-аккаунт — пометка для очереди (ADR-0037).
+
+		Файла может уже не быть (правка, восстановление после перезапуска):
+		тогда пометки нет, а честную ошибку про пропавший файл даст
+		отправка — превращать пометку в сбой загрузки очереди нельзя.
+		"""
+		try:
+			return needs_premium(self._requirements(draft))
+		except PostError:
+			return False
 
 	def _identity_candidates(
 		self, community: Community, identity: ExecutorRef | None
@@ -1639,24 +1643,27 @@ class PostsService:
 		)
 		return int(ranked[0].tg_account_id or 0) if ranked else None
 
-	def _pool_shortfall(
-		self,
-		community: Community,
-		requirements: PostRequirements,
-		rows: Sequence[CommunityExecutor],
-	) -> str:
-		"""Почему никто из способных этот пост не повезёт — текст человеку (ADR-0036).
+	@staticmethod
+	def _over_ceiling(requirements: PostRequirements) -> str | None:
+		"""Почему пост не повезёт даже Premium-аккаунт (None — повезёт).
 
-		Причина называется по лучшему из них: если Premium-аккаунта нет,
-		человек должен узнать, что дело в подписке, а не в самом Telegram.
+		Потолок Telegram — предел аккаунта с Premium (ADR-0037): выше него
+		пост не отправит никто и никогда, и это ошибка постановки, а не
+		повод ждать.
 		"""
-		premium = any(self._gateway.userbot_premium(row.tg_account_id) for row in rows)
-		reason = userbot_shortfall(requirements, premium=premium) or (
-			"Никто из публикаторов пула этот пост не повезёт."
+		reason = userbot_shortfall(requirements, premium=True)
+		if reason is None:
+			return None
+		return f"{reason} Уменьшите файл (например, битрейтом на странице «Видео»)."
+
+	@staticmethod
+	def _premium_shortfall(community: Community, requirements: PostRequirements) -> str:
+		"""Почему пост ждёт: повезёт только Premium, а его в пуле нет (ADR-0037)."""
+		reason = userbot_shortfall(requirements, premium=False) or "Пост требует Premium."
+		return (
+			f"{reason} Повезёт только аккаунт с Premium, а в пуле «{community.title}» "
+			"его нет — пост ждёт."
 		)
-		if premium:
-			return f"{reason} Уменьшите файл (например, битрейтом на странице «Видео»)."
-		return f"{reason} Публикатора с Premium в пуле «{community.title}» нет."
 
 	def _pick_publisher(
 		self, community: Community, draft: PostDraft, route: PublishRoute
@@ -1698,14 +1705,17 @@ class PostsService:
 			if named is not None:
 				raise PostError(blocker)
 			raise PostNotReadyError(blocker)
-		requirements = self._requirements(draft, route)
+		requirements = self._requirements(draft)
 		if route_uses_userbot(route):
 			capable = self._identity_candidates(community, named)
 			if not capable:
 				raise PostNotReadyError(self._identity_shortfall(community, named))
 			fitting = self._fitting(capable, requirements)
 			if not fitting:
-				raise PostError(self._pool_shortfall(community, requirements, capable))
+				ceiling = self._over_ceiling(requirements)
+				if ceiling is not None:
+					raise PostError(ceiling)
+				raise PostNotReadyError(self._premium_shortfall(community, requirements))
 			return ExecutorRef(OwnerKind.USER, fitting[0])
 		bot = self._bot_for(community, ExecutorAction.PUBLISH, named)
 		if bot is None:
@@ -2149,43 +2159,6 @@ class PostsService:
 			)
 			return None
 		return thumb
-
-	async def userbot_limit_gb(self, community_id: int) -> int:
-		"""Лимит на файл канала в целых ГБ — для подсказок интерфейса.
-
-		Зависит от Premium аккаунта, привязанного к каналу (ADR-0019);
-		канал без привязки — меньший, безопасный лимит.
-
-		Raises:
-			PostError: Сообщество не найдено.
-		"""
-		return limit_gb(await self.userbot_limit_bytes(community_id))
-
-	async def userbot_limit_bytes(self, community_id: int) -> int:
-		"""Точный лимит на файл канала в байтах (2000/4000 МиБ по Premium).
-
-		Для пометки «больше лимита канала» в пакете отправки (ADR-0015):
-		округление до целых ГБ здесь дало бы ложные пометки у файлов
-		между 2 ГБ и фактическими 2000 МиБ.
-
-		Raises:
-			PostError: Сообщество не найдено.
-		"""
-		community = await self._get_community(community_id)
-		return userbot_max_file_bytes(self._pool_premium(community))
-
-	async def text_limits(self, community_id: int) -> TextLimits:
-		"""Пределы длины текста, действующие в сообществе.
-
-		Зависят от публикатора: userbot с Premium — вчетверо больший
-		предел подписи, бот — всегда базовые (ADR-0011). Интерфейс
-		берёт пару разом: переключение типа контента не должно ходить
-		в движок за каждым новым пределом.
-
-		Raises:
-			PostError: Сообщество не найдено.
-		"""
-		return self._base_limits(await self._get_community(community_id))
 
 	async def community_title(self, community_id: int) -> str:
 		"""Название канала (для заголовков элементов очереди отправки).

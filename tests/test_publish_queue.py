@@ -1396,7 +1396,7 @@ async def test_enqueue_rejects_text_over_community_limit(
 	queue = make_queue(_SlowGateway())
 	community_id = await _add_community(db)
 	with pytest.raises(PostError, match="Текст поста длиннее"):
-		await queue.enqueue(PostDraft(community_id, text="я" * 4097))
+		await queue.enqueue(PostDraft(community_id, text="я" * 8193))
 	assert await queue.state() == []
 
 
@@ -1411,7 +1411,7 @@ async def test_edit_rejects_text_over_community_limit(
 	item = await queue.enqueue(PostDraft(community_id, text="было", when=_future(120)))
 	await _wait_status(queue, item, JobStatus.WAITING)
 	with pytest.raises(PostError, match="Текст поста длиннее"):
-		await queue.edit(item, PostDraft(community_id, text="я" * 4097, when=_future(120)))
+		await queue.edit(item, PostDraft(community_id, text="я" * 8193, when=_future(120)))
 	assert (await queue.get_draft(item)).text == "было"
 
 
@@ -1851,3 +1851,25 @@ async def test_due_post_goes_before_released_planned_ones(
 		await _wait_status(queue, item_id, JobStatus.DONE)
 	sent = [post.text for post in gateway.published]
 	assert sent.index("сейчас") == 1, "срочный ушёл сразу за тем, что уже грузилось"
+
+
+async def test_premium_only_post_is_marked_and_waits(
+	db: Database, make_queue: QueueFactory
+) -> None:
+	"""Пост сверх обычного предела помечен «только через Premium» и ждёт Premium (ADR-0037)."""
+	gateway = _SlowGateway()
+	gateway.release.set()
+	queue = make_queue(gateway)
+	community_id = await _add_community(db)
+	item = await queue.enqueue(PostDraft(community_id, text="я" * 4097))
+	waiting = await _wait_status(queue, item, JobStatus.WAITING, note="Premium")
+	assert waiting.needs_premium is True
+	assert gateway.published == []
+	plain = await queue.enqueue(PostDraft(community_id, text="обычный"))
+	assert {i.id: i.needs_premium for i in await queue.state()}[plain] is False
+	await queue.shutdown()
+
+	restarted = make_queue(gateway)  # пометка восстанавливается вместе с черновиком
+	await restarted.load()
+	marks = {i.id: i.needs_premium for i in await restarted.state()}
+	assert marks[item] is True

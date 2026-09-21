@@ -332,44 +332,51 @@ def route_uses_userbot(route: PublishRoute) -> bool:
 
 @dataclass(frozen=True)
 class PostRequirements:
-	"""Что пост требует от того, кто его повезёт (ADR-0036).
+	"""Что пост требует от того, кто его повезёт (ADR-0036, ADR-0037).
 
-	Считается от черновика один раз и спрашивается дважды: при постановке
-	(есть ли в пуле хоть кто-то подходящий — отказ должен всплыть под
-	рукой у человека) и при отправке (кому из подходящих поручить).
+	Только **содержимое**: маршрут и отложенность решаются лестницей
+	маршрутов и подготовкой публикации, а перевозчику важны размер файла
+	и длина текста. Считается от черновика и спрашивается трижды:
+	при постановке (не превышает ли пост потолок Telegram), при отправке
+	(кому из способных поручить) и для пометки «только через Premium».
 
 	Attributes:
 		file_bytes: самое большое вложение (0 — без файлов).
 		text: текст поста или подпись к файлу.
 		with_media: текст идёт подписью — предел у неё меньше.
-		scheduled: нужна серверная отложка — её создаёт только
-			пользователь (ADR-0010).
-		route: кто везёт пост (ADR-0031); у бота пределы базовые.
 	"""
 
 	file_bytes: int
 	text: str
 	with_media: bool
-	scheduled: bool
-	route: PublishRoute
 
 
 def post_requirements(
-	*,
-	file_sizes: Sequence[int],
-	text: str,
-	with_media: bool,
-	scheduled: bool,
-	route: PublishRoute,
+	*, file_sizes: Sequence[int], text: str, with_media: bool
 ) -> PostRequirements:
 	"""Требования поста по его содержимому — чистая свёртка (ADR-0036)."""
-	return PostRequirements(
-		file_bytes=max(file_sizes, default=0),
-		text=text,
-		with_media=with_media,
-		scheduled=scheduled,
-		route=route,
+	return PostRequirements(file_bytes=max(file_sizes, default=0), text=text, with_media=with_media)
+
+
+def needs_premium(requirements: PostRequirements) -> bool:
+	"""Повезёт ли пост только аккаунт с Premium (ADR-0037).
+
+	Одно правило на все экраны и очередь: обычному аккаунту пост
+	не по силам (файл больше 2000 МиБ, подпись длиннее 1024, текст
+	длиннее 4096), а аккаунту с Premium — по силам. Пост, который
+	не повезёт и Premium, сюда не относится: его не примет постановка.
+	Маршрут не участвует намеренно: бот-путь базовых пределов
+	не превышает, иначе постановка его отклонит.
+	"""
+	return (
+		userbot_shortfall(requirements, premium=False) is not None
+		and userbot_shortfall(requirements, premium=True) is None
 	)
+
+
+def file_needs_premium(size_bytes: int) -> bool:
+	"""Требует ли Premium файл такого размера — то же правило для карточек файлов."""
+	return needs_premium(post_requirements(file_sizes=[size_bytes], text="", with_media=True))
 
 
 def text_over_limit(text: str, limit: int, with_media: bool) -> str | None:

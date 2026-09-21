@@ -148,6 +148,7 @@ def queue_signature(item: Any) -> tuple[Any, ...]:
 		getattr(item, "media_path", None),
 		getattr(item, "when", None),
 		getattr(item, "sender", None),
+		getattr(item, "needs_premium", None),
 	)
 
 

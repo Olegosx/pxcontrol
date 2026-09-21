@@ -36,9 +36,9 @@ from pxcontrol.engine.services.captions import (
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.posts import (
+	PREMIUM_LIMITS,
 	MediaFile,
 	PostDraft,
-	TextLimits,
 )
 from pxcontrol.engine.services.publish_queue import (
 	EDITABLE_STATUSES,
@@ -54,11 +54,13 @@ from pxcontrol.engine.services.video import VideoDirs
 from pxcontrol.engine.telegram.rich_text import trimmed
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
+	USERBOT_MAX_FILE_BYTES,
+	USERBOT_PREMIUM_MAX_FILE_BYTES,
 	CommunityKind,
 	LinkPreview,
 	MediaKind,
+	limit_gb,
 	limit_mb,
-	text_length_limit,
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -91,12 +93,6 @@ from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.rich_edit import RichPostEdit
 from pxcontrol.ui.pages.stage_page import StagePage
 from pxcontrol.ui.queue_watcher import QueueWatcher
-
-#: Пределы, пока сообщество не ответило: базовые — они не обещают лишнего.
-_BASE_LIMITS = TextLimits(
-	text=text_length_limit(premium=False, with_media=False),
-	caption=text_length_limit(premium=False, with_media=True),
-)
 
 #: Сколько карточек очереди показывать на странице (хвост ждущих —
 #: в сводке числом; всё целиком — кнопка «Вся очередь…», ADR-0016).
@@ -142,9 +138,6 @@ class PublishPage(StagePage):
 		self._show_error = error_reporter(self)
 		# канал прошлой публикации: предвыбор после загрузки списка
 		self._kind = MediaKind.NONE
-		# пределы длины текста выбранного канала (None — канал не выбран
-		# или ответ движка ещё не пришёл: счётчик покажет базовый предел)
-		self._limits: TextLimits | None = None
 		# аватары сообществ из кэша статистики — для шапок карточек очереди
 		self._avatars: dict[int, str | None] = {}
 		self._build()
@@ -252,7 +245,7 @@ class PublishPage(StagePage):
 			return None
 		return markup_state(
 			community,
-			self._limits or _BASE_LIMITS,
+			PREMIUM_LIMITS,
 			# у опроса файлов не бывает — правила альбома к нему не идут
 			media=() if self._kind is MediaKind.POLL else self._media.files(),
 			scheduled=not self._when_row.is_now(),
@@ -400,16 +393,8 @@ class PublishPage(StagePage):
 			self._caps_hint.setText("")
 			self._when_row.set_schedule_allowed(True)
 			self._when_row.set_times([])
-			self._limits = None
 			self._apply_text_limit()
 			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.posts.text_limits(community.id),
-			self,
-			partial(self._apply_limits, community.id),
-			noop,
-		)
 		run_in_engine(
 			self._worker,
 			self._worker.engine.settings.get_for(PUBLISH_TIMES, community.id),
@@ -421,17 +406,13 @@ class PublishPage(StagePage):
 		self._topics.update_for(community)
 		self._identity.update_for(community)
 		if caps.userbot:
-			# лимит зависит от Premium userbot — узнаём у движка
+			# пределы — потолок Telegram (ADR-0037): кто повезёт, решит
+			# диспетчер, а пост сверх обычных пределов будет помечен
 			self._caps_hint.setText(
-				"Публикация через userbot: все типы контента, «сейчас» и отложенные."
-				+ _actor_note(community)
-			)
-			run_in_engine(
-				self._worker,
-				self._worker.engine.posts.userbot_limit_gb(community.id),
-				self,
-				partial(self._show_userbot_limit, community.id),
-				noop,
+				"Публикация через userbot: все типы контента, файлы до "
+				f"{limit_gb(USERBOT_PREMIUM_MAX_FILE_BYTES)} ГБ (сверх "
+				f"{limit_gb(USERBOT_MAX_FILE_BYTES)} ГБ — только через Premium), "
+				"«сейчас» и отложенные." + _actor_note(community)
 			)
 			self._when_row.set_schedule_allowed(True)
 		elif caps.bot:
@@ -450,26 +431,19 @@ class PublishPage(StagePage):
 		# сообщество сменилось — сменились и правила кнопок
 		self._refresh_markup()
 
-	def _apply_limits(self, community_id: int, limits: TextLimits) -> None:
-		"""Запоминает пределы длины сообщества, если оно всё ещё выбрано."""
-		if self._is_stale(community_id):
-			return
-		self._limits = limits
-		self._apply_text_limit()
-
 	def _apply_text_limit(self) -> None:
-		"""Ставит счётчику предел по типу поста и выбранному каналу.
+		"""Ставит счётчику предел по типу поста и маршруту.
 
-		Канал ещё не выбран (или пределы не приехали) — показываем
-		базовый предел Telegram: он не обещает лишнего.
+		Предел — потолок Telegram (ADR-0037); пост с кнопками уходит
+		ботом, и у него пределы базовые (ADR-0031). Счётчик сам скажет
+		«только через Premium», когда текст длиннее обычного предела.
 		"""
 		with_media = self._kind is not MediaKind.NONE
 		state = self._markup_state()
-		if self._limits is None or state is None:
-			self._counter.set_limit(text_length_limit(premium=False, with_media=with_media))
-			return
-		# пост с кнопками уходит ботом — у него пределы базовые (ADR-0031)
-		self._counter.set_limit(state.limits.caption if with_media else state.limits.text)
+		limits = state.limits if state is not None else PREMIUM_LIMITS
+		self._counter.set_limit(
+			limits.caption if with_media else limits.text, with_media=with_media
+		)
 
 	def _on_topics_failed(self, message: str) -> None:
 		"""Темы не прочитались — пост уйдёт в общую ленту, честно предупредив."""
@@ -486,18 +460,6 @@ class PublishPage(StagePage):
 		"""Подставляет времена сообщества, если оно всё ещё выбрано."""
 		if not self._is_stale(community_id):
 			self._when_row.set_times(times)
-
-	def _show_userbot_limit(self, community_id: int, limit_gb: int) -> None:
-		"""Дописывает лимит файла в подсказку (2 ГБ; 4 — с Premium)."""
-		if self._is_stale(community_id):
-			return
-		premium = " (Premium)" if limit_gb >= 4 else ""
-		community = self._community_or_none()
-		self._caps_hint.setText(
-			"Публикация через userbot: все типы контента, файлы "
-			f"до {limit_gb} ГБ{premium}, «сейчас» и отложенные."
-			+ (_actor_note(community) if community is not None else "")
-		)
 
 	def _refresh_preview(self) -> None:
 		"""Приводит ряд превью к тексту и типу поста.

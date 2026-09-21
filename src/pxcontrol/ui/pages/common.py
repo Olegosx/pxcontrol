@@ -81,6 +81,7 @@ from pxcontrol.engine.telegram.types import (
 	ForumTopicInfo,
 	MediaKind,
 	telegram_text_length,
+	text_length_limit,
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.theme import ACCENT_COLOR
@@ -1537,15 +1538,29 @@ def tab_strip(parent: QWidget, layout: QVBoxLayout) -> Pivot:
 	return pivot
 
 
-def counter_text(length: int, limit: int) -> str:
+def counter_text(length: int, limit: int, premium_from: int | None = None) -> str:
 	"""Подпись счётчика символов под полем текста.
 
 	Превышение называется числом: «сократите» без цифры оставляет
-	пользователя считать самому.
+	пользователя считать самому. ``premium_from`` — предел обычного
+	аккаунта: длиннее него пост повезёт только Premium (ADR-0037),
+	и об этом сказано словами, пока предел потолка не превышен.
 	"""
-	if length <= limit:
-		return f"{length} / {limit}"
-	return f"{length} / {limit} — на {length - limit} больше предела Telegram"
+	if length > limit:
+		return f"{length} / {limit} — на {length - limit} больше предела Telegram"
+	if premium_from is not None and length > premium_from:
+		return f"{length} / {limit} · только через Premium"
+	return f"{length} / {limit}"
+
+
+def regular_threshold(limit: int, with_media: bool) -> int | None:
+	"""Порог «только через Premium» для счётчика при таком пределе.
+
+	Предел выше обычного бывает только у потолка Premium; у бот-пути
+	и обычных пределов порога нет — там превышение и есть предел.
+	"""
+	regular = text_length_limit(premium=False, with_media=with_media)
+	return regular if limit > regular else None
 
 
 class CharCounter:
@@ -1573,21 +1588,30 @@ class CharCounter:
 		"""
 		self._edit = edit
 		self._limit = limit
+		self._premium_from: int | None = None
 		self.label = CaptionLabel("", parent)
 		self.label.setAlignment(Qt.AlignmentFlag.AlignRight)
 		layout.addWidget(self.label)
 		edit.textChanged.connect(self.refresh)
 		self.refresh()
 
-	def set_limit(self, limit: int) -> None:
-		"""Меняет действующий предел и перерисовывает счётчик."""
+	def set_limit(self, limit: int, *, with_media: bool | None = None) -> None:
+		"""Меняет действующий предел и перерисовывает счётчик.
+
+		``with_media`` — вид текста (подпись или пост): по нему счётчик
+		знает порог обычного аккаунта и пишет «только через Premium»
+		(ADR-0037); None — порога нет.
+		"""
 		self._limit = limit
+		self._premium_from = (
+			regular_threshold(limit, with_media) if with_media is not None else None
+		)
 		self.refresh()
 
 	def refresh(self) -> None:
 		"""Пересчитывает длину и красит подпись по факту превышения."""
 		length = telegram_text_length(self._edit.toPlainText())
-		self.label.setText(counter_text(length, self._limit))
+		self.label.setText(counter_text(length, self._limit, self._premium_from))
 		self.label.setTextColor(*(ERROR_TEXT if length > self._limit else DIM_TEXT))
 
 

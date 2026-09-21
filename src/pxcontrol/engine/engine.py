@@ -95,10 +95,6 @@ class Engine:
 			self.db,
 			self._ffmpeg_path,
 			self.settings,
-			# эвристика без контекста сообщества (очередь обработки его
-			# не знает): Premium хоть одного подключённого аккаунта; строгий
-			# пер-сообщественный лимит остаётся за публикацией (ADR-0019)
-			userbot_premium=self.gateway.any_userbot_premium,
 		)
 		self.video_queue = ProcessingQueue(self.video)
 		self.captions = CaptionsService(self.db, self._ffmpeg_path)

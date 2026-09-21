@@ -1322,28 +1322,15 @@ def test_validate_draft_caption_ceiling_is_lower(tmp_path: Path) -> None:
 		)
 
 
-async def test_text_limits_reflect_publisher_premium(db: Database) -> None:
-	"""Пределы канала зависят от Premium его публикатора."""
-	gateway = _FakeGateway()
-	service = PostsService(db, gateway)
-	community_id = await _add_community(db)
-	limits = await service.text_limits(community_id)
-	assert (limits.text, limits.caption) == (4096, 1024)
-	bound = await _bound_account(db, community_id)
-	assert bound is not None
-	gateway.premium_ids = {bound}
-	premium_limits = await service.text_limits(community_id)
-	assert (premium_limits.text, premium_limits.caption) == (8192, 4096)
-
-
 async def test_text_limits_for_draft_picks_caption_with_media(db: Database, tmp_path: Path) -> None:
-	"""Предел выбирается по наличию вложения у черновика."""
-	service = PostsService(db, _FakeGateway())
+	"""Предел выбирается по наличию вложения у черновика; сами пределы — потолок Premium."""
+	from pxcontrol.engine.services.posts import PREMIUM_LIMITS
+
 	community_id = await _add_community(db)
-	limits = await service.text_limits(community_id)
-	assert limits.for_draft(PostDraft(community_id, text="текст")) == limits.text
+	assert (PREMIUM_LIMITS.text, PREMIUM_LIMITS.caption) == (8192, 4096)
+	assert PREMIUM_LIMITS.for_draft(PostDraft(community_id, text="текст")) == PREMIUM_LIMITS.text
 	with_media = PostDraft(community_id, media=(MediaFile(_media_file(tmp_path), MediaKind.VIDEO),))
-	assert limits.for_draft(with_media) == limits.caption
+	assert PREMIUM_LIMITS.for_draft(with_media) == PREMIUM_LIMITS.caption
 
 
 async def test_publish_rejects_caption_over_channel_limit(db: Database, tmp_path: Path) -> None:
@@ -1371,8 +1358,13 @@ async def test_check_draft_rules_rejects_before_sending(db: Database) -> None:
 	service = PostsService(db, _FakeGateway())
 	community_id = await _add_community(db)
 	await service.check_draft_rules(PostDraft(community_id, text="я" * 4096))
+	# сверх обычного предела — принимается с пометкой «только через Premium»
+	# (ADR-0037); отказ — только сверх потолка Premium
+	long = PostDraft(community_id, text="я" * 4097)
+	await service.check_draft_rules(long)
+	assert service.needs_premium(long)
 	with pytest.raises(PostError, match="Текст поста длиннее"):
-		await service.check_draft_rules(PostDraft(community_id, text="я" * 4097))
+		await service.check_draft_rules(PostDraft(community_id, text="я" * 8193))
 
 
 async def test_bot_path_uses_base_limits(db: Database) -> None:
@@ -2313,10 +2305,10 @@ async def test_big_file_goes_to_premium_publisher_from_pool(
 	assert [account for account, _chat, _post in gateway.published] == [extra]
 
 
-async def test_pool_shortfall_names_missing_premium(
+async def test_post_needing_premium_waits_when_pool_has_none(
 	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	"""Никто из пула не тянет файл: причина говорит про Premium, а не про «аккаунт»."""
+	"""Пост «только через Premium» принимается и ждёт Premium-публикатора (ADR-0037)."""
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.publish_route.userbot_max_file_bytes",
 		lambda premium: 20 if premium else 10,
@@ -2326,11 +2318,39 @@ async def test_pool_shortfall_names_missing_premium(
 	gateway = _FakeGateway()
 	service = PostsService(db, gateway)
 	community_id = await _add_community(db)
-	await _extra_publisher(db, community_id)
+	extra = await _extra_publisher(db, community_id)
 	draft = PostDraft(community_id, media=(MediaFile(str(big), MediaKind.DOCUMENT),))
-	with pytest.raises(PostError, match="Premium в пуле"):
+	await service.check_draft_rules(draft)  # постановка принимает
+	assert service.needs_premium(draft)
+	with pytest.raises(PostNotReadyError, match="Premium"):
+		await service.publish(draft)
+	assert gateway.published == []
+	# появился Premium в пуле — пост уходит им
+	gateway.premium_ids = {extra}
+	await service.publish(draft)
+	assert [account for account, _chat, _post in gateway.published] == [extra]
+
+
+async def test_post_over_premium_ceiling_is_rejected(
+	db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Выше потолка Premium пост не повезёт никто — отказ при постановке и при отправке."""
+	monkeypatch.setattr(
+		"pxcontrol.engine.services.publish_route.userbot_max_file_bytes",
+		lambda premium: 20 if premium else 10,
+	)
+	huge = tmp_path / "huge.bin"
+	huge.write_bytes(b"x" * 21)
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	extra = await _extra_publisher(db, community_id)
+	gateway.premium_ids = {extra}
+	draft = PostDraft(community_id, media=(MediaFile(str(huge), MediaKind.DOCUMENT),))
+	assert not service.needs_premium(draft), "выше потолка — не пометка, а отказ"
+	with pytest.raises(PostError, match="Уменьшите файл"):
 		await service.check_draft_rules(draft)
-	with pytest.raises(PostError, match="Premium в пуле"):
+	with pytest.raises(PostError, match="Уменьшите файл"):
 		await service.publish(draft)
 	assert gateway.published == []
 
@@ -2372,19 +2392,6 @@ async def test_pool_publishes_without_default(db: Database) -> None:
 	assert await service.publish_blocker(community_id) is None
 	await service.publish(PostDraft(community_id, text="без умолчания"))
 	assert [account for account, _chat, _post in gateway.published] == [extra]
-
-
-async def test_text_limits_follow_best_premium_in_pool(db: Database) -> None:
-	"""Пределы длины для подсказок — по лучшему Premium пула, а не по умолчанию."""
-	gateway = _FakeGateway()
-	service = PostsService(db, gateway)
-	community_id = await _add_community(db)
-	extra = await _extra_publisher(db, community_id)
-	base = await service.text_limits(community_id)
-	assert (base.text, base.caption) == (4096, 1024)
-	gateway.premium_ids = {extra}
-	premium = await service.text_limits(community_id)
-	assert (premium.text, premium.caption) == (8192, 4096)
 
 
 # --- чтения и бот-путь через диспетчер (ADR-0036, этап C) ------------------------------

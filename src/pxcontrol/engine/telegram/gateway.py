@@ -297,15 +297,6 @@ class TelegramGateway:
 		transport = self._userbots.get(account_id)
 		return transport.premium if transport is not None else False
 
-	def any_userbot_premium(self) -> bool:
-		"""Есть ли Premium хоть у одного подключённого аккаунта.
-
-		Эвристика для подсказок без контекста канала (рекомендация
-		битрейта на «Видео»: очередь обработки канала не знает).
-		Строгая пер-канальная проверка лимита остаётся за публикацией.
-		"""
-		return any(t.premium for t in self._userbots.values())
-
 	def _userbot(self, account_id: int) -> MtprotoTransport:
 		"""Транспорт аккаунта из пула — или понятная ошибка.
 
