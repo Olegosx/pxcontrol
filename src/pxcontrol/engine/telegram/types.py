@@ -307,6 +307,77 @@ class ServiceMessagesPage:
 	oldest_date: datetime | None
 
 
+class ChatReactionsMode(StrEnum):
+	"""Какие реакции разрешены в сообществе (``ChatReactions`` Telegram)."""
+
+	ALL = "all"  # любые стандартные эмодзи
+	SOME = "some"  # только перечисленные
+	NONE = "none"  # реакции запрещены
+
+
+@dataclass(frozen=True)
+class ReactionOption:
+	"""Стандартная реакция из глобального списка Telegram.
+
+	Attributes:
+		emoji: сам эмодзи — то, что уходит в ``sendReaction``.
+		title: описание Telegram («Thumbs Up»).
+		premium: доступна только аккаунтам с Premium.
+	"""
+
+	emoji: str
+	title: str
+	premium: bool = False
+
+
+@dataclass(frozen=True)
+class ChatReactions:
+	"""Реакции, разрешённые в сообществе, с их описаниями (ADR-0039).
+
+	Attributes:
+		mode: режим сообщества.
+		options: разрешённые стандартные реакции; при режиме «любые» —
+			весь глобальный список без неактивных.
+	"""
+
+	mode: ChatReactionsMode
+	options: tuple[ReactionOption, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReactablePost:
+	"""Запись ленты, на которую можно поставить реакцию (ADR-0039).
+
+	Attributes:
+		id: идентификатор сообщения.
+		date: когда вышло.
+		mine: реакции текущего аккаунта на этой записи (эмодзи).
+	"""
+
+	id: int
+	date: datetime
+	mine: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReactionsPage:
+	"""Страница ленты для задачи реакций: записи и место продолжения.
+
+	Служебные записи отброшены: реакции ставят постам. Сведения
+	о реакциях текущего аккаунта дочитаны транспортом, если история
+	пришла без них (флаг ``min`` у ``messageReactions``).
+
+	Attributes:
+		posts: записи страницы от новых к старым.
+		scanned: сколько сообщений просмотрено (включая служебные).
+		next_offset_id: с какого сообщения читать дальше; None — конец.
+	"""
+
+	posts: list[ReactablePost]
+	scanned: int
+	next_offset_id: int | None
+
+
 @dataclass(frozen=True)
 class PublishedMessage:
 	"""Вышедший пост ленты сообщества, прочитанный транспортом.

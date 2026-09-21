@@ -29,6 +29,13 @@ from pxcontrol.engine.tasks.model import (
 	TaskTitle,
 	TaskTrigger,
 )
+from pxcontrol.engine.tasks.reactions import (
+	ReactionChoice,
+	ReactionScope,
+	ReactionsParams,
+	ReactionsReport,
+	ReactionsTask,
+)
 from pxcontrol.engine.tasks.service_messages import (
 	ServiceMessagesParams,
 	ServiceMessagesTask,
@@ -36,15 +43,16 @@ from pxcontrol.engine.tasks.service_messages import (
 )
 
 #: Параметры любого вида (объединение — по одному типу на вид).
-TaskParams = ServiceMessagesParams | DeletedAccountsParams
+TaskParams = ServiceMessagesParams | DeletedAccountsParams | ReactionsParams
 
 #: Отчёт любого вида.
-TaskReport = ServiceReport | MembersReport
+TaskReport = ServiceReport | MembersReport | ReactionsReport
 
 #: Реестр видов: ключ колонки → спецификация.
 SPECS: dict[TaskKind, TaskSpec[Any, Any]] = {
 	TaskKind.SERVICE_MESSAGES: ServiceMessagesTask(),
 	TaskKind.DELETED_ACCOUNTS: DeletedAccountsTask(),
+	TaskKind.REACTIONS: ReactionsTask(),
 }
 
 
@@ -65,6 +73,11 @@ __all__ = [
 	"DeletedAccountsParams",
 	"DeletedAccountsTask",
 	"MembersReport",
+	"ReactionChoice",
+	"ReactionScope",
+	"ReactionsParams",
+	"ReactionsReport",
+	"ReactionsTask",
 	"RunEvent",
 	"RunOutcome",
 	"ServiceMessagesParams",

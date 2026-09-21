@@ -111,6 +111,21 @@
 поста** (у отложенного — номер записи в очереди отложенных сервера):
 по нему бот и дорисовывает кнопки.
 
+## Реакции ([ADR-0039](../02-architecture/decisions/0039-reactions-task.md))
+
+Три userbot-операции для задачи реакций, все с приоритетом
+`MAINTENANCE`: `userbot_available_reactions` — режим и перечень
+разрешённых реакций сообщества с описаниями (`channels.getFullChannel`
+→ `available_reactions` плюс глобальный `messages.getAvailableReactions`
+без неактивных; кастомные эмодзи не отдаются); `userbot_reactions_page`
+— страница ленты без служебных записей с реакциями текущего аккаунта
+(`chosen_order`; при флаге `min` дочитываются
+`messages.getMessagesReactions` по номерам страницы — второй запрос
+в том же обращении); `userbot_send_reaction` — `messages.sendReaction`
+списком `ReactionEmoji`, `add_to_recent=False`. Отказы по записи
+(`REACTION_INVALID`, `REACTIONS_TOO_MANY`, `PREMIUM_ACCOUNT_REQUIRED`)
+переводятся в `UserbotReactionError` — пропуск записи, а не сбой.
+
 ## Дорожка аккаунта ([ADR-0024](../02-architecture/decisions/0024-telegram-account-lane.md))
 
 Единица дефицита в Telegram — **аккаунт**: его нельзя дёргать

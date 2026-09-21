@@ -15,6 +15,7 @@ from pxcontrol.engine.telegram.mtproto import (
 	UserbotFloodError,
 	UserbotMessageGoneError,
 	UserbotNotConnectedError,
+	UserbotReactionError,
 	UserbotSessionExpiredError,
 	UserbotUnavailableError,
 	community_kind_from_entity,
@@ -25,6 +26,7 @@ from pxcontrol.engine.telegram.rights import (
 	ParticipantStatus,
 )
 from pxcontrol.engine.telegram.types import (
+	ChatReactionsMode,
 	CommunityKind,
 	MediaKind,
 	OutgoingFile,
@@ -1599,3 +1601,172 @@ def test_default_client_never_sleeps_on_flood_itself() -> None:
 	from pxcontrol.engine.telegram.mtproto import _default_client
 
 	assert _default_client(1, "hash").flood_sleep_threshold == 0
+
+
+# --- реакции (ADR-0039) --------------------------------------------------------
+
+
+class _ReactionsClient(_MaintenanceClient):
+	"""Подставной клиент для реакций: перечень, лента с реакциями, отправка."""
+
+	def __init__(self) -> None:
+		super().__init__()
+		self.chat_reactions: Any = None  # available_reactions в channelFull
+		self.reaction_requests: list[Any] = []
+		self.reactions_refresh: dict[int, Any] = {}  # ответ getMessagesReactions
+		self.refresh_calls: list[list[int]] = []
+		self.send_error: Exception | None = None
+
+	async def __call__(self, request: Any) -> Any:
+		from telethon.tl import types
+
+		name = type(request).__name__
+		if name == "GetFullChannelRequest":
+			return SimpleNamespace(
+				full_chat=SimpleNamespace(available_reactions=self.chat_reactions)
+			)
+		if name == "GetAvailableReactionsRequest":
+			return SimpleNamespace(
+				reactions=[
+					SimpleNamespace(
+						reaction="👍", title="Thumbs Up", premium=False, inactive=False
+					),
+					SimpleNamespace(reaction="🔥", title="Fire", premium=False, inactive=False),
+					SimpleNamespace(reaction="🦄", title="Unicorn", premium=True, inactive=False),
+					SimpleNamespace(reaction="💤", title="Old", premium=False, inactive=True),
+				]
+			)
+		if name == "GetMessagesReactionsRequest":
+			self.refresh_calls.append(list(request.id))
+			return SimpleNamespace(
+				updates=[
+					types.UpdateMessageReactions(
+						peer=types.PeerChannel(1), msg_id=msg_id, reactions=reactions
+					)
+					for msg_id, reactions in self.reactions_refresh.items()
+				]
+			)
+		if name == "SendReactionRequest":
+			if self.send_error is not None:
+				raise self.send_error
+			self.reaction_requests.append(request)
+			return SimpleNamespace(updates=[])
+		return await super().__call__(request)
+
+
+def _reacted_message(message_id: int, mine: list[str], *, min_flag: bool = False) -> Any:
+	"""Пост с реакциями; ``mine`` — реакции текущего аккаунта (chosen_order)."""
+	from telethon.tl import types
+
+	results = [
+		types.ReactionCount(reaction=types.ReactionEmoji(emoticon=emoji), count=1, chosen_order=i)
+		for i, emoji in enumerate(mine)
+	]
+	results.append(types.ReactionCount(reaction=types.ReactionEmoji(emoticon="😁"), count=5))
+	return types.Message(
+		id=message_id,
+		peer_id=types.PeerChannel(1),
+		date=datetime(2026, 9, 1, tzinfo=UTC),
+		message="пост",
+		reactions=types.MessageReactions(results=results, min=min_flag),
+	)
+
+
+async def test_available_reactions_all_lists_active_catalogue() -> None:
+	"""Режим «любые» — весь глобальный список без неактивных, с признаком Premium."""
+	from telethon.tl import types
+
+	fake = _ReactionsClient()
+	fake.chat_reactions = types.ChatReactionsAll()
+	allowed = await _transport(fake).available_reactions("-1001")
+	assert allowed.mode is ChatReactionsMode.ALL
+	assert [option.emoji for option in allowed.options] == ["👍", "🔥", "🦄"]
+	assert allowed.options[2].premium is True
+
+
+async def test_available_reactions_some_keeps_only_listed_with_titles() -> None:
+	"""Режим «некоторые» — перечень сообщества с описаниями из каталога."""
+	from telethon.tl import types
+
+	fake = _ReactionsClient()
+	fake.chat_reactions = types.ChatReactionsSome(
+		reactions=[types.ReactionEmoji(emoticon="🔥"), types.ReactionCustomEmoji(document_id=5)]
+	)
+	allowed = await _transport(fake).available_reactions("-1001")
+	assert allowed.mode is ChatReactionsMode.SOME
+	assert [(o.emoji, o.title) for o in allowed.options] == [("🔥", "Fire")]
+
+
+async def test_available_reactions_none_and_missing_mean_forbidden() -> None:
+	"""«Запрещены» и отсутствующее поле — разрешённых нет."""
+	from telethon.tl import types
+
+	fake = _ReactionsClient()
+	fake.chat_reactions = types.ChatReactionsNone()
+	assert (await _transport(fake).available_reactions("-1001")).mode is ChatReactionsMode.NONE
+	fake.chat_reactions = None
+	assert (await _transport(fake).available_reactions("-1001")).mode is ChatReactionsMode.NONE
+
+
+async def test_reactions_page_reads_my_reactions_and_skips_service() -> None:
+	"""Страница: свои реакции по chosen_order, служебные записи отброшены."""
+	from telethon.tl import types
+
+	fake = _ReactionsClient()
+	fake.history_pages = [
+		[
+			_reacted_message(30, ["👍"]),
+			_service_message(29, types.MessageActionPinMessage()),
+			_reacted_message(28, []),
+			_reacted_message(27, []),
+		]
+	]
+	page = await _transport(fake).reactions_page("-1001", 0, 100)
+	assert [(post.id, post.mine) for post in page.posts] == [(30, ("👍",)), (28, ()), (27, ())]
+	assert page.scanned == 4
+	assert page.next_offset_id == 27
+	assert fake.refresh_calls == []  # дочитывать нечего
+
+
+async def test_reactions_page_refreshes_min_reactions() -> None:
+	"""Реакции с флагом min дочитываются отдельным запросом по номерам."""
+	from telethon.tl import types
+
+	fake = _ReactionsClient()
+	fake.history_pages = [[_reacted_message(30, [], min_flag=True), _reacted_message(29, ["🔥"])]]
+	fake.reactions_refresh = {
+		30: types.MessageReactions(
+			results=[
+				types.ReactionCount(
+					reaction=types.ReactionEmoji(emoticon="👍"), count=1, chosen_order=0
+				)
+			]
+		)
+	}
+	page = await _transport(fake).reactions_page("-1001", 0, 100)
+	assert fake.refresh_calls == [[30]]
+	assert [(post.id, post.mine) for post in page.posts] == [(30, ("👍",)), (29, ("🔥",))]
+
+
+async def test_send_reaction_sends_emoji_list_without_recent() -> None:
+	"""Реакции уходят списком ReactionEmoji, в «недавние» не добавляются."""
+	fake = _ReactionsClient()
+	await _transport(fake).send_reaction("-1001", 30, ["👍", "🔥"])
+	(request,) = fake.reaction_requests
+	assert request.msg_id == 30
+	assert [r.emoticon for r in request.reaction] == ["👍", "🔥"]
+	assert request.add_to_recent is False
+
+
+async def test_send_reaction_refusals_become_reaction_error() -> None:
+	"""REACTION_INVALID и «нужен Premium» — отказ по записи, а не сбой связи."""
+	from telethon import errors
+
+	fake = _ReactionsClient()
+	for error in (
+		errors.ReactionInvalidError(request=None),
+		errors.PremiumAccountRequiredError(request=None),
+	):
+		fake.send_error = error
+		with pytest.raises(UserbotReactionError):
+			await _transport(fake).send_reaction("-1001", 30, ["🦄"])

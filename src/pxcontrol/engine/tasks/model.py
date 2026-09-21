@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -44,6 +44,7 @@ class TaskKind(StrEnum):
 
 	SERVICE_MESSAGES = "service_messages"  # служебные записи в ленте (ADR-0026)
 	DELETED_ACCOUNTS = "deleted_accounts"  # удалённые аккаунты среди участников
+	REACTIONS = "reactions"  # реакции на записи выбранными пользователями (ADR-0039)
 
 
 class TaskTrigger(StrEnum):
@@ -80,16 +81,20 @@ _R = TypeVar("_R")
 class TaskContext:
 	"""Что вид задачи получает от сервиса на время одного запуска.
 
-	Снимки сообщества и исполнителя, признак «без изменений» и три
-	обратных вызова: ход работы для карточки, событие в журнал запуска
-	и проверка «пора остановиться». Сам вид ни очереди, ни базы,
-	ни исполнителя выбирать не может — это забота сервиса.
+	Снимки сообщества и исполнителя, признак «без изменений», состояние
+	вида между запусками и четыре обратных вызова: ход работы для
+	карточки, событие в журнал запуска, проверка «пора остановиться»
+	и прерываемая пауза. Сам вид ни очереди, ни базы, ни исполнителя
+	выбирать не может — это забота сервиса.
 
 	Attributes:
 		community: сообщество-цель (снимок: задача работает по
 			``tg_chat_id`` и от строки в базе не зависит).
 		executor: исполнитель, чьими руками идёт работа (пользователь).
 		dry_run: «без изменений» — только посмотреть и посчитать.
+		cursor: состояние вида между запусками (JSON-словарь; None —
+			ещё не было). Вид пишет сюда новое состояние — сервис
+			сохраняет его вместе с исходом запуска.
 	"""
 
 	def __init__(
@@ -98,16 +103,20 @@ class TaskContext:
 		executor: ExecutorDto,
 		*,
 		dry_run: bool,
+		cursor: dict[str, Any] | None,
 		progress: Callable[[float, str | None], None],
 		log: Callable[[str], None],
 		check_stop: Callable[[], None],
+		sleep: Callable[[float], Awaitable[None]],
 	) -> None:
 		self.community = community
 		self.executor = executor
 		self.dry_run = dry_run
+		self.cursor = cursor
 		self._progress = progress
 		self._log = log
 		self._check_stop = check_stop
+		self._sleep = sleep
 
 	def progress(self, fraction: float, note: str | None = None) -> None:
 		"""Сообщает долю выполнения и пометку состояния для карточки."""
@@ -124,6 +133,11 @@ class TaskContext:
 			JobCancelled: Отмену запросил человек или останавливается движок.
 		"""
 		self._check_stop()
+
+	async def sleep(self, seconds: float) -> None:
+		"""Пауза между шагами, которую прерывает остановка движка (ADR-0020)."""
+		if seconds > 0:
+			await self._sleep(seconds)
 
 
 class TaskSpec(Protocol[_P, _R]):
@@ -161,6 +175,18 @@ class TaskSpec(Protocol[_P, _R]):
 		"""Какое право нужно исполнителю для такого запуска."""
 		...
 
+	def choose_executor(
+		self, params: _P, cursor: dict[str, Any] | None, capable: Sequence[ExecutorDto]
+	) -> ExecutorDto | None:
+		"""Кто из способных поведёт этот запуск; None — никто не годится.
+
+		``capable`` — исполнители-пользователи с нужным правом в порядке
+		диспетчера (ADR-0036). Большинству видов подходит первый
+		(:func:`first_capable`); вид с названными исполнителями выбирает
+		среди них по своему состоянию (реакции — по кругу).
+		"""
+		...
+
 	def title(self, *, dry_run: bool) -> str:
 		"""Что делает запуск, по-русски («Чистка служебных записей»)."""
 		...
@@ -196,7 +222,12 @@ class TaskTitle:
 	hint: str  # объяснение человеку, что это и зачем
 
 
-def check_range(what: str, value: int, limits: tuple[int, int]) -> None:
+def first_capable(capable: Sequence[ExecutorDto]) -> ExecutorDto | None:
+	"""Выбор исполнителя по умолчанию: первый в порядке диспетчера."""
+	return capable[0] if capable else None
+
+
+def check_range(what: str, value: float, limits: tuple[float, float]) -> None:
 	"""Проверяет, что число в допустимых границах.
 
 	Raises:
@@ -204,7 +235,7 @@ def check_range(what: str, value: int, limits: tuple[int, int]) -> None:
 	"""
 	low, high = limits
 	if not low <= value <= high:
-		raise TaskError(f"{what}: допустимо от {low} до {high}, а указано {value}.")
+		raise TaskError(f"{what}: допустимо от {low:g} до {high:g}, а указано {value:g}.")
 
 
 def as_int(payload: dict[str, Any], key: str, default: int) -> int:

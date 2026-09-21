@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -46,6 +46,8 @@ from pxcontrol.engine.telegram.stats_graph import (
 from pxcontrol.engine.telegram.types import (
 	FORUM_TOPICS_PAGE,
 	TELEGRAM_MAX_SCHEDULED,
+	ChatReactions,
+	ChatReactionsMode,
 	CommunityAnalytics,
 	CommunityInfo,
 	CommunityKind,
@@ -60,6 +62,9 @@ from pxcontrol.engine.telegram.types import (
 	ParticipantsPage,
 	PublishedMessage,
 	PublishedPage,
+	ReactablePost,
+	ReactionOption,
+	ReactionsPage,
 	RecentPost,
 	ScheduledMessage,
 	ServiceMessageInfo,
@@ -152,6 +157,17 @@ class UserbotMessageGoneError(UserbotUnavailableError):
 	списка и действием — штатная гонка (истина живёт на сервере,
 	ADR-0010). Отдельный класс: это не отказ в правах и не сбой связи,
 	а сигнал перечитать список.
+	"""
+
+
+class UserbotReactionError(UserbotUnavailableError):
+	"""Telegram не принял реакцию на эту запись (ADR-0039).
+
+	``REACTION_INVALID`` (такой эмодзи здесь не разрешён),
+	``REACTIONS_TOO_MANY`` (у записи уже предел разных реакций),
+	``PREMIUM_ACCOUNT_REQUIRED`` (эмодзи только для Premium). Отказ
+	по одной записи — пропуск, а не конец прохода: остальные записи
+	реакцию получат.
 	"""
 
 
@@ -284,6 +300,14 @@ def _translate_error(exc: Exception) -> UserbotUnavailableError:
 		| errors.UserDeactivatedError,
 	):
 		return UserbotSessionExpiredError(_SESSION_EXPIRED_TEXT)
+	if isinstance(
+		exc,
+		errors.ReactionInvalidError
+		| errors.ReactionEmptyError
+		| errors.ReactionsTooManyError
+		| errors.PremiumAccountRequiredError,
+	):
+		return UserbotReactionError(f"Telegram не принял реакцию: {exc}")
 	if isinstance(exc, errors.MessageDeleteForbiddenError):
 		# отказ в удалении — не сбой прохода, а пропуск записи (ADR-0026).
 		# Перевод живёт здесь, а не отдельной веткой except у операции:
@@ -766,6 +790,26 @@ def _service_message_id(produced: Any) -> int | None:
 		return max(ids) if ids else None
 	message_id = getattr(produced, "id", None)
 	return int(message_id) if message_id is not None else None
+
+
+def _mine_reactions(reactions: Any) -> tuple[str, ...]:
+	"""Эмодзи реакций текущего аккаунта из ``messageReactions`` (чистая).
+
+	Своя реакция помечена ``chosen_order`` (документация Telegram:
+	«if set, the current user also sent this reaction»). Реакции
+	на кастомные эмодзи и платные учитываются как поставленные
+	(запись уже с реакцией), но без эмодзи — им даётся пустое имя,
+	которого в выборе задачи не бывает.
+	"""
+	if reactions is None:
+		return ()
+	mine: list[str] = []
+	for item in getattr(reactions, "results", None) or []:
+		if getattr(item, "chosen_order", None) is None:
+			continue
+		reaction = getattr(item, "reaction", None)
+		mine.append(str(getattr(reaction, "emoticon", "") or ""))
+	return tuple(mine)
 
 
 def _peer_id(chat_id: str) -> int:
@@ -1790,6 +1834,141 @@ class MtprotoTransport:
 			next_offset_id=oldest.id if oldest is not None and oldest.id > 1 else None,
 			oldest_date=oldest.date if oldest is not None else None,
 		)
+
+	async def available_reactions(self, chat_id: str) -> ChatReactions:
+		"""Какие реакции разрешены в сообществе — с описаниями (ADR-0039).
+
+		Режим и перечень приходят полем ``available_reactions``
+		в ``channelFull`` (тот же ответ, что читает статистика);
+		описания стандартных эмодзи и признак «только Premium» —
+		из глобального списка ``messages.getAvailableReactions``.
+		Два запроса в одном обращении: перечень сообщества без описаний
+		человеку не показать. Реакции на кастомные эмодзи не предлагаются:
+		их ставят только с Premium, и стандартных эмодзи для задачи
+		достаточно.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Флуд-лимит.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.channels import GetFullChannelRequest
+		from telethon.tl.functions.messages import GetAvailableReactionsRequest
+		from telethon.tl.types import ChatReactionsAll, ChatReactionsSome, ReactionEmoji
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			full = await client(GetFullChannelRequest(entity))
+			catalogue = await client(GetAvailableReactionsRequest(hash=0))
+		known = {
+			item.reaction: ReactionOption(
+				emoji=item.reaction, title=item.title, premium=bool(getattr(item, "premium", False))
+			)
+			for item in getattr(catalogue, "reactions", [])
+			if not getattr(item, "inactive", False)
+		}
+		allowed = getattr(getattr(full, "full_chat", None), "available_reactions", None)
+		if isinstance(allowed, ChatReactionsAll):
+			return ChatReactions(ChatReactionsMode.ALL, tuple(known.values()))
+		if isinstance(allowed, ChatReactionsSome):
+			options = tuple(
+				known.get(r.emoticon, ReactionOption(emoji=r.emoticon, title=r.emoticon))
+				for r in allowed.reactions
+				if isinstance(r, ReactionEmoji)
+			)
+			return ChatReactions(ChatReactionsMode.SOME, options)
+		# ChatReactionsNone и отсутствующее поле: разрешённых нет.
+		# Что означает отсутствие поля, документация не говорит —
+		# честнее показать «запрещены», чем предложить эмодзи, которые
+		# сервер отвергнет (проверяется живьём, ADR-0039)
+		return ChatReactions(ChatReactionsMode.NONE)
+
+	async def reactions_page(self, chat_id: str, offset_id: int, limit: int) -> ReactionsPage:
+		"""Читает страницу ленты с реакциями текущего аккаунта (ADR-0039).
+
+		Своя реакция видна по ``chosen_order`` у ``reactionCount`` — но
+		только если ``messageReactions`` пришёл без флага ``min``
+		(тогда сведений о текущем пользователе в нём нет, и они
+		дочитываются отдельным ``messages.getMessagesReactions``
+		по номерам страницы — второй запрос в том же обращении).
+
+		Args:
+			chat_id: сообщество.
+			offset_id: читать записи старше этого id (0 — с самых новых).
+			limit: сколько сообщений прочитать (Telegram отдаёт до 100).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Флуд-лимит — проход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.messages import GetMessagesReactionsRequest
+		from telethon.tl.types import MessageService
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			history = await client.get_messages(entity, limit=limit, offset_id=offset_id)
+		posts = [
+			message
+			for message in history
+			if not isinstance(message, MessageService) and getattr(message, "date", None)
+		]
+		unknown = [m.id for m in posts if getattr(getattr(m, "reactions", None), "min", False)]
+		fresh: dict[int, Any] = {}
+		if unknown:
+			async with _mtproto_errors():
+				updates = await client(GetMessagesReactionsRequest(peer=entity, id=unknown))
+			for update in getattr(updates, "updates", []):
+				if type(update).__name__ == "UpdateMessageReactions":
+					fresh[update.msg_id] = update.reactions
+		oldest = next(
+			(item for item in reversed(history) if getattr(item, "date", None) is not None),
+			None,
+		)
+		return ReactionsPage(
+			posts=[
+				ReactablePost(
+					id=m.id,
+					date=m.date,
+					mine=_mine_reactions(fresh.get(m.id, getattr(m, "reactions", None))),
+				)
+				for m in posts
+			],
+			scanned=len(history),
+			next_offset_id=oldest.id if oldest is not None and oldest.id > 1 else None,
+		)
+
+	async def send_reaction(self, chat_id: str, message_id: int, emojis: Sequence[str]) -> None:
+		"""Ставит реакции на запись (несколько — только с Premium).
+
+		Список уходит целиком: по правилам Telegram он заменяет реакции
+		пользователя на записи, порядок — по возрастанию времени.
+		В «недавние» реакции не добавляется: задача не должна менять
+		панель быстрых реакций человека в его клиенте.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotReactionError: Telegram не принял реакцию (эмодзи
+				не разрешён, предел разных реакций, нужен Premium).
+			UserbotMessageGoneError: Записи уже нет.
+			UserbotFloodError: Флуд-лимит — проход прекращается.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.messages import SendReactionRequest
+		from telethon.tl.types import ReactionEmoji
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			await client(
+				SendReactionRequest(
+					peer=entity,
+					msg_id=message_id,
+					reaction=[ReactionEmoji(emoticon=emoji) for emoji in emojis],
+					add_to_recent=False,
+				)
+			)
 
 	async def delete_messages(self, chat_id: str, message_ids: list[int]) -> int:
 		"""Удаляет сообщения сообщества; возвращает, сколько удалилось.

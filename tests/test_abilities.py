@@ -134,3 +134,13 @@ def test_publishing_as_community_needs_anonymity_in_groups() -> None:
 	assert not can(member(send_plain=True), action, GROUP), "участник от имени группы не пишет"
 	# обычная публикация в группе участнику по-прежнему доступна
 	assert can(member(send_plain=True), ExecutorAction.PUBLISH, GROUP)
+
+
+def test_reacting_is_a_member_permission() -> None:
+	"""Реакции — разрешение участника (ADR-0039): администратору всегда, участнику по флагу."""
+	assert can(admin(), ExecutorAction.REACT, CHANNEL)
+	assert can(member(send_reactions=True), ExecutorAction.REACT, GROUP)
+	assert not can(member(send_plain=True), ExecutorAction.REACT, GROUP)
+	left = ExecutorRights(ParticipantStatus.LEFT, AdminRights(), MemberRights(send_reactions=True))
+	assert not can(left, ExecutorAction.REACT, CHANNEL)
+	assert ExecutorAction.REACT in ACTION_WORDS

@@ -15,11 +15,20 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pxcontrol.engine.services.abilities import ExecutorAction, can
-from pxcontrol.engine.tasks.model import TaskContext, TaskKind, TaskTitle, as_int, check_range
+from pxcontrol.engine.services.communities import ExecutorDto
+from pxcontrol.engine.tasks.model import (
+	TaskContext,
+	TaskKind,
+	TaskTitle,
+	as_int,
+	check_range,
+	first_capable,
+)
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
 from pxcontrol.engine.telegram.types import DeletedAccount, ParticipantsPage
 
@@ -157,6 +166,14 @@ class DeletedAccountsTask:
 
 	def action(self, params: DeletedAccountsParams, *, dry_run: bool) -> ExecutorAction:
 		return ExecutorAction.READ_HISTORY if dry_run else ExecutorAction.BAN
+
+	def choose_executor(
+		self,
+		params: DeletedAccountsParams,
+		cursor: dict[str, Any] | None,
+		capable: Sequence[ExecutorDto],
+	) -> ExecutorDto | None:
+		return first_capable(capable)
 
 	def title(self, *, dry_run: bool) -> str:
 		return "Поиск удалённых аккаунтов" if dry_run else "Исключение удалённых аккаунтов"

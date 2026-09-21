@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from pxcontrol.engine.services.abilities import ExecutorAction
+from pxcontrol.engine.services.communities import ExecutorDto
 from pxcontrol.engine.tasks.model import (
 	TaskContext,
 	TaskError,
@@ -30,6 +31,7 @@ from pxcontrol.engine.tasks.model import (
 	TaskTitle,
 	as_int,
 	check_range,
+	first_capable,
 )
 from pxcontrol.engine.telegram.types import ServiceMessageKind, ServiceMessagesPage
 
@@ -213,6 +215,14 @@ class ServiceMessagesTask:
 
 	def action(self, params: ServiceMessagesParams, *, dry_run: bool) -> ExecutorAction:
 		return ExecutorAction.READ_HISTORY if dry_run else ExecutorAction.DELETE_OTHERS
+
+	def choose_executor(
+		self,
+		params: ServiceMessagesParams,
+		cursor: dict[str, Any] | None,
+		capable: Sequence[ExecutorDto],
+	) -> ExecutorDto | None:
+		return first_capable(capable)
 
 	def title(self, *, dry_run: bool) -> str:
 		return "Просмотр служебных записей" if dry_run else "Чистка служебных записей"

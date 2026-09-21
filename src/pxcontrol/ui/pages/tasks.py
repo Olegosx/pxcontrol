@@ -35,6 +35,7 @@ from qfluentwidgets import (
 	CaptionLabel,
 	CheckBox,
 	ComboBox,
+	DoubleSpinBox,
 	LineEdit,
 	PushButton,
 	SegmentedWidget,
@@ -47,11 +48,15 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
-from pxcontrol.engine.services.communities import CommunityDto
+from pxcontrol.engine.services.communities import CommunityDto, ExecutorDto
 from pxcontrol.engine.services.tasks import TaskDto, TaskJobDto, TaskRunDto
 from pxcontrol.engine.tasks import (
 	DeletedAccountsParams,
 	MembersReport,
+	ReactionChoice,
+	ReactionScope,
+	ReactionsParams,
+	ReactionsReport,
 	RunOutcome,
 	ServiceMessagesParams,
 	ServiceReport,
@@ -60,6 +65,7 @@ from pxcontrol.engine.tasks import (
 	TaskParams,
 	TaskTrigger,
 	deleted_accounts,
+	reactions,
 	service_messages,
 )
 from pxcontrol.engine.tasks.schedule import (
@@ -68,7 +74,13 @@ from pxcontrol.engine.tasks.schedule import (
 	ScheduleKind,
 	schedule_text,
 )
-from pxcontrol.engine.telegram.types import ServiceMessageKind
+from pxcontrol.engine.telegram.types import (
+	ChatReactions,
+	ExecutorRef,
+	OwnerKind,
+	ReactionOption,
+	ServiceMessageKind,
+)
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
@@ -107,6 +119,24 @@ TRIGGER_WORDS: dict[TaskTrigger, str] = {
 
 #: Сколько запусков читать в журнал за раз.
 RUNS_SHOWN = 100
+
+#: Названия видов задач по-русски (заголовки сегментов и журнала).
+KIND_TITLES: dict[TaskKind, str] = {
+	TaskKind.SERVICE_MESSAGES: service_messages.TITLE.noun,
+	TaskKind.DELETED_ACCOUNTS: deleted_accounts.TITLE.noun,
+	TaskKind.REACTIONS: reactions.TITLE.noun,
+}
+
+
+def reactor_label(executor: ExecutorDto) -> str:
+	"""Подпись пользователя в списке реагирующих: имя и состояние."""
+	notes = []
+	if executor.paused:
+		notes.append("приостановлен")
+	if not executor.status.in_community:
+		notes.append("не состоит")
+	return f"{executor.label} ({', '.join(notes)})" if notes else executor.label
+
 
 #: Виды расписания в порядке показа и их подписи в выпадающем списке.
 SCHEDULE_KINDS: tuple[tuple[ScheduleKind, str], ...] = (
@@ -508,6 +538,283 @@ class _DeletedAccountsSection(_TaskSection):
 		self._kick_button.setEnabled(report.removed == 0 and report.found > 0)
 
 
+class _ReactionsSection(_TaskSection):
+	"""Раздел «реакции»: кто ставит, какие, каким записям, с какими паузами.
+
+	Два списка приходят из движка позже строки задачи — пользователи
+	с правом реагировать и разрешённые в сообществе реакции; сохранённые
+	параметры раскладываются по галочкам, когда списки на месте.
+	"""
+
+	kind = TaskKind.REACTIONS
+
+	def __init__(self, panel: TasksPanel, page_parent: QWidget) -> None:
+		super().__init__(panel, page_parent)
+		self._user_boxes: dict[int, CheckBox] = {}
+		self._reaction_rows: dict[str, tuple[CheckBox, SpinBox]] = {}
+		self._pending: ReactionsParams | None = None
+		box = QVBoxLayout(self)
+		box.setContentsMargins(0, 0, 0, 0)
+		box.setSpacing(density.spacing().row_spacing)
+		hint = BodyLabel(reactions.TITLE.hint, self)
+		hint.setWordWrap(True)
+		box.addWidget(hint)
+		columns = QHBoxLayout()
+		box.addLayout(columns, stretch=1)
+		users_column = QVBoxLayout()
+		users_column.addWidget(StrongBodyLabel("Кто ставит (по кругу)", self))
+		self._users_note = CaptionLabel("Читаю пользователей…", self)
+		users_column.addWidget(self._users_note)
+		users_area, self._users_box = list_area(self, density.spacing().list_spacing)
+		users_column.addWidget(users_area, stretch=1)
+		columns.addLayout(users_column, stretch=1)
+		reactions_column = QVBoxLayout()
+		reactions_column.addWidget(StrongBodyLabel("Какие реакции и их вес, %", self))
+		self._reactions_note = CaptionLabel("Читаю разрешённые реакции…", self)
+		reactions_column.addWidget(self._reactions_note)
+		reactions_area, self._reactions_box = list_area(self, density.spacing().list_spacing)
+		reactions_column.addWidget(reactions_area, stretch=1)
+		columns.addLayout(reactions_column, stretch=1)
+		box.addLayout(self._scope_row())
+		box.addLayout(self._limits_row())
+		box.addLayout(self._pause_row())
+		self._label = BodyLabel("Проход ещё не выполнялся.", self)
+		self._label.setWordWrap(True)
+		box.addWidget(self._label)
+		self._error = ErrorLabel(self)
+		box.addWidget(self._error)
+		box.addLayout(self._run_row())
+		box.addWidget(self.schedule_block(self))
+		box.addLayout(self.journal_row(self))
+
+	def _scope_row(self) -> QHBoxLayout:
+		"""Охват: каким записям ставить, и число случайных."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Каким записям:", self))
+		self._scope = ComboBox(self)
+		for scope, title in reactions.SCOPE_TITLES.items():
+			self._scope.addItem(title, userData=scope)
+		self._scope.currentIndexChanged.connect(self._on_scope)
+		row.addWidget(self._scope, stretch=1)
+		self._random_label = BodyLabel("сколько:", self)
+		row.addWidget(self._random_label)
+		self._random_count = SpinBox(self)
+		self._random_count.setRange(*reactions.RANDOM_COUNT_RANGE)
+		self._random_count.setValue(reactions.DEFAULT_RANDOM_COUNT)
+		row.addWidget(self._random_count)
+		self._on_scope()
+		return row
+
+	def _limits_row(self) -> QHBoxLayout:
+		"""Границы прохода: глубина просмотра и потолок реакций."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Просматривать последних записей:", self))
+		self._depth = SpinBox(self)
+		self._depth.setRange(*reactions.DEPTH_RANGE)
+		self._depth.setValue(reactions.DEFAULT_DEPTH)
+		row.addWidget(self._depth)
+		row.addWidget(BodyLabel("реакций за проход не больше:", self))
+		self._limit = SpinBox(self)
+		self._limit.setRange(*reactions.LIMIT_RANGE)
+		self._limit.setValue(reactions.DEFAULT_LIMIT)
+		row.addWidget(self._limit)
+		row.addStretch()
+		return row
+
+	def _pause_row(self) -> QHBoxLayout:
+		"""Пауза между реакциями и две реакции у Premium."""
+		row = QHBoxLayout()
+		row.addWidget(BodyLabel("Пауза между реакциями от", self))
+		self._pause_min = DoubleSpinBox(self)
+		self._pause_min.setRange(*reactions.PAUSE_RANGE)
+		self._pause_min.setSingleStep(0.1)
+		self._pause_min.setValue(reactions.DEFAULT_PAUSE_S[0])
+		row.addWidget(self._pause_min)
+		row.addWidget(BodyLabel("до", self))
+		self._pause_max = DoubleSpinBox(self)
+		self._pause_max.setRange(*reactions.PAUSE_RANGE)
+		self._pause_max.setSingleStep(0.1)
+		self._pause_max.setValue(reactions.DEFAULT_PAUSE_S[1])
+		row.addWidget(self._pause_max)
+		row.addWidget(BodyLabel("с", self))
+		row.addStretch()
+		self._premium_double = CheckBox("Premium ставит две реакции", self)
+		self._premium_double.setToolTip(
+			"Аккаунт с подпиской Premium может поставить несколько реакций — "
+			"выпадут две разные из набора"
+		)
+		row.addWidget(self._premium_double)
+		return row
+
+	def _run_row(self) -> QHBoxLayout:
+		"""Кнопки: подобрать записи (без изменений) и провести проход."""
+		row = QHBoxLayout()
+		row.addStretch()
+		preview = self.run_button("Подобрать записи", self)
+		preview.setToolTip("Прочитать ленту и посчитать подходящие записи — реакции не ставятся")
+		preview.clicked.connect(lambda: self._launch_checked(dry_run=True))
+		row.addWidget(preview)
+		run = self.run_button("Провести проход", self)
+		run.setToolTip("Следующий по кругу пользователь поставит реакции прямо сейчас")
+		run.clicked.connect(lambda: self._launch_checked(dry_run=False))
+		row.addWidget(run)
+		return row
+
+	def _launch_checked(self, *, dry_run: bool) -> None:
+		"""Проверяет заполнение формы и ставит запуск."""
+		params = self.params()
+		if not params.users:
+			self._error.fail("Отметьте хотя бы одного пользователя.")
+			return
+		if not any(choice.weight > 0 for choice in params.reactions):
+			self._error.fail("Отметьте хотя бы одну реакцию с ненулевым весом.")
+			return
+		self._error.succeed()
+		self.launch(dry_run=dry_run, status_text="Подбор идёт…" if dry_run else "Проход идёт…")
+
+	def _on_scope(self, *_args: object) -> None:
+		"""Число случайных записей нужно только охвату «случайные»."""
+		is_random = self._scope.currentData() is ReactionScope.RANDOM_WITHOUT_MINE
+		self._random_label.setVisible(is_random)
+		self._random_count.setVisible(is_random)
+
+	# --- списки из движка ---------------------------------------------------------
+
+	def mount(self, task: TaskDto) -> None:
+		super().mount(task)
+		self._panel.read_reactors(self.show_reactors)
+		self._panel.read_reaction_options(self.show_reaction_options, self._options_failed)
+
+	def show_reactors(self, executors: list[ExecutorDto]) -> None:
+		"""Раскладывает пользователей с правом реагировать галочками."""
+		clear_layout(self._users_box)
+		self._user_boxes.clear()
+		for executor in executors:
+			check = CheckBox(reactor_label(executor), self)
+			self._user_boxes[executor.owner.id] = check
+			self._users_box.addWidget(check)
+		self._users_note.setText(
+			"Пользователей с правом реагировать в пуле нет — введите их на «Участниках»"
+			if not executors
+			else "Отмеченные ставят реакции по очереди, по одному за запуск"
+		)
+		self._apply_pending()
+
+	def show_reaction_options(self, allowed: ChatReactions) -> None:
+		"""Раскладывает разрешённые реакции: галочка и вес."""
+		clear_layout(self._reactions_box)
+		self._reaction_rows.clear()
+		for option in allowed.options:
+			self._reactions_box.addWidget(self._reaction_row(option))
+		self._reactions_note.setText(
+			"В сообществе реакции запрещены — задача невыполнима"
+			if not allowed.options
+			else "Вес относительный: 50 и 50 — то же, что 100 и 100; 0 — не выпадает"
+		)
+		self._apply_pending()
+
+	def _options_failed(self, message: str) -> None:
+		"""Перечень реакций не прочитался — причина на месте, форма живая."""
+		self._reactions_note.setText(f"Разрешённые реакции не прочитаны: {message}")
+
+	def _reaction_row(self, option: ReactionOption) -> QWidget:
+		"""Строка реакции: галочка с эмодзи и названием, вес."""
+		box = QWidget(self)
+		row = QHBoxLayout(box)
+		row.setContentsMargins(0, 0, 0, 0)
+		title = f"{option.emoji}  {option.title}" + ("  · Premium" if option.premium else "")
+		check = CheckBox(title, box)
+		row.addWidget(check, stretch=1)
+		weight = SpinBox(box)
+		weight.setRange(*reactions.WEIGHT_RANGE)
+		weight.setValue(100)
+		row.addWidget(weight)
+		self._reaction_rows[option.emoji] = (check, weight)
+		return box
+
+	def _apply_pending(self) -> None:
+		"""Сохранённые параметры — по галочкам, когда списки уже на экране."""
+		params = self._pending
+		if params is None:
+			return
+		chosen_users = {user.id for user in params.users}
+		for account_id, check in self._user_boxes.items():
+			check.setChecked(account_id in chosen_users)
+		weights = {choice.emoji: choice.weight for choice in params.reactions}
+		for emoji, (check, weight) in self._reaction_rows.items():
+			check.setChecked(emoji in weights)
+			if emoji in weights:
+				weight.setValue(weights[emoji])
+
+	# --- контракт раздела ------------------------------------------------------------
+
+	def apply_params(self, params: TaskParams) -> None:
+		if not isinstance(params, ReactionsParams):
+			return
+		self._pending = params
+		for index in range(self._scope.count()):
+			if self._scope.itemData(index) is params.scope:
+				self._scope.setCurrentIndex(index)
+		self._random_count.setValue(params.random_count)
+		self._depth.setValue(params.depth)
+		self._limit.setValue(params.limit)
+		self._pause_min.setValue(params.pause_min_s)
+		self._pause_max.setValue(params.pause_max_s)
+		self._premium_double.setChecked(params.premium_double)
+		self._apply_pending()
+
+	def params(self) -> ReactionsParams:
+		scope = self._scope.currentData()
+		users = tuple(
+			ExecutorRef(OwnerKind.USER, account_id)
+			for account_id, check in self._user_boxes.items()
+			if check.isChecked()
+		)
+		chosen = tuple(
+			ReactionChoice(emoji, weight.value())
+			for emoji, (check, weight) in self._reaction_rows.items()
+			if check.isChecked()
+		)
+		pending = self._pending
+		return ReactionsParams(
+			# пока списки не пришли, галочек нет — сохранённый выбор
+			# остаётся прежним, а не стирается пустотой
+			users=users if self._user_boxes or pending is None else pending.users,
+			reactions=chosen if self._reaction_rows or pending is None else pending.reactions,
+			scope=scope if isinstance(scope, ReactionScope) else ReactionScope.ALL_WITHOUT_MINE,
+			random_count=self._random_count.value(),
+			depth=self._depth.value(),
+			limit=self._limit.value(),
+			pause_min_s=self._pause_min.value(),
+			pause_max_s=self._pause_max.value(),
+			premium_double=self._premium_double.isChecked(),
+		)
+
+	def set_status(self, text: str) -> None:
+		self._label.setText(text)
+
+	def confirm_schedule(self, schedule: Schedule) -> bool:
+		params = self.params()
+		if not params.users or not any(choice.weight > 0 for choice in params.reactions):
+			self._error.fail("Для расписания отметьте пользователей и хотя бы одну реакцию.")
+			return False
+		self._error.succeed()
+		return confirm_delete(
+			self,
+			f"Включить реакции в «{self._panel.community.title}» по расписанию "
+			f"({schedule_text(schedule)})?\n\nПользователей по кругу: {len(params.users)}; "
+			f"охват — {reactions.SCOPE_TITLES[params.scope]}; за проход не больше "
+			f"{params.limit} реакций. Каждый запуск — проход одного пользователя без "
+			"дополнительного подтверждения.",
+			accept_text="Включить",
+		)
+
+	def show_report(self, item: TaskJobDto) -> None:
+		report = item.report
+		if isinstance(report, ReactionsReport):
+			self._label.setText(reactions.reactions_summary(report, dry_run=item.dry_run))
+
+
 class _ScheduleEditor(QWidget):
 	"""Форма расписания раздела: вид, границы, включено, сохранение.
 
@@ -660,13 +967,10 @@ class TasksPanel(QWidget):
 		self._sections: list[_TaskSection] = [
 			_ServiceMessagesSection(self, self),
 			_DeletedAccountsSection(self, self),
+			_ReactionsSection(self, self),
 		]
-		for section, title in zip(
-			self._sections,
-			(service_messages.TITLE.noun, deleted_accounts.TITLE.noun),
-			strict=True,
-		):
-			self._add_page(str(section.kind), title, section)
+		for section in self._sections:
+			self._add_page(str(section.kind), KIND_TITLES[section.kind], section)
 			self._read_task(section)
 		self._segments.currentItemChanged.connect(self._show)
 		self._segments.setCurrentItem(str(self._sections[0].kind))
@@ -745,6 +1049,28 @@ class TasksPanel(QWidget):
 			self._show_error,
 		)
 
+	def read_reactors(self, ready: Callable[[list[ExecutorDto]], None]) -> None:
+		"""Читает пользователей пула с правом реагировать."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.tasks.reactors(self.community.id),
+			self,
+			ready,
+			self._show_error,
+		)
+
+	def read_reaction_options(
+		self, ready: Callable[[ChatReactions], None], failed: Callable[[str], None]
+	) -> None:
+		"""Читает разрешённые в сообществе реакции (одно обращение к Telegram)."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.tasks.reaction_options(self.community.id),
+			self,
+			ready,
+			failed,
+		)
+
 	def open_journal(self, task: TaskDto) -> None:
 		"""Открывает окно журнала запусков задачи."""
 		exec_dialog(TaskRunsDialog(self._worker, task, self.community, self.window()))
@@ -804,12 +1130,7 @@ class TaskRunsDialog(WorkDialog):
 	def __init__(
 		self, worker: EngineWorker, task: TaskDto, community: CommunityDto, parent: QWidget
 	) -> None:
-		title = (
-			service_messages.TITLE.noun
-			if task.kind is TaskKind.SERVICE_MESSAGES
-			else deleted_accounts.TITLE.noun
-		)
-		super().__init__(f"Журнал · {title} · {community.title}", parent)
+		super().__init__(f"Журнал · {KIND_TITLES[task.kind]} · {community.title}", parent)
 		self._worker = worker
 		self._task = task
 		self._runs: list[TaskRunDto] = []

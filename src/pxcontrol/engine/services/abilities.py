@@ -30,7 +30,7 @@ class ExecutorAction(StrEnum):
 	Перечень ровно тот, у которого есть потребитель: публикация и кнопки
 	(маршруты постов), удаление и исключение (обслуживание), приглашение,
 	чтение ссылки-приглашения и назначение (ввод исполнителя), чтение
-	истории (обслуживание же).
+	истории (обслуживание же), реакции (задача реакций, ADR-0039).
 	Новое действие — одна ветка в :func:`can` и один потребитель; заводить
 	их про запас в проекте не принято.
 	"""
@@ -44,6 +44,7 @@ class ExecutorAction(StrEnum):
 	INVITE_LINK = "invite_link"  # видеть основную ссылку-приглашение сообщества
 	PROMOTE = "promote"  # назначать администраторов (так входит бот в канал)
 	READ_HISTORY = "read_history"  # читать ленту и список участников
+	REACT = "react"  # ставить реакции на записи (задача реакций, ADR-0039)
 
 
 def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> bool:
@@ -70,6 +71,12 @@ def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> 
 		# ленту и участников видит тот, кто состоит: отдельного права
 		# на чтение Telegram не выдаёт
 		return rights.status.in_community
+	if action is ExecutorAction.REACT:
+		# реакции — разрешение участника (chatBannedRights.send_reactions);
+		# администратору ограничения не мешают
+		if rights.status.administers:
+			return True
+		return rights.status.in_community and rights.allowed.send_reactions
 	if action is ExecutorAction.INVITE:
 		# приглашать может и обычный участник, если сообщество ему это
 		# оставило, — в группах настройка частая
@@ -138,6 +145,7 @@ ACTION_WORDS: dict[ExecutorAction, str] = {
 	ExecutorAction.INVITE_LINK: "видеть ссылку-приглашение",
 	ExecutorAction.PROMOTE: "назначать администраторов",
 	ExecutorAction.READ_HISTORY: "читать историю и участников",
+	ExecutorAction.REACT: "ставить реакции",
 }
 
 

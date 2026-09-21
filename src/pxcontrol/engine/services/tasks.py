@@ -38,7 +38,7 @@ import random
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +49,7 @@ from pxcontrol.engine.db.types import as_utc, as_utc_optional
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.jobs import Job, JobCancelled, JobQueue, JobStatus
 from pxcontrol.engine.periodic import PeriodicTask
-from pxcontrol.engine.services.abilities import ACTION_WORDS, ExecutorAction
+from pxcontrol.engine.services.abilities import ACTION_WORDS, ExecutorAction, can
 from pxcontrol.engine.services.accounts import account_display
 from pxcontrol.engine.services.communities import (
 	CommunitiesService,
@@ -71,10 +71,12 @@ from pxcontrol.engine.tasks import (
 )
 from pxcontrol.engine.tasks.schedule import Schedule, ScheduleKind, next_run
 from pxcontrol.engine.telegram.types import (
+	ChatReactions,
 	DeletedAccount,
 	ExecutorRef,
 	OwnerKind,
 	ParticipantsPage,
+	ReactionsPage,
 	ServiceMessagesPage,
 )
 
@@ -132,6 +134,18 @@ class _TasksPort(Protocol):
 		self, account_id: int, chat_id: str, account: DeletedAccount
 	) -> int | None: ...
 
+	async def userbot_available_reactions(self, account_id: int, chat_id: str) -> ChatReactions: ...
+
+	async def userbot_reactions_page(
+		self, account_id: int, chat_id: str, offset_id: int, limit: int
+	) -> ReactionsPage: ...
+
+	async def userbot_send_reaction(
+		self, account_id: int, chat_id: str, message_id: int, emojis: Sequence[str]
+	) -> None: ...
+
+	def userbot_premium(self, account_id: int | None) -> bool: ...
+
 
 @dataclass(frozen=True)
 class TaskDto:
@@ -146,6 +160,7 @@ class TaskDto:
 		schedule: расписание.
 		next_run_at: следующий запуск по расписанию; None — не назначен.
 		last_run_at: когда задача запускалась в последний раз.
+		cursor: состояние вида между запусками; None — ещё не было.
 	"""
 
 	id: int
@@ -156,6 +171,7 @@ class TaskDto:
 	schedule: Schedule
 	next_run_at: datetime | None
 	last_run_at: datetime | None
+	cursor: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +262,8 @@ class _TaskJob(Job):
 		self.executor: ExecutorDto | None = None
 		self.report: TaskReport | None = None
 		self.events: list[RunEvent] = []
+		#: состояние вида после запуска (None — вид ничего не менял)
+		self.cursor: dict[str, Any] | None = None
 		# в одном сообществе в один момент идёт не больше одной задачи
 		self.locks = frozenset({("community", community.id)})
 
@@ -522,9 +540,7 @@ class TasksService:
 			await session.commit()
 			await session.refresh(row)
 			task = _task_dto(row)
-		community, _executor = await self._target(
-			task.community_id, spec.action(params, dry_run=dry_run)
-		)
+		community, _executor = await self._pick(task, dry_run=dry_run)
 		return self._put(
 			_TaskJob(
 				self._jobs.new_id(), task, community, dry_run=dry_run, trigger=TaskTrigger.MANUAL
@@ -689,10 +705,10 @@ class TasksService:
 		except EngineError as exc:
 			raise TaskError(str(exc)) from exc
 
-	async def _target(
+	async def _capable_users(
 		self, community_id: int, action: ExecutorAction
-	) -> tuple[CommunityDto, ExecutorDto]:
-		"""Сообщество и исполнитель, способный на это действие (ADR-0035).
+	) -> tuple[CommunityDto, list[ExecutorDto]]:
+		"""Сообщество и пользователи пула, способные на действие (ADR-0035).
 
 		Порядок — диспетчера (ADR-0036): свободный раньше занятого
 		загрузкой, при равенстве — публикатор по умолчанию. Выбор идёт
@@ -719,7 +735,62 @@ class TasksService:
 				"не может), и нужное право должно быть у них. Выдайте его в Telegram "
 				"и перепроверьте доступы."
 			)
-		return community, users[0]
+		return community, users
+
+	async def _pick(self, task: TaskDto, *, dry_run: bool) -> tuple[CommunityDto, ExecutorDto]:
+		"""Сообщество и исполнитель этого запуска — по правилу вида.
+
+		Способных даёт пул в порядке диспетчера, а кого из них взять,
+		решает вид (первого — уборка; следующего по кругу из названных —
+		реакции). Названные, но неспособные сейчас исполнители — отказ
+		с их перечислением: человек должен понять, кого вернуть в строй.
+
+		Raises:
+			TaskError: Сообщество не найдено, способных нет или среди
+				названных видом нет ни одного способного.
+		"""
+		spec = spec_of(task.kind)
+		community, users = await self._capable_users(
+			task.community_id, spec.action(task.params, dry_run=dry_run)
+		)
+		executor = spec.choose_executor(task.params, task.cursor, users)
+		if executor is None:
+			raise TaskError(
+				"Ни один из выбранных для задачи пользователей сейчас не может её "
+				"вести: они приостановлены, не состоят в сообществе или лишены нужного "
+				"права. Выберите других или верните этих в строй."
+			)
+		return community, executor
+
+	async def reaction_options(self, community_id: int) -> ChatReactions:
+		"""Какие реакции разрешены в сообществе — для формы задачи реакций.
+
+		Читает состоящий пользователь пула по диспетчеру: перечень
+		у сообщества один, чей аккаунт спросит — не важно.
+
+		Raises:
+			TaskError: Сообщество не найдено или некому прочитать.
+			UserbotUnavailableError: Telegram отказал.
+		"""
+		community, users = await self._capable_users(community_id, ExecutorAction.READ_HISTORY)
+		return await self._gateway.userbot_available_reactions(
+			users[0].owner.id, community.tg_chat_id
+		)
+
+	async def reactors(self, community_id: int) -> list[ExecutorDto]:
+		"""Пользователи пула, которым по снимку прав можно ставить реакции.
+
+		Приостановленные тоже в списке: их выбирают, чтобы не терять
+		настройку, а вести проход они не будут, пока на паузе.
+		"""
+		community = await self._community(community_id)
+		executors = await self._communities.list_executors(community_id)
+		return [
+			executor
+			for executor in executors
+			if executor.owner.kind is OwnerKind.USER
+			and can(executor.rights, ExecutorAction.REACT, community.kind)
+		]
 
 	async def _refresh_unread_rights(self, community_id: int) -> bool:
 		"""Уточняет права живым зондом, если снимка у кого-то ещё не было.
@@ -766,9 +837,7 @@ class TasksService:
 		"""
 		spec = spec_of(job.task.kind)
 		job.run_id = await self._open_run(job)
-		_community, executor = await self._target(
-			job.community.id, spec.action(job.task.params, dry_run=job.dry_run)
-		)
+		_community, executor = await self._pick(job.task, dry_run=job.dry_run)
 		job.executor = executor
 		await self._mark_executor(job.run_id, executor.owner)
 		self._log(job, f"исполнитель — {executor.label}")
@@ -776,11 +845,18 @@ class TasksService:
 			job.community,
 			executor,
 			dry_run=job.dry_run,
+			cursor=dict(job.task.cursor) if job.task.cursor is not None else None,
 			progress=lambda fraction, note: self._progress(job, fraction, note),
 			log=lambda text: self._log(job, text),
 			check_stop=lambda: self._check_stop(job),
+			sleep=self._jobs.wait_stop,
 		)
-		job.report = await spec.run(ctx, self._gateway, job.task.params)
+		try:
+			job.report = await spec.run(ctx, self._gateway, job.task.params)
+		finally:
+			# состояние вида сохраняется и при обрыве: вид сам решает,
+			# что записать до шага, который может не состояться
+			job.cursor = ctx.cursor
 		await self._after_run(job)
 
 	@staticmethod
@@ -879,6 +955,8 @@ class TasksService:
 			task_row = await session.get(CommunityTask, job.task.id)
 			if task_row is not None:
 				task_row.last_run_at = now
+				if job.cursor is not None:
+					task_row.cursor = job.cursor
 				# следующий момент — от конца этого запуска, каким бы он
 				# ни был: пауза между проходами считается между ними
 				if task_row.enabled:
@@ -932,6 +1010,7 @@ def _task_dto(row: CommunityTask) -> TaskDto:
 		schedule=Schedule.from_payload(row.schedule),
 		next_run_at=as_utc_optional(row.next_run_at),
 		last_run_at=as_utc_optional(row.last_run_at),
+		cursor=dict(row.cursor) if isinstance(row.cursor, dict) else None,
 	)
 
 

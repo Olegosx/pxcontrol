@@ -60,6 +60,7 @@ from pxcontrol.engine.telegram.rich_text import TextEntity
 from pxcontrol.engine.telegram.rights import AdminRights
 from pxcontrol.engine.telegram.types import (
 	BotRef,
+	ChatReactions,
 	CommunityAnalytics,
 	CommunityInfo,
 	CommunityStatsInfo,
@@ -74,6 +75,7 @@ from pxcontrol.engine.telegram.types import (
 	ParticipantsPage,
 	PublishedMessage,
 	PublishedPage,
+	ReactionsPage,
 	ScheduledMessage,
 	ServiceMessagesPage,
 	TelegramFloodError,
@@ -691,6 +693,38 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.service_messages_page(chat_id, offset_id, limit)
+
+	async def userbot_available_reactions(self, account_id: int, chat_id: str) -> ChatReactions:
+		"""Какие реакции разрешены в сообществе — с описаниями (ADR-0039).
+
+		Приоритет обслуживания и для формы задачи, и для запуска: одно
+		короткое обращение, а второго приоритета у операции не бывает
+		(ADR-0024, п. 3 — см. ``userbot_delete_messages``).
+
+		Raises: см. :meth:`MtprotoTransport.available_reactions`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			return await transport.available_reactions(chat_id)
+
+	async def userbot_reactions_page(
+		self, account_id: int, chat_id: str, offset_id: int, limit: int
+	) -> ReactionsPage:
+		"""Читает страницу ленты с реакциями аккаунта (задача реакций, ADR-0039).
+
+		Raises: см. :meth:`MtprotoTransport.reactions_page`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			return await transport.reactions_page(chat_id, offset_id, limit)
+
+	async def userbot_send_reaction(
+		self, account_id: int, chat_id: str, message_id: int, emojis: Sequence[str]
+	) -> None:
+		"""Ставит реакции на запись от имени аккаунта (ADR-0039).
+
+		Raises: см. :meth:`MtprotoTransport.send_reaction`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
+			await transport.send_reaction(chat_id, message_id, emojis)
 
 	async def userbot_delete_messages(
 		self, account_id: int, chat_id: str, message_ids: list[int]

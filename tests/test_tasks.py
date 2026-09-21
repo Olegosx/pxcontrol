@@ -11,14 +11,16 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, CommunityExecutor, TgAccount
 from pxcontrol.engine.jobs import JobStatus
-from pxcontrol.engine.services.communities import CommunitiesService
+from pxcontrol.engine.services.communities import CommunitiesService, ExecutorDto
 from pxcontrol.engine.services.tasks import (
 	EVENTS_CAP,
 	TaskDto,
@@ -29,6 +31,10 @@ from pxcontrol.engine.services.tasks import (
 from pxcontrol.engine.tasks import (
 	DeletedAccountsParams,
 	MembersReport,
+	ReactionChoice,
+	ReactionScope,
+	ReactionsParams,
+	ReactionsReport,
 	RunOutcome,
 	ServiceMessagesParams,
 	ServiceReport,
@@ -37,6 +43,14 @@ from pxcontrol.engine.tasks import (
 	TaskTrigger,
 )
 from pxcontrol.engine.tasks.deleted_accounts import members_summary
+from pxcontrol.engine.tasks.reactions import (
+	next_user,
+	pick_reaction,
+	pick_reactions,
+	reactions_summary,
+	rotation,
+	select_targets,
+)
 from pxcontrol.engine.tasks.schedule import Schedule, ScheduleKind, next_run, schedule_text
 from pxcontrol.engine.tasks.service_messages import (
 	DEFAULT_DELETE_LIMIT,
@@ -50,6 +64,7 @@ from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotFloodError,
+	UserbotReactionError,
 	service_message_kind,
 )
 from pxcontrol.engine.telegram.rights import (
@@ -59,11 +74,17 @@ from pxcontrol.engine.telegram.rights import (
 	ParticipantStatus,
 )
 from pxcontrol.engine.telegram.types import (
+	ChatReactions,
+	ChatReactionsMode,
 	CommunityInfo,
 	CommunityKind,
 	DeletedAccount,
 	ExecutorRef,
+	OwnerKind,
 	ParticipantsPage,
+	ReactablePost,
+	ReactionOption,
+	ReactionsPage,
 	ServiceMessageInfo,
 	ServiceMessageKind,
 	ServiceMessagesPage,
@@ -1458,3 +1479,349 @@ def test_schedule_texts_for_ui() -> None:
 	on = next_run_text(task(Schedule(ScheduleKind.INTERVAL, 35, 96), enabled=True, next_at=at))
 	assert "следующий запуск" in on and "2026" in on
 	assert parse_times(" 04:00, 16:30 ,,") == ("04:00", "16:30")
+
+
+# --- реакции (этап C, ADR-0039) -----------------------------------------------------
+
+
+class _ReactionsGateway(_FakeGateway):
+	"""Подставной шлюз реакций: перечень, лента с реакциями, отправка."""
+
+	def __init__(
+		self,
+		*,
+		mode: ChatReactionsMode = ChatReactionsMode.ALL,
+		options: tuple[str, ...] = ("👍", "🔥", "❤"),
+		feed: list[ReactionsPage] | None = None,
+		premium: bool = False,
+	) -> None:
+		super().__init__()
+		self.mode = mode
+		self.options = options
+		self.feed = feed or []
+		self.premium = premium
+		self.sent: list[tuple[int, int, tuple[str, ...]]] = []
+		self.refused: set[int] = set()  # записи, на которые Telegram не принимает реакцию
+
+	async def userbot_available_reactions(self, account_id: int, chat_id: str) -> ChatReactions:
+		return ChatReactions(
+			self.mode, tuple(ReactionOption(emoji=e, title=e) for e in self.options)
+		)
+
+	async def userbot_reactions_page(
+		self, account_id: int, chat_id: str, offset_id: int, limit: int
+	) -> ReactionsPage:
+		self.requested.append(offset_id)
+		if not self.feed:
+			return ReactionsPage(posts=[], scanned=0, next_offset_id=None)
+		return self.feed.pop(0)
+
+	async def userbot_send_reaction(
+		self, account_id: int, chat_id: str, message_id: int, emojis: Sequence[str]
+	) -> None:
+		if message_id in self.refused:
+			raise UserbotReactionError("Telegram не принял реакцию: REACTION_INVALID")
+		self.sent.append((account_id, message_id, tuple(emojis)))
+
+	def userbot_premium(self, account_id: int | None) -> bool:
+		return self.premium
+
+
+def _post(message_id: int, mine: tuple[str, ...] = ()) -> ReactablePost:
+	return ReactablePost(id=message_id, date=datetime.now(UTC), mine=mine)
+
+
+def _feed(*ids: int, mine: dict[int, tuple[str, ...]] | None = None) -> list[ReactionsPage]:
+	"""Одна страница ленты с записями по номерам."""
+	mine = mine or {}
+	posts = [_post(i, mine.get(i, ())) for i in ids]
+	return [ReactionsPage(posts=posts, scanned=len(posts), next_offset_id=None)]
+
+
+async def _add_user(db: Database, community_id: int, label: str) -> int:
+	"""Ещё один пользователь пула с правом реагировать (администратор)."""
+	async with db.session_factory() as session:
+		account = TgAccount(label=label, phone="+7902", session="s")
+		session.add(account)
+		await session.flush()
+		session.add(
+			CommunityExecutor(
+				community_id=community_id,
+				tg_account_id=account.id,
+				status=ParticipantStatus.ADMIN,
+				rights=ExecutorRights(
+					ParticipantStatus.ADMIN, AdminRights(), ALL_MEMBER_RIGHTS
+				).to_payload(),
+				checked_at=datetime.now(UTC),
+			)
+		)
+		await session.commit()
+		return account.id
+
+
+def _reaction_params(*user_ids: int, **overrides: Any) -> ReactionsParams:
+	"""Параметры реакций без пауз (тесты не ждут настоящих секунд)."""
+	base: dict[str, Any] = {
+		"users": tuple(ExecutorRef(OwnerKind.USER, i) for i in user_ids),
+		"reactions": (ReactionChoice("👍", 70), ReactionChoice("🔥", 30)),
+		"pause_min_s": 0.0,
+		"pause_max_s": 0.0,
+	}
+	base.update(overrides)
+	return ReactionsParams(**base)
+
+
+async def _account_id(db: Database, community_id: int) -> int:
+	"""Аккаунт публикатора сообщества из теста."""
+	from sqlalchemy import select
+
+	async with db.session_factory() as session:
+		return (
+			await session.execute(
+				select(Community.default_tg_account_id).where(Community.id == community_id)
+			)
+		).scalar_one()
+
+
+def test_pick_reaction_respects_weights_and_skips_zero() -> None:
+	"""Вес — вероятность: нулевой не выпадает, больший выпадает чаще."""
+	rng = random.Random(3)
+	choices = (ReactionChoice("👍", 90), ReactionChoice("🔥", 10), ReactionChoice("❤", 0))
+	drawn = [pick_reaction(choices, rng) for _ in range(500)]
+	assert "❤" not in drawn
+	assert drawn.count("👍") > drawn.count("🔥") * 3
+	assert pick_reaction((ReactionChoice("❤", 0),), rng) is None
+	assert set(pick_reactions(choices, 2, rng)) == {"🔥", "👍"}  # две разные
+
+
+def test_select_targets_by_scope_skips_posts_with_my_reaction() -> None:
+	"""Охваты: все без моей реакции, последняя, случайные — с потолком за проход."""
+	rng = random.Random(1)
+	posts = [_post(5), _post(4, ("👍",)), _post(3), _post(2), _post(1)]
+	everything = select_targets(
+		posts, ReactionScope.ALL_WITHOUT_MINE, random_count=3, limit=10, rng=rng
+	)
+	assert [p.id for p in everything] == [5, 3, 2, 1]
+	capped = select_targets(posts, ReactionScope.ALL_WITHOUT_MINE, random_count=3, limit=2, rng=rng)
+	assert [p.id for p in capped] == [5, 3]
+	last = select_targets(posts, ReactionScope.LAST_POST, random_count=3, limit=10, rng=rng)
+	assert [p.id for p in last] == [5]
+	reacted_last = [_post(9, ("🔥",)), _post(8)]
+	assert (
+		select_targets(reacted_last, ReactionScope.LAST_POST, random_count=1, limit=1, rng=rng)
+		== []
+	)
+	some = select_targets(
+		posts, ReactionScope.RANDOM_WITHOUT_MINE, random_count=2, limit=10, rng=rng
+	)
+	assert len(some) == 2 and all(not p.mine for p in some)
+
+
+def test_user_rotation_survives_shrunken_list() -> None:
+	"""Курсор по кругу; список пользователей мог уменьшиться — номер по модулю."""
+	users = (ExecutorRef(OwnerKind.USER, 1), ExecutorRef(OwnerKind.USER, 2))
+	assert next_user(users, None) == 0
+	assert next_user(users, {"next": 1}) == 1
+	assert next_user(users, {"next": 5}) == 1
+	assert [u.id for u in rotation(users, 1)] == [2, 1]
+
+
+def test_reactions_params_and_report_survive_json() -> None:
+	"""Параметры и отчёт реакций переживают запись и чтение."""
+	from pxcontrol.engine.tasks import spec_of
+
+	spec = spec_of(TaskKind.REACTIONS)
+	params = _reaction_params(1, 2, scope=ReactionScope.RANDOM_WITHOUT_MINE, premium_double=True)
+	assert spec.params_from_payload(spec.params_to_payload(params)) == params
+	report = ReactionsReport(executor="@a", scanned=10, candidates=3, reacted=2, by_emoji={"👍": 2})
+	assert spec.report_from_payload(spec.report_to_payload(report)) == report
+	assert (
+		spec.params_from_payload({"users": ["x"], "reactions": [{"weight": 5}]})
+		== ReactionsParams()
+	)
+
+
+def test_reactions_validation_names_the_problem() -> None:
+	"""Без пользователей, без реакций с весом, с перевёрнутой паузой — отказ."""
+	from pxcontrol.engine.tasks import spec_of
+
+	spec = spec_of(TaskKind.REACTIONS)
+	with pytest.raises(TaskError, match="пользователя"):
+		spec.validate(ReactionsParams(reactions=(ReactionChoice("👍", 1),)), dry_run=False)
+	with pytest.raises(TaskError, match="ненулевым весом"):
+		spec.validate(_reaction_params(1, reactions=(ReactionChoice("👍", 0),)), dry_run=False)
+	with pytest.raises(TaskError, match="верхняя граница"):
+		spec.validate(_reaction_params(1, pause_min_s=2.0, pause_max_s=1.0), dry_run=False)
+
+
+async def test_reactions_pass_reacts_to_posts_without_mine(db: Database) -> None:
+	"""Проход ставит реакции записям без реакции пользователя и пишет отчёт."""
+	gateway = _ReactionsGateway(feed=_feed(5, 4, 3, mine={4: ("👍",)}))
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	account_id = await _account_id(db, community_id)
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	await service.run_now(task.id, _reaction_params(account_id))
+	await service.settle()
+	item = (await service.state())[0]
+	assert item.status is JobStatus.DONE, item.error
+	report = item.report
+	assert isinstance(report, ReactionsReport)
+	assert (report.candidates, report.reacted, report.skipped) == (2, 2, 0)
+	assert [(m, len(e)) for _a, m, e in gateway.sent] == [(5, 1), (3, 1)]
+	assert all(emoji in ("👍", "🔥") for _a, _m, emojis in gateway.sent for emoji in emojis)
+	assert sum(report.by_emoji.values()) == 2
+	(run,) = await service.runs(task.id)
+	assert "Реакций поставлено: 2" in run.summary
+
+
+async def test_reactions_dry_run_only_counts(db: Database) -> None:
+	"""Запуск «без изменений» считает подходящие записи, ничего не ставя."""
+	gateway = _ReactionsGateway(feed=_feed(5, 4))
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	account_id = await _account_id(db, community_id)
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	await service.run_now(task.id, _reaction_params(account_id), dry_run=True)
+	await service.settle()
+	report = (await service.state())[0].report
+	assert isinstance(report, ReactionsReport)
+	assert (report.candidates, report.reacted) == (2, 0)
+	assert gateway.sent == []
+
+
+async def test_reactions_users_take_turns_across_runs(db: Database) -> None:
+	"""Пользователи идут по кругу: курсор задачи переживает запуски."""
+	gateway = _ReactionsGateway(feed=_feed(1) + _feed(2) + _feed(3))
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	first = await _account_id(db, community_id)
+	second = await _add_user(db, community_id, "@second")
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	for _ in range(3):
+		await service.run_now(task.id, _reaction_params(first, second))
+		await service.settle()
+	assert [account for account, _m, _e in gateway.sent] == [first, second, first]
+	fresh = await service.task(community_id, TaskKind.REACTIONS)
+	assert fresh.cursor == {"next": 1}
+
+
+async def test_reactions_skip_user_who_cannot_react_now(db: Database) -> None:
+	"""Названный, но приостановленный пользователь пропускается — очередь идёт дальше."""
+	gateway = _ReactionsGateway(feed=_feed(1))
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	first = await _account_id(db, community_id)
+	second = await _add_user(db, community_id, "@second")
+	async with db.session_factory() as session:  # первого приостановил человек (ADR-0029)
+		account = await session.get(TgAccount, first)
+		assert account is not None
+		account.paused = True
+		await session.commit()
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	await service.run_now(task.id, _reaction_params(first, second))
+	await service.settle()
+	assert [account for account, _m, _e in gateway.sent] == [second]
+
+
+async def test_reactions_refuse_when_no_named_user_is_capable(db: Database) -> None:
+	"""Все названные неспособны — отказ при постановке с объяснением."""
+	service = _service(db, _ReactionsGateway())
+	community_id = await _community(db)
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	with pytest.raises(TaskError, match="выбранных для задачи"):
+		await service.run_now(task.id, _reaction_params(999))
+
+
+async def test_reactions_forbidden_in_community_is_an_error(db: Database) -> None:
+	"""Реакции запрещены в сообществе — запуск с честной ошибкой в журнале."""
+	gateway = _ReactionsGateway(mode=ChatReactionsMode.NONE, feed=_feed(1))
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	account_id = await _account_id(db, community_id)
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	await service.run_now(task.id, _reaction_params(account_id))
+	await service.settle()
+	item = (await service.state())[0]
+	assert item.status is JobStatus.ERROR
+	assert item.error is not None and "запрещены" in item.error
+
+
+async def test_reactions_drop_emojis_not_allowed_here(db: Database) -> None:
+	"""Реакция не из перечня сообщества не ставится, остальные — ставятся."""
+	gateway = _ReactionsGateway(mode=ChatReactionsMode.SOME, options=("🔥",), feed=_feed(1, 2))
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	account_id = await _account_id(db, community_id)
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	await service.run_now(task.id, _reaction_params(account_id))
+	await service.settle()
+	assert [e for _a, _m, e in gateway.sent] == [("🔥",), ("🔥",)]
+	(run,) = await service.runs(task.id)
+	assert any("не разрешены" in text for _at, text in run.events)
+
+
+async def test_reactions_refusal_per_post_is_a_skip(db: Database) -> None:
+	"""Отказ Telegram по одной записи — пропуск, проход продолжается."""
+	gateway = _ReactionsGateway(feed=_feed(3, 2, 1))
+	gateway.refused = {2}
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	account_id = await _account_id(db, community_id)
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	await service.run_now(task.id, _reaction_params(account_id))
+	await service.settle()
+	item = (await service.state())[0]
+	assert item.status is JobStatus.DONE
+	report = item.report
+	assert isinstance(report, ReactionsReport)
+	assert (report.reacted, report.skipped) == (2, 1)
+
+
+async def test_reactions_premium_puts_two_when_asked(db: Database) -> None:
+	"""С Premium и флажком — две разные реакции; без флажка — одна."""
+	gateway = _ReactionsGateway(feed=_feed(1) + _feed(2), premium=True)
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	account_id = await _account_id(db, community_id)
+	task = await service.task(community_id, TaskKind.REACTIONS)
+	await service.run_now(task.id, _reaction_params(account_id, premium_double=True))
+	await service.settle()
+	await service.run_now(task.id, _reaction_params(account_id, premium_double=False))
+	await service.settle()
+	assert [len(e) for _a, _m, e in gateway.sent] == [2, 1]
+	assert len(set(gateway.sent[0][2])) == 2
+
+
+async def test_reactors_and_reaction_options_for_the_form(db: Database) -> None:
+	"""Форма получает пользователей с правом реагировать и перечень реакций."""
+	gateway = _ReactionsGateway(mode=ChatReactionsMode.SOME, options=("🔥", "👍"))
+	service = _service(db, gateway)
+	community_id = await _community(db)
+	reactors = await service.reactors(community_id)
+	assert [r.label for r in reactors] == ["@ub"]
+	options = await service.reaction_options(community_id)
+	assert [o.emoji for o in options.options] == ["🔥", "👍"]
+
+
+def test_reactions_summary_and_reactor_label() -> None:
+	"""Итог прохода одной строкой и подпись пользователя в форме."""
+	from pxcontrol.ui.pages.tasks import reactor_label
+
+	report = ReactionsReport(
+		executor="@ub", scanned=50, candidates=4, reacted=3, skipped=1, by_emoji={"👍": 3}
+	)
+	text = reactions_summary(report, dry_run=False)
+	assert "поставлено: 3 из 4" in text and "не принял: 1" in text and "👍 3" in text
+	assert "Подходящих записей: 4" in reactions_summary(report, dry_run=True)
+	rights = ExecutorRights(ParticipantStatus.MEMBER, AdminRights(), ALL_MEMBER_RIGHTS)
+	executor = ExecutorDto(
+		owner=ExecutorRef(OwnerKind.USER, 1),
+		label="@a",
+		status=ParticipantStatus.MEMBER,
+		rights=rights,
+		is_default=False,
+		paused=True,
+		can_publish=False,
+	)
+	assert reactor_label(executor) == "@a (приостановлен)"
