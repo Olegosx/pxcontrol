@@ -25,15 +25,18 @@ from sqlalchemy.orm import selectinload
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import Community, CommunityExecutor
 from pxcontrol.engine.errors import EngineError, user_message
+from pxcontrol.engine.services.abilities import ExecutorAction
 from pxcontrol.engine.services.captions import filename_complaint
 from pxcontrol.engine.services.community_rights import (
+	bot_ref,
+	capable_rows,
 	community_capabilities,
+	executor_paused,
 	publisher_incapable,
 	publisher_paused,
-	publisher_row,
 	publishing_users,
+	ranked_executors,
 )
-from pxcontrol.engine.services.dispatch import Candidate, rank
 from pxcontrol.engine.services.publish_route import (
 	PostRequirements,
 	PublishRoute,
@@ -69,7 +72,6 @@ from pxcontrol.engine.telegram.rich_text import (
 	trimmed,
 	validate_rich_text,
 )
-from pxcontrol.engine.telegram.rights import ParticipantStatus
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
 	CAPTION_LENGTH_LIMIT,
@@ -1236,15 +1238,13 @@ class PostsService:
 		быть не правдой, а устаревшей записью — и прежде чем отказать,
 		её стоит освежить.
 
-		Случай узкий: канал, бот назначен и не приостановлен, а права
-		правки в снимке нет. Всё прочее (бота нет вовсе, группа) зондом
-		не лечится — там отказ окончателен.
+		Случай узкий: канал, в пуле есть не приостановленный бот, а права
+		правки в снимке нет ни у одного. Всё прочее (бота нет вовсе,
+		группа) зондом не лечится — там отказ окончателен.
 		"""
-		bot = community.default_bot
 		return (
 			CommunityKind(community.kind) is CommunityKind.CHANNEL
-			and bot is not None
-			and not bot.paused
+			and bool(capable_rows(community, ExecutorAction.READ_HISTORY, OwnerKind.BOT))
 			and not community_capabilities(community).markup_edit
 		)
 
@@ -1433,15 +1433,12 @@ class PostsService:
 		"""
 		if plan.route is not PublishRoute.USERBOT_MARKUP or not plan.draft.markup:
 			return None
-		bot = plan.community.default_bot
+		bot = self._bot_for(plan.community, ExecutorAction.EDIT_OTHERS)
 		if bot is None or message_id is None:
 			return "Кнопки не поставлены: пост ушёл, но бота для разметки не оказалось."
 		try:
 			await self._gateway.bot_edit_markup(
-				BotRef(bot.id, bot.token),
-				plan.community.tg_chat_id,
-				message_id,
-				plan.draft.markup,
+				bot, plan.community.tg_chat_id, message_id, plan.draft.markup
 			)
 		except Exception as exc:  # noqa: BLE001 — исход кнопок, а не поста
 			logger.warning(
@@ -1484,30 +1481,43 @@ class PostsService:
 			route=route,
 		)
 
-	def _publishers(self, community: Community, requirements: PostRequirements) -> list[Candidate]:
-		"""Пользователи пула, которым этот пост по силам, — в порядке диспетчера (ADR-0036).
+	def _publishers(self, community: Community, requirements: PostRequirements) -> list[int]:
+		"""Аккаунты пула, которым этот пост по силам, — в порядке диспетчера (ADR-0036).
 
-		Способность — по снимку прав (:func:`publishing_users`), пригодность —
-		по требованиям поста и Premium аккаунта, порядок — по живой
-		занятости дорожек (:func:`rank`): свободный раньше занятого
-		загрузкой, публикатор по умолчанию — при равенстве.
+		Способность и порядок — :func:`ranked_executors` (снимок прав,
+		живая занятость дорожек, предпочтение умолчания); пригодность —
+		по требованиям поста и Premium аккаунта. Отбор идёт после
+		ранжирования и порядок сохраняет.
 		"""
-		live = self._gateway.live_states()
-		candidates: list[Candidate] = []
-		for row in publishing_users(community):
-			owner = ExecutorRef(OwnerKind.USER, int(row.tg_account_id or 0))
-			premium = self._gateway.userbot_premium(owner.id)
-			if userbot_shortfall(requirements, premium=premium) is not None:
-				continue
-			candidates.append(
-				Candidate(
-					owner,
-					preferred=owner.id == community.default_tg_account_id,
-					premium=premium,
-					live=live.get(owner),
-				)
+		ranked = ranked_executors(
+			community, ExecutorAction.PUBLISH, self._gateway.live_states(), kind=OwnerKind.USER
+		)
+		return [
+			int(row.tg_account_id or 0)
+			for row in ranked
+			if userbot_shortfall(
+				requirements, premium=self._gateway.userbot_premium(row.tg_account_id)
 			)
-		return rank(candidates)
+			is None
+		]
+
+	def _bot_for(self, community: Community, action: ExecutorAction) -> BotRef | None:
+		"""Бот пула, способный на действие, — первый по диспетчеру (None — нет).
+
+		Одна точка для отправки ботом, дорисовки и правки кнопок (ADR-0036):
+		бот берётся из пула по правам, а не из назначения.
+		"""
+		ranked = ranked_executors(
+			community, action, self._gateway.live_states(), kind=OwnerKind.BOT
+		)
+		return bot_ref(ranked[0]) if ranked else None
+
+	def _user_for(self, community: Community, action: ExecutorAction) -> int | None:
+		"""Аккаунт пула, способный на действие, — первый по диспетчеру (None — нет)."""
+		ranked = ranked_executors(
+			community, action, self._gateway.live_states(), kind=OwnerKind.USER
+		)
+		return int(ranked[0].tg_account_id or 0) if ranked else None
 
 	def _pool_shortfall(self, community: Community, requirements: PostRequirements) -> str:
 		"""Почему никто из пула этот пост не повезёт — текст человеку (ADR-0036).
@@ -1545,7 +1555,7 @@ class PostsService:
 			candidates = self._publishers(community, requirements)
 			if not candidates:
 				raise PostError(self._pool_shortfall(community, requirements))
-			return candidates[0].owner.id
+			return candidates[0]
 		if draft.when is not None:
 			# поправимо человеком (вернуть userbot в доступы), поэтому
 			# очередь такой пост придержит, а не похоронит ошибкой
@@ -1625,9 +1635,9 @@ class PostsService:
 		Returns:
 			Номер вышедшего поста.
 		"""
-		if community.default_bot is None:  # publish() сюда без бота не приводит
-			raise PostError("У сообщества не назначен бот — переподключите его.")
-		bot = BotRef(community.default_bot.id, community.default_bot.token)
+		bot = self._bot_for(community, ExecutorAction.PUBLISH)
+		if bot is None:  # prepare_publish сюда без способного бота не приводит
+			raise PostError("У сообщества нет бота, способного публиковать, — проверьте доступы.")
 		if draft.poll is not None:
 			return await self._gateway.bot_send_poll(
 				bot, community.tg_chat_id, draft.poll, draft.topic_id, draft.markup
@@ -1678,14 +1688,13 @@ class PostsService:
 		community = await self._get_community(community_id)
 		if not community.forum:
 			raise PostError(f"У «{community.title}» темы (форум) не включены.")
-		if community.default_tg_account_id is None:
+		reader = self._user_for(community, ExecutorAction.READ_HISTORY)
+		if reader is None:
 			raise PostError(
 				f"Темы «{community.title}» может прочитать только userbot — "
-				"привяжите аккаунт на странице сообщества → «Участники…»."
+				"введите аккаунт в сообщество на вкладке «Участники»."
 			)
-		return await self._gateway.userbot_get_forum_topics(
-			community.default_tg_account_id, community.tg_chat_id
-		)
+		return await self._gateway.userbot_get_forum_topics(reader, community.tg_chat_id)
 
 	async def _move_to_published(self, media_path: str) -> None:
 		"""Переносит опубликованное видео из результатов в опубликованные.
@@ -2416,13 +2425,11 @@ class PostsService:
 			raise PostError(blocker)
 		if markup is not None:
 			validate_markup(markup)
-		bot = community.default_bot
+		bot = self._bot_for(community, ExecutorAction.EDIT_OTHERS)
 		if bot is None:  # проверка выше уже это исключила — страховка контракта
 			raise PostError(f"У «{community.title}» нет бота — кнопки ставить некому.")
 		try:
-			await self._gateway.bot_edit_markup(
-				BotRef(bot.id, bot.token), community.tg_chat_id, ref.message_id, markup
-			)
+			await self._gateway.bot_edit_markup(bot, community.tg_chat_id, ref.message_id, markup)
 		except BotMessageGoneError as exc:
 			# та же гонка, что и у правки текста: пост удалили из другого
 			# клиента между чтением ленты и действием. Исход должен
@@ -2481,74 +2488,66 @@ class PostsService:
 		if self._markup_settled is not None:
 			await self._markup_settled(ref.community_id, ref.message_id)
 
-	@staticmethod
-	def _published_reader(community: Community) -> int:
-		"""Аккаунт, читающий ленту сообщества (публикатор по умолчанию).
+	def _published_reader(self, community: Community) -> int:
+		"""Аккаунт, читающий ленту сообщества, — из пула по диспетчеру (ADR-0036).
 
-		Вышедший из сообщества публикатор (ADR-0035) не спрашивается —
-		как и у отложек: ленту он не увидит, а обращение стоило бы
-		места на дорожке и вернуло бы сырой отказ Telegram.
+		Ленту видит любой состоящий пользователь (``READ_HISTORY``);
+		кого спросить, решает живая занятость: пока публикатор льёт файл,
+		ленту читает свободный сосед. Вышедшие и приостановленные
+		не спрашиваются: ленту они не увидят, а обращение стоило бы места
+		на дорожке и вернуло бы сырой отказ Telegram.
 
 		Raises:
-			PostError: Публикатора нет, он приостановлен или не состоит
-				в сообществе — читать ленту нечем, и притвориться пустой
-				лентой нельзя.
+			PostError: Состоящего пользователя нет, все приостановлены —
+				читать ленту нечем, и притвориться пустой лентой нельзя.
 		"""
-		account = community.default_account
-		if account is None:
+		reader = self._user_for(community, ExecutorAction.READ_HISTORY)
+		if reader is not None:
+			return reader
+		rows = [row for row in community.executors if row.tg_account_id is not None]
+		if any(executor_paused(row) for row in rows):
 			raise PostError(
-				f"У «{community.title}» нет публикатора — ленту читать нечем. "
-				"Назначьте публикатора на странице сообщества."
+				f"Пользователи «{community.title}» приостановлены — ленту читать нечем. "
+				"Возобновите одного из них в разделе «Пользователи и боты»."
 			)
-		if account.paused:
+		if rows:
 			raise PostError(
-				f"Публикатор «{community.title}» приостановлен — ленту читать нечем. "
-				"Возобновите его в разделе «Пользователи и боты»."
+				f"Ни один пользователь «{community.title}» не состоит в сообществе — ленту "
+				"читать нечем. Введите аккаунт заново на вкладке «Участники»."
 			)
-		row = publisher_row(community, OwnerKind.USER)
-		if row is None or not ParticipantStatus(row.status).in_community:
-			raise PostError(
-				f"Публикатор «{community.title}» не состоит в сообществе — ленту читать "
-				"нечем. Введите его заново на вкладке «Участники»."
-			)
-		return int(account.id)
+		raise PostError(
+			f"У «{community.title}» нет публикатора — ленту читать нечем. "
+			"Введите аккаунт в сообщество на вкладке «Участники»."
+		)
 
-	@staticmethod
-	def _scheduled_readers(community: Community) -> list[int]:
-		"""Аккаунты для чтения отложек сообщества (ADR-0022).
+	def _scheduled_readers(self, community: Community) -> list[int]:
+		"""Аккаунты для чтения отложек сообщества (ADR-0022, ADR-0036).
 
-		Канал — только умолчание: отложки канала общие для админов,
-		опрос каждого дал бы одни и те же записи. Группа — все участники
-		(отложку видит создатель) плюс умолчание, если оно вне списка
-		(страховка рассинхрона инварианта). Приостановленные аккаунты
-		(ADR-0029) не спрашиваются: обращений к ним нет, а их сообщество
-		в «непрочитанные» не попадает — его и не пытались читать.
-		Связи ``executors → tg_account`` и ``default_account`` должны быть
-		подгружены. Вышедшие из сообщества (ADR-0035) не спрашиваются:
+		Канал — один читатель: отложки канала общие для админов, опрос
+		каждого дал бы одни и те же записи; кого именно — решает
+		диспетчер среди способных публиковать (отложки видит тот, кто
+		может их создавать). Группа — все состоящие пользователи: отложку
+		там видит только её создатель (проверено 07.09.2026), и слот
+		у чата один на всех. Приостановленные и вышедшие не спрашиваются:
 		отложенных они не видят, а обращение стоило бы места на дорожке.
 		"""
-		default = community.default_account
-		default_id = default.id if default is not None and not default.paused else None
 		if community.kind != "group":
-			return [default_id] if default_id is not None else []
-		readers = [
-			row.tg_account_id
-			for row in community.executors
-			if row.tg_account_id is not None
-			and not (row.tg_account is not None and row.tg_account.paused)
-			and ParticipantStatus(row.status).in_community
+			reader = self._user_for(community, ExecutorAction.PUBLISH)
+			return [reader] if reader is not None else []
+		return [
+			int(row.tg_account_id or 0)
+			for row in capable_rows(community, ExecutorAction.READ_HISTORY, OwnerKind.USER)
 		]
-		if default_id is not None and default_id not in readers:
-			readers.append(default_id)
-		return readers
 
 	async def scheduled_times(self, community_id: int) -> list[datetime]:
 		"""Моменты существующих отложек канала (для раскладки пакета).
 
 		Пакетная отправка (ADR-0015) пропускает занятые слоты — сюда
-		отдаются времена уже созданных в Telegram отложенных записей;
-		читает их аккаунт, привязанный к каналу (ADR-0019). Канал без
-		userbot-админа отложек иметь не может — пустой список.
+		отдаются времена уже созданных в Telegram отложенных записей.
+		Читатели — по пулу (:meth:`_scheduled_readers`): в канале один,
+		в группе все состоящие — там каждый видит только свои отложки,
+		а лимит слотов у чата один (ADR-0036). Сообщество без способного
+		пользователя отложек иметь не может — пустой список.
 
 		Raises:
 			PostError: Сообщество не найдено.
@@ -2556,12 +2555,11 @@ class PostsService:
 				вызывающая сторона решает, продолжать ли без них.
 		"""
 		community = await self._get_community(community_id)
-		if community.default_tg_account_id is None:
-			return []
-		messages = await self._gateway.userbot_get_scheduled(
-			community.default_tg_account_id, community.tg_chat_id
-		)
-		return [message.scheduled_at for message in messages]
+		times: list[datetime] = []
+		for reader in self._scheduled_readers(community):
+			messages = await self._gateway.userbot_get_scheduled(reader, community.tg_chat_id)
+			times.extend(message.scheduled_at for message in messages)
+		return times
 
 	async def _get_community(self, community_id: int) -> Community:
 		"""Возвращает сообщество с публикаторами или объясняет, что оно не найдено.

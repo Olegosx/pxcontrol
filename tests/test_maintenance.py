@@ -21,6 +21,7 @@ from pxcontrol.engine.services.maintenance import (
 	ServiceReport,
 	selectable_kinds,
 )
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotFloodError,
@@ -36,6 +37,7 @@ from pxcontrol.engine.telegram.types import (
 	CommunityInfo,
 	CommunityKind,
 	DeletedAccount,
+	ExecutorRef,
 	ParticipantsPage,
 	ServiceMessageInfo,
 	ServiceMessageKind,
@@ -45,6 +47,9 @@ from pxcontrol.engine.telegram.types import (
 
 class _FakeGateway:
 	"""Подставной шлюз: страницы истории и учёт удалений."""
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]:
+		return dict(getattr(self, "lanes", {}))
 
 	def __init__(
 		self,

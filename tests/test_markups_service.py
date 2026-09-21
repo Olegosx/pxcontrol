@@ -22,6 +22,7 @@ from pxcontrol.engine.services.markups import (
 	PromisedMarkupDto,
 	promise_expired,
 )
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.markup import (
 	BUTTON_TEXT_LIMIT,
 	ButtonKind,
@@ -29,7 +30,7 @@ from pxcontrol.engine.telegram.markup import (
 	PostButton,
 	PostMarkup,
 )
-from pxcontrol.engine.telegram.types import BotRef, TelegramFloodError
+from pxcontrol.engine.telegram.types import BotRef, ExecutorRef, TelegramFloodError
 from tests.conftest import community_executor
 
 
@@ -205,6 +206,9 @@ async def test_broken_row_is_skipped(db: Database) -> None:
 
 class _FakeGateway:
 	"""Подмена шлюза для дозора: поиск поста и правка разметки без сети."""
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]:
+		return dict(getattr(self, "lanes", {}))
 
 	def __init__(self) -> None:
 		#: какой номер «найдётся» по тексту (None — не опознан)

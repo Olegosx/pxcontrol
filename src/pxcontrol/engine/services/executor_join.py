@@ -22,12 +22,21 @@ from typing import Protocol
 
 from pxcontrol.engine.db.models import Bot, Community, TgAccount
 from pxcontrol.engine.errors import EngineError
-from pxcontrol.engine.services.abilities import BOT_ADMIN_RIGHTS, ExecutorAction, can
-from pxcontrol.engine.services.community_rights import executor_paused, executor_rights
+from pxcontrol.engine.services.abilities import BOT_ADMIN_RIGHTS, ExecutorAction
+from pxcontrol.engine.services.community_rights import (
+	ranked_executors,
+)
 from pxcontrol.engine.telegram.bot_api import BotNotInCommunityError
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError, UserbotUnavailableError
 from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, ParticipantStatus
-from pxcontrol.engine.telegram.types import BotRef, CommunityInfo, CommunityKind
+from pxcontrol.engine.telegram.types import (
+	BotRef,
+	CommunityInfo,
+	CommunityKind,
+	ExecutorRef,
+	OwnerKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +68,8 @@ class _JoinGateway(Protocol):
 	async def userbot_promote(
 		self, account_id: int, chat_id: str, target: str, rights: AdminRights
 	) -> None: ...
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]: ...
 
 
 class JoinOutcome(StrEnum):
@@ -266,25 +277,22 @@ class ExecutorJoiner:
 			return False
 		return True
 
-	@staticmethod
-	def _executors_for(community: Community, action: ExecutorAction) -> list[int]:
-		"""Аккаунты пула, способные на названное действие, в порядке строк пула.
+	def _executors_for(self, community: Community, action: ExecutorAction) -> list[int]:
+		"""Аккаунты пула, способные на названное действие, в порядке диспетчера.
 
 		Ввод исполнителя делают руками своих же администраторов, и выбрать
-		их можно только по правам. Приостановленные (ADR-0029)
-		не рассматриваются — приложение их не использует ни для чего.
+		их можно только по правам; кого из способных спросить первым,
+		решает живая занятость дорожек (ADR-0036) — человек ждёт ответа,
+		и ждать за чужой загрузкой ему незачем. Приостановленные
+		(ADR-0029) не рассматриваются — приложение их не использует
+		ни для чего.
 		"""
-		kind = CommunityKind(community.kind)
-		return [
-			row.tg_account_id
-			for row in community.executors
-			if row.tg_account_id is not None
-			and not executor_paused(row)
-			and can(executor_rights(row), action, kind)
-		]
+		ranked = ranked_executors(
+			community, action, self._gateway.live_states(), kind=OwnerKind.USER
+		)
+		return [int(row.tg_account_id or 0) for row in ranked]
 
-	@classmethod
-	def _executor_for(cls, community: Community, action: ExecutorAction) -> int | None:
+	def _executor_for(self, community: Community, action: ExecutorAction) -> int | None:
 		"""Первый аккаунт пула, способный на действие (None — такого нет)."""
-		capable = cls._executors_for(community, action)
+		capable = self._executors_for(community, action)
 		return capable[0] if capable else None

@@ -20,6 +20,7 @@ from pxcontrol.engine.telegram.bot_api import (
 	BotNotInCommunityError,
 	community_kind_from_chat_type,
 )
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotNotConnectedError,
 	UserbotNotInCommunityError,
@@ -49,6 +50,9 @@ class _FakeGateway:
 	Userbot-проверки адресные (ADR-0019): «админами» считаются аккаунты
 	из ``userbot_admins``, остальным Telegram «подтверждает отказ».
 	"""
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]:
+		return dict(getattr(self, "lanes", {}))
 
 	login = None  # вход userbot в этих тестах не используется
 
@@ -1091,6 +1095,20 @@ async def test_executors_for_puts_the_publisher_first(db: Database) -> None:
 	assert readers[0].is_default, "публикатор идёт первым"
 	publishers = await service.executors_for(community_id, ExecutorAction.PUBLISH)
 	assert [e.label for e in publishers] == ["@first"]
+	# занятое загрузкой умолчание уступает свободному (ADR-0036)
+	from datetime import UTC, datetime
+
+	from pxcontrol.engine.telegram.lane import WorkKind
+
+	first = readers[0].owner.id
+	gateway.lanes = {
+		ExecutorRef(OwnerKind.USER, first): LaneLiveState(
+			WorkKind.PUBLISH, datetime.now(UTC), 0, 0.0
+		)
+	}
+	readers = await service.executors_for(community_id, ExecutorAction.READ_HISTORY)
+	assert [e.label for e in readers] == ["@second", "@first"]
+	gateway.lanes = {}
 	# приостановленного в подборе нет вовсе (ADR-0029)
 	await _pause_account(db, second)
 	assert [

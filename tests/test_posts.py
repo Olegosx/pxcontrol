@@ -944,9 +944,11 @@ async def test_list_scheduled_isolates_flooded_account(db: Database) -> None:
 		account = TgAccount(label="@ub2", phone="+7901", session="s")
 		session.add(account)
 		await session.flush()
-		session.add(
-			Community(title="Свободный", tg_chat_id="-1002", default_tg_account_id=account.id)
-		)
+		free = Community(title="Свободный", tg_chat_id="-1002", default_tg_account_id=account.id)
+		session.add(free)
+		await session.flush()
+		# читатели — из пула (ADR-0036): назначение без членства никого не читает
+		session.add(community_executor(free.id, account_id=account.id))
 		await session.commit()
 	service = PostsService(db, _PartlyFloodedGateway(flooded_id))
 	scheduled = await service.list_scheduled()
@@ -2365,3 +2367,106 @@ async def test_text_limits_follow_best_premium_in_pool(db: Database) -> None:
 	gateway.premium_ids = {extra}
 	premium = await service.text_limits(community_id)
 	assert (premium.text, premium.caption) == (8192, 4096)
+
+
+# --- чтения и бот-путь через диспетчер (ADR-0036, этап C) ------------------------------
+
+
+def _uploading(gateway: _FakeGateway, account_id: int) -> None:
+	"""Помечает дорожку аккаунта занятой загрузкой файла."""
+	from pxcontrol.engine.telegram.lane import WorkKind
+
+	gateway.lanes[ExecutorRef(OwnerKind.USER, account_id)] = LaneLiveState(
+		WorkKind.PUBLISH, datetime.now(UTC), 0, 0.0
+	)
+
+
+async def test_scheduled_times_in_group_count_all_readers(db: Database) -> None:
+	"""Слоты группы считаются по всем читателям: каждый видит только свои отложки."""
+	gateway = _PerAccountGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, forum=True)
+	default_id = await _bound_account(db, community_id)
+	extra = await _extra_publisher(db, community_id)
+	assert default_id is not None
+	when = datetime(2026, 7, 13, 10, 0, tzinfo=UTC)
+	gateway.per_account = {
+		default_id: [ScheduledMessage(1, "от умолчания", when)],
+		extra: [ScheduledMessage(2, "от второго", when + timedelta(hours=1))],
+	}
+	times = await service.scheduled_times(community_id)
+	assert sorted(times) == [when, when + timedelta(hours=1)]
+	assert sorted(gateway.polled) == sorted([default_id, extra])
+
+
+async def test_scheduled_times_in_channel_ask_one_reader(db: Database) -> None:
+	"""В канале отложки общие для админов — читает один, по диспетчеру."""
+	gateway = _PerAccountGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	default_id = await _bound_account(db, community_id)
+	extra = await _extra_publisher(db, community_id)
+	assert default_id is not None
+	await service.scheduled_times(community_id)
+	assert gateway.polled == [default_id], "умолчание — предпочтение при равной занятости"
+	gateway.polled.clear()
+	_uploading(gateway, default_id)
+	await service.scheduled_times(community_id)
+	assert gateway.polled == [extra], "занятое загрузкой умолчание уступает свободному"
+
+
+async def test_forum_topics_read_by_free_member(db: Database) -> None:
+	"""Темы форума читает свободный состоящий пользователь, а не занятое умолчание."""
+
+	class _TopicsGateway(_FakeGateway):
+		def __init__(self) -> None:
+			super().__init__()
+			self.readers: list[int] = []
+
+		async def userbot_get_forum_topics(
+			self, account_id: int, chat_id: str
+		) -> list[ForumTopicInfo]:
+			self.readers.append(account_id)
+			return []
+
+	gateway = _TopicsGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, forum=True)
+	default_id = await _bound_account(db, community_id)
+	extra = await _extra_publisher(db, community_id)
+	assert default_id is not None
+	_uploading(gateway, default_id)
+	await service.list_topics(community_id)
+	assert gateway.readers == [extra]
+
+
+async def test_published_feed_read_by_pool_member_when_default_paused(db: Database) -> None:
+	"""Лента читается любым состоящим пользователем пула — пауза умолчания не помеха."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db)
+	default_id = await _bound_account(db, community_id)
+	extra = await _extra_publisher(db, community_id)
+	async with db.session_factory() as session:
+		account = await session.get(TgAccount, default_id or 0)
+		assert account is not None
+		account.paused = True
+		await session.commit()
+	await service.list_published(community_id)
+	assert [call[0] for call in gateway.history_calls] == [extra]
+
+
+async def test_bot_from_pool_publishes_without_default_bot(db: Database) -> None:
+	"""Бот-путь открыт любым способным ботом пула, а не только назначенным."""
+	gateway = _FakeGateway()
+	service = PostsService(db, gateway)
+	community_id = await _add_community(db, with_bot=False, userbot_assigned=False)
+	async with db.session_factory() as session:
+		bot = Bot(label="Из пула", token="777:BBB", username="pool_bot")
+		session.add(bot)
+		await session.flush()
+		session.add(community_executor(community_id, bot_id=bot.id))
+		await session.commit()
+	assert await service.publish_blocker(community_id) is None
+	await service.publish(PostDraft(community_id, text="ботом из пула"))
+	assert gateway.sent == [("777:BBB", "-1001", "ботом из пула")]

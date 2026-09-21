@@ -48,8 +48,10 @@ from pxcontrol.engine.db.models import Community, CommunityExecutor, PromisedMar
 from pxcontrol.engine.db.types import as_utc, as_utc_optional
 from pxcontrol.engine.errors import user_message
 from pxcontrol.engine.periodic import PeriodicTask
-from pxcontrol.engine.services.community_rights import community_capabilities
+from pxcontrol.engine.services.abilities import ExecutorAction
+from pxcontrol.engine.services.community_rights import bot_ref, ranked_executors
 from pxcontrol.engine.telegram.bot_api import BotMessageGoneError
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.markup import (
 	MarkupError,
 	PostMarkup,
@@ -57,7 +59,7 @@ from pxcontrol.engine.telegram.markup import (
 	markup_to_json,
 	validate_markup,
 )
-from pxcontrol.engine.telegram.types import BotRef, TelegramFloodError
+from pxcontrol.engine.telegram.types import BotRef, ExecutorRef, OwnerKind, TelegramFloodError
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,8 @@ class _MarkupPort(Protocol):
 	async def bot_edit_markup(
 		self, bot: BotRef, chat_id: str, message_id: int, markup: PostMarkup | None
 	) -> None: ...
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]: ...
 
 
 @dataclass(frozen=True)
@@ -602,22 +606,27 @@ class MarkupsService:
 			).scalar_one_or_none()
 			if community is None:
 				return None
-			caps = community_capabilities(community)
-			bot = community.default_bot
-			account_id = community.default_tg_account_id
-			if not caps.bot or bot is None or not caps.markup_edit:
+			# кого спросить — решает диспетчер по пулу (ADR-0036): бот
+			# с правом править чужое ставит кнопки, свободный состоящий
+			# пользователь опознаёт вышедший пост
+			live = self._gateway.live_states()  # type: ignore[union-attr]
+			bots = ranked_executors(community, ExecutorAction.EDIT_OTHERS, live, kind=OwnerKind.BOT)
+			if not bots:
 				logger.info(
 					"Сообщество id=%s пока не может принять кнопки (бот или право) — жду.",
 					community_id,
 				)
 				return None
-			if account_id is None or not caps.userbot:
+			readers = ranked_executors(
+				community, ExecutorAction.READ_HISTORY, live, kind=OwnerKind.USER
+			)
+			if not readers:
 				logger.info(
-					"У сообщества id=%s нет публикатора — вышедший пост опознать нечем, жду.",
+					"У сообщества id=%s нет пользователя — вышедший пост опознать нечем, жду.",
 					community_id,
 				)
 				return None
-			return community.tg_chat_id, account_id, BotRef(bot.id, bot.token)
+			return community.tg_chat_id, int(readers[0].tg_account_id or 0), bot_ref(bots[0])
 
 	@staticmethod
 	def _dto(row: PromisedMarkup) -> PromisedMarkupDto | None:

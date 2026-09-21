@@ -22,12 +22,14 @@ from pxcontrol.engine.services.community_stats import (
 	window_start,
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import UserbotFloodError, UserbotNotConnectedError
 from pxcontrol.engine.telegram.types import (
 	BotRef,
 	CommunityAnalytics,
 	CommunityStatsInfo,
 	DayPoint,
+	ExecutorRef,
 	HistoryMarks,
 	NamedSeries,
 	RecentPost,
@@ -44,6 +46,9 @@ _NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
 
 class _FakeStatsGateway:
 	"""Подставной шлюз статистики: значения и счётчики вызовов."""
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]:
+		return dict(getattr(self, "lanes", {}))
 
 	def __init__(self) -> None:
 		self.participants = 1000
@@ -150,6 +155,17 @@ async def _add_community(
 		await session.commit()
 		await session.refresh(community)
 		return community.id
+
+
+async def _add_member(db: Database, community_id: int) -> int:
+	"""Второй состоящий пользователь в пуле сообщества (ADR-0036)."""
+	async with db.session_factory() as session:
+		account = TgAccount(label="ub2", phone="+7901", session="s")
+		session.add(account)
+		await session.flush()
+		session.add(community_executor(community_id, account_id=account.id))
+		await session.commit()
+		return int(account.id)
 
 
 async def _add_account(db: Database) -> int:
@@ -500,3 +516,22 @@ async def test_paused_publishers_not_polled(db: Database, tmp_path: Path) -> Non
 	service = _service(db, gateway, tmp_path)
 	assert await service.refresh_due(_NOW) is False
 	assert gateway.stats_calls == [] and gateway.bot_calls == []
+
+
+async def test_full_pass_prefers_free_pool_member(db: Database, tmp_path: Path) -> None:
+	"""Полный проход спрашивает свободного из пула, а не умолчание под загрузкой (ADR-0036)."""
+	from pxcontrol.engine.telegram.lane import WorkKind
+	from pxcontrol.engine.telegram.types import OwnerKind
+
+	gateway = _FakeStatsGateway()
+	service = _service(db, gateway, tmp_path)
+	account_id = await _add_account(db)
+	community_id = await _add_community(db, "-1001", account_id=account_id)
+	member = await _add_member(db, community_id)
+	gateway.lanes = {
+		ExecutorRef(OwnerKind.USER, account_id): LaneLiveState(
+			WorkKind.PUBLISH, datetime.now(UTC), 0, 0.0
+		)
+	}
+	await service.refresh_due()
+	assert gateway.stats_calls == [member]

@@ -44,19 +44,23 @@ from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import (
 	Community,
 	CommunityAnalyticsRow,
+	CommunityExecutor,
 	CommunityStats,
 	CommunityStatsHistory,
 )
 from pxcontrol.engine.db.types import as_utc_optional
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.periodic import PeriodicTask
+from pxcontrol.engine.services.abilities import ExecutorAction
 from pxcontrol.engine.services.community_overview import (
 	GROWTH_DAYS,
 	CommunityOverviewDto,
 	HistorySample,
 	build_overview,
 )
+from pxcontrol.engine.services.community_rights import bot_ref, ranked_executors
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.types import (
 	ANALYTICS_DAILY,
 	ANALYTICS_PAIRS,
@@ -65,8 +69,10 @@ from pxcontrol.engine.telegram.types import (
 	CommunityAnalytics,
 	CommunityStatsInfo,
 	DayPoint,
+	ExecutorRef,
 	HistoryMarks,
 	NamedSeries,
+	OwnerKind,
 	RecentPost,
 	ScheduledMessage,
 	Share,
@@ -129,6 +135,8 @@ class _StatsGateway(Protocol):
 	async def userbot_history_marks(
 		self, account_id: int, chat_id: str, *, with_created: bool
 	) -> HistoryMarks: ...
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]: ...
 
 	async def userbot_community_analytics(
 		self, account_id: int, chat_id: str
@@ -463,8 +471,10 @@ class CommunityStatsService:
 					await session.execute(
 						select(Community)
 						.options(
-							selectinload(Community.default_bot),
-							selectinload(Community.default_account),
+							selectinload(Community.executors).selectinload(
+								CommunityExecutor.tg_account
+							),
+							selectinload(Community.executors).selectinload(CommunityExecutor.bot),
 						)
 						.order_by(Community.id)
 					)
@@ -476,19 +486,21 @@ class CommunityStatsService:
 				row.community_id: row
 				for row in (await session.execute(select(CommunityStats))).scalars()
 			}
-			# приостановленные публикаторы (ADR-0029) не опрашиваются:
-			# бот — просто пропуск, userbot получил бы отказ шлюза
-			# на каждом тике и засорял бы журнал
-			bot_refs = {
-				c.id: BotRef(c.default_bot.id, c.default_bot.token)
-				for c in communities
-				if c.default_bot is not None and not c.default_bot.paused
-			}
-			account_ids = {
-				c.id: c.default_account.id
-				for c in communities
-				if c.default_account is not None and not c.default_account.paused
-			}
+			# кого спросить — решает диспетчер по пулу (ADR-0036): любой
+			# состоящий исполнитель своего вида, свободный раньше занятого
+			# загрузкой. Приостановленные (ADR-0029) и вышедшие
+			# не опрашиваются: бот — просто пропуск, userbot получил бы
+			# отказ шлюза на каждом тике и засорял бы журнал
+			live = self._gateway.live_states()
+			bot_refs: dict[int, BotRef] = {}
+			account_ids: dict[int, int] = {}
+			for c in communities:
+				bots = ranked_executors(c, ExecutorAction.READ_HISTORY, live, kind=OwnerKind.BOT)
+				if bots:
+					bot_refs[c.id] = bot_ref(bots[0])
+				users = ranked_executors(c, ExecutorAction.READ_HISTORY, live, kind=OwnerKind.USER)
+				if users:
+					account_ids[c.id] = int(users[0].tg_account_id or 0)
 		changed = False
 		for community in communities:
 			if not enabled.get(community.id, COMMUNITY_ENABLED.default):

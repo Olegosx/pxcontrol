@@ -46,6 +46,7 @@ from pxcontrol.engine.services.community_rights import (
 	publisher_incapable,
 	publisher_paused,
 	publisher_row,
+	ranked_executors,
 )
 from pxcontrol.engine.services.executor_join import ExecutorJoiner, JoinOutcome
 from pxcontrol.engine.services.publish_route import (
@@ -54,6 +55,7 @@ from pxcontrol.engine.services.publish_route import (
 )
 from pxcontrol.engine.services.settings import COMMUNITY_ENABLED, SettingsService
 from pxcontrol.engine.telegram.bot_api import BotError, BotNotInCommunityError
+from pxcontrol.engine.telegram.lane import LaneLiveState
 from pxcontrol.engine.telegram.mtproto import (
 	UserbotAccessError,
 	UserbotNotInCommunityError,
@@ -219,6 +221,8 @@ class _CommunityChecker(Protocol):
 	async def userbot_promote(
 		self, account_id: int, chat_id: str, target: str, rights: AdminRights
 	) -> None: ...
+
+	def live_states(self) -> dict[ExecutorRef, LaneLiveState]: ...
 
 
 @dataclass(frozen=True)
@@ -831,24 +835,20 @@ class CommunitiesService:
 		а устаревший снимок поправит отказ сервера — он и так остаётся
 		последним словом.
 
-		Приостановленные (ADR-0029) в список не попадают. Публикатор
-		по умолчанию идёт первым: когда он способен, работу делает он —
-		так сохраняется прежнее поведение, а прочие исполнители
-		подхватывают лишь то, чего он не может.
+		Приостановленные (ADR-0029) в список не попадают. Порядок —
+		диспетчера (ADR-0036, :func:`ranked_executors`): свободный раньше
+		занятого загрузкой, меньше ожидающих — раньше, при равенстве —
+		публикатор по умолчанию, затем порядок пула. Первый в списке —
+		тот, кому работу и поручают.
 
 		Raises:
 			CommunityError: Сообщество не найдено.
 		"""
 		async with self._db.session_factory() as session:
 			community = await self._community_in_session(session, community_id, with_refs=True)
-			kind = CommunityKind(community.kind)
-			executors = self._executor_dtos(community)
-		capable = [
-			executor
-			for executor in executors
-			if not executor.paused and can(executor.rights, action, kind)
-		]
-		return sorted(capable, key=lambda executor: not executor.is_default)
+			ranked = ranked_executors(community, action, self._gateway.live_states())
+			by_owner = {executor.owner: executor for executor in self._executor_dtos(community)}
+		return [by_owner[executor_owner(row)] for row in ranked]
 
 	async def add_executor(
 		self, community_id: int, owner: ExecutorRef, invite: str | None = None
