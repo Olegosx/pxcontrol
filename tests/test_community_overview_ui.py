@@ -191,6 +191,9 @@ def test_overview_sections_skip_empty_ones() -> None:
 	empty = CommunityOverviewDto(community_id=1)
 	assert overview_sections(empty, CommunityKind.CHANNEL) == []
 	assert overview_sections(empty, CommunityKind.GROUP) == []
+	# доля включивших уведомления живёт в «Аудитории» — раздел не пуст
+	notified = CommunityOverviewDto(community_id=1, notifications=(9800, 18420))
+	assert overview_sections(notified, CommunityKind.CHANNEL) == [OverviewSection.AUDIENCE]
 
 	channel = CommunityOverviewDto(
 		community_id=1,

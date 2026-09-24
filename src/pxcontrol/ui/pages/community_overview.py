@@ -368,6 +368,7 @@ def overview_sections(overview: CommunityOverviewDto, kind: CommunityKind) -> li
 					overview.members_by_source,
 					overview.languages,
 					overview.mute,
+					overview.notifications,
 				)
 			),
 		),
@@ -945,7 +946,13 @@ class OverviewTab(OverviewCards):
 		return grid
 
 	def _main_tiles(self, overview: CommunityOverviewDto) -> list[Tile]:
-		"""Четыре главные плитки: у канала и группы четвёртая своя."""
+		"""Четыре главные плитки: у канала и группы своя только третья.
+
+		Четвёртая у обоих — «Удалённых аккаунтов»: задача чистки есть
+		и у канала (там она чистит подписчиков), а число мёртвых душ —
+		главное из того, что человек может поправить сам. «Уведомления
+		включены» у канала живут в разделе «Аудитория».
+		"""
 		group = self._community.kind is CommunityKind.GROUP
 		delta_text, delta_color = delta_caption(overview.participants_delta)
 		tiles = [
@@ -966,37 +973,39 @@ class OverviewTab(OverviewCards):
 					DIM_TEXT,
 				)
 			)
+		else:
 			tiles.append(
 				Tile(
-					"Удалённых аккаунтов",
-					[(_count(overview.deleted_found), 24, None)],
-					deleted_caption(
-						overview.deleted_found, overview.participants, overview.deleted_checked_at
-					),
+					"Просмотров на пост",
+					[(_count(overview.views_per_post), 24, None)],
+					# доля подписчиков понятнее «медианы последних постов»:
+					# сразу видно, какая часть канала видит запись
+					share_caption(overview.views_per_post, overview.participants, "подписчиков"),
 					DIM_TEXT,
 				)
 			)
-			return tiles
 		tiles.append(
 			Tile(
-				"Просмотров на пост",
-				[(_count(overview.views_per_post), 24, None)],
-				# доля подписчиков понятнее «медианы последних постов»:
-				# сразу видно, какая часть канала видит запись
-				share_caption(overview.views_per_post, overview.participants, "подписчиков"),
-				DIM_TEXT,
-			)
-		)
-		part, total = overview.notifications or (None, None)
-		tiles.append(
-			Tile(
-				"Уведомления включены",
-				[(percent_text(part, total), 24, None)],
-				f"{_count(part)} из {_count(total)}" if total else "нет данных",
+				"Удалённых аккаунтов",
+				[(_count(overview.deleted_found), 24, None)],
+				deleted_caption(
+					overview.deleted_found, overview.participants, overview.deleted_checked_at
+				),
 				DIM_TEXT,
 			)
 		)
 		return tiles
+
+	@staticmethod
+	def _notifications_tile(overview: CommunityOverviewDto) -> Tile:
+		"""Плитка «Уведомления включены»: доля и «N из M»."""
+		part, total = overview.notifications or (None, None)
+		return Tile(
+			"Уведомления включены",
+			[(percent_text(part, total), 24, None)],
+			f"{_count(part)} из {_count(total)}" if total else "нет данных",
+			DIM_TEXT,
+		)
 
 	def _flow_tile(self, overview: CommunityOverviewDto) -> Tile:
 		"""Плитка «Пришли · ушли» — общая у канала и группы."""
@@ -1017,9 +1026,15 @@ class OverviewTab(OverviewCards):
 	def _section_tiles(
 		self, section: OverviewSection, overview: CommunityOverviewDto
 	) -> list[Tile]:
-		"""Плитки раздела: пары «сейчас, раньше» из статистики Telegram."""
+		"""Плитки раздела: пары «сейчас, раньше» из статистики Telegram.
+
+		В «Аудитории» — ещё доля включивших уведомления (её Telegram
+		отдаёт каналу), когда она есть.
+		"""
 		days = overview.period_days
 		pairs: list[tuple[str, tuple[int, int] | None]] = []
+		if section is OverviewSection.AUDIENCE:
+			return [self._notifications_tile(overview)] if overview.notifications else []
 		if section is OverviewSection.POSTS:
 			pairs = [
 				("Пересылок на пост", overview.shares_per_post),
