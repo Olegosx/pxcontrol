@@ -177,3 +177,43 @@ def test_series_days_union() -> None:
 	)
 	assert series_days(series) == [d1, d2]
 	assert series_days(()) == []
+
+
+# --- разделы «Обзора» (спека `screens/community-page.md`, раздел 4.2) -----------
+
+
+def test_overview_sections_skip_empty_ones() -> None:
+	"""Раздел без данных не попадает в список — заголовка над пустотой не будет."""
+	from pxcontrol.engine.telegram.types import NamedSeries as Series
+	from pxcontrol.engine.telegram.types import TopPoster
+	from pxcontrol.ui.pages.community_overview import OverviewSection, overview_sections
+
+	empty = CommunityOverviewDto(community_id=1)
+	assert overview_sections(empty, CommunityKind.CHANNEL) == []
+	assert overview_sections(empty, CommunityKind.GROUP) == []
+
+	channel = CommunityOverviewDto(
+		community_id=1,
+		growth=(DayPoint(date(2026, 9, 1), 100),),
+		interactions=(Series("views", (DayPoint(date(2026, 9, 1), 10),)),),
+		hours=tuple(range(24)),
+	)
+	assert overview_sections(channel, CommunityKind.CHANNEL) == [
+		OverviewSection.AUDIENCE,
+		OverviewSection.POSTS,
+		OverviewSection.WHEN,
+	]
+	# у канала нет разделов разговора, даже если данные вдруг пришли
+	assert OverviewSection.MESSAGES not in overview_sections(channel, CommunityKind.CHANNEL)
+
+	group = CommunityOverviewDto(
+		community_id=1,
+		messages=(120, 90),
+		top_posters=(TopPoster("Олег", 42, 180),),
+	)
+	assert overview_sections(group, CommunityKind.GROUP) == [
+		OverviewSection.MESSAGES,
+		OverviewSection.PEOPLE,
+	]
+	# «Посты» — раздел канала: группе он не показывается
+	assert OverviewSection.POSTS not in overview_sections(group, CommunityKind.GROUP)

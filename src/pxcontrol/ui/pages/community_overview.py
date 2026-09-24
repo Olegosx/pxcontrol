@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import StrEnum
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent, QPen
@@ -70,6 +71,7 @@ from pxcontrol.ui.pages.common import (
 	format_count,
 	format_local,
 	plural,
+	section_header,
 	status_caption,
 	tinted,
 )
@@ -319,6 +321,96 @@ def source_note(overview: CommunityOverviewDto, community: CommunityDto) -> str:
 		"Удалённые аккаунты — итог последнего прохода обслуживания. Числа справочные: "
 		"ни одна цифра на этой вкладке ничего не запускает."
 	)
+
+
+class OverviewSection(StrEnum):
+	"""Раздел «Обзора» — вопрос, на который он отвечает.
+
+	Порядок объявления — порядок показа сверху вниз
+	(``screens/community-page.md``, раздел 4.2). У канала свои разделы,
+	у группы свои: «Посты» отвечают на вопрос о ленте, «Сообщения»
+	и «Люди» — о разговоре, и смешивать их незачем.
+	"""
+
+	AUDIENCE = "audience"  # кто нас читает и откуда приходит
+	POSTS = "posts"  # как расходятся записи (канал)
+	MESSAGES = "messages"  # как идёт разговор (группа)
+	WHEN = "when"  # когда читают
+	PEOPLE = "people"  # кто больше всех делает (группа)
+
+
+#: Заголовок раздела «Обзора».
+SECTION_TITLES: dict[OverviewSection, str] = {
+	OverviewSection.AUDIENCE: "Аудитория",
+	OverviewSection.POSTS: "Посты",
+	OverviewSection.MESSAGES: "Сообщения",
+	OverviewSection.WHEN: "Когда читают",
+	OverviewSection.PEOPLE: "Люди",
+}
+
+
+def overview_sections(overview: CommunityOverviewDto, kind: CommunityKind) -> list[OverviewSection]:
+	"""Разделы «Обзора» в порядке показа; раздел без данных не попадает.
+
+	Пустой раздел — это заголовок над пустотой: он обещает данные,
+	которых нет. Поэтому решение принимается здесь, по снимку, и
+	проверяется тестом, а не угадывается вёрсткой.
+	"""
+	group = kind is CommunityKind.GROUP
+	filled: list[tuple[OverviewSection, bool]] = [
+		(
+			OverviewSection.AUDIENCE,
+			any(
+				(
+					overview.growth,
+					overview.flow_joined,
+					overview.flow_left,
+					overview.members_by_source,
+					overview.languages,
+					overview.mute,
+				)
+			),
+		),
+		(
+			OverviewSection.POSTS,
+			not group
+			and any(
+				(
+					overview.shares_per_post,
+					overview.reactions_per_post,
+					overview.views_per_story,
+					overview.shares_per_story,
+					overview.reactions_per_story,
+					overview.interactions,
+					overview.iv_interactions,
+					overview.story_interactions,
+					overview.views_by_source,
+					overview.reactions_by_emotion,
+					overview.story_reactions,
+					overview.recent_posts,
+				)
+			),
+		),
+		(
+			OverviewSection.MESSAGES,
+			group
+			and any(
+				(
+					overview.messages,
+					overview.viewers,
+					overview.posters,
+					overview.messages_daily,
+					overview.actions,
+				)
+			),
+		),
+		(OverviewSection.WHEN, bool(overview.hours or overview.weekdays)),
+		(
+			OverviewSection.PEOPLE,
+			group and any((overview.top_posters, overview.top_admins, overview.top_inviters)),
+		),
+	]
+	return [section for section, has_data in filled if has_data]
 
 
 def series_title(name: str) -> str:
@@ -786,41 +878,86 @@ class OverviewTab(OverviewCards):
 	# --- отрисовка --------------------------------------------------------------------
 
 	def _render(self, overview: CommunityOverviewDto) -> None:
+		"""Главный ряд, разделы по вопросам, справка и сноска.
+
+		Порядок — из спеки экрана (раздел 4): сначала четыре главных
+		числа одной строкой, затем разделы, отвечающие на вопросы,
+		и только в конце справка «что за сообщество»: её читают один
+		раз, а числа — каждый.
+		"""
 		clear_layout(self._layout)
-		# справка — первой: «что за сообщество» читают раньше, чем «что
-		# с ним происходит»; числа и графики — следом, потоковой сеткой:
-		# на широком окне карточек в ряд больше, на узком меньше
-		self._layout.addWidget(self._reference(overview))
-		self._layout.addWidget(
-			FlowGrid(self._tiles(overview), self, min_width=_TILE_MIN_WIDTH, spacing=_CARD_SPACING)
-		)
-		cards = self._chart_cards(overview)
-		if cards:
+		self._layout.addLayout(self._main_row(overview))
+		sections = overview_sections(overview, self._community.kind)
+		for section in sections:
+			self._layout.addWidget(section_header(self, SECTION_TITLES[section]))
+			self._add_section(section, overview)
+		if not sections:
 			self._layout.addWidget(
-				FlowGrid(cards, self, min_width=_CHART_MIN_WIDTH, spacing=_CARD_SPACING)
+				CaptionLabel("Данных пока нет: статистика накопится за неделю наблюдений.", self)
 			)
-		else:
-			empty = CaptionLabel(
-				"Данных пока нет: статистика накопится за неделю наблюдений.", self
-			)
-			self._layout.addWidget(empty)
+		self._layout.addWidget(section_header(self, "О сообществе"))
+		self._layout.addWidget(self._reference(overview))
 		note = CaptionLabel(source_note(overview, self._community), self)
 		note.setWordWrap(True)
 		self._layout.addWidget(tinted(note, DIM_TEXT))
 		self._layout.addStretch()
 
+	def _add_section(self, section: OverviewSection, overview: CommunityOverviewDto) -> None:
+		"""Содержимое раздела: плитки, сетка карточек и таблицы во всю ширину."""
+		tiles = [self._tile_card(tile) for tile in self._section_tiles(section, overview)]
+		if tiles:
+			self._layout.addWidget(
+				FlowGrid(tiles, self, min_width=_TILE_MIN_WIDTH, spacing=_CARD_SPACING)
+			)
+		cards = [card for card in self._section_cards(section, overview) if card is not None]
+		for card in cards:
+			layout = card.layout()
+			if isinstance(layout, QVBoxLayout):
+				# строка сетки — по самой высокой карточке; лишняя высота
+				# остаётся снизу, а не растягивает строки долей
+				layout.addStretch()
+		if cards:
+			self._layout.addWidget(
+				FlowGrid(cards, self, min_width=_CHART_MIN_WIDTH, spacing=_CARD_SPACING)
+			)
+		# таблицы — не в сетке: высота строки сетки равна самой высокой
+		# карточке, и рядом с таблицей соседняя стояла с пустым низом
+		for table in self._section_tables(section, overview):
+			if table is not None:
+				self._layout.addWidget(table)
+
 	# --- плитки чисел ------------------------------------------------------------------
 
-	def _tiles(self, overview: CommunityOverviewDto) -> list[QWidget]:
-		"""Плитки чисел: четыре основные и всё, что ещё отдал Telegram."""
-		community = self._community
-		is_group = community.kind is CommunityKind.GROUP
-		audience = "Участников" if is_group else "Подписчиков"
+	def _main_row(self, overview: CommunityOverviewDto) -> QGridLayout:
+		"""Главный ряд: четыре числа всегда в одну строку (раздел 4.1).
+
+		Не потоковая сетка, а жёсткие четыре колонки: это те числа,
+		ради которых вкладку открывают, и переносить их по одному
+		на узком окне — терять смысл строки. Нет данных — «—»
+		и «нет данных», плитка не исчезает.
+		"""
+		grid = QGridLayout()
+		grid.setContentsMargins(0, 0, 0, 0)
+		grid.setHorizontalSpacing(_CARD_SPACING)  # макет
+		for column, tile in enumerate(self._main_tiles(overview)):
+			grid.addWidget(self._tile_card(tile), 0, column)
+			grid.setColumnStretch(column, 1)
+		return grid
+
+	def _main_tiles(self, overview: CommunityOverviewDto) -> list[Tile]:
+		"""Четыре главные плитки: у канала и группы четвёртая своя."""
+		group = self._community.kind is CommunityKind.GROUP
 		delta_text, delta_color = delta_caption(overview.participants_delta)
-		tiles: list[Tile] = [
-			Tile(audience, [(_count(overview.participants), 24, None)], delta_text, delta_color)
+		tiles = [
+			Tile(
+				"Участников" if group else "Подписчиков",
+				[(_count(overview.participants), 24, None)],
+				delta_text,
+				delta_color,
+			),
+			self._flow_tile(overview),
 		]
-		if is_group:
+		if group:
 			tiles.append(
 				Tile(
 					"Онлайн сейчас",
@@ -829,126 +966,143 @@ class OverviewTab(OverviewCards):
 					DIM_TEXT,
 				)
 			)
-		else:
 			tiles.append(
 				Tile(
-					"Просмотров на пост",
-					[(_count(overview.views_per_post), 24, None)],
-					"медиана последних постов"
-					if overview.views_per_post is not None
-					else "нет данных",
+					"Удалённых аккаунтов",
+					[(_count(overview.deleted_found), 24, None)],
+					deleted_caption(
+						overview.deleted_found, overview.participants, overview.deleted_checked_at
+					),
 					DIM_TEXT,
 				)
 			)
+			return tiles
 		tiles.append(
 			Tile(
-				f"Пришли · ушли, {PERIOD_DAYS} дней",
-				[
-					(signed(overview.joined), 24, ACCENT_TEXT if overview.joined else DIM_TEXT),
-					(
-						signed(-overview.left) if overview.left is not None else "—",
-						19,
-						ERROR_TEXT if overview.left else DIM_TEXT,
-					),
-				],
-				flow_caption(overview.joined, overview.left),
+				"Просмотров на пост",
+				[(_count(overview.views_per_post), 24, None)],
+				# доля подписчиков понятнее «медианы последних постов»:
+				# сразу видно, какая часть канала видит запись
+				share_caption(overview.views_per_post, overview.participants, "подписчиков"),
 				DIM_TEXT,
 			)
 		)
+		part, total = overview.notifications or (None, None)
 		tiles.append(
 			Tile(
-				"Удалённых аккаунтов",
-				[(_count(overview.deleted_found), 24, None)],
-				deleted_caption(
-					overview.deleted_found, overview.participants, overview.deleted_checked_at
-				),
+				"Уведомления включены",
+				[(percent_text(part, total), 24, None)],
+				f"{_count(part)} из {_count(total)}" if total else "нет данных",
 				DIM_TEXT,
 			)
 		)
-		tiles.extend(self._telegram_tiles(overview))
-		return [self._tile_card(tile) for tile in tiles]
+		return tiles
 
-	def _telegram_tiles(self, overview: CommunityOverviewDto) -> list[Tile]:
-		"""Плитки по парам «сейчас, раньше» из статистики Telegram (только непустые)."""
+	def _flow_tile(self, overview: CommunityOverviewDto) -> Tile:
+		"""Плитка «Пришли · ушли» — общая у канала и группы."""
+		return Tile(
+			f"Пришли · ушли, {PERIOD_DAYS} дней",
+			[
+				(signed(overview.joined), 24, ACCENT_TEXT if overview.joined else DIM_TEXT),
+				(
+					signed(-overview.left) if overview.left is not None else "—",
+					19,
+					ERROR_TEXT if overview.left else DIM_TEXT,
+				),
+			],
+			flow_caption(overview.joined, overview.left),
+			DIM_TEXT,
+		)
+
+	def _section_tiles(
+		self, section: OverviewSection, overview: CommunityOverviewDto
+	) -> list[Tile]:
+		"""Плитки раздела: пары «сейчас, раньше» из статистики Telegram."""
 		days = overview.period_days
-		pairs: list[tuple[str, tuple[int, int] | None]] = [
-			("Пересылок на пост", overview.shares_per_post),
-			("Реакций на пост", overview.reactions_per_post),
-			("Просмотров на историю", overview.views_per_story),
-			("Пересылок на историю", overview.shares_per_story),
-			("Реакций на историю", overview.reactions_per_story),
-			(f"Сообщений за {days} дней", overview.messages),
-			("Читающих", overview.viewers),
-			("Пишущих", overview.posters),
-		]
+		pairs: list[tuple[str, tuple[int, int] | None]] = []
+		if section is OverviewSection.POSTS:
+			pairs = [
+				("Пересылок на пост", overview.shares_per_post),
+				("Реакций на пост", overview.reactions_per_post),
+				("Просмотров на историю", overview.views_per_story),
+				("Пересылок на историю", overview.shares_per_story),
+				("Реакций на историю", overview.reactions_per_story),
+			]
+		elif section is OverviewSection.MESSAGES:
+			pairs = [
+				(f"Сообщений за {days} дней", overview.messages),
+				("Читающих", overview.viewers),
+				("Пишущих", overview.posters),
+			]
 		tiles = []
 		for title, pair in pairs:
 			if pair is None:
 				continue
 			text, color = pair_caption(pair, days)
 			tiles.append(Tile(title, [(_count(pair[0]), 24, None)], text, color))
-		if overview.notifications is not None:
-			part, total = overview.notifications
-			tiles.append(
-				Tile(
-					"Уведомления включены",
-					[(percent_text(part, total), 24, None)],
-					f"{_count(part)} из {_count(total)}",
-					DIM_TEXT,
-				)
-			)
 		return tiles
 
 	# --- карточки графиков, долей и таблиц ---------------------------------------------
 
-	def _chart_cards(self, overview: CommunityOverviewDto) -> list[QWidget]:
-		"""Все карточки под сетку, в порядке важности; без данных карточки нет."""
-		cards: list[QWidget | None] = [
-			self._growth_card(overview),
-			self._flow_card(overview),
-			self._hours_card(overview),
-			self._daily_card("Просмотры и пересылки", overview.interactions),
-			self._daily_card("Сообщения по дням", overview.messages_daily),
-			self._daily_card("Читающие и пишущие", overview.actions),
-			self._daily_card("Instant View", overview.iv_interactions),
-			self._mute_card(overview),
-			self._daily_card("Истории: просмотры и пересылки", overview.story_interactions),
-			self._shares_card("Откуда просмотры", overview.views_by_source),
-			self._shares_card(
-				"Откуда новые участники"
-				if self._community.kind is CommunityKind.GROUP
-				else "Откуда новые подписчики",
-				overview.members_by_source,
-			),
-			self._shares_card("Языки аудитории", overview.languages),
-			self._shares_card("Реакции", overview.reactions_by_emotion),
-			self._shares_card("Реакции на истории", overview.story_reactions),
-			self._shares_card("По дням недели", overview.weekdays, keep_order=True),
-			self._recent_posts_card(overview),
-			self._top_card(
-				"Самые активные",
-				["Участник", "Сообщений", "Символов"],
-				[(p.name, p.messages, p.avg_chars) for p in overview.top_posters],
-			),
-			self._top_card(
-				"Администраторы",
-				["Админ", "Удалил", "Исключил", "Забанил"],
-				[(a.name, a.deleted, a.kicked, a.banned) for a in overview.top_admins],
-			),
-			self._top_card(
-				"Пригласили больше всех",
-				["Участник", "Пригласил"],
-				[(i.name, i.invitations) for i in overview.top_inviters],
-			),
-		]
-		ready = [card for card in cards if card is not None]
-		for card in ready:
-			layout = card.layout()
-			if isinstance(layout, QVBoxLayout):
-				# строка сетки — по самой высокой карточке; лишняя высота
-				# остаётся снизу, а не растягивает строки долей и таблицы
-				layout.addStretch()
-		return ready
+	def _section_cards(
+		self, section: OverviewSection, overview: CommunityOverviewDto
+	) -> list[QWidget | None]:
+		"""Карточки раздела в порядке спеки; без данных карточки нет."""
+		if section is OverviewSection.AUDIENCE:
+			who = "участников" if self._community.kind is CommunityKind.GROUP else "подписчиков"
+			return [
+				self._growth_card(overview),
+				self._flow_card(overview),
+				self._shares_card(f"Откуда новые {who}", overview.members_by_source),
+				self._shares_card("Языки аудитории", overview.languages),
+				self._mute_card(overview),
+			]
+		if section is OverviewSection.POSTS:
+			return [
+				self._daily_card("Просмотры и пересылки", overview.interactions),
+				self._daily_card("Instant View", overview.iv_interactions),
+				self._daily_card("Истории: просмотры и пересылки", overview.story_interactions),
+				self._shares_card("Откуда просмотры", overview.views_by_source),
+				self._shares_card("Реакции", overview.reactions_by_emotion),
+				self._shares_card("Реакции на истории", overview.story_reactions),
+			]
+		if section is OverviewSection.MESSAGES:
+			return [
+				self._daily_card("Сообщения по дням", overview.messages_daily),
+				self._daily_card("Читающие и пишущие", overview.actions),
+			]
+		if section is OverviewSection.WHEN:
+			return [
+				self._hours_card(overview),
+				self._shares_card("По дням недели", overview.weekdays, keep_order=True),
+			]
+		return []
+
+	def _section_tables(
+		self, section: OverviewSection, overview: CommunityOverviewDto
+	) -> list[QWidget | None]:
+		"""Таблицы раздела — во всю ширину, после сетки карточек."""
+		if section is OverviewSection.POSTS:
+			return [self._recent_posts_card(overview)]
+		if section is OverviewSection.PEOPLE:
+			return [
+				self._top_card(
+					"Самые активные",
+					["Участник", "Сообщений", "Символов"],
+					[(p.name, p.messages, p.avg_chars) for p in overview.top_posters],
+				),
+				self._top_card(
+					"Администраторы",
+					["Админ", "Удалил", "Исключил", "Забанил"],
+					[(a.name, a.deleted, a.kicked, a.banned) for a in overview.top_admins],
+				),
+				self._top_card(
+					"Пригласили больше всех",
+					["Участник", "Пригласил"],
+					[(i.name, i.invitations) for i in overview.top_inviters],
+				),
+			]
+		return []
 
 	def _growth_card(self, overview: CommunityOverviewDto) -> QWidget | None:
 		growth = overview.growth
