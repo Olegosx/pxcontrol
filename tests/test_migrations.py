@@ -22,8 +22,8 @@ EXPECTED_TABLES = {
 	"publish_queue_items",
 	"caption_fields",
 	"caption_values",
-	"caption_templates",
-	"caption_template_fields",
+	"caption_presets",
+	"caption_preset_fields",
 	"community_stats_history",
 	"community_analytics",
 	"account_operations",
@@ -453,3 +453,88 @@ def test_queue_text_downgrade_returns_separators(tmp_path: Path) -> None:
 			"SELECT text, entities FROM publish_queue_items WHERE id = ?", (item,)
 		).fetchone()
 	assert row == ("**жирный** и `код` и [тут](https://example.com)", None)
+
+
+def _caption_state_before_presets(conn: sqlite3.Connection) -> None:
+	"""Два сообщества с шаблонами подписи и настройкой разбора — до c2e6f18a4d93.
+
+	У первого поле «Video» уже занято человеком — перенос обязан взять
+	другое имя, а не приклеиться к чужому полю.
+	"""
+	for community_id in (1, 2):
+		conn.execute(
+			"INSERT INTO communities (id, title, tg_chat_id, created_at, updated_at)"
+			" VALUES (?, 'c', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+			(community_id, f"-100{community_id}"),
+		)
+	fields = [(10, 1, "Video"), (11, 1, "Genre"), (20, 2, "Title")]
+	for field_id, community_id, name in fields:
+		conn.execute(
+			"INSERT INTO caption_fields (id, community_id, name, hashtag, multiple, show_name,"
+			" created_at, updated_at) VALUES (?, ?, ?, 1, 0, 1,"
+			" CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+			(field_id, community_id, name),
+		)
+	templates = [(1, 1, "{video} ({Genre})"), (2, 1, None), (3, 2, "{Title} {video}")]
+	for template_id, community_id, pattern in templates:
+		conn.execute(
+			"INSERT INTO caption_templates (id, community_id, name, filename_pattern,"
+			" created_at, updated_at) VALUES (?, ?, 't', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+			(template_id, community_id, pattern),
+		)
+	rows = [(1, 11, 0), (1, 10, 1), (2, 11, 0), (3, 20, 0)]
+	for template_id, field_id, position in rows:
+		conn.execute(
+			"INSERT INTO caption_template_fields (template_id, field_id, position, enabled)"
+			" VALUES (?, ?, ?, 1)",
+			(template_id, field_id, position),
+		)
+	conn.execute(
+		"INSERT INTO community_settings (community_id, name, value)"
+		" VALUES (1, 'title_parse_rules', '[\"case:first_word\"]')"
+	)
+
+
+def test_caption_title_becomes_video_field(tmp_path: Path) -> None:
+	"""Миграция c2e6f18a4d93: название — поле, первым в каждом пресете.
+
+	Подписи не должны лишиться жирной первой строки: у каждого сообщества
+	с шаблонами заводится поле названия (жирным, без имени, без решёток)
+	с правилом «всё имя файла», ``{video}`` становится подстановкой этого
+	поля, а настройка прежнего разбора названия удаляется.
+	"""
+	db_file = tmp_path / "presets.db"
+	_upgrade(db_file, "e3f9a2c7d514")
+	with sqlite3.connect(db_file) as conn:
+		_caption_state_before_presets(conn)
+		conn.commit()
+	_upgrade(db_file, "head")
+	with sqlite3.connect(db_file) as conn:
+		created = {
+			community_id: (field_id, name, flags)
+			for field_id, community_id, name, *flags in conn.execute(
+				"SELECT id, community_id, name, hashtag, multiple, show_name, bold"
+				" FROM caption_fields WHERE id NOT IN (10, 11, 20)"
+			)
+		}
+		patterns = dict(conn.execute("SELECT id, filename_pattern FROM caption_presets"))
+		composition = conn.execute(
+			"SELECT preset_id, field_id, position, source_rule FROM caption_preset_fields"
+			" ORDER BY preset_id, position"
+		).fetchall()
+		settings = conn.execute("SELECT COUNT(*) FROM community_settings").fetchone()
+	# имя «Video» у первого сообщества занято — берётся следующее
+	assert created[1][1] == "Video 2" and created[2][1] == "Video"
+	assert created[1][2] == [0, 0, 0, 1]  # без решёток, одно, без имени, жирным
+	first, second = created[1][0], created[2][0]
+	assert patterns == {1: "{Video 2} ({Genre})", 2: None, 3: "{Title} {Video}"}
+	assert composition == [
+		(1, first, 0, "{}"),
+		(1, 11, 1, None),
+		(1, 10, 2, None),
+		(2, first, 0, "{}"),
+		(2, 11, 1, None),
+		(3, second, 0, "{}"),
+		(3, 20, 1, None),
+	]
+	assert settings == (0,)

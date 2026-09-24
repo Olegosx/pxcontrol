@@ -29,10 +29,7 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
-from pxcontrol.engine.services.captions import (
-	TemplateDto,
-	title_from_filename,
-)
+from pxcontrol.engine.services.captions import CaptionPresetDto, filename_source
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.community_stats import CommunityStatsDto
 from pxcontrol.engine.services.posts import (
@@ -64,7 +61,7 @@ from pxcontrol.engine.telegram.types import (
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.captions import CaptionDialog, FieldsDialog
+from pxcontrol.ui.pages.captions import CaptionDialog
 from pxcontrol.ui.pages.common import (
 	CharCounter,
 	CollapsibleCard,
@@ -185,16 +182,17 @@ class PublishPage(StagePage):
 		self._segments = kind_segments(self, layout, self._on_kind_changed)
 
 	def _build_caption_tools(self, layout: QVBoxLayout) -> None:
-		"""Кнопки шаблонизатора подписи."""
+		"""Сборка подписи по пресету; сами пресеты — в «Настройках» сообщества."""
 		self._caption_tools = QWidget(self)
 		row = QHBoxLayout(self._caption_tools)
 		row.setContentsMargins(0, 0, 0, 0)
 		compose = PushButton("Собрать подпись…", self)
+		compose.setToolTip(
+			"Подпись по пресету сообщества; пресеты настраиваются "
+			"на странице сообщества, вкладка «Настройки»"
+		)
 		compose.clicked.connect(self._on_compose_caption)
 		row.addWidget(compose)
-		setup = PushButton("Поля подписи…", self)
-		setup.clicked.connect(self._on_setup_fields)
-		row.addWidget(setup)
 		row.addStretch()
 		layout.addWidget(self._caption_tools)
 
@@ -522,7 +520,7 @@ class PublishPage(StagePage):
 		start_dir = start.processed if isinstance(start, VideoDirs) else start
 		self._media.open_dialog(start_dir)
 
-	# --- подпись по шаблону -----------------------------------------------------
+	# --- подпись по пресету -----------------------------------------------------
 
 	def _current_community(self) -> CommunityDto | None:
 		"""Выбранное сообщество или None (с показом подсказки)."""
@@ -531,74 +529,65 @@ class PublishPage(StagePage):
 			self._show_error("Сначала подключите и выберите сообщество.")
 		return community
 
-	def _on_setup_fields(self) -> None:
-		"""Открывает настройку полей и шаблонов подписи сообщества."""
-		community = self._current_community()
-		if community is not None:
-			exec_dialog(FieldsDialog(self._worker, community.id, community.title, self.window()))
-
 	def _on_compose_caption(self) -> None:
-		"""Загружает шаблоны сообщества и открывает диалог сборки."""
+		"""Загружает пресеты сообщества и открывает окно сборки."""
 		community = self._current_community()
 		if community is None:
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.list_templates(community.id),
+			self._worker.engine.captions.list_presets(community.id),
 			self,
 			self._open_caption_dialog,
 			self._show_error,
 		)
 
-	def _open_caption_dialog(self, templates: list[TemplateDto]) -> None:
-		"""Собирает подпись по шаблону и вставляет её в поле текста."""
-		# пустой (например, только что созданный) шаблон не должен
-		# блокировать сборку по остальным — в диалог идут пригодные
-		usable = [template for template in templates if template.fields]
+	def _open_caption_dialog(self, presets: list[CaptionPresetDto]) -> None:
+		"""Собирает подпись по пресету и вставляет её в поле текста.
+
+		Поля с правилом разбора заполняются из имени первого файла поста
+		(ADR-0042); у текстового поста файла нет — всё вводится руками.
+		"""
+		# пустой (например, только что созданный) пресет не должен
+		# блокировать сборку по остальным — в окно идут пригодные
+		usable = [preset for preset in presets if preset.fields]
 		if not usable:
-			self._show_error("Сначала настройте поля и шаблон — кнопка «Поля подписи…».")
+			self._show_error(
+				"Сначала создайте пресет подписи: страница сообщества, "
+				"вкладка «Настройки», блок «Пресеты подписи»."
+			)
 			return
 		files = self._media.files()
-		media = files[0].path if files else ""
-		title = ""
-		if self._kind is not MediaKind.NONE and media:
-			title = title_from_filename(media)
-		dialog = CaptionDialog(usable, title, self.window())
+		media = files[0].path if files and self._kind is not MediaKind.NONE else ""
+		dialog = CaptionDialog(usable, filename_source(media) if media else None, self.window())
 		if not exec_dialog(dialog):
 			return
 		self._post_text.set_rich(dialog.caption())
-		self._record_template_usage(dialog.template_id(), dialog.used_values())
-		self._suggest_rename(templates, dialog, media)
+		preset = dialog.preset()
+		values = dialog.values()
+		self._record_preset_usage(preset.id, values)
+		self._suggest_rename(preset, values, media)
 
-	def _record_template_usage(self, template_id: int, used_values: dict[int, list[str]]) -> None:
-		"""Запоминает использованные значения шаблона (для предвыбора)."""
+	def _record_preset_usage(self, preset_id: int, used_values: dict[int, list[str]]) -> None:
+		"""Пополняет словари и запоминает пресет (для предвыбора)."""
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.record_usage(template_id, used_values),
+			self._worker.engine.captions.record_usage(preset_id, used_values),
 			self,
 			noop,
 			self._show_error,
 		)
 
 	def _suggest_rename(
-		self, templates: list[TemplateDto], dialog: CaptionDialog, media: str
+		self, preset: CaptionPresetDto, values: dict[int, list[str]], media: str
 	) -> None:
-		"""Предлагает имя файла по шаблону имени (если он задан)."""
-		template = next(t for t in templates if t.id == dialog.template_id())
+		"""Предлагает имя файла по шаблону имени пресета (если он задан)."""
 		community = self._current_community()
-		if not (template.filename_pattern and media and community):
-			return
-		if self._kind is MediaKind.NONE:
+		if not (preset.filename_pattern and media and community):
 			return
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.render_filename(
-				template.id,
-				community.id,
-				dialog.title(),
-				dialog.used_values(),
-				media,
-			),
+			self._worker.engine.captions.render_filename(preset.id, community.id, values, media),
 			self,
 			self._show_rename_suggestion,
 			self._show_error,

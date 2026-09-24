@@ -1,11 +1,13 @@
 """Редактор пакета отправки: черновики постов из готовой папки (ADR-0015).
 
 Тело экрана «Пакет» раздела «Публикация» (ADR-0032). Строка на файл:
-галочка, подпись (собрана по общему шаблону, правится), переименование
-(по шаблону имени, правится) и время публикации (заполнено раскладкой
-по выбранной стратегии, правится). Разворачивающийся блок «Правила
-разбора имени файла» (чистая ``parse_title`` движка) по явной кнопке
-пересобирает подписи и подсказки имён из разобранных названий.
+галочка, подпись (собрана по общему пресету подписи, правится),
+переименование (по шаблону имени пресета, правится) и время публикации
+(заполнено раскладкой по выбранной стратегии, правится). Подпись строки
+собирается из общих значений окна сборки и значений, разобранных
+из имени её файла по правилам пресета (:class:`BatchCaption`, ADR-0042);
+до ADR-0042 здесь же жил блок «Правила разбора имени файла» — разбор
+переехал в пресет.
 :meth:`BatchEditor.drafts` отдаёт список черновиков ``PostDraft`` —
 дальше работает обычная очередь отправки.
 
@@ -17,11 +19,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 
 from PySide6.QtCore import QDate, Signal
-from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	BodyLabel,
 	CalendarPicker,
@@ -37,16 +40,9 @@ from qfluentwidgets import (
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import (
-	TITLE_STEP_PRESETS,
-	CaptionLine,
-	CaptionsError,
-	TitleCaseMode,
-	TitleParseRules,
-	TitleStep,
+	CaptionPresetDto,
 	build_caption,
-	compile_step,
-	parse_title,
-	title_from_filename,
+	filename_source,
 )
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import MediaFile, PostDraft
@@ -62,7 +58,6 @@ from pxcontrol.engine.services.schedule_plan import (
 	parse_hhmm,
 	plan_times,
 )
-from pxcontrol.engine.services.settings import TITLE_PARSE_RULES
 from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.markup import PostMarkup
 from pxcontrol.engine.telegram.rich_text import RichText, trimmed
@@ -77,12 +72,8 @@ from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	DEFAULT_SCHEDULE_OFFSET_S,
 	CharCounter,
-	CollapsibleCard,
 	ErrorLabel,
 	SelectionRow,
-	bind,
-	clear_layout,
-	elide_text,
 	file_action_buttons,
 	human_size,
 	noop,
@@ -97,13 +88,6 @@ _WHEN_FORMAT = "%d.%m.%Y %H:%M"
 #: Высота поля подписи в строке (несколько строк текста без прокрутки окна).
 _CAPTION_HEIGHT = 64
 
-#: Режимы регистра разбора имени файла: подпись → режим движка.
-_CASE_MODES: list[tuple[str, TitleCaseMode]] = [
-	("Как есть", TitleCaseMode.KEEP),
-	("Каждое Слово С Заглавной", TitleCaseMode.EVERY_WORD),
-	("Только первая буква", TitleCaseMode.FIRST_WORD),
-]
-
 #: Стратегии раскладки: подпись → вид плана и «раз в N дней?».
 _STRATEGIES: list[tuple[str, PlanKind, bool]] = [
 	("По временам сообщества", PlanKind.COMMUNITY_TIMES, False),
@@ -114,14 +98,26 @@ _STRATEGIES: list[tuple[str, PlanKind, bool]] = [
 ]
 
 
-def _replacement_text(replacement: str) -> str:
-	"""Замена шага для списка: кавычки делают видимым пробел.
+@dataclass(frozen=True)
+class BatchCaption:
+	"""Подпись пакета: пресет, отмеченные поля и общие значения.
 
-	Пустая замена — это удаление, так и пишем словом. Всё остальное
-	берём в кавычки: без них шаг «[_-] → » выглядел бы оборванным,
-	а пробел в замене — самый ходовой случай.
+	Окно сборки проходится один раз на пакет (ADR-0015) и даёт общие
+	значения полей без правила разбора; поля с правилом у каждой строки
+	берут значения из имени её файла (ADR-0042).
 	"""
-	return f"«{replacement}»" if replacement else "удалить"
+
+	preset: CaptionPresetDto
+	enabled_ids: tuple[int, ...]
+	common_values: dict[int, list[str]]
+
+	def values_for(self, path: str) -> dict[int, list[str]]:
+		"""Значения полей строки: общие плюс разобранные из имени файла."""
+		return {**self.common_values, **self.preset.parsed(filename_source(path))}
+
+	def caption_for(self, path: str) -> RichText:
+		"""Подпись строки по пресету."""
+		return build_caption(self.preset.lines(self.values_for(path), self.enabled_ids))
 
 
 def _parse_when(text: str) -> datetime | None:
@@ -196,7 +192,7 @@ class _BatchRow:
 		self.caption.setPlaceholderText("Подпись к видео (необязательно)…")
 		self.rich_caption.set_rich(caption)
 		box.addWidget(self.rich_caption)
-		# подписи собраны общим шаблоном: предел легко перерастает весь
+		# подписи собраны общим пресетом: предел легко перерастает весь
 		# пакет сразу, и увидеть это лучше здесь, чем при постановке
 		self.counter = CharCounter(self.card, box, self.caption, caption_limit)
 		bottom = QHBoxLayout()
@@ -239,27 +235,22 @@ class BatchEditor(QWidget):
 		root: str,
 		files: list[VideoFile],
 		parent: QWidget,
-		caption_lines: list[CaptionLine] | None = None,
-		filename_template_id: int | None = None,
-		used_values: dict[int, list[str]] | None = None,
+		caption: BatchCaption | None = None,
 		community_times: list[str] | None = None,
 		limit_bytes: int | None = None,
 		caption_limit: int = CAPTION_LENGTH_LIMIT,
 		schedule_allowed: bool = True,
 		busy: list[datetime] | None = None,
-		title_rules: TitleParseRules | None = None,
 	) -> None:
-		"""``caption_lines`` — строки общего шаблона подписи (None — без
-		подписей); ``filename_template_id`` — шаблон имени файла для
-		переименования (None — не предлагать); ``limit_bytes`` — лимит
+		"""``caption`` — пресет подписи с общими значениями (None — без
+		подписей); переименование предлагается, если у пресета задан
+		шаблон имени файла; ``limit_bytes`` — лимит
 		файла выбранного канала (пометка и снятая галочка у больших);
 		``caption_limit`` — предел длины подписи канала (счётчик под
 		каждой подписью; у Premium-публикатора он выше базового);
 		``schedule_allowed`` — доступна ли отложка (у бот-канала — нет);
 		``busy`` — занятые моменты существующих отложек канала (местное
-		наивное время) — раскладка их пропускает; ``title_rules`` —
-		заготовка правил разбора имени файла (наполняет блок правил,
-		применяется только явной кнопкой)."""
+		наивное время) — раскладка их пропускает."""
 		super().__init__(parent)
 		self.content = QVBoxLayout(self)
 		self.content.setContentsMargins(0, 0, 0, 0)
@@ -270,16 +261,12 @@ class BatchEditor(QWidget):
 		self._schedule_allowed = schedule_allowed
 		self._busy = list(busy or [])
 		self._rows: list[_BatchRow] = []
-		self._caption_lines = caption_lines
-		self._filename_template_id = filename_template_id
-		self._used_values = dict(used_values or {})
-		self._applied_rules: TitleParseRules | None = None
+		self._caption = caption
 		folder = CaptionLabel(f"Папка: {root}", self)
 		folder.setWordWrap(True)
 		self.content.addWidget(folder)
-		self._build_rules_card(title_rules or TitleParseRules())
 		self._build_strategy_row()
-		self._build_rows(files, caption_lines, limit_bytes, caption_limit)
+		self._build_rows(files, limit_bytes, caption_limit)
 		self._build_selection_row()
 		self._error = ErrorLabel(self)
 		self.content.addWidget(self._error)
@@ -373,182 +360,6 @@ class BatchEditor(QWidget):
 
 	# --- сборка ----------------------------------------------------------------
 
-	def _build_rules_card(self, rules: TitleParseRules) -> None:
-		"""Разворачивающийся блок «Правила разбора имени файла».
-
-		Разбор — цепочка замен: шаг («что найти» → «на что заменить»)
-		применяется кнопкой, встаёт в конец цепочки, и названия всех
-		строк пересчитываются от исходного имени файла через всю
-		цепочку. Поэтому убранный из середины шаг даёт честный
-		результат, а не «как получилось». Пустое поле замены означает
-		удаление; пробел в нём — обычное значение (им разбивают
-		слипшиеся слова: ``[_-]`` → пробел). Помощник рядом с полем
-		вставляет готовое выражение — дальше его правят руками.
-		Цепочка приходит из настройки канала и туда же сохраняется
-		(``TITLE_PARSE_RULES``).
-		"""
-		card = CollapsibleCard("Правила разбора имени файла", self)
-		self._steps: list[TitleStep] = list(rules.steps)
-		step_row = QHBoxLayout()
-		self._step_edit = LineEdit(card)
-		self._step_edit.setPlaceholderText(r"что найти: выражение, например \d{3,4}p|WEB-DL")
-		self._step_edit.setToolTip(
-			"Регулярное выражение поиска. Без учёта регистра — начните с (?i)"
-		)
-		self._step_edit.returnPressed.connect(self._apply_step)
-		step_row.addWidget(self._step_edit, stretch=2)
-		step_row.addWidget(BodyLabel("→", card))
-		self._replace_edit = LineEdit(card)
-		self._replace_edit.setPlaceholderText("на что заменить (пусто — удалить)")
-		self._replace_edit.setToolTip(
-			"Чем заменить совпадение. Пусто — удаление; пробел — обычное "
-			"значение: им разбивают слипшиеся слова (например [_-] → пробел). "
-			"Допустимы ссылки на группы выражения: \\1, \\g<имя>"
-		)
-		self._replace_edit.returnPressed.connect(self._apply_step)
-		step_row.addWidget(self._replace_edit, stretch=1)
-		self._step_presets = ComboBox(card)
-		self._step_presets.setPlaceholderText("Заготовки")
-		for label, _pattern in TITLE_STEP_PRESETS:
-			self._step_presets.addItem(label)
-		self._step_presets.setCurrentIndex(-1)
-		self._step_presets.currentIndexChanged.connect(self._insert_preset)
-		step_row.addWidget(self._step_presets)
-		apply_button = PushButton("Применить", card)
-		apply_button.setToolTip(
-			"Добавить шаг в цепочку и пересобрать названия всех строк "
-			"(ручные правки подписей перезапишутся)"
-		)
-		apply_button.clicked.connect(self._apply_step)
-		step_row.addWidget(apply_button)
-		card.body.addLayout(step_row)
-		self._pattern_error = ErrorLabel(card)
-		card.body.addWidget(self._pattern_error)
-		self._steps_box = QVBoxLayout()
-		self._steps_box.setSpacing(density.spacing().list_spacing)
-		card.body.addLayout(self._steps_box)
-		case_row = QHBoxLayout()
-		case_row.addWidget(BodyLabel("Регистр названия:", card))
-		self._rule_case = ComboBox(card)
-		for label, _mode in _CASE_MODES:
-			self._rule_case.addItem(label)
-		modes = [mode for _label, mode in _CASE_MODES]
-		self._rule_case.setCurrentIndex(modes.index(rules.case))
-		# регистр заменой не выражается — это отдельное правило поверх
-		# цепочки; смена сразу пересобирает названия
-		self._rule_case.currentIndexChanged.connect(self._reapply_rules)
-		case_row.addWidget(self._rule_case)
-		case_row.addStretch()
-		card.body.addLayout(case_row)
-		self.content.addWidget(card)
-		self._show_steps()
-
-	def _insert_preset(self, index: int) -> None:
-		"""Вставляет заготовку в поле выражения — дальше её правят руками.
-
-		Поле замены заготовка не трогает: чем заменить найденное, решает
-		автор (заготовки — про поиск мусора, и обычно его удаляют).
-		"""
-		if 0 <= index < len(TITLE_STEP_PRESETS):
-			self._step_edit.setText(TITLE_STEP_PRESETS[index][1])
-			self._step_presets.setCurrentIndex(-1)  # пункт не «залипает»
-			self._step_edit.setFocus()
-
-	def _show_steps(self) -> None:
-		"""Перерисовывает список применённых шагов (в порядке применения)."""
-		clear_layout(self._steps_box)
-		if not self._steps:
-			self._steps_box.addWidget(
-				CaptionLabel("Шагов нет — названия берутся из имён файлов как есть.", self)
-			)
-			return
-		for index, step in enumerate(self._steps):
-			row = QHBoxLayout()
-			text = f"{index + 1}. {step.pattern} → {_replacement_text(step.replacement)}"
-			label = BodyLabel(text, self)
-			label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-			elide_text(label, text)
-			row.addWidget(label, stretch=1)
-			remove = PushButton("Убрать", self)
-			# по номеру, а не по значению: два одинаковых шага в цепочке
-			# сняли бы друг друга и порядок остальных разъехался бы
-			remove.clicked.connect(bind(self._remove_step, index))
-			row.addWidget(remove)
-			self._steps_box.addLayout(row)
-
-	def _rules_from_form(self) -> TitleParseRules:
-		"""Правила из состояния блока: цепочка шагов и режим регистра."""
-		return TitleParseRules(
-			steps=tuple(self._steps),
-			case=_CASE_MODES[int(self._rule_case.currentIndex())][1],
-		)
-
-	def _row_title(self, row: _BatchRow) -> str:
-		"""Название строки: из имени файла, с учётом применённых правил."""
-		title = title_from_filename(row.video.path)
-		if self._applied_rules is not None:
-			title = parse_title(title, self._applied_rules)
-		return title
-
-	def _apply_step(self) -> None:
-		"""Добавляет шаг из полей в цепочку и пересобирает названия.
-
-		Битое выражение или битый шаблон замены в цепочку не попадают:
-		причина — строкой под полями, названия остаются прежними.
-		Замена берётся как есть, без обрезки краёв: пробел в ней —
-		значащий (``[_-]`` → пробел разбивает слипшиеся слова).
-		"""
-		pattern = str(self._step_edit.text()).strip()
-		if not pattern:
-			return
-		step = TitleStep(pattern, str(self._replace_edit.text()))
-		try:
-			compile_step(step)
-		except CaptionsError as exc:
-			self._pattern_error.fail(str(exc))
-			return
-		self._pattern_error.succeed()
-		self._steps.append(step)
-		self._step_edit.clear()
-		self._replace_edit.clear()
-		self._show_steps()
-		self._reapply_rules()
-
-	def _remove_step(self, index: int) -> None:
-		"""Убирает шаг цепочки по номеру и пересобирает названия заново."""
-		if 0 <= index < len(self._steps):
-			del self._steps[index]
-			self._show_steps()
-			self._reapply_rules()
-
-	def _reapply_rules(self, *_args: object) -> None:
-		"""Пересобирает подписи и подсказки имён всех строк по цепочке.
-
-		Названия всегда считаются от исходного имени файла через всю
-		цепочку — поэтому убранный шаг честно отменяется. Без общего
-		шаблона подписи результат — жирное название само по себе (раз
-		правила настраивают, разобранное название должно быть видно).
-		Цепочка сохраняется заготовкой канала; сбой сохранения
-		применению не мешает (текст — в плашку ошибок окна).
-		"""
-		self._applied_rules = self._rules_from_form()
-		for row in self._rows:
-			row.set_caption(build_caption(self._row_title(row), self._caption_lines or []))
-		self._request_renames()
-
-		def _save_failed(message: str) -> None:
-			self._error.fail(message)  # fail возвращает bool — мосту нужен None
-
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.set_for(
-				TITLE_PARSE_RULES, self._community.id, self._applied_rules.to_tokens()
-			),
-			self,
-			noop,
-			_save_failed,
-		)
-
 	def _build_strategy_row(self) -> None:
 		"""Стратегия раскладки времени и её параметры."""
 		row = QHBoxLayout()
@@ -618,7 +429,6 @@ class BatchEditor(QWidget):
 	def _build_rows(
 		self,
 		files: list[VideoFile],
-		caption_lines: list[CaptionLine] | None,
 		limit_bytes: int | None,
 		caption_limit: int,
 	) -> None:
@@ -633,9 +443,7 @@ class BatchEditor(QWidget):
 		box.setSpacing(density.spacing().list_spacing)
 		for video in files:
 			caption = (
-				build_caption(title_from_filename(video.path), caption_lines)
-				if caption_lines is not None
-				else RichText("")
+				self._caption.caption_for(video.path) if self._caption is not None else RichText("")
 			)
 			oversized = limit_bytes is not None and video.size_bytes > limit_bytes
 			# пометка «только через Premium» (ADR-0037) — у userbot-пути:
@@ -662,22 +470,22 @@ class BatchEditor(QWidget):
 		self.content.addLayout(self._selection.layout)
 
 	def _request_renames(self) -> None:
-		"""Просит движок предложить имена файлов по шаблону имени.
+		"""Просит движок предложить имена файлов по шаблону имени пресета.
 
 		Подсказка вспомогательная: ошибка одной строки не мешает
 		остальным (и не показывается плашкой — просто поле пустое).
-		Название строки — с учётом применённых правил разбора.
+		Значения строки — общие плюс разобранные из имени её файла.
 		"""
-		if self._filename_template_id is None:
+		caption = self._caption
+		if caption is None or not caption.preset.filename_pattern:
 			return
 		for row in self._rows:
 			run_in_engine(
 				self._worker,
 				self._worker.engine.captions.render_filename(
-					self._filename_template_id,
+					caption.preset.id,
 					self._community.id,
-					self._row_title(row),
-					self._used_values,
+					caption.values_for(row.video.path),
 					row.video.path,
 				),
 				self,

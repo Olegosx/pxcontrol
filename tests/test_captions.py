@@ -1,8 +1,10 @@
-"""Тесты подписей: чистая сборка текста и сервис полей/шаблонов."""
+"""Тесты подписей: чистая сборка и разбор имени файла, сервис полей и пресетов."""
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -13,23 +15,38 @@ from pxcontrol.engine.services.captions import (
 	BRACKETS_STEP,
 	DATE_STEP,
 	DIGIT_WORDS_STEP,
-	TITLE_STEP_PRESETS,
+	EXTRACT_PRESETS,
+	STEP_PRESETS,
 	CaptionLine,
+	CaptionPresetDraft,
+	CaptionPresetDto,
 	CaptionsError,
 	CaptionsService,
-	TitleCaseMode,
-	TitleParseRules,
-	TitleStep,
+	CaseMode,
+	FieldDto,
+	FieldEdit,
+	FieldStyle,
+	PresetFieldSpec,
+	ReplaceStep,
+	SourceRule,
 	build_caption,
+	check_rule,
 	compile_step,
+	compose_filename,
+	extract_values,
+	filename_source,
 	hashtag,
-	parse_title,
-	title_from_filename,
 )
 from pxcontrol.engine.services.video import PIPELINE_STAMP_FORMAT
 from pxcontrol.engine.telegram.rich_text import RichText, TextEntity, TextStyle
 
-# --- чистые функции ---------------------------------------------------------
+#: Пример из постановки задачи (ADR-0042): дата, номер, актёры, тайтл.
+_MOVIE = "11.12.2014 627563 Bruce Lee, Jan Clod Van Dam, Ded Morozz (Prosto Film)"
+
+#: Оформление строки названия ролика (так его заводит миграция).
+_TITLE_STYLE = FieldStyle(hashtag=False, multiple=False, show_name=False, bold=True)
+
+# --- сборка подписи ------------------------------------------------------------------
 
 
 def test_hashtag_normalization() -> None:
@@ -40,115 +57,160 @@ def test_hashtag_normalization() -> None:
 	assert hashtag("uno") == "#Uno"
 
 
-def test_build_caption_full() -> None:
-	"""Название жирным **сущностью** (ADR-0033), поля построчно, пустые — вон.
+def test_build_caption_title_is_ordinary_bold_field() -> None:
+	"""Название — обычная строка с оформлением «жирным», разметка сущностью.
 
-	Звёздочек в тексте больше нет: разметка живёт рядом с видимым
-	текстом, иначе она считалась бы длиной поста и мешала правке.
+	Звёздочек в тексте нет (ADR-0033); пустые поля пропускаются.
 	"""
 	caption = build_caption(
-		"Lara Croft",
 		[
-			CaptionLine("Year", hashtag=False, values=["2026"]),
-			CaptionLine("Genre", hashtag=True, values=["action", "sci-fi"]),
-			CaptionLine("Author", hashtag=True, values=["  "]),  # пусто — пропуск
-		],
+			CaptionLine("Video", ["Lara Croft"], _TITLE_STYLE),
+			CaptionLine("Year", ["2026"], FieldStyle(hashtag=False)),
+			CaptionLine("Genre", ["action", "sci-fi"], FieldStyle(multiple=True)),
+			CaptionLine("Author", ["  "]),  # пусто — пропуск
+		]
 	)
 	assert caption.text == "Lara Croft\nYear: 2026\nGenre: #Action, #SciFi"
 	assert caption.entities == (TextEntity(TextStyle.BOLD, 0, len("Lara Croft")),)
 
 
-def test_build_caption_without_title() -> None:
-	"""Без названия подпись начинается сразу с полей и без разметки."""
-	caption = build_caption("", [CaptionLine("Year", False, ["2026"])])
-	assert caption == RichText("Year: 2026")
-
-
-def test_build_caption_without_field_name() -> None:
-	"""show_name=False — строка из одних значений, без префикса «Имя: »."""
+def test_build_caption_bold_anywhere_counts_utf16() -> None:
+	"""Жирная строка не первой: смещение — в UTF-16, эмодзи занимает две единицы."""
 	caption = build_caption(
-		"Lara Croft",
 		[
-			CaptionLine("Genre", hashtag=True, values=["action", "sci-fi"], show_name=False),
-			CaptionLine("Year", hashtag=False, values=["2026"]),
-			CaptionLine("Tags", hashtag=True, values=[""], show_name=False),  # пусто — пропуск
-		],
+			CaptionLine("Mood", ["🙂"], FieldStyle(hashtag=False, show_name=False)),
+			CaptionLine("Empty", []),  # пропуск не сдвигает смещения
+			CaptionLine("Title", ["Фильм"], replace_style(bold=True, hashtag=False)),
+		]
 	)
-	assert caption.text == "Lara Croft\n#Action, #SciFi\nYear: 2026"
+	assert caption.text == "🙂\nTitle: Фильм"
+	# «🙂» — две единицы UTF-16, плюс перевод строки
+	assert caption.entities == (TextEntity(TextStyle.BOLD, 3, len("Title: Фильм")),)
 
 
-def test_title_from_filename_matches_pipeline_stamp() -> None:
+def replace_style(**changes: Any) -> FieldStyle:
+	"""Оформление по умолчанию с поправками."""
+	from dataclasses import replace
+
+	return replace(FieldStyle(), **changes)
+
+
+def test_build_caption_without_bold_and_names() -> None:
+	"""Без жирных строк разметки нет; show_name=False — только значения."""
+	caption = build_caption(
+		[
+			CaptionLine("Genre", ["action", "sci-fi"], FieldStyle(show_name=False)),
+			CaptionLine("Year", ["2026"], FieldStyle(hashtag=False)),
+		]
+	)
+	assert caption == RichText("#Action, #SciFi\nYear: 2026")
+
+
+def test_filename_source_matches_pipeline_stamp() -> None:
 	"""Связка форматов: суффикс с штампом PIPELINE_STAMP_FORMAT вырезается.
 
 	Формат штампа живёт в сервисе видео, вырезающее его регулярное
 	выражение — здесь: тест ловит их молчаливое расхождение.
 	"""
 	stamp = datetime(2026, 8, 26, 12, 30, 45).strftime(PIPELINE_STAMP_FORMAT)
-	assert title_from_filename(f"/x/Имя ролика_пресет_{stamp}.mp4") == "Имя ролика"
+	assert filename_source(f"/x/Имя ролика_пресет_{stamp}.mp4") == "Имя ролика"
 
 
-def test_title_from_filename_strips_pipeline_suffix() -> None:
-	"""Суффикс конвейера _<пресет>_<штамп> отрезается, чужие имена — как есть."""
-	assert title_from_filename("/x/Lara Croft_test_20260713-223049.mp4") == "Lara Croft"
-	assert title_from_filename("/x/Просто видео.mp4") == "Просто видео"
+def test_filename_source_strips_pipeline_suffix_only() -> None:
+	"""Суффикс конвейера отрезается, чужие имена — как есть (без расширения)."""
+	assert filename_source("/x/Lara Croft_test_20260713-223049.mp4") == "Lara Croft"
+	assert filename_source("/x/Просто видео.mp4") == "Просто видео"
+	assert filename_source(f"/x/{_MOVIE}.mkv") == _MOVIE
 
 
-# --- разбор имени файла в название (пакетная публикация) ---------------------
-
-#: Ходовой шаг: разделители → пробел. Раньше это была галочка, теперь —
-#: обычная пара «выражение → замена»; в тестах встречается всюду.
-_SPACES = TitleStep("_", " ")
+# --- разбор имени файла в значения полей ------------------------------------------------
 
 
-def test_parse_title_applies_steps_in_order() -> None:
-	"""Шаги идут по очереди: каждый — по результату предыдущего."""
-	rules = TitleParseRules(steps=(_SPACES, TitleStep(DATE_STEP), TitleStep(DIGIT_WORDS_STEP)))
-	assert parse_title("Фильм_2024-01-31_1080_финал", rules) == "Фильм финал"
-	# порядок важен: даты после замены разделителей уже не видны
-	late_dates = TitleParseRules(steps=(_SPACES, TitleStep(DATE_STEP)))
-	assert parse_title("Фильм_2024_01_31", late_dates) == "Фильм 2024 01 31"
-	early_dates = TitleParseRules(steps=(TitleStep(DATE_STEP), _SPACES))
-	assert parse_title("Фильм_2024_01_31", early_dates) == "Фильм"
-
-
-def test_parse_title_replacement_is_explicit() -> None:
-	"""Замена задаётся шагом: пустая — удаление, пробел — разрыв слов.
-
-	Прежняя модель заменяла совпадение пробелом всегда; теперь это выбор
-	автора правил, и оба исхода должны быть достижимы.
-	"""
-	glue = TitleParseRules(steps=(TitleStep("_", ""),))
-	assert parse_title("Мой_ролик", glue) == "Мойролик"
-	split = TitleParseRules(steps=(TitleStep("_", " "),))
-	assert parse_title("Мой_ролик", split) == "Мой ролик"
-	# замена не обязана быть пустой или пробелом
-	dash = TitleParseRules(steps=(TitleStep(r"\s+", "-"),))
-	assert parse_title("Мой ролик", dash) == "Мой-ролик"
-	# ссылки на группы: совпадение можно переписать, а не выбросить
-	swap = TitleParseRules(steps=(TitleStep(r"(\w+)\.(\w+)", r"\2 \1"),))
-	assert parse_title("ролик.мой", swap) == "мой ролик"
-
-
-def test_parse_title_broken_replacement_is_skipped() -> None:
-	"""Битый шаблон замены выключает шаг, а не роняет разбор."""
-	rules = TitleParseRules(steps=(TitleStep("_", r"\9"), _SPACES))
-	assert parse_title("Фильм_релиз", rules) == "Фильм релиз"
-
-
-def test_parse_title_case_modes() -> None:
-	"""Регистр применяется по итоговой фразе, не ломая «iPhone»."""
-	every = TitleParseRules(steps=(_SPACES,), case=TitleCaseMode.EVERY_WORD)
-	assert parse_title("lara_croft_tomb", every) == "Lara Croft Tomb"
-	assert parse_title("обзор iPhone", TitleParseRules(case=TitleCaseMode.EVERY_WORD)) == (
-		"Обзор IPhone"
+def test_task_example_splits_into_title_and_starring() -> None:
+	"""Пример из постановки: тайтл из скобок, актёры списком с решётками."""
+	title = extract_values(_MOVIE, SourceRule(extract=r"\(([^()]*)\)\s*$"), multiple=False)
+	starring = extract_values(_MOVIE, SourceRule(extract=r"^\S+\s+\d+\s+(.+?)\s*\("), True)
+	assert title == ["Prosto Film"]
+	assert starring == ["Bruce Lee", "Jan Clod Van Dam", "Ded Morozz"]
+	caption = build_caption(
+		[
+			CaptionLine("Title", title, _TITLE_STYLE),
+			CaptionLine("Starring", starring, FieldStyle(multiple=True)),
+		]
 	)
-	first = TitleParseRules(steps=(_SPACES,), case=TitleCaseMode.FIRST_WORD)
-	assert parse_title("новый_ролик_серии", first) == "Новый ролик серии"
+	assert caption.text == "Prosto Film\nStarring: #BruceLee, #JanClodVanDam, #DedMorozz"
+
+
+def test_no_match_means_no_value() -> None:
+	"""Нет совпадения — поле пустое, а не заполнено всем именем файла."""
+	rule = SourceRule(extract=r"\(([^()]*)\)\s*$")
+	assert extract_values("Без скобок", rule, multiple=False) == []
+	assert extract_values("Без скобок", rule, multiple=True) == []
+
+
+def test_default_rule_takes_whole_name() -> None:
+	"""Правило по умолчанию — имя целиком (так миграция переносит название)."""
+	assert extract_values("Lara  Croft ", SourceRule(), multiple=False) == ["Lara Croft"]
+	# у единственного значения разделитель не действует
+	assert extract_values("Tom, Jerry", SourceRule(), multiple=False) == ["Tom, Jerry"]
+
+
+def test_group_choice_value_then_first_then_whole() -> None:
+	"""Группа value главнее; иначе первая группа; без групп — всё совпадение."""
+	named = SourceRule(extract=r"(\d+)-(?P<value>[a-z]+)")
+	assert extract_values("12-abc", named, False) == ["abc"]
+	assert extract_values("12-abc", SourceRule(extract=r"(\d+)-([a-z]+)"), False) == ["12"]
+	assert extract_values("12-abc", SourceRule(extract=r"\d+-[a-z]+"), False) == ["12-abc"]
+	# необязательная группа не участвовала — значения нет
+	assert extract_values("x", SourceRule(extract=r"x(y)?"), False) == []
+
+
+def test_steps_split_case_and_dedupe() -> None:
+	"""Очистка идёт до разделения, регистр — у каждого значения, повторы — мимо."""
+	rule = SourceRule(
+		steps=(ReplaceStep("_", " "),),
+		case=CaseMode.FIRST_WORD,
+		separator=r"\s*[,&]\s*",
+	)
+	assert extract_values("bruce_lee & jan , bruce_lee,,", rule, multiple=True) == [
+		"Bruce lee",
+		"Jan",
+	]
+	every = SourceRule(case=CaseMode.EVERY_WORD)
+	# «Каждое Слово» не ломает «iPhone»: поднимается только первая буква
+	assert extract_values("обзор iPhone", every, False) == ["Обзор IPhone"]
+
+
+def test_broken_parts_do_not_break_parsing(caplog: pytest.LogCaptureFixture) -> None:
+	"""Битое извлечение — пусто, битый шаг — пропуск, битый разделитель — одно значение.
+
+	Разбор сотни имён не падает из-за опечатки; причина — в логе
+	(и на экране пресета, :func:`check_rule`).
+	"""
+	caplog.set_level(logging.WARNING)
+	assert extract_values("abc", SourceRule(extract="[незакрытый"), False) == []
+	steps = SourceRule(steps=(ReplaceStep("[незакрытый"), ReplaceStep("_", " ")))
+	assert extract_values("Фильм_релиз", steps, False) == ["Фильм релиз"]
+	assert extract_values("a,b", SourceRule(separator="("), True) == ["a,b"]
+	assert "не разобран" in caplog.text
+
+
+def test_steps_keep_previous_chain_semantics() -> None:
+	"""Цепочка замен прежняя: порядок важен, пустая замена — удаление, группы."""
+	spaces = ReplaceStep("_", " ")
+	late = SourceRule(steps=(spaces, ReplaceStep(DATE_STEP)))
+	assert extract_values("Фильм_2024_01_31", late, False) == ["Фильм 2024 01 31"]
+	early = SourceRule(steps=(ReplaceStep(DATE_STEP), spaces))
+	assert extract_values("Фильм_2024_01_31", early, False) == ["Фильм"]
+	glue = SourceRule(steps=(ReplaceStep("_", ""),))
+	assert extract_values("Мой_ролик", glue, False) == ["Мойролик"]
+	swap = SourceRule(steps=(ReplaceStep(r"(\w+)\.(\w+)", r"\2 \1"),))
+	assert extract_values("ролик.мой", swap, False) == ["мой ролик"]
 
 
 def test_date_preset_covers_common_writings() -> None:
 	"""Заготовка дат: ходовые написания, включая короткий год."""
-	rules = TitleParseRules(steps=(TitleStep(DATE_STEP, " "),))
+	rule = SourceRule(steps=(ReplaceStep(DATE_STEP, " "),))
 	for name in (
 		"Выпуск 2024-01-31 финал",
 		"Выпуск 31.01.2024 финал",
@@ -156,85 +218,114 @@ def test_date_preset_covers_common_writings() -> None:
 		"Выпуск 24-01-31 финал",
 		"Выпуск 20240131 финал",
 	):
-		assert parse_title(name, rules) == "Выпуск финал", name
+		assert extract_values(name, rule, False) == ["Выпуск финал"], name
 
 
 def test_date_preset_keeps_plain_numbers() -> None:
-	"""Одиночный год и длинные числа датой не считаются.
-
-	«Blade Runner 2049» обязан пережить разбор: год сам по себе — часть
-	названия. Разные разделители внутри одной даты («31.01-24») —
-	тоже не дата.
-	"""
-	rules = TitleParseRules(steps=(TitleStep(DATE_STEP, " "),))
-	assert parse_title("Blade Runner 2049", rules) == "Blade Runner 2049"
-	assert parse_title("Отчёт 123456789", rules) == "Отчёт 123456789"
-	assert parse_title("Выпуск 31.01-24", rules) == "Выпуск 31.01-24"
+	"""Одиночный год и длинные числа датой не считаются."""
+	rule = SourceRule(steps=(ReplaceStep(DATE_STEP, " "),))
+	assert extract_values("Blade Runner 2049", rule, False) == ["Blade Runner 2049"]
+	assert extract_values("Отчёт 123456789", rule, False) == ["Отчёт 123456789"]
+	assert extract_values("Выпуск 31.01-24", rule, False) == ["Выпуск 31.01-24"]
 
 
-def test_digit_words_preset_keeps_mixed_words() -> None:
-	"""Заготовка «слова из цифр» не трогает смешанные слова."""
-	rules = TitleParseRules(steps=(_SPACES, TitleStep(DIGIT_WORDS_STEP)))
-	assert parse_title("Ролик_2024_1080_4k_S01E02", rules) == "Ролик 4k S01E02"
+def test_digit_words_and_brackets_presets() -> None:
+	"""«Слова из цифр» не трогают смешанные слова; скобки уходят с содержимым."""
+	rule = SourceRule(steps=(ReplaceStep("_", " "), ReplaceStep(DIGIT_WORDS_STEP)))
+	assert extract_values("Ролик_2024_1080_4k_S01E02", rule, False) == ["Ролик 4k S01E02"]
+	brackets = SourceRule(steps=(ReplaceStep(BRACKETS_STEP),))
+	assert extract_values("[1080p] ролик (official)", brackets, False) == ["ролик"]
 
 
-def test_parse_title_broken_step_is_skipped() -> None:
-	"""Битый шаг пропускается, остальные отрабатывают.
-
-	Причину пользователь уже видит в форме (``compile_step``), а сотня
-	имён из-за одной опечатки разбираться не перестаёт.
-	"""
-	rules = TitleParseRules(steps=(TitleStep("[незакрытый"), _SPACES))
-	assert parse_title("Фильм_релиз", rules) == "Фильм релиз"
-
-
-def test_compile_step_reports_reason() -> None:
-	"""Проверка шага: пустой — выключен, битый — понятная ошибка.
-
-	Проверяются обе части шага: и выражение, и шаблон замены — форма
-	показывает причину до применения, а не после порчи сотни названий.
-	"""
-	assert compile_step(TitleStep("")) is None
-	assert compile_step(TitleStep(r"\d+", " ")) is not None
-	with pytest.raises(CaptionsError, match="Выражение"):
-		compile_step(TitleStep("[незакрытый"))
-	with pytest.raises(CaptionsError, match="Замена"):
-		compile_step(TitleStep(r"\d+", r"\9"))  # группы 9 в выражении нет
-	with pytest.raises(CaptionsError, match="Замена"):
-		compile_step(TitleStep(r"\d+", r"\g<нет>"))  # именованной группы нет
+def test_extract_presets_pick_expected_parts() -> None:
+	"""Заготовки извлечения: дата отдаётся целиком, а не разделителем."""
+	presets = dict(EXTRACT_PRESETS)
+	assert extract_values(_MOVIE, SourceRule(presets["Первая дата"]), False) == ["11.12.2014"]
+	assert extract_values(_MOVIE, SourceRule(presets["Текст в последних скобках"]), False) == [
+		"Prosto Film"
+	]
+	assert extract_values(
+		"Фильм (2020) [HD]", SourceRule(presets["Текст до первой скобки"]), False
+	) == ["Фильм"]
+	assert extract_values("Blade Runner 2049", SourceRule(presets["Год"]), False) == ["2049"]
 
 
-def test_step_presets_are_valid_expressions() -> None:
+def test_presets_are_valid_expressions() -> None:
 	"""Каждая заготовка помощника разбирается — в форму мусор не попадёт."""
-	for label, pattern in TITLE_STEP_PRESETS:
-		assert compile_step(TitleStep(pattern)) is not None, label
-	# разделители из заготовок убраны: это замена на пробел, а не удаление
-	assert not [label for label, pattern in TITLE_STEP_PRESETS if pattern in {"_", "-"}]
+	for label, pattern in STEP_PRESETS:
+		assert compile_step(ReplaceStep(pattern)) is not None, label
+	for label, pattern in EXTRACT_PRESETS:
+		check_rule(SourceRule(extract=pattern))  # не бросает
+		assert label
+	# разделители среди заготовок очистки не живут: это замена на пробел
+	assert not [label for label, pattern in STEP_PRESETS if pattern in {"_", "-"}]
 
 
-def test_parse_title_empty_result_falls_back_to_raw() -> None:
-	"""Шаги съели всё — возвращается исходное название, не пустота."""
-	rules = TitleParseRules(steps=(TitleStep(BRACKETS_STEP), TitleStep("(?i)ролик")))
-	assert parse_title("[1080p] ролик", rules) == "[1080p] ролик"
+def test_check_rule_and_compile_step_report_reason() -> None:
+	"""Проверка правила называет сломанную часть; пустой шаг — выключен."""
+	assert compile_step(ReplaceStep("")) is None
+	with pytest.raises(CaptionsError, match="Выражение не"):
+		compile_step(ReplaceStep("[незакрытый"))
+	with pytest.raises(CaptionsError, match="Замена"):
+		compile_step(ReplaceStep(r"\d+", r"\9"))  # группы 9 в выражении нет
+	with pytest.raises(CaptionsError, match="Замена"):
+		compile_step(ReplaceStep(r"\d+", r"\g<нет>"))  # именованной группы нет
+	with pytest.raises(CaptionsError, match="извлечения"):
+		check_rule(SourceRule(extract="(("))
+	with pytest.raises(CaptionsError, match="Разделитель"):
+		check_rule(SourceRule(separator="["))
+	check_rule(SourceRule())  # правило по умолчанию годное
 
 
-def test_parse_title_rules_tokens_round_trip() -> None:
-	"""Сериализация в токены и обратно без потерь; незнакомое — мимо."""
-	rules = TitleParseRules(
-		steps=(
-			_SPACES,  # замена-пробел обязана пережить сериализацию
-			TitleStep(DATE_STEP),
-			TitleStep(r"(?i)\bofficial\b", "—"),
-		),
-		case=TitleCaseMode.FIRST_WORD,
+def test_source_rule_json_round_trip_and_tolerance(caplog: pytest.LogCaptureFixture) -> None:
+	"""JSON правила туда и обратно без потерь; испорченное — по умолчанию.
+
+	Незнакомые ключи пропускаются: правило более новой версии не ломает
+	старую (прямая совместимость).
+	"""
+	rule = SourceRule(
+		extract=r"\(([^()]*)\)",
+		steps=(ReplaceStep("_", " "), ReplaceStep(DATE_STEP)),
+		case=CaseMode.EVERY_WORD,
+		separator=";",
 	)
-	assert TitleParseRules.from_tokens(rules.to_tokens()) == rules
-	assert TitleParseRules.from_tokens([]) == TitleParseRules()
-	# токены будущих версий не ломают чтение (прямая совместимость)
-	assert TitleParseRules.from_tokens(["новое_правило", "case:чудо"]) == TitleParseRules()
-	# испорченный токен шага пропускается, остальные читаются
-	survived = TitleParseRules.from_tokens(["sub:не json", 'sub:["_", " "]', "sub:[1, 2]"])
-	assert survived.steps == (_SPACES,)
+	assert SourceRule.from_json(rule.to_json()) == rule
+	assert SourceRule.from_json({}) == SourceRule()
+	assert SourceRule.from_json({"extract": "x", "новое": 1}) == SourceRule(extract="x")
+	caplog.set_level(logging.WARNING)
+	broken = SourceRule.from_json(
+		{"extract": 5, "steps": [["a", "b"], "мусор", [1, 2]], "case": "чудо"}
+	)
+	assert broken == SourceRule(steps=(ReplaceStep("a", "b"),))
+	assert SourceRule.from_json("не объект") == SourceRule()
+
+
+def test_preset_parsed_and_lines() -> None:
+	"""Пресет разбирает поля с правилом и собирает строки в своём порядке."""
+	title = FieldDto(1, "Title", _TITLE_STYLE, [])
+	starring = FieldDto(2, "Starring", FieldStyle(multiple=True), [])
+	genre = FieldDto(3, "Genre", FieldStyle(multiple=True), [])
+	from pxcontrol.engine.services.captions import PresetFieldDto
+
+	preset = CaptionPresetDto(
+		1,
+		"Фильм",
+		None,
+		[
+			PresetFieldDto(title, True, SourceRule(extract=r"\(([^()]*)\)\s*$")),
+			PresetFieldDto(starring, True, SourceRule(extract=r"^\S+\s+\d+\s+(.+?)\s*\(")),
+			PresetFieldDto(genre, True, None),
+		],
+	)
+	parsed = preset.parsed(_MOVIE)
+	assert parsed == {1: ["Prosto Film"], 2: ["Bruce Lee", "Jan Clod Van Dam", "Ded Morozz"]}
+	values = {**parsed, 3: ["action"]}
+	lines = preset.lines(values, enabled=[1, 3])  # Starring отключён для этой подписи
+	assert [line.name for line in lines] == ["Title", "Genre"]
+	assert build_caption(lines).text == "Prosto Film\nGenre: #Action"
+
+
+# --- имя файла --------------------------------------------------------------------------
 
 
 def test_sanitize_filename_limits_bytes_not_chars() -> None:
@@ -244,21 +335,47 @@ def test_sanitize_filename_limits_bytes_not_chars() -> None:
 		sanitize_filename,
 	)
 
-	# латиница (1 байт/символ): входит ровно MAX_FILENAME_BYTES символов
 	assert sanitize_filename("a" * 300) == "a" * MAX_FILENAME_BYTES
-	# кириллица (2 байта/буква): режется по байтам, символы целы
 	cut = sanitize_filename("ы" * 300)
 	assert cut == "ы" * (MAX_FILENAME_BYTES // 2)
 	assert len(cut.encode("utf-8")) <= MAX_FILENAME_BYTES
-	# короткие имена не трогаются
 	assert sanitize_filename("Обычное имя") == "Обычное имя"
 
 
-# --- сервис -------------------------------------------------------------------
+def test_compose_filename_keeps_unknown_placeholders() -> None:
+	"""Неизвестный плейсхолдер виден как есть; пустой результат — пустая строка."""
+	assert compose_filename("{Video} {quality}", {"Video": "Имя"}, ".mp4") == "Имя {quality}.mp4"
+	assert compose_filename("{Video}", {"Video": ""}, ".mp4") == ""
+
+
+def test_filename_complaint_matches_preset_rules() -> None:
+	"""Имя, набранное человеком, проверяется по правилам сборки по пресету.
+
+	Замок единой точки: раньше «переименовать при отправке» проверяло
+	только путь, и Telegram молча урезал слишком длинное имя на сервере,
+	а файловая система отвергала длинное имя сырой ошибкой.
+	"""
+	from pxcontrol.engine.services.captions import (
+		MAX_FILENAME_BYTES,
+		TELEGRAM_MAX_STEM_CHARS,
+		filename_complaint,
+	)
+
+	assert filename_complaint("Обычное имя.mp4") is None
+	complaint = filename_complaint("Плохое: имя?.mp4")
+	assert complaint is not None and "недопустимы символы" in complaint
+	long_stem = "я" * (TELEGRAM_MAX_STEM_CHARS + 1)
+	complaint = filename_complaint(f"{long_stem}.mp4")
+	assert complaint is not None and "предела Telegram" in complaint
+	assert filename_complaint("я" * (MAX_FILENAME_BYTES // 2 + 1)) is not None
+	assert filename_complaint("я" * TELEGRAM_MAX_STEM_CHARS + ".mp4") is None
+
+
+# --- сервис: помощники ------------------------------------------------------------------
 
 
 async def _add_community(db: Database, username: str | None = None) -> int:
-	"""Заводит канал; ID чата уникален — их бывает несколько в одном тесте."""
+	"""Заводит сообщество; ID чата уникален — их бывает несколько в одном тесте."""
 	async with db.session_factory() as session:
 		count = len((await session.execute(select(Community))).scalars().all())
 		community = Community(title="Канал", tg_chat_id=f"-100{count + 1}", username=username)
@@ -268,84 +385,223 @@ async def _add_community(db: Database, username: str | None = None) -> int:
 		return community.id
 
 
+async def _preset(
+	service: CaptionsService,
+	community_id: int,
+	name: str,
+	fields: list[int | tuple[int, SourceRule]],
+	pattern: str | None = None,
+	preset_id: int | None = None,
+) -> CaptionPresetDto:
+	"""Сохраняет пресет: поле — id или пара «id, правило разбора»."""
+	specs = tuple(
+		PresetFieldSpec(*item) if isinstance(item, tuple) else PresetFieldSpec(item)
+		for item in fields
+	)
+	return await service.save_preset(
+		community_id, CaptionPresetDraft(name, specs, pattern), preset_id
+	)
+
+
+def _mock_quality(monkeypatch: pytest.MonkeyPatch, *, fails: bool = False) -> None:
+	"""Подменяет ffprobe: кадр 1920×1080 или сбой чтения."""
+	from pxcontrol.engine.video.probe import VideoInfo
+
+	def probe(_path: str, _binary: str) -> VideoInfo:
+		if fails:
+			raise RuntimeError("не видео")
+		return VideoInfo(1920, 1080, 60.0, 25.0, True)
+
+	monkeypatch.setattr("pxcontrol.engine.services.captions.probe_video", probe)
+
+
+# --- сервис: поля ---------------------------------------------------------------------
+
+
 async def test_fields_crud_and_duplicates(db: Database) -> None:
-	"""Поле создаётся, дубль имени отклоняется, удаление чистит словарь."""
+	"""Поле создаётся с оформлением, дубль имени отклоняется, удаление чистит словарь."""
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
-	field = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
-	assert field.name == "Genre" and field.values == []
+	field = await service.add_field(community_id, "Video", _TITLE_STYLE)
+	assert field.name == "Video" and field.values == [] and field.style == _TITLE_STYLE
 	assert field.parent_field_id is None
 	with pytest.raises(CaptionsError, match="уже есть"):
-		await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
+		await service.add_field(community_id, "Video", FieldStyle())
+	with pytest.raises(CaptionsError, match="имя"):
+		await service.add_field(community_id, "  ", FieldStyle())
 	await service.delete_field(field.id)
 	assert await service.list_fields(community_id) == []
 
 
-async def test_field_show_name_flag(db: Database) -> None:
-	"""Флаг «имя в подписи»: включён по умолчанию, переключается без пересоздания."""
+async def test_update_field_style_keeps_dictionary(db: Database) -> None:
+	"""Оформление меняется без пересоздания поля — словарь цел."""
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
-	genre = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
-	assert genre.show_name is True
-	tags = await service.add_field(
-		community_id, "Tags", hashtag=True, multiple=True, show_name=False
-	)
-	assert tags.show_name is False
-
-	# выключение у существующего поля сохраняет словарь
+	genre = await service.add_field(community_id, "Genre", FieldStyle(multiple=True))
 	await service.add_values(genre.id, ["action"])
-	updated = await service.set_field_show_name(genre.id, False)
-	assert updated.show_name is False and updated.names() == ["action"]
-	fields = {f.name: f for f in await service.list_fields(community_id)}
-	assert fields["Genre"].show_name is False and fields["Tags"].show_name is False
-
+	bold = FieldStyle(hashtag=False, multiple=True, show_name=False, bold=True)
+	updated = await service.update_field(genre.id, FieldEdit(bold))
+	assert updated.style == bold and updated.names() == ["action"]
 	with pytest.raises(CaptionsError, match="не найдено"):
-		await service.set_field_show_name(999_999, True)
+		await service.update_field(999_999, FieldEdit(FieldStyle()))
 
 
-async def test_template_roundtrip_and_shared_dictionary(db: Database) -> None:
-	"""Шаблоны включают поля канала; словарь общий для всех шаблонов."""
+async def test_dictionary_add_and_delete_values(db: Database) -> None:
+	"""Редактор словаря: добавление с дедупликацией, удаление значения."""
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
-	genre = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
-	year = await service.add_field(community_id, "Year", hashtag=False, multiple=False)
-	movie = await service.save_template(community_id, "Фильм", [year.id, genre.id])
-	await service.save_template(community_id, "Клип", [genre.id])
-	assert [tf.field.name for tf in movie.fields] == ["Year", "Genre"]
+	field = await service.add_field(community_id, "Genre", FieldStyle(multiple=True))
+	updated = await service.add_values(field.id, ["action", " Action ", "", "drama"])
+	assert updated.names() == ["action", "drama"]  # дубль и пустое — пропущены
+	action = next(item for item in updated.values if item.value == "action")
+	updated = await service.delete_value(action.id)
+	assert updated.names() == ["drama"]
+	with pytest.raises(CaptionsError, match="не найдено"):
+		await service.add_values(999, ["x"])
+	with pytest.raises(CaptionsError, match="не найдено"):
+		await service.delete_value(999)
 
-	# использование по «Фильму» пополняет словарь, «Клип» его видит
+
+# --- сервис: пресеты --------------------------------------------------------------------
+
+
+async def test_preset_round_trip_with_rules_and_shared_dictionary(db: Database) -> None:
+	"""Пресет хранит порядок и правила; словарь общий для всех пресетов."""
+	service = CaptionsService(db)
+	community_id = await _add_community(db)
+	video = await service.add_field(community_id, "Video", _TITLE_STYLE)
+	genre = await service.add_field(community_id, "Genre", FieldStyle(multiple=True))
+	rule = SourceRule(extract=r"\(([^()]*)\)", case=CaseMode.EVERY_WORD)
+	movie = await _preset(service, community_id, "Фильм", [(video.id, rule), genre.id])
+	await _preset(service, community_id, "Клип", [genre.id])
+	assert [item.field.name for item in movie.fields] == ["Video", "Genre"]
+	assert [item.rule for item in movie.fields] == [rule, None]
+	assert movie.fields[0].field.style == _TITLE_STYLE
+
 	await service.record_usage(movie.id, {genre.id: ["action", "Action", "drama"]})
-	templates = await service.list_templates(community_id)
-	clip = next(t for t in templates if t.name == "Клип")
-	assert next(tf for tf in clip.fields).field.names() == ["action", "drama"]
-	film = next(t for t in templates if t.name == "Фильм")
-	assert film.last_used_at is not None
+	presets = {p.name: p for p in await service.list_presets(community_id)}
+	assert presets["Клип"].fields[0].field.names() == ["action", "drama"]
+	assert presets["Фильм"].last_used_at is not None
+
+
+async def test_parsed_fields_do_not_feed_dictionary(db: Database) -> None:
+	"""Значения полей с правилом разбора в словарь не попадают (ADR-0042).
+
+	Название ролика и состав — данные конкретного файла; словарь из них
+	только засорялся бы.
+	"""
+	service = CaptionsService(db)
+	community_id = await _add_community(db)
+	video = await service.add_field(community_id, "Video", _TITLE_STYLE)
+	genre = await service.add_field(community_id, "Genre", FieldStyle(multiple=True))
+	preset = await _preset(service, community_id, "Фильм", [(video.id, SourceRule()), genre.id])
+	await service.record_usage(preset.id, {video.id: ["Lara Croft"], genre.id: ["action"]})
+	fields = {f.name: f for f in await service.list_fields(community_id)}
+	assert fields["Video"].names() == []
+	assert fields["Genre"].names() == ["action"]
+
+
+async def test_save_preset_applies_field_edits_in_one_record(db: Database) -> None:
+	"""Правки полей едут той же записью; битая — не сохраняет ничего."""
+	service = CaptionsService(db)
+	community_id = await _add_community(db)
+	title = await service.add_field(community_id, "Title", FieldStyle())
+	character = await service.add_field(community_id, "Character", FieldStyle(multiple=True))
+	bold = FieldStyle(hashtag=False, bold=True)
+	draft = CaptionPresetDraft(
+		"Аниме",
+		(PresetFieldSpec(title.id), PresetFieldSpec(character.id)),
+		field_edits={
+			title.id: FieldEdit(bold),
+			character.id: FieldEdit(FieldStyle(multiple=True), title.id),
+		},
+	)
+	preset = await service.save_preset(community_id, draft)
+	fields = {item.field.name: item.field for item in preset.fields}
+	assert fields["Title"].style == bold
+	assert fields["Character"].parent_field_id == title.id
+
+	# кольцо связей: вся запись откатывается, имя пресета не меняется
+	ring = CaptionPresetDraft(
+		"Переименован",
+		draft.fields,
+		field_edits={title.id: FieldEdit(FieldStyle(), character.id)},
+	)
+	with pytest.raises(CaptionsError, match="кольцо"):
+		await service.save_preset(community_id, ring, preset.id)
+	assert (await service.get_preset(preset.id)).name == "Аниме"
+
+
+async def test_save_preset_validation(db: Database) -> None:
+	"""Пустое имя/состав, повтор поля, чужое поле и битое правило отклоняются."""
+	service = CaptionsService(db)
+	community_id = await _add_community(db)
+	other = await _add_community(db)
+	field = await service.add_field(community_id, "Год", FieldStyle(hashtag=False))
+	alien = await service.add_field(other, "Год", FieldStyle())
+	with pytest.raises(CaptionsError, match="имя"):
+		await _preset(service, community_id, " ", [field.id])
+	with pytest.raises(CaptionsError, match="хотя бы одно"):
+		await _preset(service, community_id, "Пустой", [])
+	with pytest.raises(CaptionsError, match="дважды"):
+		await _preset(service, community_id, "Дубль", [field.id, field.id])
+	with pytest.raises(CaptionsError, match="не найдено у этого сообщества"):
+		await _preset(service, community_id, "Чужой", [alien.id])
+	with pytest.raises(CaptionsError, match="Поле №1: Выражение извлечения"):
+		await _preset(service, community_id, "Битый", [(field.id, SourceRule(extract="(("))])
+	with pytest.raises(CaptionsError, match="не найден"):
+		await _preset(service, community_id, "Нет", [field.id], preset_id=999)
+	assert await service.list_presets(community_id) == []
+
+
+async def test_delete_preset_keeps_fields_and_dictionary(db: Database) -> None:
+	"""Удаление пресета не трогает поля и словарь; повторное — без ошибки."""
+	service = CaptionsService(db)
+	community_id = await _add_community(db)
+	field = await service.add_field(community_id, "Год", FieldStyle(hashtag=False))
+	preset = await _preset(service, community_id, "Т", [field.id])
+	await service.record_usage(preset.id, {field.id: ["2026"]})
+	await service.delete_preset(preset.id)
+	await service.delete_preset(preset.id)
+	assert await service.list_presets(community_id) == []
+	assert (await service.list_fields(community_id))[0].names() == ["2026"]
+	with pytest.raises(CaptionsError, match="не найден"):
+		await service.get_preset(preset.id)
+
+
+async def test_delete_field_leaves_presets_without_it(db: Database) -> None:
+	"""Удалённое поле уходит из состава всех пресетов (каскад схемы)."""
+	service = CaptionsService(db)
+	community_id = await _add_community(db)
+	year = await service.add_field(community_id, "Год", FieldStyle(hashtag=False))
+	genre = await service.add_field(community_id, "Genre", FieldStyle())
+	preset = await _preset(service, community_id, "Т", [year.id, genre.id])
+	await service.delete_field(year.id)
+	assert [i.field.name for i in (await service.get_preset(preset.id)).fields] == ["Genre"]
+
+
+# --- сервис: имя файла ------------------------------------------------------------------
 
 
 async def test_render_filename(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
-	"""Имя файла: плейсхолдеры, качество, канал, очистка символов."""
-	from pxcontrol.engine.video.probe import VideoInfo
-
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.captions.probe_video",
-		lambda _p, _b: VideoInfo(1920, 1080, 60.0, 25.0, True),
-	)
+	"""Имя файла: поля, качество, канал, очистка символов."""
+	_mock_quality(monkeypatch)
 	service = CaptionsService(db)
 	community_id = await _add_community(db, username="mych")
-	author = await service.add_field(community_id, "Author", hashtag=True, multiple=False)
-	genre = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
-	template = await service.save_template(
+	author = await service.add_field(community_id, "Author", FieldStyle())
+	video = await service.add_field(community_id, "Video", _TITLE_STYLE)
+	genre = await service.add_field(community_id, "Genre", FieldStyle(multiple=True))
+	preset = await _preset(
+		service,
 		community_id,
 		"Фильм",
-		[author.id, genre.id],
-		"{Author}, {video} ({Genre}) {quality} (@{channel})",
+		[author.id, video.id, genre.id],
+		"{Author}, {Video} ({Genre}) {quality} (@{channel})",
 	)
-	assert template.filename_pattern is not None
 	name = await service.render_filename(
-		template.id,
+		preset.id,
 		community_id,
-		"Lara: Croft",
-		{author.id: ["Best"], genre.id: ["action", "drama"]},
+		{author.id: ["Best"], video.id: ["Lara: Croft"], genre.id: ["action", "drama"]},
 		"/x/видео.mp4",
 	)
 	# двоеточие из названия вычищено, качество и канал подставлены
@@ -355,21 +611,16 @@ async def test_render_filename(db: Database, monkeypatch: pytest.MonkeyPatch) ->
 async def test_render_filename_builtin_wins_over_field_namesake(
 	db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	"""Поле-тёзка «video» не подменяет встроенный плейсхолдер названия."""
-	from pxcontrol.engine.video.probe import VideoInfo
-
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.captions.probe_video",
-		lambda _p, _b: VideoInfo(1920, 1080, 60.0, 25.0, True),
-	)
+	"""Поле-тёзка «channel» не подменяет встроенный плейсхолдер."""
+	_mock_quality(monkeypatch)
 	service = CaptionsService(db)
 	community_id = await _add_community(db, username="mych")
-	namesake = await service.add_field(community_id, "video", hashtag=True, multiple=False)
-	template = await service.save_template(community_id, "Тёзка", [namesake.id], "{video}")
+	namesake = await service.add_field(community_id, "channel", FieldStyle())
+	preset = await _preset(service, community_id, "Тёзка", [namesake.id], "{channel}")
 	name = await service.render_filename(
-		template.id, community_id, "Название поста", {namesake.id: ["значение-поля"]}, "/x/в.mp4"
+		preset.id, community_id, {namesake.id: ["значение-поля"]}, "/x/в.mp4"
 	)
-	assert name == "Название поста.mp4"  # встроенный приоритетнее поля
+	assert name == "mych.mp4"  # встроенный приоритетнее поля
 
 
 async def test_render_filename_fits_telegram_limit(
@@ -378,15 +629,13 @@ async def test_render_filename_fits_telegram_limit(
 	"""Длинное имя режется до законченного слова в пределах лимита Telegram."""
 	from pxcontrol.engine.services.captions import TELEGRAM_MAX_STEM_CHARS
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.captions.probe_video",
-		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
-	)
+	_mock_quality(monkeypatch, fails=True)
 	service = CaptionsService(db)
 	community_id = await _add_community(db, username="nature_docs")
-	tags = await service.add_field(community_id, "Tags", hashtag=True, multiple=True)
-	template = await service.save_template(
-		community_id, "Т", [tags.id], "{video},@{channel},{Tags}"
+	video = await service.add_field(community_id, "Video", _TITLE_STYLE)
+	tags = await service.add_field(community_id, "Tags", FieldStyle(multiple=True))
+	preset = await _preset(
+		service, community_id, "Т", [video.id, tags.id], "{Video},@{channel},{Tags}"
 	)
 	values = [
 		"4K",
@@ -400,76 +649,49 @@ async def test_render_filename_fits_telegram_limit(
 		"Meadows",
 	]
 	name = await service.render_filename(
-		template.id,
+		preset.id,
 		community_id,
-		"WinterMorningLights",
-		{tags.id: values},
+		{video.id: ["WinterMorningLights"], tags.id: values},
 		"/x/v.mp4",
 	)
 	stem = name.removesuffix(".mp4")
 	assert len(stem) <= TELEGRAM_MAX_STEM_CHARS
-	# начало нетронуто; срез пришёлся на запятую после «Sunsets» —
-	# висячая запятая убрана, имя кончается законченным словом
+	# срез пришёлся на запятую после «Sunsets» — висячая запятая убрана
 	assert stem == ("WinterMorningLights,@nature_docs,4K, 8K, Sunrise, Mountain, Twilight, Sunsets")
 
 
-async def test_render_filename_cuts_long_title_at_word(
+async def test_render_filename_cuts_long_value_at_word(
 	db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	"""Огромное название без полей режется по границе слова, без огрызков."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.captions.probe_video",
-		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
-	)
+	"""Огромное значение режется по границе слова, без огрызков."""
+	_mock_quality(monkeypatch, fails=True)
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
-	field = await service.add_field(community_id, "Год", hashtag=False, multiple=False)
-	template = await service.save_template(community_id, "Т", [field.id], "{video}")
+	video = await service.add_field(community_id, "Video", _TITLE_STYLE)
+	preset = await _preset(service, community_id, "Т", [video.id], "{Video}")
 	name = await service.render_filename(
-		template.id, community_id, "Длинное Слово " * 20, {}, "/x/v.mp4"
+		preset.id, community_id, {video.id: ["Длинное Слово " * 20]}, "/x/v.mp4"
 	)
 	stem = name.removesuffix(".mp4")
 	assert len(stem) <= 78
-	assert stem.endswith("Слово") or stem.endswith("Длинное")
-	# срез не оставил обрубка: стем состоит из целых слов исходника
 	assert all(w in ("Длинное", "Слово") for w in stem.split())
 
 
 async def test_render_filename_edge_cases(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
-	"""Не-видео — без качества; неизвестный плейсхолдер остаётся как есть."""
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.captions.probe_video",
-		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
-	)
+	"""Не-видео — без качества; неизвестный плейсхолдер остаётся; без шаблона — ошибка."""
+	_mock_quality(monkeypatch, fails=True)
 	service = CaptionsService(db)
-	community_id = await _add_community(db)  # канал без username
-	field = await service.add_field(community_id, "Год", hashtag=False, multiple=False)
-	template = await service.save_template(
-		community_id, "Т", [field.id], "{video} {quality} {Нет} ({Год})"
-	)
-	name = await service.render_filename(
-		template.id, community_id, "Имя", {field.id: ["2026"]}, "/x/файл.zip"
-	)
+	community_id = await _add_community(db)  # сообщество без username
+	field = await service.add_field(community_id, "Год", FieldStyle(hashtag=False))
+	preset = await _preset(service, community_id, "Т", [field.id], "Имя {quality} {Нет} ({Год})")
+	name = await service.render_filename(preset.id, community_id, {field.id: ["2026"]}, "/x/ф.zip")
 	assert name == "Имя {Нет} (2026).zip"
-	no_pattern = await service.save_template(community_id, "Без", [field.id])
+	no_pattern = await _preset(service, community_id, "Без", [field.id])
 	with pytest.raises(CaptionsError, match="не задан шаблон имени"):
-		await service.render_filename(no_pattern.id, community_id, "х", {}, "/x/ф.mp4")
-
-
-async def test_dictionary_add_and_delete_values(db: Database) -> None:
-	"""Редактор словаря: добавление с дедупликацией, удаление значения."""
-	service = CaptionsService(db)
-	community_id = await _add_community(db)
-	field = await service.add_field(community_id, "Genre", hashtag=True, multiple=True)
-	updated = await service.add_values(field.id, ["action", " Action ", "", "drama"])
-	assert updated.names() == ["action", "drama"]  # дубль и пустое — пропущены
-	action = next(item for item in updated.values if item.value == "action")
-	updated = await service.delete_value(action.id)
-	assert updated.names() == ["drama"]
-	with pytest.raises(CaptionsError, match="не найдено"):
-		await service.add_values(999, ["x"])
-	with pytest.raises(CaptionsError, match="не найдено"):
-		await service.delete_value(999)
+		await service.render_filename(no_pattern.id, community_id, {}, "/x/ф.mp4")
+	empty = await _preset(service, community_id, "Пусто", [field.id], "{Год}")
+	with pytest.raises(CaptionsError, match="пустым"):
+		await service.render_filename(empty.id, community_id, {}, "/x/ф.mp4")
 
 
 async def test_render_filename_respects_limits(
@@ -481,51 +703,31 @@ async def test_render_filename_respects_limits(
 		TELEGRAM_MAX_STEM_CHARS,
 	)
 
-	monkeypatch.setattr(
-		"pxcontrol.engine.services.captions.probe_video",
-		lambda _p, _b: (_ for _ in ()).throw(RuntimeError("не видео")),
-	)
+	_mock_quality(monkeypatch, fails=True)
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
-	field = await service.add_field(community_id, "Год", hashtag=False, multiple=False)
-	template = await service.save_template(community_id, "Т", [field.id], "{video}")
-	# сплошная латиница без разделителей: границы слова нет — срез ровно
-	# по лимиту Telegram (длиннее сервер изменил бы имя сам)
-	name = await service.render_filename(template.id, community_id, "a" * 200, {}, "/x/ф.mp4")
+	video = await service.add_field(community_id, "Video", _TITLE_STYLE)
+	preset = await _preset(service, community_id, "Т", [video.id], "{Video}")
+	name = await service.render_filename(
+		preset.id, community_id, {video.id: ["a" * 200]}, "/x/ф.mp4"
+	)
 	assert name == "a" * TELEGRAM_MAX_STEM_CHARS + ".mp4"
-	# эмодзи — 4 байта на символ: байтовый предел ФС строже символьного
 	long_name = await service.render_filename(
-		template.id, community_id, "\U0001f600" * 100, {}, "/x/ф.mp4"
+		preset.id, community_id, {video.id: ["\U0001f600" * 100]}, "/x/ф.mp4"
 	)
 	assert long_name.endswith(".mp4")
 	assert len(long_name.encode("utf-8")) <= MAX_FILENAME_BYTES
 	assert len(long_name.removesuffix(".mp4")) <= TELEGRAM_MAX_STEM_CHARS
 
 
-async def test_template_validation_and_delete(db: Database) -> None:
-	"""Пустое имя/состав отклоняются; удаление шаблона не трогает словарь."""
-	service = CaptionsService(db)
-	community_id = await _add_community(db)
-	field = await service.add_field(community_id, "Год", hashtag=False, multiple=False)
-	with pytest.raises(CaptionsError, match="имя"):
-		await service.save_template(community_id, " ", [field.id])
-	with pytest.raises(CaptionsError, match="хотя бы одно"):
-		await service.save_template(community_id, "Пустой", [])
-	template = await service.save_template(community_id, "Т", [field.id])
-	await service.record_usage(template.id, {field.id: ["2026"]})
-	await service.delete_template(template.id)
-	assert await service.list_templates(community_id) == []
-	assert (await service.list_fields(community_id))[0].names() == ["2026"]
-
-
-# --- связанные словари (персонаж внутри тайтла) ------------------------------
+# --- связанные словари (персонаж внутри тайтла) ------------------------------------------
 
 
 async def _linked_fields(service: CaptionsService, community_id: int) -> tuple[int, int]:
 	"""Готовит пару полей «Title» и зависимый от него «Character»."""
-	title = await service.add_field(community_id, "Title", hashtag=True, multiple=False)
-	character = await service.add_field(community_id, "Character", hashtag=True, multiple=True)
-	linked = await service.set_field_parent(character.id, title.id)
+	title = await service.add_field(community_id, "Title", FieldStyle())
+	character = await service.add_field(community_id, "Character", FieldStyle(multiple=True))
+	linked = await service.update_field(character.id, FieldEdit(character.style, title.id))
 	assert linked.parent_field_id == title.id
 	return title.id, character.id
 
@@ -535,11 +737,9 @@ async def test_usage_binds_new_values_to_selected_parent(db: Database) -> None:
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
 	title_id, character_id = await _linked_fields(service, community_id)
-	template = await service.save_template(community_id, "Фильм", [title_id, character_id])
-	await service.record_usage(
-		template.id, {title_id: ["TombRider"], character_id: ["Lara", "Zip"]}
-	)
-	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Lara"]})
+	preset = await _preset(service, community_id, "Фильм", [title_id, character_id])
+	await service.record_usage(preset.id, {title_id: ["TombRider"], character_id: ["Lara", "Zip"]})
+	await service.record_usage(preset.id, {title_id: ["Fallout"], character_id: ["Lara"]})
 	fields = {f.name: f for f in await service.list_fields(community_id)}
 	titles = {item.id: item.value for item in fields["Title"].values}
 	bound = sorted(
@@ -547,7 +747,6 @@ async def test_usage_binds_new_values_to_selected_parent(db: Database) -> None:
 		for item in fields["Character"].values
 		if item.parent_id is not None
 	)
-	# тёзки из разных тайтлов — разные записи словаря (одна на свой тайтл)
 	assert bound == [("Lara", "Fallout"), ("Lara", "TombRider"), ("Zip", "TombRider")]
 
 
@@ -556,17 +755,15 @@ async def test_available_filters_by_parent(db: Database) -> None:
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
 	title_id, character_id = await _linked_fields(service, community_id)
-	template = await service.save_template(community_id, "Фильм", [title_id, character_id])
-	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
-	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]})
-	# значение без привязки видно при любом выборе: иначе его не выбрать
+	preset = await _preset(service, community_id, "Фильм", [title_id, character_id])
+	await service.record_usage(preset.id, {title_id: ["TombRider"], character_id: ["Lara"]})
+	await service.record_usage(preset.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]})
 	await service.add_values(character_id, ["Ничей"])
 	fields = {f.name: f for f in await service.list_fields(community_id)}
 	tomb = next(i for i in fields["Title"].values if i.value == "TombRider")
 	character = fields["Character"]
 	assert [i.value for i in character.available([tomb.id])] == ["Lara", "Ничей"]
 	assert [i.value for i in character.available([])] == ["Ничей"]
-	# независимое поле фильтру не подчиняется — отдаёт весь словарь
 	assert [i.value for i in fields["Title"].available([])] == ["Fallout", "TombRider"]
 
 
@@ -575,9 +772,9 @@ async def test_deleting_parent_value_removes_children(db: Database) -> None:
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
 	title_id, character_id = await _linked_fields(service, community_id)
-	template = await service.save_template(community_id, "Фильм", [title_id, character_id])
-	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
-	await service.record_usage(template.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]})
+	preset = await _preset(service, community_id, "Фильм", [title_id, character_id])
+	await service.record_usage(preset.id, {title_id: ["TombRider"], character_id: ["Lara"]})
+	await service.record_usage(preset.id, {title_id: ["Fallout"], character_id: ["Vault Boy"]})
 	fields = {f.name: f for f in await service.list_fields(community_id)}
 	tomb = next(i for i in fields["Title"].values if i.value == "TombRider")
 	titles = await service.delete_value(tomb.id)
@@ -602,10 +799,8 @@ async def test_manual_binding_and_adoption(db: Database) -> None:
 	characters = await service.assign_value_parent(lara.id, None)
 	assert characters.values[0].parent_id is None
 
-	# значение без привязки, использованное вместе с тайтлом, усыновляется:
-	# новой записи не появляется, у прежней проставляется родитель
-	template = await service.save_template(community_id, "Фильм", [title_id, character_id])
-	await service.record_usage(template.id, {title_id: ["TombRider"], character_id: ["Lara"]})
+	preset = await _preset(service, community_id, "Фильм", [title_id, character_id])
+	await service.record_usage(preset.id, {title_id: ["TombRider"], character_id: ["Lara"]})
 	characters = next(f for f in await service.list_fields(community_id) if f.name == "Character")
 	assert characters.names() == ["Lara"]
 	assert characters.values[0].parent_id == tomb.id
@@ -617,33 +812,41 @@ async def test_parent_validation_and_unlink(db: Database) -> None:
 	community_id = await _add_community(db)
 	other_community = await _add_community(db)
 	title_id, character_id = await _linked_fields(service, community_id)
+	multi = FieldStyle(multiple=True)
 	with pytest.raises(CaptionsError, match="само от себя"):
-		await service.set_field_parent(character_id, character_id)
+		await service.update_field(character_id, FieldEdit(multi, character_id))
 	with pytest.raises(CaptionsError, match="кольцо"):
-		await service.set_field_parent(title_id, character_id)
-	alien = await service.add_field(other_community, "Title", hashtag=True, multiple=False)
-	with pytest.raises(CaptionsError, match="не найдено у этого канала"):
-		await service.set_field_parent(character_id, alien.id)
+		await service.update_field(title_id, FieldEdit(FieldStyle(), character_id))
+	alien = await service.add_field(other_community, "Title", FieldStyle())
+	with pytest.raises(CaptionsError, match="не найдено у этого сообщества"):
+		await service.update_field(character_id, FieldEdit(multi, alien.id))
 	with pytest.raises(CaptionsError, match="не найдено"):
-		await service.set_field_parent(999, title_id)
+		await service.update_field(999, FieldEdit(multi, title_id))
 
 	titles = await service.add_values(title_id, ["TombRider"])
 	await service.add_values(character_id, ["Lara"], titles.values[0].id)
-	# снятие связи обнуляет привязки: они указывали в словарь прежнего родителя
-	characters = await service.set_field_parent(character_id, None)
+	characters = await service.update_field(character_id, FieldEdit(multi, None))
 	assert characters.parent_field_id is None
 	assert characters.values[0].parent_id is None
 	with pytest.raises(CaptionsError, match="не зависит от другого поля"):
 		await service.assign_value_parent(characters.values[0].id, titles.values[0].id)
 
 
-async def test_delete_parent_field_keeps_dependent_dictionary(db: Database) -> None:
-	"""Удаление родительского поля не стирает словарь зависимого.
+async def test_style_edit_keeps_value_bindings(db: Database) -> None:
+	"""Правка одного оформления связь не трогает — привязки значений целы."""
+	service = CaptionsService(db)
+	community_id = await _add_community(db)
+	title_id, character_id = await _linked_fields(service, community_id)
+	titles = await service.add_values(title_id, ["TombRider"])
+	await service.add_values(character_id, ["Lara"], titles.values[0].id)
+	updated = await service.update_field(
+		character_id, FieldEdit(FieldStyle(multiple=True, bold=True), title_id)
+	)
+	assert updated.values[0].parent_id == titles.values[0].id
 
-	Зависимое поле становится независимым (SET NULL у связи полей),
-	его значения отвязываются — как при снятии связи через
-	set_field_parent, а не гибнут каскадом parent_value_id.
-	"""
+
+async def test_delete_parent_field_keeps_dependent_dictionary(db: Database) -> None:
+	"""Удаление родительского поля не стирает словарь зависимого."""
 	service = CaptionsService(db)
 	community_id = await _add_community(db)
 	title_id, character_id = await _linked_fields(service, community_id)
@@ -653,48 +856,8 @@ async def test_delete_parent_field_keeps_dependent_dictionary(db: Database) -> N
 	await service.delete_field(title_id)
 
 	fields = await service.list_fields(community_id)
-	assert [f.name for f in fields] == ["Character"]  # Title удалён
+	assert [f.name for f in fields] == ["Character"]
 	character = fields[0]
-	assert character.parent_field_id is None  # поле стало независимым
-	assert character.names() == ["Lara"]  # словарь цел
-	assert character.values[0].parent_id is None  # привязка снята, не каскад
-
-
-def test_filename_complaint_matches_template_rules() -> None:
-	"""Имя, набранное человеком, проверяется по правилам сборки по шаблону.
-
-	Замок единой точки: раньше «переименовать при отправке» проверяло
-	только путь, и Telegram молча урезал слишком длинное имя на сервере,
-	а файловая система отвергала длинное имя сырой ошибкой.
-	"""
-	from pxcontrol.engine.services.captions import (
-		MAX_FILENAME_BYTES,
-		TELEGRAM_MAX_STEM_CHARS,
-		filename_complaint,
-	)
-
-	assert filename_complaint("Обычное имя.mp4") is None
-	# запрещённые символы — те же, что чистит sanitize_filename
-	complaint = filename_complaint("Плохое: имя?.mp4")
-	assert complaint is not None and "недопустимы символы" in complaint
-	# предел Telegram считается по стему, без расширения
-	long_stem = "я" * (TELEGRAM_MAX_STEM_CHARS + 1)
-	complaint = filename_complaint(f"{long_stem}.mp4")
-	assert complaint is not None and "предела Telegram" in complaint
-	# байтовый предел файловых систем: кириллица — два байта на букву
-	assert filename_complaint("я" * (MAX_FILENAME_BYTES // 2 + 1)) is not None
-	# имя ровно по пределу проходит
-	assert filename_complaint("я" * TELEGRAM_MAX_STEM_CHARS + ".mp4") is None
-
-
-def test_parse_title_rules_ignore_unknown_tokens() -> None:
-	"""Незнакомый токен пропускается, а не ломает разбор.
-
-	Прямая совместимость: настройка, записанная более новой версией,
-	не должна ронять старую. Поддержки двух прежних поколений формата
-	здесь больше нет — в рабочей базе таких настроек не осталось
-	(проверено 2026-09-12), и слой перевода снят.
-	"""
-	rules = TitleParseRules.from_tokens(["из-будущего", "case:first_word"])
-	assert rules.case is TitleCaseMode.FIRST_WORD
-	assert rules.steps == ()
+	assert character.parent_field_id is None
+	assert character.names() == ["Lara"]
+	assert character.values[0].parent_id is None

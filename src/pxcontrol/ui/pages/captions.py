@@ -1,24 +1,21 @@
-"""Диалоги подписей: сборка по шаблону и настройка полей/шаблонов канала.
+"""Окна подписей: сборка подписи по пресету и редактор словаря поля.
 
 Сборка (`CaptionDialog`) работает на уже загруженных данных и ничего
-не тянет из движка; настройка (`FieldsDialog`) выполняет CRUD через
-`run_in_engine` прямо из диалога.
+не тянет из движка: пресет приходит с полями и словарями, а значения
+полей с правилом разбора считаются чистой функцией движка из имени
+файла (ADR-0042). Редактор словаря (`DictionaryDialog`) правит словарь
+через `run_in_engine` прямо из окна; открывается он с экрана пресета.
+
+Настройка полей и пресетов живёт на вкладке «Настройки» сообщества
+(:mod:`caption_presets`), а не в отдельном окне.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Sequence
-from functools import partial
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import (
-	QGridLayout,
-	QHBoxLayout,
-	QListWidget,
-	QListWidgetItem,
-	QVBoxLayout,
-	QWidget,
-)
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
 	BodyLabel,
@@ -32,17 +29,14 @@ from qfluentwidgets import (
 	PillPushButton,
 	PushButton,
 	RoundMenu,
-	SwitchButton,
 	TransparentToolButton,
 )
 
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.services.captions import (
-	FILENAME_PLACEHOLDERS,
-	CaptionLine,
+	CaptionPresetDto,
 	FieldDto,
-	TemplateDto,
-	TemplateFieldDto,
+	PresetFieldDto,
 	ValueDto,
 	build_caption,
 )
@@ -56,39 +50,30 @@ from pxcontrol.ui.pages.common import (
 	clear_layout,
 	confirm_delete,
 	error_reporter,
-	exec_dialog,
 	list_area,
 )
 
+#: Подпись поля, чьи значения в пакете берутся из имени каждого файла.
+PER_FILE_HINT = "из имени каждого файла"
 
-def _row_widget(
-	parent: QWidget,
-	text: str,
-	hint: str,
-	on_delete: Callable[[], None],
-	extras: Sequence[QWidget] = (),
-) -> QWidget:
-	"""Строка списка (виджет — чтобы перерисовка её корректно удаляла).
 
-	``extras`` — виджеты перед «Удалить» (например «Словарь…» и выбор
-	родительского поля).
+def split_prefill(field: FieldDto, values: list[str]) -> tuple[set[str], list[str]]:
+	"""Раскладывает разобранные значения: отметить в словаре или вписать строкой.
+
+	Значение, которое есть в словаре поля (без учёта регистра), отмечается
+	пилюлей; остальные уходят в строку новых значений.
+
+	Returns:
+		Отмечаемые значения (в нижнем регистре) и значения для строки.
 	"""
-	box = QWidget(parent)
-	row = QHBoxLayout(box)
-	row.setContentsMargins(0, 2, 0, 2)
-	row.addWidget(BodyLabel(text, box))
-	row.addWidget(CaptionLabel(hint, box))
-	row.addStretch()
-	for widget in extras:
-		row.addWidget(widget)
-	delete = PushButton("Удалить", box)
-	delete.clicked.connect(on_delete)
-	row.addWidget(delete)
-	return box
+	known = {name.lower() for name in field.names()}
+	picked = {value.lower() for value in values if value.lower() in known}
+	typed = [value for value in values if value.lower() not in known]
+	return picked, typed
 
 
 class _FieldRow:
-	"""Строка поля в диалоге сборки: включённость и ввод значений.
+	"""Строка поля в окне сборки: включённость и ввод значений.
 
 	Раскладка — сетка: колонка имён (одинаковой ширины) и колонка
 	значений; значения множественных полей — «пилюли»-теги, визуально
@@ -97,6 +82,9 @@ class _FieldRow:
 	У зависимого поля («Character» внутри «Title») показываются не все
 	значения словаря, а только принадлежащие выбранному значению
 	родителя — :meth:`refresh` перестраивает список при его смене.
+
+	В пакете поле с правилом разбора не правится: у каждого файла
+	значение своё, и строка только сообщает об этом.
 	"""
 
 	def __init__(
@@ -104,37 +92,47 @@ class _FieldRow:
 		dialog: QWidget,
 		grid: QGridLayout,
 		row: int,
-		tf: TemplateFieldDto,
+		item: PresetFieldDto,
+		prefill: list[str],
 		on_changed: Callable[[], None],
+		*,
+		per_file: bool = False,
 	) -> None:
-		self.field = tf.field
+		self.field = item.field
+		self.per_file = per_file and item.rule is not None
 		self._on_changed = on_changed
-		# None — родителя в шаблоне нет, фильтровать не по чему (весь словарь)
+		# None — родителя в пресете нет, фильтровать не по чему (весь словарь)
 		self._parent_ids: Collection[int] | None = None
+		self._picked, typed = split_prefill(self.field, prefill)
 		self.check = CheckBox(self.field.name, dialog)
-		self.check.setChecked(tf.enabled)
-		if self.field.multiple:
+		self.check.setChecked(item.enabled)
+		if self.per_file:
+			grid.addWidget(self.check, row, 0, Qt.AlignmentFlag.AlignLeft)
+			grid.addWidget(CaptionLabel(PER_FILE_HINT, dialog), row, 1)
+		elif self.field.style.multiple:
 			grid.addWidget(
 				self.check,
 				row,
 				0,
 				Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
 			)
-			grid.addWidget(self._build_multi(dialog), row, 1)
+			grid.addWidget(self._build_multi(dialog, typed), row, 1)
 		else:
 			grid.addWidget(self.check, row, 0, Qt.AlignmentFlag.AlignLeft)
-			grid.addWidget(self._build_single(dialog), row, 1)
+			grid.addWidget(self._build_single(dialog, prefill), row, 1)
 
-	def _build_single(self, dialog: QWidget) -> QWidget:
+	def _build_single(self, dialog: QWidget, prefill: list[str]) -> QWidget:
 		"""Одно значение: редактируемый список со словарём."""
 		self._edit = EditableComboBox(dialog)
 		self._edit.currentTextChanged.connect(self._changed)
 		# qfluentwidgets не типизирован: без явной аннотации mypy видит Any
 		widget: QWidget = self._edit
 		self._fill_single()
+		if prefill:
+			self._edit.setText(prefill[0])
 		return widget
 
-	def _build_multi(self, dialog: QWidget) -> QWidget:
+	def _build_multi(self, dialog: QWidget, typed: list[str]) -> QWidget:
 		"""Несколько значений: «пилюли»-теги словаря + строка новых."""
 		box = QWidget(dialog)
 		column = QVBoxLayout(box)
@@ -146,6 +144,7 @@ class _FieldRow:
 		column.addLayout(self._pills_box)
 		self._line = LineEdit(box)
 		self._line.setPlaceholderText("новые значения через запятую…")
+		self._line.setText(", ".join(typed))
 		column.addWidget(self._line)
 		self._box = box
 		self._fill_pills()
@@ -170,8 +169,13 @@ class _FieldRow:
 			self._edit.blockSignals(False)
 
 	def _fill_pills(self) -> None:
-		"""Пересобирает «пилюли», сохраняя отметки уцелевших значений."""
-		checked = {str(p.text()) for p in self._pills if p.isChecked()}
+		"""Пересобирает «пилюли», сохраняя отметки уцелевших значений.
+
+		Разобранные из имени файла значения отмечаются при первой сборке;
+		дальше отметки ведёт человек.
+		"""
+		checked = {str(p.text()).lower() for p in self._pills if p.isChecked()} | self._picked
+		self._picked = set()
 		clear_layout(self._pills_box)
 		self._pills = []
 		visible = self._visible()
@@ -182,31 +186,38 @@ class _FieldRow:
 		flow.setContentsMargins(0, 0, 0, 0)
 		for item in visible:
 			pill = PillPushButton(item.value, host)
-			pill.setChecked(item.value in checked)  # до connect: без лишнего сигнала
+			pill.setChecked(item.value.lower() in checked)  # до connect: без лишнего сигнала
 			pill.toggled.connect(self._changed)
 			flow.addWidget(pill)
 			self._pills.append(pill)
 		self._pills_box.addWidget(host)
 
 	def _changed(self, *_args: object) -> None:
-		"""Выбор изменился — диалог перестроит зависимые поля."""
+		"""Выбор изменился — окно перестроит зависимые поля."""
 		self._on_changed()
 
 	def refresh(self, parent_ids: Collection[int] | None) -> None:
 		"""Перестраивает список значений под выбранные значения родителя.
 
-		``None`` — родительского поля в шаблоне нет: фильтровать не по чему,
+		``None`` — родительского поля в пресете нет: фильтровать не по чему,
 		показывается весь словарь.
 		"""
 		self._parent_ids = parent_ids
-		if self.field.multiple:
+		if self.per_file:
+			return
+		if self.field.style.multiple:
 			self._fill_pills()
 		else:
 			self._fill_single()
 
 	def values(self) -> list[str]:
-		"""Введённые значения: отмеченные пилюли + строка (без дублей)."""
-		if not self.field.multiple:
+		"""Введённые значения: отмеченные пилюли + строка (без дублей).
+
+		У поля «из имени каждого файла» значений в окне нет.
+		"""
+		if self.per_file:
+			return []
+		if not self.field.style.multiple:
 			value = str(self._edit.currentText()).strip()
 			return [value] if value else []
 		picked = [str(p.text()) for p in self._pills if p.isChecked()]
@@ -225,19 +236,33 @@ class _FieldRow:
 
 
 class CaptionDialog(WorkDialog):
-	"""Сборка подписи: шаблон, название, поля со словарями."""
+	"""Сборка подписи по пресету: поля со словарями и разбором имени файла.
 
-	def __init__(self, templates: list[TemplateDto], suggested_title: str, parent: QWidget) -> None:
+	``source`` — имя файла без расширения и суффикса конвейера
+	(``filename_source`` движка); None — файла нет. Поля с правилом
+	разбора заполняются из него заранее и правятся руками.
+
+	``per_file`` — режим пакета (ADR-0015): поля с правилом разбора
+	не правятся — значения у каждого файла свои, — а окно собирает
+	общие значения остальных полей.
+	"""
+
+	def __init__(
+		self,
+		presets: list[CaptionPresetDto],
+		source: str | None,
+		parent: QWidget,
+		*,
+		per_file: bool = False,
+	) -> None:
 		super().__init__("Собрать подпись", parent, size=(680, 640))
-		self._templates = templates
+		self._presets = presets
+		self._source = source
+		self._per_file = per_file
 		self._rows: list[_FieldRow] = []
 		self._refreshing = False
-		self._build_template_combo()
-		self._title = LineEdit(self)
-		self._title.setPlaceholderText("Название (первой строкой, жирным)…")
-		self._title.setText(suggested_title)
-		self.content.addWidget(self._title)
-		# поля с их словарями — в прокручиваемой области: у шаблона
+		self._build_preset_combo()
+		# поля с их словарями — в прокручиваемой области: у пресета
 		# с десятком полей, да ещё с пилюлями значений, они не влезают
 		area, box = list_area(self, spacing=density.spacing().row_spacing)
 		fields_host = QWidget(self)
@@ -252,42 +277,52 @@ class CaptionDialog(WorkDialog):
 		# индекс и перерисовка — после сборки формы, сигнал подключаем последним
 		index = self._last_used_index()
 		self._combo.setCurrentIndex(index)
-		self._show_template(index)
-		self._combo.currentIndexChanged.connect(self._show_template)
-		self.add_accept_buttons("Вставить в подпись")
+		self._show_preset(index)
+		self._combo.currentIndexChanged.connect(self._show_preset)
+		self.add_accept_buttons("Вставить в подпись" if not per_file else "Готово")
 
-	def _build_template_combo(self) -> None:
-		"""Выбор шаблона подписи (виден всегда, даже если шаблон один)."""
+	def _build_preset_combo(self) -> None:
+		"""Выбор пресета подписи (виден всегда, даже если пресет один)."""
 		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Шаблон подписи:", self))
+		row.addWidget(BodyLabel("Пресет подписи:", self))
 		self._combo = ComboBox(self)
-		for template in self._templates:
-			self._combo.addItem(template.name)
+		for preset in self._presets:
+			self._combo.addItem(preset.name)
 		row.addWidget(self._combo, stretch=1)
 		self.content.addLayout(row)
 
 	def _last_used_index(self) -> int:
-		"""Индекс последнего использованного шаблона (или первого)."""
+		"""Индекс последнего использованного пресета (или первого)."""
 		stamps = [
-			(t.last_used_at, i) for i, t in enumerate(self._templates) if t.last_used_at is not None
+			(p.last_used_at, i) for i, p in enumerate(self._presets) if p.last_used_at is not None
 		]
 		return max(stamps)[1] if stamps else 0
 
-	def _show_template(self, index: int) -> None:
-		"""Перестраивает сетку полей под выбранный шаблон."""
+	def _show_preset(self, index: int) -> None:
+		"""Перестраивает сетку полей под выбранный пресет."""
 		clear_layout(self._fields_grid)
+		preset = self._presets[index]
+		parsed = preset.parsed(self._source) if self._source is not None else {}
 		self._rows = [
-			_FieldRow(self, self._fields_grid, row, tf, self._refresh_dependents)
-			for row, tf in enumerate(self._templates[index].fields)
+			_FieldRow(
+				self,
+				self._fields_grid,
+				row,
+				item,
+				parsed.get(item.field.id, []),
+				self._refresh_dependents,
+				per_file=self._per_file,
+			)
+			for row, item in enumerate(preset.fields)
 		]
 		self._refresh_dependents()
 
 	def _refresh_dependents(self) -> None:
 		"""Перестраивает списки зависимых полей под выбор их родителей.
 
-		Вызывается при смене шаблона и при любом изменении выбора: список
+		Вызывается при смене пресета и при любом изменении выбора: список
 		персонажей должен отвечать выбранному тайтлу сразу, а не после
-		переоткрытия диалога. Флаг ``_refreshing`` защищает от повторного
+		переоткрытия окна. Флаг ``_refreshing`` защищает от повторного
 		захода: перестройка виджетов сама может излучать сигналы.
 		"""
 		if self._refreshing:
@@ -304,38 +339,29 @@ class CaptionDialog(WorkDialog):
 		finally:
 			self._refreshing = False
 
-	def template_id(self) -> int:
-		"""Идентификатор выбранного шаблона."""
-		return self._templates[int(self._combo.currentIndex())].id
+	def preset(self) -> CaptionPresetDto:
+		"""Выбранный пресет."""
+		return self._presets[int(self._combo.currentIndex())]
 
-	def title(self) -> str:
-		"""Название поста (первая строка подписи)."""
-		return str(self._title.text()).strip()
+	def enabled_ids(self) -> list[int]:
+		"""Поля, отмеченные для этой подписи (в порядке пресета)."""
+		return [row.field.id for row in self._rows if row.check.isChecked()]
 
-	def caption(self) -> RichText:
-		"""Собранная подпись: текст и его разметка (ADR-0033)."""
-		return build_caption(str(self._title.text()), self.lines())
+	def values(self) -> dict[int, list[str]]:
+		"""Значения отмеченных полей по их id (поля без значений — мимо).
 
-	def lines(self) -> list[CaptionLine]:
-		"""Строки включённых полей — без названия.
-
-		Пакетная отправка (ADR-0015) собирает по ним подпись каждому
-		файлу отдельно: общие значения одни, название — своё из имени
-		файла (:func:`build_caption` с другим ``title``).
+		Годятся и для сборки, и для пополнения словарей: поля с правилом
+		разбора движок в словарь не пускает сам (``record_usage``).
 		"""
-		return [
-			CaptionLine(row.field.name, row.field.hashtag, row.values(), row.field.show_name)
-			for row in self._rows
-			if row.check.isChecked()
-		]
-
-	def used_values(self) -> dict[int, list[str]]:
-		"""Значения по полям — для автопополнения словарей."""
 		return {
 			row.field.id: row.values()
 			for row in self._rows
 			if row.check.isChecked() and row.values()
 		}
+
+	def caption(self) -> RichText:
+		"""Собранная подпись: текст и его разметка (ADR-0033)."""
+		return build_caption(self.preset().lines(self.values(), self.enabled_ids()))
 
 
 #: Имя группы значений, не привязанных ни к какому значению родителя.
@@ -605,363 +631,3 @@ class DictionaryDialog(WorkDialog):
 		"""Движок вернул обновлённое поле — перерисовать, очистить ввод."""
 		self._new_values.clear()
 		self._show_values(field)
-
-
-class FieldsDialog(WorkDialog):
-	"""Настройка канала: пул полей со словарями и шаблоны."""
-
-	def __init__(
-		self,
-		worker: EngineWorker,
-		community_id: int,
-		community_title: str,
-		parent: QWidget,
-	) -> None:
-		super().__init__(f"Подписи сообщества «{community_title}»", parent, size=(720, 760))
-		self._worker = worker
-		self._community_id = community_id
-		self._show_error = error_reporter(self)
-		self._fields: list[FieldDto] = []
-		# шаблон, который сейчас правится (None — форма собирает новый)
-		self._editing: TemplateDto | None = None
-		# всё содержимое — в одной прокручиваемой области: блоков два
-		# (поля и шаблоны), каждый растёт по мере наполнения канала
-		area, self._body = list_area(self, spacing=density.spacing().block_spacing)
-		self.content.addWidget(area, stretch=1)
-		self._build_fields_block()
-		self._build_templates_block()
-		self._body.addStretch()
-		self.add_close_button("Готово")
-		self._reload()
-
-	# --- поля -----------------------------------------------------------------
-
-	def _build_fields_block(self) -> None:
-		"""Блок пула полей: список и строка добавления нового поля."""
-		self._body.addWidget(BodyLabel("Поля (словарь общий для шаблонов):", self))
-		self._fields_box = QVBoxLayout()
-		self._body.addLayout(self._fields_box)
-		row = QHBoxLayout()
-		self._field_name = LineEdit(self)
-		self._field_name.setPlaceholderText("Новое поле (например, Genre)…")
-		row.addWidget(self._field_name, stretch=1)
-		row.addWidget(CaptionLabel("решётки", self))
-		self._field_hashtag = SwitchButton(self)
-		self._field_hashtag.setChecked(True)
-		row.addWidget(self._field_hashtag)
-		row.addWidget(CaptionLabel("несколько", self))
-		self._field_multiple = SwitchButton(self)
-		row.addWidget(self._field_multiple)
-		row.addWidget(CaptionLabel("имя", self))
-		self._field_show_name = SwitchButton(self)
-		self._field_show_name.setChecked(True)
-		self._field_show_name.setToolTip(
-			"Вставлять название поля в подпись («Имя: значения»); выключено — только значения"
-		)
-		row.addWidget(self._field_show_name)
-		add = PushButton("Добавить", self)
-		add.clicked.connect(self._on_add_field)
-		row.addWidget(add)
-		self._body.addLayout(row)
-
-	def _show_fields(self, fields: list[FieldDto]) -> None:
-		"""Перерисовывает список полей и набор для сборки шаблона."""
-		self._fields = fields
-		clear_layout(self._fields_box)
-		for field in fields:
-			flags = (
-				("#" if field.hashtag else "текст")
-				+ (", несколько" if field.multiple else "")
-				+ ("" if field.show_name else ", без имени")
-			)
-			dictionary = PushButton("Словарь…", self)
-			dictionary.clicked.connect(bind(self._open_dictionary, field))
-			self._fields_box.addWidget(
-				_row_widget(
-					self,
-					f"{field.name} ({flags})",
-					f"словарь: {len(field.values)}",
-					bind(self._on_delete_field, field),
-					[self._show_name_switch(field), self._parent_field_combo(field), dictionary],
-				)
-			)
-		# перерисовка не сбрасывает правку: состав правящегося шаблона
-		# восстанавливается в списке (например, после добавления поля)
-		self._fill_template_list(self._editing)
-		self._update_pattern_hint(fields)
-
-	def _show_name_switch(self, field: FieldDto) -> QWidget:
-		"""Переключатель «имя в подписи»: уходит ли название поля в подпись.
-
-		Действует на будущие сборки; словарь и состав шаблонов
-		не затрагивает — поле пересоздавать не нужно.
-		"""
-		switch = SwitchButton(self)
-		switch.setChecked(field.show_name)
-		switch.setToolTip(
-			"Вставлять название поля в подпись («Имя: значения»); выключено — только значения"
-		)
-		# сигнал — после setChecked: предустановка не должна писать в БД
-		switch.checkedChanged.connect(partial(self._on_toggle_show_name, field))
-		widget: QWidget = switch
-		return widget
-
-	def _on_toggle_show_name(self, field: FieldDto, checked: bool) -> None:
-		"""Сохраняет флаг «имя в подписи» и обновляет пометки списка."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.set_field_show_name(field.id, checked),
-			self,
-			lambda *_a: self._reload(),
-			self._show_error,
-		)
-
-	def _parent_field_combo(self, field: FieldDto) -> QWidget:
-		"""Выбор родительского поля: внутри чьих значений живёт словарь.
-
-		Например, «Character» внутри «Title» — при сборке поста
-		показываются персонажи выбранного тайтла.
-		"""
-		combo: DtoComboBox[FieldDto] = DtoComboBox(self, "внутри: —")
-		combo.set_items(
-			[other for other in self._fields if other.id != field.id],
-			lambda other: f"внутри: {other.name}",
-		)
-		if field.parent_field_id is not None:
-			combo.select(lambda other: other.id == field.parent_field_id)
-		combo.setMinimumWidth(150)
-		# сигнал — после предвыбора: иначе выбор сохранился бы сам собой
-		combo.currentIndexChanged.connect(bind(self._on_parent_field, (field, combo)))
-		widget: QWidget = combo
-		return widget
-
-	def _on_parent_field(self, pair: tuple[FieldDto, DtoComboBox[FieldDto]]) -> None:
-		"""Сохраняет связь поля с родительским полем."""
-		field, combo = pair
-		chosen = combo.selected()
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.set_field_parent(
-				field.id, chosen.id if chosen is not None else None
-			),
-			self,
-			lambda *_a: self._reload(),
-			self._show_error,
-		)
-
-	def _open_dictionary(self, field: FieldDto) -> None:
-		"""Открывает редактор словаря поля; после — обновляет счётчики."""
-		parent_field = next((f for f in self._fields if f.id == field.parent_field_id), None)
-		dependents = [f.name for f in self._fields if f.parent_field_id == field.id]
-		exec_dialog(DictionaryDialog(self._worker, field, self.window(), parent_field, dependents))
-		self._reload()
-
-	def _update_pattern_hint(self, fields: list[FieldDto]) -> None:
-		"""Подсказка плейсхолдеров имени файла — с актуальными полями канала.
-
-		Встроенные плейсхолдеры перечисляет движок
-		(``FILENAME_PLACEHOLDERS``) — новый попадает в подсказку сам.
-		"""
-		tokens = ", ".join("{" + f.name + "}" for f in fields) or "добавьте поля выше"
-		builtin = ", ".join(f"{token} — {caption}" for token, caption in FILENAME_PLACEHOLDERS)
-		self._pattern_hint.setText(
-			f"Плейсхолдеры имени файла: {builtin}; поля со значениями через запятую: {tokens}"
-		)
-
-	def _on_add_field(self) -> None:
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.add_field(
-				self._community_id,
-				str(self._field_name.text()),
-				self._field_hashtag.isChecked(),
-				self._field_multiple.isChecked(),
-				self._field_show_name.isChecked(),
-			),
-			self,
-			self._on_field_added,
-			self._show_error,
-		)
-
-	def _on_field_added(self, _field: FieldDto) -> None:
-		self._field_name.clear()
-		self._reload()
-
-	def _on_delete_field(self, field: FieldDto) -> None:
-		# необратимая потеря словаря, копившегося автопополнением, —
-		# как и везде в приложении, требует подтверждения
-		details = f" вместе со словарём ({len(field.values)} знач.)" if field.values else ""
-		if not confirm_delete(self, f"Удалить поле «{field.name}»{details}?"):
-			return
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.delete_field(field.id),
-			self,
-			lambda *_a: self._reload(),
-			self._show_error,
-		)
-
-	# --- шаблоны ----------------------------------------------------------------
-
-	def _build_templates_block(self) -> None:
-		"""Блок шаблонов: список, набор полей, шаблон имени файла, сохранение."""
-		self._body.addWidget(BodyLabel("Шаблоны (отметьте поля, порядок — перетаскиванием):", self))
-		self._templates_box = QVBoxLayout()
-		self._body.addLayout(self._templates_box)
-		self._template_list = QListWidget(self)
-		self._template_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-		self._body.addWidget(self._template_list)
-		self._template_pattern = LineEdit(self)
-		self._template_pattern.setPlaceholderText(
-			"Шаблон имени файла (необязательно): {Author}, {video} ({Genre}) {quality} (@{channel})"
-		)
-		self._body.addWidget(self._template_pattern)
-		self._pattern_hint = CaptionLabel("", self)
-		self._pattern_hint.setWordWrap(True)
-		# подсказку можно выделять и копировать (плейсхолдеры — в шаблон)
-		self._pattern_hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-		self._body.addWidget(self._pattern_hint)
-		self._edit_hint = CaptionLabel("", self)
-		self._edit_hint.hide()
-		self._body.addWidget(self._edit_hint)
-		row = QHBoxLayout()
-		self._template_name = LineEdit(self)
-		self._template_name.setPlaceholderText("Имя шаблона (например, Фильм)…")
-		row.addWidget(self._template_name, stretch=1)
-		self._cancel_edit_button = PushButton("Отменить правку", self)
-		self._cancel_edit_button.clicked.connect(self._cancel_edit)
-		self._cancel_edit_button.hide()
-		row.addWidget(self._cancel_edit_button)
-		self._save_template_button = PushButton("Сохранить шаблон", self)
-		self._save_template_button.clicked.connect(self._on_save_template)
-		row.addWidget(self._save_template_button)
-		self._body.addLayout(row)
-
-	def _fill_template_list(self, template: TemplateDto | None = None) -> None:
-		"""Заполняет набор полей формы шаблона.
-
-		``template`` — правящийся шаблон: его поля идут первыми в порядке
-		состава и отмечены; остальные поля канала — следом, без отметки.
-		None — все поля без отметок (сборка нового шаблона).
-		"""
-		self._template_list.clear()
-		template_ids = [tf.field.id for tf in template.fields] if template is not None else []
-		ordered = sorted(
-			self._fields,
-			key=lambda field: (
-				template_ids.index(field.id) if field.id in template_ids else len(template_ids)
-			),
-		)
-		for field in ordered:
-			item = QListWidgetItem(field.name)
-			item.setData(Qt.ItemDataRole.UserRole, field.id)
-			item.setFlags(
-				item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled
-			)
-			item.setCheckState(
-				Qt.CheckState.Checked if field.id in template_ids else Qt.CheckState.Unchecked
-			)
-			self._template_list.addItem(item)
-
-	def _show_templates(self, templates: list[TemplateDto]) -> None:
-		"""Перерисовывает список шаблонов с их составом."""
-		clear_layout(self._templates_box)
-		for template in templates:
-			hint = ", ".join(tf.field.name for tf in template.fields)
-			if template.filename_pattern:
-				hint += " · шаблон имени файла задан"
-			edit = PushButton("Изменить…", self)
-			edit.clicked.connect(bind(self._start_edit_template, template))
-			self._templates_box.addWidget(
-				_row_widget(
-					self,
-					template.name,
-					hint,
-					bind(self._on_delete_template, template),
-					[edit],
-				)
-			)
-
-	def _start_edit_template(self, template: TemplateDto) -> None:
-		"""Загружает шаблон в форму: имя, состав с порядком, шаблон имени."""
-		self._editing = template
-		self._template_name.setText(template.name)
-		self._template_pattern.setText(template.filename_pattern or "")
-		self._fill_template_list(template)
-		self._edit_hint.setText(
-			f"Правка шаблона «{template.name}»: сохранение перезапишет его "
-			"(смена имени — переименует)."
-		)
-		self._edit_hint.show()
-		self._cancel_edit_button.show()
-		self._save_template_button.setText("Сохранить изменения")
-
-	def _cancel_edit(self) -> None:
-		"""Возвращает форму в режим сборки нового шаблона."""
-		self._editing = None
-		self._template_name.clear()
-		self._template_pattern.clear()
-		self._fill_template_list()
-		self._edit_hint.hide()
-		self._cancel_edit_button.hide()
-		self._save_template_button.setText("Сохранить шаблон")
-
-	def _checked_field_ids(self) -> list[int]:
-		"""Отмеченные поля в текущем порядке списка."""
-		ids: list[int] = []
-		for index in range(self._template_list.count()):
-			item = self._template_list.item(index)
-			if item.checkState() is Qt.CheckState.Checked:
-				ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
-		return ids
-
-	def _on_save_template(self) -> None:
-		"""Сохраняет форму: новый шаблон или перезапись правящегося."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.save_template(
-				self._community_id,
-				str(self._template_name.text()),
-				self._checked_field_ids(),
-				str(self._template_pattern.text()).strip() or None,
-				template_id=self._editing.id if self._editing else None,
-			),
-			self,
-			self._on_template_saved,
-			self._show_error,
-		)
-
-	def _on_template_saved(self, _template: TemplateDto) -> None:
-		self._cancel_edit()  # форма снова собирает новый шаблон
-		self._reload()
-
-	def _on_delete_template(self, template: TemplateDto) -> None:
-		if not confirm_delete(self, f"Удалить шаблон «{template.name}»?"):
-			return
-		if self._editing is not None and self._editing.id == template.id:
-			self._cancel_edit()  # удаляемый шаблон не должен остаться в форме
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.delete_template(template.id),
-			self,
-			lambda *_a: self._reload(),
-			self._show_error,
-		)
-
-	# --- загрузка -----------------------------------------------------------------
-
-	def _reload(self) -> None:
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.list_fields(self._community_id),
-			self,
-			self._show_fields,
-			self._show_error,
-		)
-		run_in_engine(
-			self._worker,
-			self._worker.engine.captions.list_templates(self._community_id),
-			self,
-			self._show_templates,
-			self._show_error,
-		)

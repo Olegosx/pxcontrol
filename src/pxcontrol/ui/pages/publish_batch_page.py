@@ -4,7 +4,7 @@
 режимом внутри формы поста: кнопка на форме вела цепочку подготовки
 и открывала рабочее окно с черновиками. Теперь у него свой экран, а всё
 остальное в ADR-0015 не меняется — те же черновики построчно, общий
-шаблон подписи, раскладка времени стратегиями, атомарная постановка
+пресет подписи (ADR-0042), раскладка времени стратегиями, атомарная постановка
 ``enqueue_many``.
 
 Экран отвечает за три вещи, которых у редактора строк нет:
@@ -12,8 +12,8 @@
 - **адресат пакета** — сообщество и тема форума (общий блок
   :mod:`post_target`, тот же, что у формы поста);
 - **подготовка источника** — цепочка обращений к движку: сканирование
-  папки, общий шаблон подписи, времена сообщества, занятые отложки,
-  правила разбора имени, пределы текста и размера файла;
+  папки, общий пресет подписи, времена сообщества, занятые отложки,
+  пределы текста и размера файла;
 - **кнопки под постом** — одна клавиатура на весь пакет (ADR-0031):
   правила их доступности зависят от маршрута, а маршрут — от самого
   «тяжёлого» черновика пакета (отложенного и с крупным файлом).
@@ -37,10 +37,10 @@ from qfluentwidgets import (
 )
 
 from pxcontrol.engine import EngineWorker
-from pxcontrol.engine.services.captions import CaptionLine, TemplateDto, TitleParseRules
+from pxcontrol.engine.services.captions import CaptionPresetDto
 from pxcontrol.engine.services.communities import CommunityDto
 from pxcontrol.engine.services.posts import PREMIUM_LIMITS, TextLimits
-from pxcontrol.engine.services.settings import PUBLISH_TIMES, TITLE_PARSE_RULES
+from pxcontrol.engine.services.settings import PUBLISH_TIMES
 from pxcontrol.engine.services.video import VideoFile
 from pxcontrol.engine.telegram.types import (
 	BOT_MAX_FILE_BYTES,
@@ -65,7 +65,7 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.markup_editor import MarkupEditor, MarkupState, markup_state
 from pxcontrol.ui.pages.post_target import CommunityChoice, IdentityChoice, TopicChoice
-from pxcontrol.ui.pages.publish_batch import BatchEditor
+from pxcontrol.ui.pages.publish_batch import BatchCaption, BatchEditor
 from pxcontrol.ui.pages.publish_stages import PublishStage
 from pxcontrol.ui.pages.stage_page import StagePage
 
@@ -75,20 +75,16 @@ class _BatchSetup:
 	"""Собираемые данные пакета отправки (ADR-0015).
 
 	Заполняется по шагам цепочки колбэков (папка → сканирование →
-	общий шаблон подписи → времена сообщества → отложки → правила
-	разбора имени → пределы), чтобы не таскать длинный список
-	аргументов через каждую функцию.
+	общий пресет подписи → времена сообщества → отложки → пределы),
+	чтобы не таскать длинный список аргументов через каждую функцию.
 	"""
 
 	community: CommunityDto
 	root: str
 	files: list[VideoFile] = field(default_factory=list)
-	caption_lines: list[CaptionLine] | None = None
-	filename_template_id: int | None = None
-	used_values: dict[int, list[str]] = field(default_factory=dict)
+	caption: BatchCaption | None = None
 	times: list[str] = field(default_factory=list)
 	busy: list[datetime] = field(default_factory=list)  # отложки сообщества (UTC)
-	title_rules: TitleParseRules = field(default_factory=TitleParseRules)
 	limits: TextLimits | None = None
 
 
@@ -285,7 +281,7 @@ class BatchStagePage(StagePage):
 		)
 
 	def _on_scanned(self, setup: _BatchSetup, files: list[VideoFile]) -> None:
-		"""Файлы найдены — общий шаблон подписи (если шаблоны настроены)."""
+		"""Файлы найдены — общий пресет подписи (если пресеты настроены)."""
 		if not files:
 			show_info(
 				self,
@@ -296,31 +292,31 @@ class BatchStagePage(StagePage):
 		setup.files = files
 		run_in_engine(
 			self._worker,
-			self._worker.engine.captions.list_templates(setup.community.id),
+			self._worker.engine.captions.list_presets(setup.community.id),
 			self,
 			partial(self._caption_pass, setup),
 			self._show_error,
 		)
 
-	def _caption_pass(self, setup: _BatchSetup, templates: list[TemplateDto]) -> None:
-		"""Один проход диалога подписи: шаблон и общие значения на весь пакет.
+	def _caption_pass(self, setup: _BatchSetup, presets: list[CaptionPresetDto]) -> None:
+		"""Один проход окна сборки: пресет и общие значения на весь пакет.
 
-		Название у каждой строки будет своё (из имени файла), поэтому поле
-		названия в диалоге пустое. Отмена диалога — пакет без подписей,
-		а не отмена пакета: подписи правятся построчно дальше.
+		Поля с правилом разбора у каждой строки берут значения из имени
+		её файла (ADR-0042), поэтому в окне они не правятся. Отмена окна —
+		пакет без подписей, а не отмена пакета: подписи правятся
+		построчно дальше. Словари пополняются только общими значениями:
+		разобранное из имён файлов движок в словарь не пускает.
 		"""
-		usable = [template for template in templates if template.fields]
+		usable = [preset for preset in presets if preset.fields]
 		if usable:
-			dialog = CaptionDialog(usable, "", self.window())
+			dialog = CaptionDialog(usable, None, self.window(), per_file=True)
 			if exec_dialog(dialog):
-				setup.caption_lines = dialog.lines()
-				setup.used_values = dialog.used_values()
-				template = next(item for item in usable if item.id == dialog.template_id())
-				if template.filename_pattern:
-					setup.filename_template_id = template.id
+				preset = dialog.preset()
+				values = dialog.values()
+				setup.caption = BatchCaption(preset, tuple(dialog.enabled_ids()), values)
 				run_in_engine(
 					self._worker,
-					self._worker.engine.captions.record_usage(template.id, setup.used_values),
+					self._worker.engine.captions.record_usage(preset.id, values),
 					self,
 					noop,
 					self._show_error,
@@ -362,19 +358,8 @@ class BatchStagePage(StagePage):
 		self._scheduled_loaded(setup, [])
 
 	def _scheduled_loaded(self, setup: _BatchSetup, scheduled: list[datetime]) -> None:
-		"""Отложки получены — заготовка правил разбора имени файла."""
+		"""Отложки получены — остались пределы текста сообщества."""
 		setup.busy = scheduled
-		run_in_engine(
-			self._worker,
-			self._worker.engine.settings.get_for(TITLE_PARSE_RULES, setup.community.id),
-			self,
-			partial(self._rules_loaded, setup),
-			self._show_error,
-		)
-
-	def _rules_loaded(self, setup: _BatchSetup, tokens: list[str]) -> None:
-		"""Правила разбора получены — остались пределы текста сообщества."""
-		setup.title_rules = TitleParseRules.from_tokens(tokens)
 		# пределы — потолок Telegram (ADR-0037): кто повезёт, решит
 		# диспетчер; файл сверх обычного предела строка пометит
 		setup.limits = PREMIUM_LIMITS
@@ -395,14 +380,11 @@ class BatchStagePage(StagePage):
 			setup.root,
 			setup.files,
 			self,
-			caption_lines=setup.caption_lines,
-			filename_template_id=setup.filename_template_id,
-			used_values=setup.used_values,
+			caption=setup.caption,
 			community_times=setup.times,
 			limit_bytes=limit_bytes,
 			caption_limit=self._caption_limit(),
 			schedule_allowed=setup.community.capabilities.userbot,
-			title_rules=setup.title_rules,
 			# отложки приходят из Telegram в UTC, раскладка живёт
 			# в местном наивном времени — как ввод пользователя
 			busy=[moment.astimezone().replace(tzinfo=None) for moment in setup.busy],

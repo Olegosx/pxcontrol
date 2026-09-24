@@ -1,28 +1,33 @@
-"""Сервис подписей к постам: поля со словарями, шаблоны, сборка текста.
+"""Сервис подписей к постам: поля со словарями, пресеты, сборка текста.
 
-Поле канала («Genre», «Year»…) хранит свой словарь значений один раз;
-шаблоны — именованные наборы полей с порядком. Сборка подписи — чистые
-функции: жирное название (Markdown, Telethon парсит его по умолчанию)
-и строки «Поле: значения» (с решётками или без).
+Поле сообщества («Genre», «Year», «Video»…) хранит оформление и словарь
+значений один раз; пресеты — именованные наборы полей с порядком
+(ADR-0042). Название ролика — обычное поле с оформлением «жирным»,
+а не особая первая строка.
+
+Значение поля пресета бывает взято из имени файла: у строки состава
+пресета есть правило разбора (:class:`SourceRule`) — извлечение
+выражением, цепочка замен, регистр и разделение на значения. Разбор
+и сборка подписи — чистые функции.
 
 Словари бывают связанными: поле объявляется зависимым от другого поля
-канала («Character» внутри «Title»), и тогда его значения живут внутри
-значений родителя — при сборке поста показываются персонажи выбранного
-тайтла. Тайтл удаляется — его персонажи уходят вместе с ним (каскад
-в схеме, решение от 15.08.2026).
+сообщества («Character» внутри «Title»), и тогда его значения живут
+внутри значений родителя — при сборке поста показываются персонажи
+выбранного тайтла. Тайтл удаляется — его персонажи уходят вместе с ним
+(каскад в схеме, решение от 15.08.2026).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
-from collections.abc import Collection
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,8 +36,8 @@ from sqlalchemy.orm import selectinload
 from pxcontrol.engine.db.database import Database
 from pxcontrol.engine.db.models import (
 	CaptionField,
-	CaptionTemplate,
-	CaptionTemplateField,
+	CaptionPreset,
+	CaptionPresetField,
 	CaptionValue,
 	Community,
 )
@@ -46,17 +51,17 @@ logger = logging.getLogger(__name__)
 
 #: Суффикс имён файлов нашего конвейера: _<пресет>_<штамп>; вид штампа —
 #: ``PIPELINE_STAMP_FORMAT`` сервиса видео (связка закреплена тестом
-#: ``test_title_from_filename_matches_pipeline_stamp``).
+#: ``test_filename_source_matches_pipeline_stamp``).
 _PIPELINE_SUFFIX = re.compile(r"_[^_]+_\d{8}-\d{6}$")
 
-#: Плейсхолдер шаблона имени файла: {video}, {ИмяПоля}, {quality}, {channel}.
+#: Плейсхолдер шаблона имени файла: {ИмяПоля}, {quality}, {channel}.
 _PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
 
 #: Встроенные плейсхолдеры шаблона имени файла: токен → описание.
 #: Единая точка для подсказок интерфейса (контракт ``render_filename``):
 #: новый плейсхолдер попадает в подсказку сам, без правки страниц.
+#: Название ролика здесь больше не встроенное — это обычное поле.
 FILENAME_PLACEHOLDERS: tuple[tuple[str, str], ...] = (
-	("{video}", "название видео"),
 	("{quality}", "качество видео"),
 	("{channel}", "@имя канала"),
 )
@@ -87,6 +92,27 @@ class CaptionsError(EngineError):
 	"""Ошибка работы с подписями (с понятным человеку текстом)."""
 
 
+# --- поля и пресеты: объекты передачи ------------------------------------------
+
+
+@dataclass(frozen=True)
+class FieldStyle:
+	"""Оформление строки поля в подписи.
+
+	Attributes:
+		hashtag: значения — хэштегами («#TombRaider»), иначе текстом.
+		multiple: у поля бывает несколько значений.
+		show_name: строка начинается с имени поля («Genre: …»);
+			выключено — в строке только значения.
+		bold: строка выделяется жирным (так выглядит название ролика).
+	"""
+
+	hashtag: bool = True
+	multiple: bool = False
+	show_name: bool = True
+	bold: bool = False
+
+
 @dataclass(frozen=True)
 class ValueDto:
 	"""Значение словаря: идентификатор, текст и привязка к родителю.
@@ -106,17 +132,13 @@ class FieldDto:
 
 	``parent_field_id`` — поле, от которого зависит это поле: его значения
 	живут внутри значений родителя; None — поле независимое.
-	``show_name`` — вставлять ли имя поля в подпись: при False строка
-	собирается без префикса «Имя: », только из значений.
 	"""
 
 	id: int
 	name: str
-	hashtag: bool
-	multiple: bool
+	style: FieldStyle
 	values: list[ValueDto]
 	parent_field_id: int | None = None
-	show_name: bool = True
 
 	def names(self) -> list[str]:
 		"""Тексты значений словаря (в порядке словаря)."""
@@ -135,38 +157,224 @@ class FieldDto:
 			item for item in self.values if item.parent_id is None or item.parent_id in parent_ids
 		]
 
-
-@dataclass(frozen=True)
-class TemplateFieldDto:
-	"""Поле в составе шаблона: само поле и включённость по умолчанию."""
-
-	field: FieldDto
-	enabled: bool
+	def line(self, values: list[str]) -> CaptionLine:
+		"""Строка подписи этого поля с данными значениями."""
+		return CaptionLine(self.name, values, self.style)
 
 
 @dataclass(frozen=True)
-class TemplateDto:
-	"""Шаблон подписи: имя, состав полей и шаблон имени файла."""
+class FieldEdit:
+	"""Правка поля сообщества: оформление и связь с родительским полем."""
 
-	id: int
-	name: str
-	last_used_at: datetime | None
-	fields: list[TemplateFieldDto]
-	filename_pattern: str | None = None
+	style: FieldStyle
+	parent_field_id: int | None = None
 
 
 @dataclass(frozen=True)
 class CaptionLine:
-	"""Строка подписи для сборки: имя поля, оформление, значения.
+	"""Строка подписи для сборки: имя поля, значения и оформление."""
 
-	``show_name=False`` — имя поля в подпись не вставляется, строка
-	состоит только из значений.
+	name: str
+	values: list[str]
+	style: FieldStyle = FieldStyle()
+
+
+# --- правило разбора имени файла ------------------------------------------------
+
+
+class CaseMode(StrEnum):
+	"""Режим регистра значения после разбора имени файла."""
+
+	KEEP = "keep"  # как есть
+	EVERY_WORD = "every_word"  # Каждое Слово С Заглавной
+	FIRST_WORD = "first_word"  # Только первая буква значения
+
+
+@dataclass(frozen=True)
+class ReplaceStep:
+	r"""Шаг очистки: что найти и на что заменить.
+
+	Attributes:
+		pattern: регулярное выражение поиска; пустое — шага нет.
+		replacement: чем заменить совпадение; пустая строка — удаление.
+			Пробел здесь — обычное значение, а не «ничего»: замена
+			разделителей (``_``, ``-``) пробелом разбивает слипшиеся
+			слова. Допустимы ссылки на группы выражения (``\1``,
+			``\g<имя>``) — совпадение можно не выбрасывать, а
+			переписать.
+	"""
+
+	pattern: str
+	replacement: str = ""
+
+
+#: Разделитель значений по умолчанию (для полей с несколькими значениями).
+DEFAULT_SEPARATOR = ","
+
+#: Имя группы извлечения, которая главнее прочих групп выражения.
+VALUE_GROUP = "value"
+
+
+@dataclass(frozen=True)
+class SourceRule:
+	"""Правило «взять значение поля из имени файла» (ADR-0042).
+
+	Применяется к имени файла без расширения и без суффикса конвейера
+	(:func:`filename_source`) по шагам: извлечение → цепочка замен →
+	разделение на значения (у поля с несколькими значениями) → регистр
+	каждого значения. Правило с частями по умолчанию берёт имя целиком.
+
+	Attributes:
+		extract: выражение поиска; значение — группа ``value``, иначе
+			первая группа, иначе всё совпадение. Пустое — имя целиком.
+			Нет совпадения — у поля нет значения.
+		steps: цепочка замен по результату извлечения.
+		case: регистр каждого значения.
+		separator: выражение-разделитель значений (только для поля
+			с несколькими значениями).
+	"""
+
+	extract: str = ""
+	steps: tuple[ReplaceStep, ...] = ()
+	case: CaseMode = CaseMode.KEEP
+	separator: str = DEFAULT_SEPARATOR
+
+	def to_json(self) -> dict[str, Any]:
+		"""Правило для колонки ``source_rule`` (JSON)."""
+		return {
+			"extract": self.extract,
+			"steps": [[step.pattern, step.replacement] for step in self.steps],
+			"case": self.case.value,
+			"separator": self.separator,
+		}
+
+	@classmethod
+	def from_json(cls, raw: object) -> SourceRule:
+		"""Правило из колонки; испорченная часть — по умолчанию, со следом в логе.
+
+		Незнакомые ключи пропускаются: правило, записанное более новой
+		версией, не ломает старую (прямая совместимость).
+		"""
+		if not isinstance(raw, dict):
+			logger.warning("Правило разбора имени файла — не объект: %r", raw)
+			return cls()
+		return cls(
+			extract=_text_part(raw, "extract", ""),
+			steps=_steps_part(raw.get("steps", [])),
+			case=_case_part(raw.get("case", CaseMode.KEEP.value)),
+			separator=_text_part(raw, "separator", DEFAULT_SEPARATOR),
+		)
+
+
+def _text_part(raw: dict[str, Any], key: str, default: str) -> str:
+	"""Строковая часть правила; не строка — умолчание со следом в логе."""
+	value = raw.get(key, default)
+	if isinstance(value, str):
+		return value
+	logger.warning("Часть «%s» правила разбора — не строка: %r", key, value)
+	return default
+
+
+def _steps_part(raw: object) -> tuple[ReplaceStep, ...]:
+	"""Цепочка замен правила; испорченный шаг пропускается со следом в логе."""
+	if not isinstance(raw, list):
+		logger.warning("Цепочка замен правила разбора — не список: %r", raw)
+		return ()
+	steps: list[ReplaceStep] = []
+	for pair in raw:
+		if isinstance(pair, list) and len(pair) == 2 and all(isinstance(p, str) for p in pair):
+			steps.append(ReplaceStep(pair[0], pair[1]))
+		else:
+			logger.warning("Шаг правила разбора — не пара «выражение, замена»: %r", pair)
+	return tuple(steps)
+
+
+def _case_part(raw: object) -> CaseMode:
+	"""Режим регистра правила; незнакомый — «как есть» со следом в логе."""
+	try:
+		return CaseMode(str(raw))
+	except ValueError:
+		logger.warning("Неизвестный режим регистра в правиле разбора: %r", raw)
+		return CaseMode.KEEP
+
+
+@dataclass(frozen=True)
+class PresetFieldDto:
+	"""Поле в составе пресета: само поле, включённость и правило разбора.
+
+	``rule`` — правило «взять из имени файла»; None — значение вводит
+	человек при сборке подписи.
+	"""
+
+	field: FieldDto
+	enabled: bool
+	rule: SourceRule | None = None
+
+
+@dataclass(frozen=True)
+class CaptionPresetDto:
+	"""Пресет подписи: имя, состав полей и шаблон имени файла."""
+
+	id: int
+	name: str
+	last_used_at: datetime | None
+	fields: list[PresetFieldDto]
+	filename_pattern: str | None = None
+
+	def parsed(self, source: str) -> dict[int, list[str]]:
+		"""Значения полей с правилом, разобранные из имени файла.
+
+		``source`` — имя без расширения и суффикса конвейера
+		(:func:`filename_source`). Поле без правила в ответ не входит,
+		поле без совпадения — входит с пустым списком.
+		"""
+		return {
+			item.field.id: extract_values(source, item.rule, item.field.style.multiple)
+			for item in self.fields
+			if item.rule is not None
+		}
+
+	def lines(
+		self, values: Mapping[int, list[str]], enabled: Collection[int] | None = None
+	) -> list[CaptionLine]:
+		"""Строки подписи по составу пресета — в его порядке.
+
+		``values`` — значения по id полей (разобранные и введённые
+		вместе); ``enabled`` — поля, вошедшие в эту подпись (None — все).
+		Поле без значений даёт пустую строку: её пропустит сборка.
+		"""
+		return [
+			item.field.line(values.get(item.field.id, []))
+			for item in self.fields
+			if enabled is None or item.field.id in enabled
+		]
+
+
+@dataclass(frozen=True)
+class PresetFieldSpec:
+	"""Строка состава пресета к сохранению: поле и его правило разбора."""
+
+	field_id: int
+	rule: SourceRule | None = None
+
+
+@dataclass(frozen=True)
+class CaptionPresetDraft:
+	"""Пресет к сохранению целиком — всё, что правится на его экране.
+
+	Attributes:
+		name: имя пресета.
+		fields: состав по порядку с правилами разбора.
+		filename_pattern: шаблон имени файла (пусто — не задан).
+		field_edits: правки полей сообщества по их id — оформление
+			и связь; они общие для всех пресетов и сохраняются той же
+			записью, что и пресет.
 	"""
 
 	name: str
-	hashtag: bool
-	values: list[str]
-	show_name: bool = True
+	fields: tuple[PresetFieldSpec, ...]
+	filename_pattern: str | None = None
+	field_edits: Mapping[int, FieldEdit] = field(default_factory=dict)
 
 
 # --- чистые функции сборки ---------------------------------------------------
@@ -182,43 +390,57 @@ def hashtag(value: str) -> str:
 	return "#" + "".join(w[:1].upper() + w[1:] for w in words)
 
 
-def build_caption(title: str, lines: list[CaptionLine]) -> RichText:
-	"""Собирает подпись: жирное название плюс строки полей.
+def _render_line(line: CaptionLine) -> str:
+	"""Текст строки поля; пустая строка — значений нет."""
+	values = [v for v in (raw.strip() for raw in line.values) if v]
+	if not values:
+		return ""
+	rendered = ", ".join(hashtag(v) if line.style.hashtag else v for v in values)
+	return f"{line.name}: {rendered}" if line.style.show_name else rendered
 
-	Строки без значений пропускаются. Строка поля — «Имя: значения»;
-	при выключенном ``show_name`` — только значения.
 
-	Название выделяется **сущностью разметки**, а не звёздочками
-	(ADR-0033): текст подписи — то, что увидит читатель, а оформление
-	живёт рядом. Прежняя сборка отдавала ``**название**`` строкой,
-	и эти звёздочки считались длиной поста и мешали правке.
+def build_caption(lines: list[CaptionLine]) -> RichText:
+	"""Собирает подпись из строк полей; строки без значений пропускаются.
+
+	Строка поля — «Имя: значения»; при выключенном ``show_name`` — только
+	значения. Строка поля с оформлением «жирным» выделяется **сущностью
+	разметки** (ADR-0033), а не звёздочками: текст подписи — то, что
+	увидит читатель, оформление живёт рядом. Смещения — в кодовых
+	единицах UTF-16, как их считает Telegram.
 	"""
-	name = title.strip()
-	rows = [name] if name else []
+	rows: list[str] = []
+	entities: list[TextEntity] = []
+	offset = 0
 	for line in lines:
-		values = [v for v in (raw.strip() for raw in line.values) if v]
-		if not values:
+		text = _render_line(line)
+		if not text:
 			continue
-		rendered = ", ".join(hashtag(v) if line.hashtag else v for v in values)
-		rows.append(f"{line.name}: {rendered}" if line.show_name else rendered)
-	text = "\n".join(rows)
-	entities = (TextEntity(TextStyle.BOLD, 0, telegram_text_length(name)),) if name else ()
-	return RichText(text, entities)
+		if rows:
+			offset += 1  # перевод строки перед этой строкой
+		length = telegram_text_length(text)
+		if line.style.bold:
+			entities.append(TextEntity(TextStyle.BOLD, offset, length))
+		rows.append(text)
+		offset += length
+	return RichText("\n".join(rows), tuple(entities))
 
 
-def title_from_filename(path: str) -> str:
-	"""Название поста из имени файла (без суффикса нашего конвейера)."""
+def filename_source(path: str) -> str:
+	"""Исходный текст разбора: имя файла без расширения и суффикса конвейера.
+
+	Суффикс ``_<пресет>_<штамп>`` — технический след нашей обработки
+	видео, а не содержимое, поэтому срезается до любых правил.
+	"""
 	stem = Path(path).stem
 	return _PIPELINE_SUFFIX.sub("", stem).strip()
 
 
-# --- элементарный разбор имени файла в название (пакетная публикация) ---------
+# --- разбор имени файла в значения полей ------------------------------------------
 #
-# Модель одна: разбор — это цепочка замен по регулярным выражениям.
-# Каждый шаг применяется к результату предыдущего, совпадения заменяются
-# пробелом (для имён файлов «удалить» и «заменить пробелом» — одно и то
-# же: лишние пробелы схлопываются в конце). Единственное, что заменой
-# не выражается, — регистр: он остался отдельным полем правил.
+# Правило поля: извлечение → цепочка замен → разделение → регистр.
+# Извлечение — поиск, а не замена: нет совпадения — нет значения
+# (замена без совпадения оставила бы имя целиком, и поле «Starring»
+# получило бы всё имя файла).
 
 #: Заготовка дат: ходовые написания в именах файлов. Внутри одной даты
 #: разделитель одинаковый (обратная ссылка по имени): «31.01-24» датой
@@ -249,13 +471,13 @@ EDGE_NUMBERS_STEP = r"^\s*\d+[\s.\-–—)]+|[\s.\-–—(]+\d+\s*$"
 #: Заготовка слов из одних цифр: «2024», «1080», «007».
 DIGIT_WORDS_STEP = r"\b\d+\b"
 
-#: Заготовки для помощника в интерфейсе: подпись → выражение. Единая
-#: точка: список пунктов и их шаблоны не должны жить в двух местах.
-#: Выбранная заготовка вставляется в поле выражения и правится руками;
-#: замену автор задаёт сам (пусто — удаление). Разделителей (``_``, ``-``)
+#: Заготовки выражений очистки: подпись → выражение. Единая точка:
+#: список пунктов и их шаблоны не должны жить в двух местах. Выбранная
+#: заготовка вставляется в поле выражения и правится руками; замену
+#: автор задаёт сам (пусто — удаление). Разделителей (``_``, ``-``)
 #: среди заготовок нет намеренно: это замена на пробел, а не удаление,
 #: и пишется она парой «``[_-]``  →  пробел» без всякой заготовки.
-TITLE_STEP_PRESETS: tuple[tuple[str, str], ...] = (
+STEP_PRESETS: tuple[tuple[str, str], ...] = (
 	("Скобки с содержимым", BRACKETS_STEP),
 	("Даты", DATE_STEP),
 	("Слова из одних цифр", DIGIT_WORDS_STEP),
@@ -264,38 +486,30 @@ TITLE_STEP_PRESETS: tuple[tuple[str, str], ...] = (
 	("Метки качества и релиза", r"(?i)\d{3,4}p|WEB-?DL|BluRay|x26[45]|HDR"),
 )
 
-
-class TitleCaseMode(StrEnum):
-	"""Режим регистра названия после разбора имени файла."""
-
-	KEEP = "keep"  # как есть
-	EVERY_WORD = "every_word"  # Каждое Слово С Заглавной
-	FIRST_WORD = "first_word"  # Только первая буква фразы
-
-
-@dataclass(frozen=True)
-class TitleStep:
-	r"""Шаг разбора: что найти и на что заменить.
-
-	Attributes:
-		pattern: регулярное выражение поиска; пустое — шага нет.
-		replacement: чем заменить совпадение; пустая строка — удаление.
-			Пробел здесь — обычное значение, а не «ничего»: замена
-			разделителей (``_``, ``-``) пробелом разбивает слипшиеся
-			слова. Допустимы ссылки на группы выражения (``\1``,
-			``\g<имя>``) — совпадение можно не выбрасывать, а
-			переписать.
-	"""
-
-	pattern: str
-	replacement: str = ""
+#: Заготовки выражений извлечения: подпись → выражение. У даты группа
+#: ``value`` обязательна: внутри заготовки дат есть свои группы
+#: разделителей, и «первая группа» вернула бы разделитель, а не дату.
+EXTRACT_PRESETS: tuple[tuple[str, str], ...] = (
+	("Текст в последних скобках", r"\(([^()]*)\)\s*$"),
+	("Текст до первой скобки", r"^([^(\[]+?)\s*[(\[]"),
+	("Первая дата", f"(?P<{VALUE_GROUP}>{DATE_STEP})"),
+	("Год", r"(?<!\d)(?:19|20)\d{2}(?!\d)"),
+)
 
 
-def compile_step(step: TitleStep) -> re.Pattern[str] | None:
+def _compile(pattern: str, what: str) -> re.Pattern[str]:
+	"""Компилирует выражение; битое — понятная ошибка с текстом ``re``."""
+	try:
+		return re.compile(pattern)
+	except re.error as exc:
+		raise CaptionsError(f"{what} не разобрано: {exc}") from exc
+
+
+def compile_step(step: ReplaceStep) -> re.Pattern[str] | None:
 	"""Готовит шаг к применению; None — пустое выражение (шага нет).
 
 	Проверяются обе части: выражение и шаблон замены. Публичная:
-	интерфейс проверяет ею шаг до применения и показывает причину отказа
+	интерфейс проверяет ею шаг до добавления и показывает причину отказа
 	рядом с полем ввода — разбирать сообщения ``re`` на двух сторонах
 	не нужно.
 
@@ -305,10 +519,7 @@ def compile_step(step: TitleStep) -> re.Pattern[str] | None:
 	"""
 	if not step.pattern:
 		return None
-	try:
-		expression = re.compile(step.pattern)
-	except re.error as exc:
-		raise CaptionsError(f"Выражение не разобрано: {exc}") from exc
+	expression = _compile(step.pattern, "Выражение")
 	try:
 		# шаблон замены разбирается при первой же подстановке — даже
 		# без совпадений, поэтому пустая строка годится в пробники.
@@ -320,101 +531,60 @@ def compile_step(step: TitleStep) -> re.Pattern[str] | None:
 	return expression
 
 
-#: Токен шага: JSON-пара «выражение, замена».
-_STEP_PREFIX = "sub:"
+def check_rule(rule: SourceRule) -> None:
+	"""Проверяет правило целиком: извлечение, шаги и разделитель.
 
+	Общая точка проверки: экран пресета показывает причину до сохранения,
+	сервис не сохраняет битое правило.
 
-def _step_from_token(raw: str) -> TitleStep | None:
-	"""Шаг из JSON-пары токена; None — токен испорчен (след в логе)."""
-	try:
-		pair = json.loads(raw)
-	except ValueError:
-		logger.warning("Токен шага разбора не разобран: %s", raw)
-		return None
-	if not (isinstance(pair, list) and len(pair) == 2 and all(isinstance(p, str) for p in pair)):
-		logger.warning("Токен шага разбора — не пара «выражение, замена»: %s", raw)
-		return None
-	return TitleStep(pair[0], pair[1])
-
-
-@dataclass(frozen=True)
-class TitleParseRules:
-	"""Разбор имени файла в название поста: цепочка замен и регистр.
-
-	Осознанно простые и детерминированные правила (полный смысловой
-	разбор — будущая задача ИИ, ей эти правила не мешают). Хранятся
-	настройкой канала как список токенов
-	(:meth:`to_tokens`/:meth:`from_tokens`).
-
-	Attributes:
-		steps: шаги по порядку применения; каждый следующий работает
-			по результату предыдущего.
-		case: режим регистра итоговой фразы.
+	Raises:
+		CaptionsError: Какая-то часть правила не разбирается.
 	"""
-
-	steps: tuple[TitleStep, ...] = ()
-	case: TitleCaseMode = TitleCaseMode.KEEP
-
-	def to_tokens(self) -> list[str]:
-		"""Сериализация в список токенов для настройки канала.
-
-		Шаг — пара, поэтому в одну строку токена он пишется как JSON:
-		и выражение, и замена бывают любыми, и разделитель-символ
-		рано или поздно встретился бы внутри них самих.
-		"""
-		tokens = [
-			_STEP_PREFIX + json.dumps([step.pattern, step.replacement], ensure_ascii=False)
-			for step in self.steps
-		]
-		if self.case is not TitleCaseMode.KEEP:
-			tokens.append(f"case:{self.case.value}")
-		return tokens
-
-	@classmethod
-	def from_tokens(cls, tokens: list[str]) -> TitleParseRules:
-		"""Правила из списка токенов; незнакомые токены игнорируются.
-
-		Терпимость к незнакомому — прямая совместимость: настройка,
-		записанная более новой версией, не ломает старую.
-
-		Поддержки двух прежних поколений формата (галочки ``brackets``/
-		``separators``/``remove:…`` и шаги ``step:``) здесь больше нет:
-		приложение не выходило за пределы машины автора, и в рабочей
-		базе таких настроек не оказалось ни одной (проверено
-		2026-09-12). Незнакомый токен теперь просто отмечается в логе.
-		"""
-		case = TitleCaseMode.KEEP
-		steps: list[TitleStep] = []
-		for token in tokens:
-			if token.startswith(_STEP_PREFIX):
-				step = _step_from_token(token.removeprefix(_STEP_PREFIX))
-				if step is not None:
-					steps.append(step)
-			elif token.startswith("case:"):
-				try:
-					case = TitleCaseMode(token.removeprefix("case:"))
-				except ValueError:
-					logger.warning("Неизвестный режим регистра в настройке: %s", token)
-			else:
-				logger.warning("Неизвестный токен правил разбора: %s", token)
-		return cls(steps=tuple(steps), case=case)
+	if rule.extract:
+		_compile(rule.extract, "Выражение извлечения")
+	for step in rule.steps:
+		compile_step(step)
+	if rule.separator:
+		_compile(rule.separator, "Разделитель")
 
 
-def parse_title(raw: str, rules: TitleParseRules) -> str:
-	"""Применяет разбор к названию, взятому из имени файла.
+def _extracted(source: str, pattern: str) -> str | None:
+	"""Извлечённый текст: группа ``value``, первая группа или всё совпадение.
 
-	Шаги идут по порядку, каждый — по результату предыдущего;
-	совпадение заменяется тем, что задано шагом (пустая замена —
-	удаление). В конце пробелы схлопываются, последним применяется
-	регистр (по итоговой фразе). Пустой результат откатывается
-	к исходному названию: пост без названия хуже поста с сырым.
-
-	Битый шаг пропускается (след — в логе): разбор сотни имён не должен
-	падать из-за одной опечатки, а причину пользователь уже видит
-	в форме (:func:`compile_step`).
+	None — совпадения нет (или выбранная группа не участвовала в нём).
 	"""
-	text = raw
-	for step in rules.steps:
+	if not pattern:
+		return source
+	found = re.search(pattern, source)
+	if found is None:
+		return None
+	if VALUE_GROUP in found.re.groupindex:
+		return found.group(VALUE_GROUP)
+	return found.group(1) if found.re.groups else found.group(0)
+
+
+def _cased(text: str, case: CaseMode) -> str:
+	"""Схлопывает пробелы и применяет регистр к одному значению.
+
+	«Каждое Слово» поднимает только первую букву слова: ``title()``
+	ломал бы «iPhone».
+	"""
+	words = text.split()
+	if case is CaseMode.EVERY_WORD:
+		words = [word[:1].upper() + word[1:] for word in words]
+	joined = " ".join(words)
+	if case is CaseMode.FIRST_WORD:
+		joined = joined[:1].upper() + joined[1:]
+	return joined
+
+
+def _applied_steps(text: str, steps: tuple[ReplaceStep, ...]) -> str:
+	"""Цепочка замен; битый шаг пропускается со следом в логе.
+
+	Разбор сотни имён не должен падать из-за одной опечатки, а причину
+	человек видит на экране пресета (:func:`check_rule`).
+	"""
+	for step in steps:
 		try:
 			expression = compile_step(step)
 		except CaptionsError as exc:
@@ -422,14 +592,41 @@ def parse_title(raw: str, rules: TitleParseRules) -> str:
 			continue
 		if expression is not None:
 			text = expression.sub(step.replacement, text)
-	words = text.split()
-	if rules.case is TitleCaseMode.EVERY_WORD:
-		# только первая буква каждого слова: title() ломал бы «iPhone»
-		words = [word[:1].upper() + word[1:] for word in words]
-	text = " ".join(words)
-	if rules.case is TitleCaseMode.FIRST_WORD:
-		text = text[:1].upper() + text[1:]
-	return text if text else raw.strip()
+	return text
+
+
+def _split(text: str, separator: str) -> list[str]:
+	"""Делит текст на значения; битый разделитель — одно значение (след в логе)."""
+	if not separator:
+		return [text]
+	try:
+		return re.split(separator, text)
+	except re.error as exc:
+		logger.warning("Разбор имени: разделитель не разобран: %s", exc)
+		return [text]
+
+
+def extract_values(source: str, rule: SourceRule, multiple: bool) -> list[str]:
+	"""Значения поля, разобранные из имени файла по правилу.
+
+	Порядок: извлечение (нет совпадения — пустой список), цепочка замен,
+	разделение (только у поля с несколькими значениями), регистр
+	и схлопывание пробелов каждого значения. Пустые значения
+	отбрасываются, повторы — тоже (порядок первого появления).
+	Битое извлечение даёт пустой список со следом в логе: поле без
+	значения честнее поля, заполненного всем именем файла.
+	"""
+	try:
+		text = _extracted(source, rule.extract)
+	except (re.error, IndexError) as exc:
+		logger.warning("Разбор имени: выражение извлечения не разобрано: %s", exc)
+		return []
+	if text is None:
+		return []
+	text = _applied_steps(text, rule.steps)
+	parts = _split(text, rule.separator) if multiple else [text]
+	values = (_cased(part, rule.case) for part in parts)
+	return list(dict.fromkeys(value for value in values if value))
 
 
 def sanitize_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:
@@ -449,8 +646,8 @@ def sanitize_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:
 def filename_complaint(name: str) -> str | None:
 	"""Претензия к имени файла, набранному человеком (None — имя годное).
 
-	Правила те же, по которым чистится имя, собранное по шаблону
-	подписи (:func:`sanitize_filename`, :data:`TELEGRAM_MAX_STEM_CHARS`):
+	Правила те же, по которым чистится имя, собранное по пресету
+	(:func:`sanitize_filename`, :data:`TELEGRAM_MAX_STEM_CHARS`):
 	один набор запрещённых символов, один байтовый предел файловых
 	систем, один предел Telegram на стем. Разница лишь в том, что
 	собранное имя чистится молча, а набранное человеком — отклоняется
@@ -478,6 +675,30 @@ def filename_complaint(name: str) -> str | None:
 			"молча урезал бы его сам."
 		)
 	return None
+
+
+def compose_filename(pattern: str, mapping: Mapping[str, str], suffix: str) -> str:
+	"""Имя файла по шаблону: подстановка, очистка, пределы, расширение.
+
+	Неизвестные плейсхолдеры остаются как есть — видно и правится
+	руками (экран пресета показывает так ``{quality}`` без файла).
+	Байтовый бюджет — предел ФС минус расширение (оно едет как есть);
+	поверх — лимит Telegram на стем (:data:`TELEGRAM_MAX_STEM_CHARS`,
+	иначе сервер молча режет и чистит имя): срез до конца последнего
+	законченного слова (:func:`_cut_readable`).
+
+	Returns:
+		Имя с расширением; пустая строка — по шаблону ничего не вышло.
+	"""
+	rendered = _PLACEHOLDER.sub(lambda m: mapping.get(m.group(1), m.group(0)), pattern)
+	stem = sanitize_filename(rendered, MAX_FILENAME_BYTES - len(suffix.encode("utf-8")))
+	stem = _cut_readable(stem, TELEGRAM_MAX_STEM_CHARS)
+	return stem + suffix if stem else ""
+
+
+def filename_mapping(fields: list[FieldDto], values: Mapping[int, list[str]]) -> dict[str, str]:
+	"""Подстановки полей для шаблона имени файла: значения через запятую."""
+	return {item.name: ", ".join(values.get(item.id, [])) for item in fields}
 
 
 def _parents_first(fields: dict[int, CaptionField]) -> list[int]:
@@ -543,7 +764,7 @@ def _cut_readable(stem: str, limit: int) -> str:
 
 
 class CaptionsService:
-	"""Поля, словари и шаблоны подписей каналов."""
+	"""Поля, словари и пресеты подписей сообществ."""
 
 	def __init__(self, db: Database, ffmpeg_path: FfmpegSource = "ffmpeg") -> None:
 		self._db = db
@@ -552,7 +773,7 @@ class CaptionsService:
 	# --- поля и словари ---------------------------------------------------
 
 	async def list_fields(self, community_id: int) -> list[FieldDto]:
-		"""Возвращает поля канала со словарями значений."""
+		"""Возвращает поля сообщества со словарями значений."""
 		async with self._db.session_factory() as session:
 			rows = (
 				(
@@ -568,16 +789,12 @@ class CaptionsService:
 			)
 			return [self._field_dto(f) for f in rows]
 
-	async def add_field(
-		self, community_id: int, name: str, hashtag: bool, multiple: bool, show_name: bool = True
-	) -> FieldDto:
-		"""Добавляет поле в пул канала.
+	async def add_field(self, community_id: int, name: str, style: FieldStyle) -> FieldDto:
+		"""Добавляет поле в пул сообщества.
 
-		``show_name`` — вставлять ли имя поля в подпись (см. :class:`FieldDto`);
-		позже флаг переключается через :meth:`set_field_show_name`.
-		Связь с родительским полем задаётся отдельно
-		(:meth:`set_field_parent`): её выбирают уже среди существующих
-		полей канала.
+		Связь с родительским полем задаётся правкой (:meth:`update_field`
+		или правкой в составе :meth:`save_preset`): её выбирают уже среди
+		существующих полей сообщества.
 
 		Raises:
 			CaptionsError: Пустое имя или поле с таким именем уже есть.
@@ -595,101 +812,87 @@ class CaptionsService:
 				)
 			).scalar_one_or_none()
 			if exists is not None:
-				raise CaptionsError(f"Поле «{name}» уже есть у канала.")
-			field = CaptionField(
-				community_id=community_id,
-				name=name,
-				hashtag=hashtag,
-				multiple=multiple,
-				show_name=show_name,
+				raise CaptionsError(f"Поле «{name}» уже есть у сообщества.")
+			row = CaptionField(community_id=community_id, name=name)
+			self._apply_style(row, style)
+			session.add(row)
+			await session.commit()
+			await session.refresh(row)
+			field_id = row.id
+		logger.info("Поле подписи «%s» добавлено (сообщество id=%s).", name, community_id)
+		return await self._get_field(field_id)
+
+	async def update_field(self, field_id: int, edit: FieldEdit) -> FieldDto:
+		"""Меняет оформление поля и его связь с родительским полем.
+
+		Действует на все пресеты сообщества: поле и словарь у сообщества
+		одни. Смена связи сбрасывает привязки значений — они указывали
+		в словарь прежнего родителя и после смены ничего не значат.
+
+		Raises:
+			CaptionsError: Поле не найдено или родитель не годится
+				(другое сообщество, само поле, кольцо связей).
+		"""
+		async with self._db.session_factory() as session:
+			row = await session.get(CaptionField, field_id)
+			if row is None:
+				raise CaptionsError("Поле не найдено — обновите список.")
+			await self._apply_edit(session, row, edit)
+			await session.commit()
+		return await self._get_field(field_id)
+
+	@classmethod
+	async def _apply_edit(cls, session: AsyncSession, row: CaptionField, edit: FieldEdit) -> None:
+		"""Применяет правку поля в открытой сессии (с проверкой родителя)."""
+		if edit.parent_field_id is not None:
+			await cls._validate_parent(session, row, edit.parent_field_id)
+		if row.parent_field_id != edit.parent_field_id:
+			await session.execute(
+				update(CaptionValue)
+				.where(CaptionValue.field_id == row.id)
+				.values(parent_value_id=None)
 			)
-			session.add(field)
-			await session.commit()
-			await session.refresh(field)
-		logger.info("Поле подписи «%s» добавлено (канал id=%s).", name, community_id)
-		return FieldDto(
-			field.id, field.name, field.hashtag, field.multiple, [], show_name=field.show_name
-		)
+			logger.info("Поле id=%s: родитель — %s.", row.id, edit.parent_field_id or "нет")
+		row.parent_field_id = edit.parent_field_id
+		cls._apply_style(row, edit.style)
+		await session.flush()  # следующая правка проверяет кольца по новому состоянию
 
-	async def set_field_show_name(self, field_id: int, show_name: bool) -> FieldDto:
-		"""Включает или выключает вставку имени поля в подпись.
-
-		Флаг действует на все будущие сборки подписи (у существующего
-		поля переключается без пересоздания — словарь сохраняется).
-
-		Returns:
-			Поле с обновлённым флагом и словарём.
-
-		Raises:
-			CaptionsError: Поле не найдено.
-		"""
-		async with self._db.session_factory() as session:
-			field = await session.get(CaptionField, field_id)
-			if field is None:
-				raise CaptionsError("Поле не найдено — обновите список.")
-			field.show_name = show_name
-			await session.commit()
-		logger.info("Поле id=%s: имя в подписи — %s.", field_id, "да" if show_name else "нет")
-		return await self._get_field(field_id)
-
-	async def set_field_parent(self, field_id: int, parent_field_id: int | None) -> FieldDto:
-		"""Объявляет поле зависимым от другого поля канала (None — снимает связь).
-
-		Смена связи сбрасывает привязки значений: они указывали на словарь
-		прежнего родителя и после смены ничего не значат.
-
-		Returns:
-			Поле с обновлённой связью и словарём.
-
-		Raises:
-			CaptionsError: Поле не найдено, родитель не годится (другой
-				канал, само поле, кольцо связей).
-		"""
-		async with self._db.session_factory() as session:
-			field = await session.get(CaptionField, field_id)
-			if field is None:
-				raise CaptionsError("Поле не найдено — обновите список.")
-			if parent_field_id is not None:
-				await self._validate_parent(session, field, parent_field_id)
-			if field.parent_field_id != parent_field_id:
-				await session.execute(
-					update(CaptionValue)
-					.where(CaptionValue.field_id == field_id)
-					.values(parent_value_id=None)
-				)
-			field.parent_field_id = parent_field_id
-			await session.commit()
-		logger.info("Поле id=%s: родитель — %s.", field_id, parent_field_id or "нет")
-		return await self._get_field(field_id)
+	@staticmethod
+	def _apply_style(row: CaptionField, style: FieldStyle) -> None:
+		"""Переносит оформление в строку поля."""
+		row.hashtag = style.hashtag
+		row.multiple = style.multiple
+		row.show_name = style.show_name
+		row.bold = style.bold
 
 	@staticmethod
 	async def _validate_parent(
-		session: AsyncSession, field: CaptionField, parent_field_id: int
+		session: AsyncSession, row: CaptionField, parent_field_id: int
 	) -> None:
 		"""Проверяет пригодность родительского поля.
 
 		Raises:
-			CaptionsError: Родитель — само поле, из другого канала,
+			CaptionsError: Родитель — само поле, из другого сообщества,
 				не найден или связь замкнулась бы в кольцо.
 		"""
-		if parent_field_id == field.id:
+		if parent_field_id == row.id:
 			raise CaptionsError("Поле не может зависеть само от себя.")
 		parent = await session.get(CaptionField, parent_field_id)
-		if parent is None or parent.community_id != field.community_id:
-			raise CaptionsError("Родительское поле не найдено у этого канала.")
+		if parent is None or parent.community_id != row.community_id:
+			raise CaptionsError("Родительское поле не найдено у этого сообщества.")
 		ancestor: CaptionField | None = parent
 		while ancestor is not None and ancestor.parent_field_id is not None:
-			if ancestor.parent_field_id == field.id:
+			if ancestor.parent_field_id == row.id:
 				raise CaptionsError("Связь полей замкнулась бы в кольцо.")
 			ancestor = await session.get(CaptionField, ancestor.parent_field_id)
 
 	async def delete_field(self, field_id: int) -> None:
-		"""Удаляет поле, его словарь и строки состава шаблонов.
+		"""Удаляет поле, его словарь и строки состава пресетов.
 
 		Значения зависимых полей перед этим отвязываются (как при смене
-		связи в :meth:`set_field_parent`): зависимое поле становится
+		связи в :meth:`update_field`): зависимое поле становится
 		независимым с целым словарём — а не остаётся пустым из-за каскада
-		``parent_value_id``. Сам словарь поля и строки состава шаблонов
+		``parent_value_id``. Сам словарь поля и строки состава пресетов
 		убирают каскады схемы (внешние ключи включены).
 		"""
 		async with self._db.session_factory() as session:
@@ -699,21 +902,21 @@ class CaptionsService:
 				.where(CaptionValue.parent_value_id.in_(doomed_values))
 				.values(parent_value_id=None)
 			)
-			field = await session.get(CaptionField, field_id)
-			if field is None:
+			row = await session.get(CaptionField, field_id)
+			if row is None:
 				# идемпотентность сознательная (повторный клик), но след
 				# нужен: удаление словаря необратимо (как в delete_community)
 				logger.info("Поле подписи id=%s уже отсутствует — удалять нечего.", field_id)
 				return
-			name = field.name
-			await session.delete(field)
+			name = row.name
+			await session.delete(row)
 			await session.commit()
 		logger.info("Поле подписи «%s» (id=%s) удалено вместе со словарём.", name, field_id)
 
 	async def add_values(
 		self, field_id: int, values: list[str], parent_value_id: int | None = None
 	) -> FieldDto:
-		"""Пополняет словарь поля (редактор словаря в «Полях подписи»).
+		"""Пополняет словарь поля (редактор словаря).
 
 		Дубли значений (без учёта регистра) и пустые строки пропускаются —
 		правила те же, что при автопополнении из сборки подписи.
@@ -728,11 +931,11 @@ class CaptionsService:
 				не из словаря родительского поля.
 		"""
 		async with self._db.session_factory() as session:
-			field = await session.get(CaptionField, field_id)
-			if field is None:
+			row = await session.get(CaptionField, field_id)
+			if row is None:
 				raise CaptionsError("Поле не найдено — обновите список.")
 			if parent_value_id is not None:
-				await self._validate_parent_value(session, field, parent_value_id)
+				await self._validate_parent_value(session, row, parent_value_id)
 			await self._merge_values(session, field_id, values, parent_value_id)
 			await session.commit()
 		return await self._get_field(field_id)
@@ -751,36 +954,36 @@ class CaptionsService:
 				родительское значение не из словаря родительского поля.
 		"""
 		async with self._db.session_factory() as session:
-			row = await session.get(CaptionValue, value_id)
-			if row is None:
+			value = await session.get(CaptionValue, value_id)
+			if value is None:
 				raise CaptionsError("Значение не найдено — обновите список.")
-			field = await session.get(CaptionField, row.field_id)
-			if field is None or field.parent_field_id is None:
+			row = await session.get(CaptionField, value.field_id)
+			if row is None or row.parent_field_id is None:
 				raise CaptionsError(
 					"Поле не зависит от другого поля — привязывать значение не к чему."
 				)
 			if parent_value_id is not None:
-				await self._validate_parent_value(session, field, parent_value_id)
-			row.parent_value_id = parent_value_id
+				await self._validate_parent_value(session, row, parent_value_id)
+			value.parent_value_id = parent_value_id
 			await session.commit()
-			field_id = row.field_id
+			field_id = value.field_id
 		return await self._get_field(field_id)
 
 	@staticmethod
 	async def _validate_parent_value(
-		session: AsyncSession, field: CaptionField, parent_value_id: int
+		session: AsyncSession, row: CaptionField, parent_value_id: int
 	) -> None:
 		"""Проверяет, что значение принадлежит словарю родительского поля.
 
 		Raises:
 			CaptionsError: Поле независимое или значение из чужого словаря.
 		"""
-		if field.parent_field_id is None:
+		if row.parent_field_id is None:
 			raise CaptionsError(
-				f"Поле «{field.name}» не зависит от другого поля — привязывать значение не к чему."
+				f"Поле «{row.name}» не зависит от другого поля — привязывать значение не к чему."
 			)
 		parent = await session.get(CaptionValue, parent_value_id)
-		if parent is None or parent.field_id != field.parent_field_id:
+		if parent is None or parent.field_id != row.parent_field_id:
 			raise CaptionsError("Родительское значение не из словаря родительского поля.")
 
 	async def delete_value(self, value_id: int) -> FieldDto:
@@ -806,153 +1009,196 @@ class CaptionsService:
 		logger.info("Значение «%s» удалено из словаря поля id=%s.", value, field_id)
 		return await self._get_field(field_id)
 
-	# --- шаблоны -----------------------------------------------------------
+	# --- пресеты -----------------------------------------------------------
 
-	async def list_templates(self, community_id: int) -> list[TemplateDto]:
-		"""Возвращает шаблоны канала с полным составом полей."""
+	async def list_presets(self, community_id: int) -> list[CaptionPresetDto]:
+		"""Возвращает пресеты сообщества с полным составом полей."""
 		async with self._db.session_factory() as session:
 			rows = (
 				(
 					await session.execute(
-						select(CaptionTemplate)
-						.options(
-							selectinload(CaptionTemplate.fields)
-							.selectinload(CaptionTemplateField.field)
-							.selectinload(CaptionField.values)
-						)
-						.where(CaptionTemplate.community_id == community_id)
-						.order_by(CaptionTemplate.id)
+						self._preset_query().where(CaptionPreset.community_id == community_id)
 					)
 				)
 				.scalars()
 				.all()
 			)
-			return [self._template_dto(t) for t in rows]
+			return [self._preset_dto(p) for p in rows]
 
-	async def save_template(
-		self,
-		community_id: int,
-		name: str,
-		field_ids: list[int],
-		filename_pattern: str | None = None,
-		template_id: int | None = None,
-	) -> TemplateDto:
-		"""Создаёт или перезаписывает шаблон (состав — в порядке списка).
-
-		``filename_pattern`` — необязательный шаблон имени файла при
-		отправке ({video}, {ИмяПоля}, {quality}, {channel}).
+	async def get_preset(self, preset_id: int) -> CaptionPresetDto:
+		"""Возвращает пресет с составом полей.
 
 		Raises:
-			CaptionsError: Пустое имя, пустой состав, чужое поле
-				или шаблон не найден.
+			CaptionsError: Пресет не найден.
 		"""
-		name = name.strip()
-		if not name:
-			raise CaptionsError("У шаблона должно быть имя.")
-		if not field_ids:
-			raise CaptionsError("Выберите хотя бы одно поле для шаблона.")
 		async with self._db.session_factory() as session:
-			# состав — только из полей этого канала: внешний ключ гарантирует
-			# лишь существование поля, и промах вызывающего пришил бы шаблону
-			# поле чужого канала
-			owned = set(
-				(
-					await session.execute(
-						select(CaptionField.id).where(
-							CaptionField.community_id == community_id,
-							CaptionField.id.in_(field_ids),
-						)
-					)
-				).scalars()
+			row = (
+				await session.execute(self._preset_query().where(CaptionPreset.id == preset_id))
+			).scalar_one_or_none()
+			if row is None:
+				raise CaptionsError("Пресет не найден — обновите список.")
+			return self._preset_dto(row)
+
+	@staticmethod
+	def _preset_query() -> Any:
+		"""Запрос пресетов с составом, полями и словарями (одним заходом)."""
+		return (
+			select(CaptionPreset)
+			.options(
+				selectinload(CaptionPreset.fields)
+				.selectinload(CaptionPresetField.field)
+				.selectinload(CaptionField.values)
 			)
-			if any(field_id not in owned for field_id in field_ids):
-				raise CaptionsError("В составе шаблона поле другого канала — обновите список.")
-			template = await self._get_or_create_template(session, community_id, name, template_id)
-			template.filename_pattern = (filename_pattern or "").strip() or None
-			saved_id = template.id
-			await session.execute(
-				delete(CaptionTemplateField).where(CaptionTemplateField.template_id == saved_id)
-			)
-			for position, field_id in enumerate(field_ids):
-				session.add(
-					CaptionTemplateField(
-						template_id=saved_id,
-						field_id=field_id,
-						position=position,
-						enabled=True,
+			.order_by(CaptionPreset.id)
+		)
+
+	async def save_preset(
+		self, community_id: int, draft: CaptionPresetDraft, preset_id: int | None = None
+	) -> CaptionPresetDto:
+		"""Создаёт или перезаписывает пресет целиком — одной записью.
+
+		В ту же запись уходят правки полей сообщества из черновика
+		(оформление и связи): экран пресета сохраняется одной кнопкой,
+		и половина правок не должна пережить сбой второй половины.
+
+		Raises:
+			CaptionsError: Пустое имя, пустой состав, поле повторяется
+				или из другого сообщества, битое правило разбора,
+				негодная связь полей, пресет не найден.
+		"""
+		name = draft.name.strip()
+		self._check_draft(name, draft)
+		wanted = {*(spec.field_id for spec in draft.fields), *draft.field_edits}
+		async with self._db.session_factory() as session:
+			owned = await self._owned_fields(session, community_id, wanted)
+			for field_id, edit in draft.field_edits.items():
+				await self._apply_edit(session, owned[field_id], edit)
+			preset = await self._get_or_create_preset(session, community_id, name, preset_id)
+			preset.filename_pattern = (draft.filename_pattern or "").strip() or None
+			saved_id = preset.id
+			await self._replace_composition(session, saved_id, draft.fields)
+			await session.commit()
+		logger.info("Пресет подписи «%s» сохранён (сообщество id=%s).", name, community_id)
+		return await self.get_preset(saved_id)
+
+	@staticmethod
+	def _check_draft(name: str, draft: CaptionPresetDraft) -> None:
+		"""Проверки черновика, не требующие базы.
+
+		Raises:
+			CaptionsError: Пустое имя или состав, повтор поля, битое правило.
+		"""
+		if not name:
+			raise CaptionsError("У пресета должно быть имя.")
+		if not draft.fields:
+			raise CaptionsError("Добавьте в пресет хотя бы одно поле.")
+		field_ids = [spec.field_id for spec in draft.fields]
+		if len(set(field_ids)) != len(field_ids):
+			raise CaptionsError("Поле встречается в пресете дважды.")
+		for position, spec in enumerate(draft.fields, start=1):
+			if spec.rule is None:
+				continue
+			try:
+				check_rule(spec.rule)
+			except CaptionsError as exc:
+				raise CaptionsError(f"Поле №{position}: {exc}") from exc
+
+	@staticmethod
+	async def _owned_fields(
+		session: AsyncSession, community_id: int, field_ids: Collection[int]
+	) -> dict[int, CaptionField]:
+		"""Поля сообщества по id; чужое или пропавшее — ошибка.
+
+		Внешний ключ гарантирует лишь существование поля, и промах
+		вызывающего пришил бы пресету поле чужого сообщества.
+
+		Raises:
+			CaptionsError: Поле не найдено у этого сообщества.
+		"""
+		rows = (
+			(
+				await session.execute(
+					select(CaptionField).where(
+						CaptionField.community_id == community_id,
+						CaptionField.id.in_(list(field_ids)),
 					)
 				)
-			await session.commit()
-		logger.info("Шаблон подписи «%s» сохранён (канал id=%s).", name, community_id)
-		templates = await self.list_templates(community_id)
-		return next(t for t in templates if t.id == saved_id)
+			)
+			.scalars()
+			.all()
+		)
+		owned = {row.id: row for row in rows}
+		if any(field_id not in owned for field_id in field_ids):
+			raise CaptionsError("Поле не найдено у этого сообщества — обновите список.")
+		return owned
 
-	async def delete_template(self, template_id: int) -> None:
-		"""Удаляет шаблон; строки состава убирают каскады схемы
-		(внешние ключи включены) — как при удалении поля."""
+	@staticmethod
+	async def _replace_composition(
+		session: AsyncSession, preset_id: int, specs: tuple[PresetFieldSpec, ...]
+	) -> None:
+		"""Перезаписывает состав пресета по порядку черновика."""
+		await session.execute(
+			delete(CaptionPresetField).where(CaptionPresetField.preset_id == preset_id)
+		)
+		for position, spec in enumerate(specs):
+			session.add(
+				CaptionPresetField(
+					preset_id=preset_id,
+					field_id=spec.field_id,
+					position=position,
+					enabled=True,
+					source_rule=spec.rule.to_json() if spec.rule is not None else None,
+				)
+			)
+
+	async def delete_preset(self, preset_id: int) -> None:
+		"""Удаляет пресет; строки состава убирают каскады схемы
+		(внешние ключи включены) — как при удалении поля. Поля
+		и словари остаются у сообщества."""
 		async with self._db.session_factory() as session:
-			template = await session.get(CaptionTemplate, template_id)
-			if template is None:
-				logger.info("Шаблон подписи id=%s уже отсутствует — удалять нечего.", template_id)
+			preset = await session.get(CaptionPreset, preset_id)
+			if preset is None:
+				logger.info("Пресет подписи id=%s уже отсутствует — удалять нечего.", preset_id)
 				return
-			name = template.name
-			await session.delete(template)
+			name = preset.name
+			await session.delete(preset)
 			await session.commit()
-		logger.info("Шаблон подписи «%s» (id=%s) удалён.", name, template_id)
+		logger.info("Пресет подписи «%s» (id=%s) удалён.", name, preset_id)
 
 	async def render_filename(
 		self,
-		template_id: int,
+		preset_id: int,
 		community_id: int,
-		title: str,
-		used_values: dict[int, list[str]],
+		used_values: Mapping[int, list[str]],
 		media_path: str,
 	) -> str:
-		"""Собирает имя файла по шаблону имени выбранного шаблона подписи.
+		"""Собирает имя файла по шаблону имени пресета.
 
-		Плейсхолдеры: ``{video}`` — название видео/поста, ``{ИмяПоля}`` —
-		значения поля через запятую (без решёток), ``{quality}`` — меньшая
-		сторона кадра видео (ffprobe), ``{channel}`` — @имя канала без
-		``@``. Неизвестные плейсхолдеры остаются как есть — видно
-		и правится руками. Название нарочно не ``{title}``: у каналов
-		бывает поле «Title», и различие только регистром путало.
-
-		Стем вписывается в лимит Telegram
-		(:data:`TELEGRAM_MAX_STEM_CHARS`, иначе сервер молча режет
-		и чистит имя): срез до конца последнего законченного слова
-		(:func:`_cut_readable`); сплошное слово без разделителей —
-		срез как есть.
+		Плейсхолдеры: ``{ИмяПоля}`` — значения поля через запятую (без
+		решёток), ``{quality}`` — меньшая сторона кадра видео (ffprobe),
+		``{channel}`` — @имя сообщества без ``@``. Встроенные
+		плейсхолдеры главнее полей-тёзок. Остальные правила —
+		:func:`compose_filename`.
 
 		Raises:
-			CaptionsError: Шаблон не найден, шаблон имени не задан
+			CaptionsError: Пресет не найден, шаблон имени не задан
 				или имя получилось пустым.
 		"""
 		async with self._db.session_factory() as session:
-			template = await session.get(CaptionTemplate, template_id)
-			if template is None or not template.filename_pattern:
-				raise CaptionsError("У шаблона не задан шаблон имени файла.")
-			pattern = template.filename_pattern
+			preset = await session.get(CaptionPreset, preset_id)
+			if preset is None or not preset.filename_pattern:
+				raise CaptionsError("У пресета не задан шаблон имени файла.")
+			pattern = preset.filename_pattern
 			community = await session.get(Community, community_id)
-		mapping: dict[str, str] = {}
-		for field in await self.list_fields(community_id):
-			mapping[field.name] = ", ".join(used_values.get(field.id, []))
-		# встроенные плейсхолдеры — поверх полей: поле, названное «video»,
-		# не должно молча подменять название поста (приоритет закреплён
-		# тестом; сами имена перечисляет FILENAME_PLACEHOLDERS)
-		mapping["video"] = title.strip()
+		mapping = filename_mapping(await self.list_fields(community_id), used_values)
 		# ffprobe — блокирующий подпроцесс: в отдельном потоке,
 		# чтобы не останавливать цикл событий движка
 		mapping["quality"] = await asyncio.to_thread(self._probe_quality, media_path)
 		mapping["channel"] = (community.username or "") if community else ""
-		rendered = _PLACEHOLDER.sub(lambda m: mapping.get(m.group(1), m.group(0)), pattern)
-		# байтовый бюджет — предел ФС минус расширение (оно едет как есть);
-		# поверх — лимит Telegram: срез до законченного слова
-		suffix = Path(media_path).suffix
-		stem = sanitize_filename(rendered, MAX_FILENAME_BYTES - len(suffix.encode("utf-8")))
-		stem = _cut_readable(stem, TELEGRAM_MAX_STEM_CHARS)
-		if not stem:
+		name = compose_filename(pattern, mapping, Path(media_path).suffix)
+		if not name:
 			raise CaptionsError("Имя файла по шаблону получилось пустым.")
-		return stem + suffix
+		return name
 
 	def _probe_quality(self, media_path: str) -> str:
 		"""Качество видео (меньшая сторона кадра) или пустая строка.
@@ -968,20 +1214,34 @@ class CaptionsService:
 			return ""
 		return str(min(info.width, info.height))
 
-	async def record_usage(self, template_id: int, used_values: dict[int, list[str]]) -> None:
-		"""Фиксирует использование шаблона: словари пополняются сами.
+	async def record_usage(self, preset_id: int, used_values: Mapping[int, list[str]]) -> None:
+		"""Фиксирует использование пресета: словари пополняются сами.
 
 		``used_values`` — значения по id полей; новые (без учёта регистра)
-		добавляются в словарь. Поля обрабатываются от родителей к зависимым:
-		новое значение зависимого поля привязывается к значению родителя
-		из этой же сборки (новый персонаж — к выбранному тайтлу). Привязка
-		возможна, когда у родителя выбрано ровно одно значение: иначе
-		«внутри какого тайтла» — вопрос без ответа.
+		добавляются в словарь. **Поля с правилом разбора словарь
+		не пополняют**: их значения — данные конкретного файла (название
+		ролика, состав), а не словарь, из которого выбирают. Поля
+		обрабатываются от родителей к зависимым: новое значение
+		зависимого поля привязывается к значению родителя из этой же
+		сборки (новый персонаж — к выбранному тайтлу). Привязка возможна,
+		когда у родителя выбрано ровно одно значение: иначе «внутри
+		какого тайтла» — вопрос без ответа.
 
-		Шаблону отмечается момент использования — для предвыбора в диалоге.
+		Пресету отмечается момент использования — для предвыбора в диалоге.
 		"""
 		async with self._db.session_factory() as session:
-			fields = await self._fields_by_id(session, list(used_values))
+			parsed = set(
+				(
+					await session.execute(
+						select(CaptionPresetField.field_id).where(
+							CaptionPresetField.preset_id == preset_id,
+							CaptionPresetField.source_rule.is_not(None),
+						)
+					)
+				).scalars()
+			)
+			wanted = [field_id for field_id in used_values if field_id not in parsed]
+			fields = await self._fields_by_id(session, wanted)
 			merged: dict[int, list[int]] = {}
 			for field_id in _parents_first(fields):
 				merged[field_id] = await self._merge_values(
@@ -990,9 +1250,9 @@ class CaptionsService:
 					used_values[field_id],
 					_single_parent(merged, fields[field_id].parent_field_id),
 				)
-			template = await session.get(CaptionTemplate, template_id)
-			if template is not None:
-				template.last_used_at = datetime.now(UTC)
+			preset = await session.get(CaptionPreset, preset_id)
+			if preset is not None:
+				preset.last_used_at = datetime.now(UTC)
 			await session.commit()
 
 	@staticmethod
@@ -1082,55 +1342,61 @@ class CaptionsService:
 			CaptionsError: Поле не найдено.
 		"""
 		async with self._db.session_factory() as session:
-			field = (
+			row = (
 				await session.execute(
 					select(CaptionField)
 					.options(selectinload(CaptionField.values))
 					.where(CaptionField.id == field_id)
 				)
 			).scalar_one_or_none()
-		if field is None:
+		if row is None:
 			raise CaptionsError("Поле не найдено — обновите список.")
-		return self._field_dto(field)
+		return self._field_dto(row)
 
 	@staticmethod
-	async def _get_or_create_template(
-		session: AsyncSession, community_id: int, name: str, template_id: int | None
-	) -> CaptionTemplate:
-		"""Находит шаблон для перезаписи или создаёт новый.
+	async def _get_or_create_preset(
+		session: AsyncSession, community_id: int, name: str, preset_id: int | None
+	) -> CaptionPreset:
+		"""Находит пресет для перезаписи или создаёт новый.
 
 		Raises:
-			CaptionsError: Шаблон для обновления не найден.
+			CaptionsError: Пресет для обновления не найден или он
+				другого сообщества.
 		"""
-		if template_id is None:
-			template = CaptionTemplate(community_id=community_id, name=name)
-			session.add(template)
+		if preset_id is None:
+			preset = CaptionPreset(community_id=community_id, name=name)
+			session.add(preset)
 			await session.flush()
-			return template
-		existing = await session.get(CaptionTemplate, template_id)
-		if existing is None:
-			raise CaptionsError("Шаблон не найден — обновите список.")
+			return preset
+		existing = await session.get(CaptionPreset, preset_id)
+		if existing is None or existing.community_id != community_id:
+			raise CaptionsError("Пресет не найден — обновите список.")
 		existing.name = name
 		return existing
 
 	@staticmethod
-	def _field_dto(field: CaptionField) -> FieldDto:
+	def _field_dto(row: CaptionField) -> FieldDto:
 		return FieldDto(
-			field.id,
-			field.name,
-			field.hashtag,
-			field.multiple,
-			[ValueDto(v.id, v.value, v.parent_value_id) for v in field.values],
-			field.parent_field_id,
-			field.show_name,
+			row.id,
+			row.name,
+			FieldStyle(row.hashtag, row.multiple, row.show_name, row.bold),
+			[ValueDto(v.id, v.value, v.parent_value_id) for v in row.values],
+			row.parent_field_id,
 		)
 
 	@classmethod
-	def _template_dto(cls, template: CaptionTemplate) -> TemplateDto:
-		return TemplateDto(
-			template.id,
-			template.name,
-			template.last_used_at,
-			[TemplateFieldDto(cls._field_dto(row.field), row.enabled) for row in template.fields],
-			template.filename_pattern,
+	def _preset_dto(cls, preset: CaptionPreset) -> CaptionPresetDto:
+		return CaptionPresetDto(
+			preset.id,
+			preset.name,
+			preset.last_used_at,
+			[
+				PresetFieldDto(
+					cls._field_dto(row.field),
+					row.enabled,
+					SourceRule.from_json(row.source_rule) if row.source_rule is not None else None,
+				)
+				for row in preset.fields
+			],
+			preset.filename_pattern,
 		)

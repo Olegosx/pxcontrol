@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 from PySide6.QtCore import QDate, QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import (
@@ -1080,6 +1080,31 @@ class SaveChoice(StrEnum):
 	SAVE = "save"  # сохранить и уйти
 	DISCARD = "discard"  # уйти, правки отбросить
 	STAY = "stay"  # остаться на месте с правками
+
+
+@runtime_checkable
+class UnsavedChanges(Protocol):
+	"""Тело экрана с несохранёнными правками: уход с него — через вопрос.
+
+	Общий признак для владельцев (страница сообщества): вкладка, другое
+	сообщество или путь уводят с тела только через :meth:`leave` —
+	а не по проверке конкретного класса. Сейчас так устроены «Задачи»
+	и «Настройки» (экран пресета подписи).
+	"""
+
+	@property
+	def dirty(self) -> bool:
+		"""Есть ли несохранённые правки."""
+		...
+
+	def leave(self, then: Callable[[], None], *, stay: Callable[[], None] | None = None) -> None:
+		"""Уход: без правок — сразу ``then``; с правками — по ответу человека.
+
+		«Сохранить» уводит только после ответа движка, «Не сохранять» —
+		отбрасывает правки и уводит, «Отмена» — зовёт ``stay`` (вернуть
+		на место то, что уход успел сдвинуть).
+		"""
+		...
 
 
 def ask_save_changes(parent: QWidget, text: str) -> SaveChoice:

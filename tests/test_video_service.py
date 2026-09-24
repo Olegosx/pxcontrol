@@ -605,9 +605,9 @@ async def test_prepare_sanitizes_preset_name_in_filename(
 
 	Разделители путей не создают лишних каталогов (раньше «Канал/Тест»
 	ронял ffmpeg в самом конце кодирования), а «_» меняется на «-»,
-	чтобы title_from_filename срезал суффикс _<пресет>_<штамп> целиком.
+	чтобы filename_source срезал суффикс _<пресет>_<штамп> целиком.
 	"""
-	from pxcontrol.engine.services.captions import title_from_filename
+	from pxcontrol.engine.services.captions import filename_source
 
 	monkeypatch.setattr(
 		"pxcontrol.engine.services.video.shutil.which", lambda _b: "/usr/bin/ffmpeg"
@@ -620,7 +620,7 @@ async def test_prepare_sanitizes_preset_name_in_filename(
 	output = await service.prepare(str(source), PresetFields(name="Канал/Тест_HD", subdir="паб"))
 	assert Path(output).parent == tmp_path / "res" / "паб"
 	assert "_КаналТест-HD_" in Path(output).name
-	assert title_from_filename(output) == "Lara Croft"
+	assert filename_source(output) == "Lara Croft"
 
 
 async def test_prepare_extra_subdir_for_batch(

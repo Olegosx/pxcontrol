@@ -586,9 +586,10 @@ class PromisedMarkup(TimestampMixin, Base):
 class CaptionField(TimestampMixin, Base):
 	"""Поле подписи сообщества: пул полей + словарь значений.
 
-	Поле («Genre», «Year»…) и его словарь существуют у сообщества в одном
-	экземпляре; шаблоны лишь включают поле в свой состав — так значение,
-	добавленное при сборке по одному шаблону, видно и в остальных.
+	Поле («Genre», «Year»…), его оформление и словарь существуют
+	у сообщества в одном экземпляре; пресеты лишь включают поле в свой
+	состав — так значение, добавленное при сборке по одному пресету,
+	видно и в остальных.
 	"""
 
 	__tablename__ = "caption_fields"
@@ -601,6 +602,9 @@ class CaptionField(TimestampMixin, Base):
 	# выключен — строка подписи собирается без префикса «Имя: »,
 	# в подпись уходят только значения
 	show_name: Mapped[bool] = mapped_column(Boolean, default=True)
+	# строка поля в подписи выделяется жирным (так выглядит название
+	# ролика — обычное поле, а не особая первая строка)
+	bold: Mapped[bool] = mapped_column(Boolean, default=False)
 	# поле зависит от другого поля сообщества: его значения живут внутри
 	# значений родителя («Character» внутри «Title»); родительское поле
 	# удалили — зависимое становится независимым (SET NULL)
@@ -640,38 +644,48 @@ class CaptionValue(TimestampMixin, Base):
 	parent: Mapped[CaptionValue | None] = relationship(remote_side="CaptionValue.id")
 
 
-class CaptionTemplate(TimestampMixin, Base):
-	"""Именованный шаблон подписи канала (упорядоченный набор полей)."""
+class CaptionPreset(TimestampMixin, Base):
+	"""Именованный пресет подписи сообщества (упорядоченный набор полей)."""
 
-	__tablename__ = "caption_templates"
+	__tablename__ = "caption_presets"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
 	community_id: Mapped[int] = mapped_column(ForeignKey("communities.id", ondelete="CASCADE"))
 	name: Mapped[str] = mapped_column(String(64))
-	# для предвыбора «последнего использованного» шаблона в диалоге
+	# для предвыбора «последнего использованного» пресета в диалоге сборки
 	last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-	# шаблон имени файла при отправке: {video}, {ИмяПоля}, {quality}, {channel}
+	# шаблон имени файла при отправке: {ИмяПоля}, {quality}, {channel}
 	filename_pattern: Mapped[str | None] = mapped_column(String(255), default=None)
 
-	fields: Mapped[list[CaptionTemplateField]] = relationship(
-		back_populates="template",
+	fields: Mapped[list[CaptionPresetField]] = relationship(
+		back_populates="preset",
 		cascade="all, delete-orphan",
 		# каскад удаления — на стороне БД (см. CaptionField.values)
 		passive_deletes=True,
-		order_by="CaptionTemplateField.position",
+		order_by="CaptionPresetField.position",
 	)
 
 
-class CaptionTemplateField(Base):
-	"""Строка состава шаблона: поле, порядок, включено ли по умолчанию."""
+class CaptionPresetField(Base):
+	"""Строка состава пресета: поле, порядок и правило разбора имени файла.
 
-	__tablename__ = "caption_template_fields"
+	``source_rule`` — правило «взять значение из имени файла» в JSON
+	(``SourceRule`` сервиса подписей); NULL — значение вводит человек.
+	Правило живёт здесь, а не у поля: одно и то же поле в разных
+	пресетах разбирается по-разному.
+	"""
+
+	__tablename__ = "caption_preset_fields"
 
 	id: Mapped[int] = mapped_column(primary_key=True)
-	template_id: Mapped[int] = mapped_column(ForeignKey("caption_templates.id", ondelete="CASCADE"))
+	preset_id: Mapped[int] = mapped_column(ForeignKey("caption_presets.id", ondelete="CASCADE"))
 	field_id: Mapped[int] = mapped_column(ForeignKey("caption_fields.id", ondelete="CASCADE"))
 	position: Mapped[int] = mapped_column(Integer, default=0)
 	enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+	# none_as_null: «правила нет» — настоящий NULL, а не JSON-строка
+	# «null» (по умолчанию SQLAlchemy пишет None как JSON null, и выборка
+	# «правило задано» по IS NOT NULL находила бы все строки)
+	source_rule: Mapped[Any | None] = mapped_column(JSON(none_as_null=True), default=None)
 
-	template: Mapped[CaptionTemplate] = relationship(back_populates="fields")
+	preset: Mapped[CaptionPreset] = relationship(back_populates="fields")
 	field: Mapped[CaptionField] = relationship()

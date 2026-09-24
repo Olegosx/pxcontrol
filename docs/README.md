@@ -39,7 +39,7 @@
 | [post-text.md](03-modules/post-text.md) | Оформление текста поста: разметка сущностями, поле с кнопками стилей, правила движка | 🟢 |
 | [published.md](03-modules/published.md) | Опубликовано: лента вышедших постов, чтение страницами, состояние обещанных кнопок | 🟢 |
 | [video-processing.md](03-modules/video-processing.md) | Подготовка видео | 🟢 |
-| [captions.md](03-modules/captions.md) | Подписи к постам (шаблоны) | 🟢 |
+| [captions.md](03-modules/captions.md) | Подписи к постам (пресеты, разбор имени файла) | 🟢 |
 | [tasks.md](03-modules/tasks.md) | Задачи сообщества: уборка в ленте и участниках, журнал запусков, расписание (ADR-0038) | 🟢 |
 | [content-sources.md](03-modules/content-sources.md) | Источники и парсинг | 🟡 |
 | [ai-generation.md](03-modules/ai-generation.md) | Генерация контента ИИ | 🟡 |

@@ -452,8 +452,8 @@ class PresetFields:
 #: Формат штампа времени конвейера: имена результатов
 #: (``<исходник>_<пресет>_<штамп>.mp4``) и подпапок пакетов. Связан
 #: контрактом с ``_PIPELINE_SUFFIX`` сервиса подписей
-#: (``title_from_filename`` вырезает суффикс по этому виду) — связка
-#: закреплена тестом ``test_title_from_filename_matches_pipeline_stamp``.
+#: (``filename_source`` вырезает суффикс по этому виду) — связка
+#: закреплена тестом ``test_filename_source_matches_pipeline_stamp``.
 PIPELINE_STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
@@ -1080,7 +1080,7 @@ class VideoService:
 		stamp = datetime.now().strftime(PIPELINE_STAMP_FORMAT)
 		# имя пресета — свободный текст: чистим спецсимволы ОС (как подпапку)
 		# и меняем «_» на «-», чтобы суффикс _<пресет>_<штамп> оставался
-		# разборчивым для title_from_filename (captions)
+		# разборчивым для filename_source (captions)
 		preset_part = sanitize_subdir(fields.name).replace("_", "-").strip(" .") or "preset"
 		output = out_dir / f"{source.stem}_{preset_part}_{stamp}.mp4"
 		# имена полей пресета и параметров обработки совпадают, поэтому

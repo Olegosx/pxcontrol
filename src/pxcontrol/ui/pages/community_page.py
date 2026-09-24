@@ -18,27 +18,38 @@
   пул userbot-аккаунтов с ролями и публикатором по умолчанию и бот
   сообщества, назначаемый и отвязываемый здесь же;
 - **Задачи** — уборка и журнал запусков (тело окна задач, ADR-0038);
-- **Настройки** — активность, пресет и времена, проверка доступов,
-  удаление. Публикаторов здесь нет намеренно: всё, кто публикует, —
-  на вкладке «Участники», одним местом.
+- **Настройки** — активность, пресет видео и времена, проверка
+  доступов, пресеты подписи (список и экран пресета в той же вкладке,
+  ADR-0042), удаление. Публикаторов здесь нет намеренно: всё, кто
+  публикует, — на вкладке «Участники», одним местом.
 
 Тела вкладок строятся лениво, при первом открытии, а панели очередей
 присоединяются к наблюдателям главного окна только на время показа
 (ADR-0034): десяток страниц сообществ не должен перерисовывать карточки
-на невидимых вкладках. Сигнал ``changed`` уходит после каждой
+на невидимых вкладках. Тела с несохранёнными правками («Задачи»,
+экран пресета в «Настройках») отпускают человека только через вопрос —
+страница узнаёт их по общему признаку ``UnsavedChanges``, а не по
+классу. Сигнал ``changed`` уходит после каждой
 операции, меняющей данные, — главное окно по нему обновляет дашборд
 и подменю навигации.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QHideEvent, QShowEvent
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+	QGridLayout,
+	QHBoxLayout,
+	QSizePolicy,
+	QStackedWidget,
+	QVBoxLayout,
+	QWidget,
+)
 from qfluentwidgets import (
 	Action,
 	BodyLabel,
@@ -67,6 +78,7 @@ from qfluentwidgets import (
 from pxcontrol.engine import EngineWorker
 from pxcontrol.engine.jobs import JobStatus
 from pxcontrol.engine.services.accounts import BotDto, TgAccountDto
+from pxcontrol.engine.services.captions import CaptionPresetDto, FieldDto
 from pxcontrol.engine.services.communities import (
 	CommunityAccess,
 	CommunityDto,
@@ -88,6 +100,7 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
+from pxcontrol.ui.pages.caption_presets import PresetEditor, PresetList
 from pxcontrol.ui.pages.common import (
 	LIST_BUTTON_HEIGHT,
 	DtoComboBox,
@@ -96,6 +109,7 @@ from pxcontrol.ui.pages.common import (
 	FormDialog,
 	QueueCounts,
 	TabItem,
+	UnsavedChanges,
 	WorkDialog,
 	account_caption,
 	bot_caption,
@@ -1124,6 +1138,108 @@ class _ScheduledTab(QWidget):
 # --- страница -------------------------------------------------------------------------
 
 
+class _SettingsTab(QWidget):
+	"""Тело вкладки «Настройки»: строки настроек, пресеты подписи, экран пресета.
+
+	Два вида в стопке, как у «Задач»: обзор (строки настроек — их рисует
+	страница в :attr:`rows` и :attr:`tail` — и список пресетов подписи
+	между ними) и экран пресета (ADR-0042). Уход с экрана пресета
+	с правками — через вопрос (:meth:`leave`, признак ``UnsavedChanges``).
+	"""
+
+	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
+		super().__init__(parent)
+		self._worker = worker
+		self._show_error = error_reporter(self)
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		self._stack = QStackedWidget(self)
+		layout.addWidget(self._stack)
+		self._overview = QWidget(self)
+		column = QVBoxLayout(self._overview)
+		column.setContentsMargins(0, 0, 0, 0)
+		column.setSpacing(density.spacing().block_spacing)
+		self.rows = self._sub_layout(column)
+		self._presets = PresetList(worker, community, self._overview)
+		self._presets.open_requested.connect(self.open_preset)
+		column.addWidget(self._presets)
+		self.tail = self._sub_layout(column)
+		column.addStretch()
+		self._editor = PresetEditor(worker, community, self)
+		self._editor.back_requested.connect(self.show_overview)
+		self._editor.presets_changed.connect(self._presets.reload)
+		self._editor.closed.connect(partial(self._show_page, self._overview))
+		self._stack.addWidget(self._overview)
+		self._stack.addWidget(self._editor)
+		self._show_page(self._overview)
+
+	@staticmethod
+	def _sub_layout(column: QVBoxLayout) -> QVBoxLayout:
+		box = QVBoxLayout()
+		box.setContentsMargins(0, 0, 0, 0)
+		box.setSpacing(density.spacing().list_spacing)
+		column.addLayout(box)
+		return box
+
+	def _show_page(self, page: QWidget) -> None:
+		"""Показывает вид стопки; скрытый не участвует в её высоте.
+
+		Штатный ``QStackedWidget`` меряет все страницы разом (как
+		в «Задачах»): под коротким обзором оставалась бы пустота высотой
+		в экран пресета.
+		"""
+		for widget in (self._overview, self._editor):
+			policy = QSizePolicy.Policy.Preferred if widget is page else QSizePolicy.Policy.Ignored
+			widget.setSizePolicy(policy, policy)
+		self._stack.setCurrentWidget(page)
+
+	def set_active(self, active: bool) -> None:
+		"""Вкладка показана — пресеты перечитываются."""
+		if active:
+			self._presets.reload()
+
+	def update_community(self, community: CommunityDto) -> None:
+		"""Свежий снимок сообщества (имя канала — в предпросмотре имени файла)."""
+		self._presets.community = community
+		self._editor.community = community
+
+	def open_preset(self, preset: CaptionPresetDto | None) -> None:
+		"""Открывает экран пресета (None — новый) с полями сообщества."""
+		others = self._presets.presets
+		run_in_engine(
+			self._worker,
+			self._worker.engine.captions.list_fields(self._presets.community.id),
+			self,
+			partial(self._show_editor, preset, others),
+			self._show_error,
+		)
+
+	def _show_editor(
+		self,
+		preset: CaptionPresetDto | None,
+		others: list[CaptionPresetDto],
+		pool: list[FieldDto],
+	) -> None:
+		self._editor.open(preset, pool, others)
+		self._show_page(self._editor)
+
+	def show_overview(self) -> None:
+		"""Путь «Настройки»: к обзору; с правками — через вопрос."""
+		self.leave(partial(self._show_page, self._overview), stay=self._editor.render_path)
+
+	@property
+	def dirty(self) -> bool:
+		"""Есть ли на открытом экране пресета несохранённые правки."""
+		return self._stack.currentWidget() is self._editor and self._editor.dirty
+
+	def leave(self, then: Callable[[], None], *, stay: Callable[[], None] | None = None) -> None:
+		"""Уход со вкладки: правки экрана пресета — только через вопрос."""
+		if not self.dirty:
+			then()
+			return
+		self._editor.leave(then, stay=stay)
+
+
 class CommunityPage(ScrollArea):
 	"""Страница сообщества: шапка, вкладки, всё действующее — по вкладкам.
 
@@ -1234,6 +1350,9 @@ class CommunityPage(ScrollArea):
 		overview = self._tabs.get(TAB_OVERVIEW)
 		if isinstance(overview, OverviewTab):
 			overview.update_community(community)
+		settings = self._tabs.get(TAB_SETTINGS)
+		if isinstance(settings, _SettingsTab):
+			settings.update_community(community)
 		self._drop_snapshot_tabs()
 
 	def _drop_snapshot_tabs(self) -> None:
@@ -1242,8 +1361,8 @@ class CommunityPage(ScrollArea):
 			body = self._tabs.get(key)
 			if body is None:
 				continue
-			if isinstance(body, TasksPanel) and body.dirty:
-				# открыта настройка задачи с правками: пересборка стёрла бы
+			if isinstance(body, UnsavedChanges) and body.dirty:
+				# открыта настройка с правками: пересборка стёрла бы
 				# их молча; тело пересоберётся при следующем снимке
 				continue
 			self._tabs.pop(key)
@@ -1397,26 +1516,34 @@ class CommunityPage(ScrollArea):
 	# --- вкладки ------------------------------------------------------------------
 
 	def leave(self, then: Callable[[], None]) -> None:
-		"""Уход со страницы на другое сообщество: правки «Задач» — через вопрос.
+		"""Уход со страницы на другое сообщество: правки вкладок — через вопрос.
 
 		Смена сообщества снимает тела вкладок, и открытая настройка
-		задачи с правками пропала бы молча (спека «Задачи», раздел 4.4).
+		задачи или пресета с правками пропала бы молча (спека «Задачи»,
+		раздел 4.4). Тел с правками может быть несколько — вопрос
+		задаётся по очереди, уход — после последнего ответа.
 		"""
-		tasks = self._tabs.get(TAB_TASKS)
-		if isinstance(tasks, TasksPanel):
-			tasks.leave(then)
-		else:
+		pending = [
+			body for body in self._tabs.values() if isinstance(body, UnsavedChanges) and body.dirty
+		]
+		self._leave_each(pending, then)
+
+	def _leave_each(self, pending: Sequence[UnsavedChanges], then: Callable[[], None]) -> None:
+		"""Уводит с тел по очереди; «Отмена» на любом останавливает уход."""
+		if not pending:
 			then()
+			return
+		pending[0].leave(partial(self._leave_each, pending[1:], then))
 
 	def _on_tab_requested(self, key: str) -> None:
-		"""Клик по вкладке: из «Задач» с правками — только через вопрос.
+		"""Клик по вкладке: из тела с правками — только через вопрос.
 
 		Переключатель к этому мгновению уже стоит на новой вкладке —
 		его возвращают на место до ответа, а переключают заново, когда
 		правки сохранены или отброшены; «Отмена» оставляет всё как было.
 		"""
 		leaving = self._tabs.get(self._current_tab)
-		if key != self._current_tab and isinstance(leaving, TasksPanel) and leaving.dirty:
+		if key != self._current_tab and isinstance(leaving, UnsavedChanges) and leaving.dirty:
 			self._segments.setCurrentItem(self._current_tab)
 			leaving.leave(partial(self._segments.setCurrentItem, key))
 			return
@@ -1472,11 +1599,10 @@ class CommunityPage(ScrollArea):
 		if key == TAB_TASKS:
 			return self._tasks_tab()
 		if key == TAB_SETTINGS:
-			box = QWidget(self)
-			self._settings_rows = QVBoxLayout(box)
-			self._settings_rows.setContentsMargins(0, 0, 0, 0)
-			self._settings_rows.setSpacing(density.spacing().list_spacing)
-			return box
+			settings = _SettingsTab(self._worker, self._community, self)
+			self._settings_rows = settings.rows
+			self._settings_tail = settings.tail
+			return settings
 		return OverviewTab(self._worker, self._community, self)
 
 	def _members_tab(self) -> QWidget:
@@ -1573,7 +1699,11 @@ class CommunityPage(ScrollArea):
 	# --- вкладка «Настройки» ----------------------------------------------------------
 
 	def _render_settings(self) -> None:
-		"""Строки настроек и — за хайрлайном — удаление."""
+		"""Строки настроек, ниже — пресеты подписи и — за хайрлайном — удаление.
+
+		Список пресетов живёт между строками и хвостом постоянно (его
+		рисует тело вкладки), а строки пересобираются по снимку.
+		"""
 		if not hasattr(self, "_settings_rows"):
 			return
 		rows = self._settings_rows
@@ -1581,11 +1711,12 @@ class CommunityPage(ScrollArea):
 		rows.addWidget(self._enabled_row())
 		rows.addWidget(self._prefs_row())
 		rows.addWidget(self._recheck_row())
-		rows.addSpacing(density.spacing().row_spacing)
-		rows.addWidget(HorizontalSeparator(self))
-		rows.addSpacing(density.spacing().row_spacing)
-		rows.addWidget(self._delete_row())
-		rows.addStretch()
+		tail = self._settings_tail
+		clear_layout(tail)
+		tail.addSpacing(density.spacing().row_spacing)
+		tail.addWidget(HorizontalSeparator(self))
+		tail.addSpacing(density.spacing().row_spacing)
+		tail.addWidget(self._delete_row())
 
 	def _action_row(self, text: str, actions: list[QWidget], hint: str | None = None) -> QWidget:
 		"""Строка настроек: состояние сверху, пояснение снизу, действия справа."""

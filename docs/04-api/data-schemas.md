@@ -55,7 +55,9 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `JobStatus` | `jobs.py` | состояние задания любой очереди движка (ADR-0025) |
 | `SchedulePlan`, `PlanKind` | `schedule_plan.py` | раскладка времени пакета отправки: стратегия и параметры (ADR-0015) |
 | `MaintenanceItemDto`, `ServiceReport`, `MembersReport`, `MaintenanceTarget` | `maintenance.py` | задание обслуживания, итоги по служебным записям и по участникам (ADR-0026) |
-| `FieldDto`, `TemplateDto`, `TemplateFieldDto`, `CaptionLine` | `captions.py` | поля со словарями и шаблоны подписей |
+| `FieldDto`, `FieldStyle`, `FieldEdit`, `CaptionLine` | `captions.py` | поле подписи со словарём, его оформление (решётки, несколько значений, имя, жирным) и правка; строка подписи к сборке |
+| `CaptionPresetDto`, `PresetFieldDto`, `CaptionPresetDraft`, `PresetFieldSpec` | `captions.py` | пресет подписи с составом и правилами разбора; черновик к сохранению одной записью (ADR-0042) |
+| `SourceRule`, `ReplaceStep`, `CaseMode` | `captions.py` | правило «взять значение из имени файла»: извлечение, цепочка замен, регистр, разделитель; JSON — колонка `caption_preset_fields.source_rule` |
 | `ValueDto` | `captions.py` | значение словаря поля (с привязкой к родительскому значению) |
 
 ### Телеграм-слой (`engine/telegram/types.py`) — граница «сервисы → транспорты»
