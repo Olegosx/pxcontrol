@@ -235,19 +235,19 @@ def test_live_text_and_visibility() -> None:
 # --- страница аккаунта (ADR-0030) --------------------------------------------------------
 
 
-def test_reference_rows_and_route_key() -> None:
+def test_reference_rows_and_group_title() -> None:
 	from datetime import UTC, datetime
 
 	from pxcontrol.engine.services.activity import LiveDto, OwnerActivityDto, WindowStats
 	from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind
 	from pxcontrol.ui.pages.user_state import (
 		bot_reference_rows,
+		owner_group_title,
 		user_reference_rows,
-		user_route_key,
 	)
 
-	assert user_route_key(ExecutorRef(OwnerKind.USER, 3)) == "user_3"
-	assert user_route_key(ExecutorRef(OwnerKind.BOT, 3)) == "bot_3"
+	assert owner_group_title(OwnerKind.USER) == "Пользователи"
+	assert owner_group_title(OwnerKind.BOT) == "Боты"
 	rows = dict(user_reference_rows(_account(memberships=2, publisher_of=1), None))
 	assert rows["Состояние"] == "подключён"
 	assert rows["@имя"] == "@lara" and rows["Телефон"] == "+7900"

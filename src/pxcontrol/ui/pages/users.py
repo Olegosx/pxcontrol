@@ -10,8 +10,8 @@
 (пустой раздел не рисуется). Карточка — информация и действия:
 добавление, удаление, приостановка и возобновление, вход, пометка,
 диагностика бота. Клик по карточке открывает страницу аккаунта —
-пункт живого подменю, которое главное окно приводит в соответствие
-по сигналу ``users_changed`` (как у сообществ).
+единственную на приложение (ADR-0041): в навигации исполнителей нет,
+вход к ним — отсюда.
 
 Правила показа (состояние, набор действий, подписи, сводка, поиск) —
 чистые функции :mod:`user_state`, они тестируются без Qt.
@@ -107,6 +107,7 @@ from pxcontrol.ui.pages.user_state import (
 	live_text,
 	matches_bot_search,
 	matches_user_search,
+	owner_group_title,
 	participation_text,
 	primary_user_action,
 	state_badge,
@@ -405,8 +406,12 @@ _SCOPE_KEYS: dict[UserScope, tuple[str, ...]] = {
 
 _SCOPE_TEXTS: dict[UserScope, ScopeTexts] = {
 	UserScope.ALL: ScopeTexts("", "Пользователи и боты", "Поиск"),
-	UserScope.PEOPLE: ScopeTexts("Пользователи и боты", "Пользователи", "Поиск по пользователям"),
-	UserScope.BOTS: ScopeTexts("Пользователи и боты", "Боты", "Поиск по ботам"),
+	UserScope.PEOPLE: ScopeTexts(
+		"Пользователи и боты", owner_group_title(OwnerKind.USER), "Поиск по пользователям"
+	),
+	UserScope.BOTS: ScopeTexts(
+		"Пользователи и боты", owner_group_title(OwnerKind.BOT), "Поиск по ботам"
+	),
 }
 
 
@@ -499,12 +504,10 @@ class _SummaryBar:
 class UsersPage(ScrollArea):
 	"""Дашборд пользователей и ботов: шапка, сводка, два раздела карточек.
 
-	Сигналы для главного окна: ``users_changed`` — свежие списки
-	пользователей и ботов (синхронизация подменю), ``open_user`` —
-	клик по карточке (переход на страницу аккаунта).
+	Сигнал для главного окна: ``open_user`` — клик по карточке
+	(переход на страницу аккаунта).
 	"""
 
-	users_changed = Signal(list, list)
 	open_user = Signal(object)  # ExecutorRef
 
 	def __init__(self, worker: EngineWorker, parent: QWidget | None = None) -> None:
@@ -643,7 +646,6 @@ class UsersPage(ScrollArea):
 		"""Снимок активности получен — рисуем страницу целиком."""
 		self._activity = activity
 		self._render()
-		self.users_changed.emit(list(self._accounts), list(self._bots))
 
 	def _poll_activity(self) -> None:
 		"""Тик таймера: только снимок активности, карточки обновляются на месте."""
@@ -698,7 +700,8 @@ class UsersPage(ScrollArea):
 		self._hide_empty()
 		if accounts:
 			section = self._stack.ensure(
-				_USERS, partial(self._make_section, "Пользователи", FluentIcon.PEOPLE)
+				_USERS,
+				partial(self._make_section, owner_group_title(OwnerKind.USER), FluentIcon.PEOPLE),
 			)
 			if isinstance(section, GridSection):
 				section.sync(
@@ -711,7 +714,8 @@ class UsersPage(ScrollArea):
 			self._stack.drop(_USERS)
 		if bots:
 			section = self._stack.ensure(
-				_BOTS, partial(self._make_section, "Боты", FluentIcon.ROBOT)
+				_BOTS,
+				partial(self._make_section, owner_group_title(OwnerKind.BOT), FluentIcon.ROBOT),
 			)
 			if isinstance(section, GridSection):
 				section.sync(

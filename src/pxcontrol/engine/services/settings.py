@@ -138,6 +138,11 @@ UI_CONTROL_HEIGHT: SettingKey[int] = SettingKey("ui_control_height", SettingScop
 #: Применяется при запуске.
 UI_FONT_SIZE: SettingKey[int] = SettingKey("ui_font_size", SettingScope.APP, 14, int)
 
+#: Панель навигации свёрнута до значков. Человек сворачивает её
+#: кнопкой-«бутербродом»; при следующем запуске панель открывается
+#: в том же виде (ADR-0041, п. 7). По умолчанию — развёрнута.
+UI_NAV_COMPACT: SettingKey[bool] = SettingKey("ui_nav_compact", SettingScope.APP, False, bool)
+
 #: Вид дашборда «Каналы и группы»: ``"tiles"`` — сетка карточек,
 #: ``"list"`` — таблица. Положение переключателя в шапке страницы;
 #: незнакомое значение страница читает как плитку.

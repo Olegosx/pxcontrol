@@ -1,8 +1,11 @@
 """Страница аккаунта — пользователя или бота (ADR-0030).
 
-Одна страница на оба вида исполнителей, у бота она короче. Открывается
-с карточки дашборда «Пользователи и боты» и живёт пунктом его подменю
-(главное окно приводит подменю в соответствие по ``users_changed``).
+Одна страница на оба вида исполнителей **и на всё приложение**
+(ADR-0041): она живёт в стопке главного окна без пункта навигации
+и показывает того исполнителя, которого открыли с карточки дашборда
+«Пользователи и боты». Над шапкой — строка пути: «Пользователи и боты ›
+Пользователи › имя»; клик по первым двум её элементам возвращает
+на дашборд с нужным разделом.
 
 Устройство: шапка (аватар-буква, имя, плашка состояния, подстрочник,
 главное действие по состоянию и меню «…»), затем **обзор** без единой
@@ -29,6 +32,7 @@ from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
+	BreadcrumbBar,
 	CaptionLabel,
 	CardWidget,
 	FluentIcon,
@@ -98,10 +102,10 @@ from pxcontrol.ui.pages.user_state import (
 	live_shown,
 	live_text,
 	membership_caption,
+	owner_group_title,
 	state_badge,
 	user_actions,
 	user_reference_rows,
-	user_route_key,
 	user_state,
 	user_subtitle,
 	window_tile_caption,
@@ -119,6 +123,15 @@ _CARD_SPACING = 10
 
 #: Логотип в строке сообщества.
 _ROW_LOGO_SIZE = 28
+
+#: Ключ маршрута страницы (``objectName``). Страница одна, поэтому
+#: ключ постоянный: пункта навигации у неё нет (ADR-0041, п. 4).
+USER_PAGE_ROUTE = "user_page"
+
+#: Ключи элементов строки пути (внутренние, наружу не выходят).
+_PATH_ROOT = "path_root"
+_PATH_GROUP = "path_group"
+_PATH_SUBJECT = "path_subject"
 
 Subject = TgAccountDto | BotDto
 
@@ -255,12 +268,15 @@ class UserPage(ScrollArea):
 	"""Страница аккаунта: шапка с действиями, обзор активности, сообщества.
 
 	Сигналы: ``changed`` — данные изменились (пауза, пометка, удаление):
-	главное окно перечитывает дашборд, а тот — подменю; ``open_community``
-	— клик по строке сообщества.
+	главное окно перечитывает дашборд; ``open_community`` — клик
+	по строке сообщества; ``dashboard_requested`` — клик по строке пути
+	или исчезнувший исполнитель (окно возвращает человека на дашборд).
 	"""
 
 	changed = Signal()
 	open_community = Signal(int)
+	#: Назад на дашборд: вид исполнителя (его раздел) или None («все»).
+	dashboard_requested = Signal(object)  # OwnerKind | None
 
 	def __init__(
 		self, worker: EngineWorker, subject: Subject, parent: QWidget | None = None
@@ -269,10 +285,13 @@ class UserPage(ScrollArea):
 		self._worker = worker
 		self._subject: Subject = subject
 		self._owner = subject_owner(subject)
-		self.setObjectName(user_route_key(self._owner))
+		self.setObjectName(USER_PAGE_ROUTE)
 		self._show_error = error_reporter(self)
 		self._activity: OwnerActivityDto | None = None
+		# сборка строки пути шлёт тот же сигнал, что и клик по ней
+		self._building_path = False
 		self._build()
+		self._render_path()
 		self._render_header()
 		self._timer = QTimer(self)
 		self._timer.setInterval(ACTIVITY_POLL_MS)
@@ -283,9 +302,30 @@ class UserPage(ScrollArea):
 		"""Владелец дорожки этой страницы."""
 		return self._owner
 
-	def update_subject(self, subject: Subject) -> None:
-		"""Свежий снимок из дашборда (синхронизация главного окна)."""
+	def show_subject(self, subject: Subject) -> None:
+		"""Показывает исполнителя на этой странице (ADR-0041, п. 4).
+
+		Тот же исполнитель — обычное обновление снимком. Другой —
+		снимок активности и список сообществ сбрасываются (чужие числа
+		не должны мелькнуть) и перечитываются заново.
+		"""
+		owner = subject_owner(subject)
+		if owner == self._owner:
+			self.update_subject(subject)
+			return
 		self._subject = subject
+		self._owner = owner
+		self._activity = None
+		self._overview.render_tiles(None)
+		clear_layout(self._communities_box)
+		self._render_path()
+		self._render_header()
+		self.reload()
+
+	def update_subject(self, subject: Subject) -> None:
+		"""Свежий снимок того же исполнителя (после действия на странице)."""
+		self._subject = subject
+		self._render_path()
 		self._render_header()
 		self._overview.render_reference(self._reference_rows())
 
@@ -293,14 +333,39 @@ class UserPage(ScrollArea):
 
 	def _build(self) -> None:
 		layout = page_layout(self)
+		# путь и шапка — одним блоком: между ними интервал строки,
+		# а не блока (navigation.md, раздел 5)
+		top = QVBoxLayout()
+		top.setSpacing(density.spacing().row_spacing)
+		self._path = BreadcrumbBar(self)
+		self._path.currentItemChanged.connect(self._on_path_clicked)
+		top.addWidget(self._path, alignment=Qt.AlignmentFlag.AlignLeft)
 		self._header_box = QVBoxLayout()
-		layout.addLayout(self._header_box)
+		top.addLayout(self._header_box)
+		layout.addLayout(top)
 		self._overview = _ActivityOverview(self)
 		layout.addWidget(self._overview)
 		self._communities_box = QVBoxLayout()
 		self._communities_box.setSpacing(density.spacing().list_spacing)
 		layout.addLayout(self._communities_box)
 		layout.addStretch()
+
+	def _render_path(self) -> None:
+		"""Строка пути: дашборд › раздел вида › имя исполнителя."""
+		self._building_path = True
+		try:
+			self._path.clear()
+			self._path.addItem(_PATH_ROOT, "Пользователи и боты")
+			self._path.addItem(_PATH_GROUP, owner_group_title(self._owner.kind))
+			self._path.addItem(_PATH_SUBJECT, subject_title(self._subject))
+		finally:
+			self._building_path = False
+
+	def _on_path_clicked(self, route_key: str) -> None:
+		"""Клик по строке пути: дашборд целиком или его раздел."""
+		if self._building_path or route_key == _PATH_SUBJECT:
+			return
+		self.dashboard_requested.emit(None if route_key == _PATH_ROOT else self._owner.kind)
 
 	def _render_header(self) -> None:
 		"""Шапка: аватар, имя с плашкой, подстрочник, главное действие, «…»."""
@@ -538,8 +603,30 @@ class UserPage(ScrollArea):
 	# --- действия --------------------------------------------------------------------
 
 	def _after_change(self) -> None:
-		"""После действия: свой снимок и сигнал главному окну."""
+		"""После действия: дашборду — сигнал, себе — свежий снимок.
+
+		Исполнителя могло не остаться (удаление): тогда показывать
+		страницу нечем, и она просит окно вернуть человека на дашборд
+		(ADR-0041).
+		"""
 		self.changed.emit()
+		accounts = self._worker.engine.accounts
+		def gone(_message: str) -> None:
+			"""Исполнителя больше нет — вернуть человека на дашборд."""
+			self.dashboard_requested.emit(self._owner.kind)
+
+		if self._owner.kind is OwnerKind.USER:
+			run_in_engine(
+				self._worker,
+				accounts.get_tg_account(self._owner.id),
+				self,
+				self.update_subject,
+				gone,
+			)
+		else:
+			run_in_engine(
+				self._worker, accounts.get_bot(self._owner.id), self, self.update_subject, gone
+			)
 
 	def _run_user_action(self, action: UserAction, account: TgAccountDto) -> None:
 		run_user_action(self._worker, self, action, account, self._after_change)

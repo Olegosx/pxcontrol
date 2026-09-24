@@ -47,6 +47,7 @@ from pxcontrol.ui.pages.community_state import (
 	audience_word,
 	card_actions,
 	card_state,
+	community_group_title,
 	executors_count,
 	header_state_text,
 	state_badge_text,
@@ -295,6 +296,12 @@ def test_summary_counts_ignores_queue_of_other_communities() -> None:
 	assert totals.queued == 7
 	assert totals.errors == 2
 	assert totals.total == 1
+
+
+def test_community_group_title() -> None:
+	"""Название группы вида — одно на дашборд, навигацию и строку пути."""
+	assert community_group_title(CommunityKind.CHANNEL) == "Каналы"
+	assert community_group_title(CommunityKind.GROUP) == "Группы"
 
 
 def test_scope_kinds() -> None:

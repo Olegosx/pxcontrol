@@ -110,6 +110,7 @@ from pxcontrol.ui.pages.community_state import (
 	action_available,
 	card_actions,
 	card_state,
+	community_group_title,
 	state_badge,
 	state_badge_text,
 	subtitle_text,
@@ -540,8 +541,8 @@ _TABLE_WIDTHS: tuple[int | None, ...] = (
 
 #: Разделы дашборда по порядку: вид сообщества → заголовок и значок.
 _SECTIONS: tuple[tuple[CommunityKind, str, FluentIcon], ...] = (
-	(CommunityKind.CHANNEL, "Каналы", FluentIcon.CHAT),
-	(CommunityKind.GROUP, "Группы", FluentIcon.PEOPLE),
+	(CommunityKind.CHANNEL, community_group_title(CommunityKind.CHANNEL), FluentIcon.CHAT),
+	(CommunityKind.GROUP, community_group_title(CommunityKind.GROUP), FluentIcon.PEOPLE),
 )
 
 
@@ -965,8 +966,7 @@ class _SummaryBar:
 class CommunitiesPage(ScrollArea):
 	"""Дашборд сообществ: шапка, сводка, разделы «Каналы» и «Группы».
 
-	Сигналы для главного окна: ``communities_changed`` — свежий список
-	(синхронизация подменю навигации), ``open_community`` — клик
+	Сигналы для главного окна: ``open_community`` — клик
 	по карточке или строке (переход на страницу сообщества),
 	``publish_requested`` — «Опубликовать» (экран «Новый пост»
 	с предвыбранным сообществом), ``schedule_requested`` —
@@ -976,7 +976,6 @@ class CommunitiesPage(ScrollArea):
 	(экран «Очередь» с фильтром «ошибки»).
 	"""
 
-	communities_changed = Signal(list)
 	open_community = Signal(int)
 	publish_requested = Signal(int)
 	schedule_requested = Signal(int)
@@ -1138,7 +1137,6 @@ class CommunitiesPage(ScrollArea):
 		"""
 		self._stats_cache = {item.community_id: item for item in stats}
 		self._render()
-		self.communities_changed.emit(list(self._communities))
 
 	# --- вид и поиск -----------------------------------------------------------
 

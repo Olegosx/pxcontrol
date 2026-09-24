@@ -32,7 +32,7 @@ from pxcontrol.engine.telegram.lane import WorkKind
 from pxcontrol.engine.telegram.types import (
 	USERBOT_PREMIUM_MAX_FILE_BYTES,
 	DayPoint,
-	ExecutorRef,
+	OwnerKind,
 	Share,
 	limit_gb,
 )
@@ -386,9 +386,13 @@ def live_shown(state: UserState | BotState) -> bool:
 # --- страница аккаунта (ADR-0030) --------------------------------------------------------
 
 
-def user_route_key(owner: ExecutorRef) -> str:
-	"""Ключ маршрута страницы аккаунта в навигации (objectName)."""
-	return f"{owner.kind}_{owner.id}"
+def owner_group_title(kind: OwnerKind) -> str:
+	"""Название группы исполнителей: «Пользователи» или «Боты».
+
+	Одно на всё приложение: заголовок раздела дашборда, пункт навигации
+	и строка пути страницы аккаунта (ADR-0041) зовут раздел одинаково.
+	"""
+	return "Пользователи" if kind is OwnerKind.USER else "Боты"
 
 
 def kind_rows(kinds: tuple[Share, ...]) -> list[tuple[str, int]]:

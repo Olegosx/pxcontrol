@@ -50,6 +50,16 @@ class CardState(StrEnum):
 	DISABLED = "disabled"  # выключено переключателем активности
 
 
+def community_group_title(kind: CommunityKind) -> str:
+	"""Название группы вида: «Каналы» или «Группы».
+
+	Одно на всё приложение: заголовок раздела дашборда, пункт навигации
+	и строка пути страницы сообщества (ADR-0041) должны звать раздел
+	одинаково.
+	"""
+	return "Каналы" if kind is CommunityKind.CHANNEL else "Группы"
+
+
 def card_state(community: CommunityDto, counts: QueueCounts) -> CardState:
 	"""Состояние по приоритету «выключено → ошибки → публикатор на паузе → нет публикатора».
 

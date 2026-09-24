@@ -1,7 +1,11 @@
-"""Страница одного сообщества: шапка, вкладки, всё действующее — по вкладкам.
+"""Страница одного сообщества: путь, шапка, вкладки, всё действующее — по вкладкам.
 
-Открывается из подменю «Каналы и группы» (или кликом по карточке
-дашборда). Шапка общая для вкладок: аватар, название, плашка
+Страница **одна на всё приложение** (ADR-0041): она живёт в стопке
+главного окна без пункта навигации и показывает то сообщество, которое
+открыли с дашборда «Каналы и группы» или со страницы аккаунта. Над
+шапкой — строка пути (`BreadcrumbBar`): «Каналы и группы › Каналы ›
+название»; клик по первым двум её элементам возвращает на дашборд
+с нужным разделом. Шапка общая для вкладок: аватар, название, плашка
 состояния, подстрочник, «Опубликовать» и меню «…». Ниже —
 переключатель вкладок и стопка их тел:
 
@@ -38,6 +42,7 @@ from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
 	BodyLabel,
+	BreadcrumbBar,
 	CaptionLabel,
 	FluentIcon,
 	HorizontalSeparator,
@@ -108,6 +113,7 @@ from pxcontrol.ui.pages.common import (
 from pxcontrol.ui.pages.community_overview import OverviewTab
 from pxcontrol.ui.pages.community_state import (
 	TASKS_UNAVAILABLE,
+	community_group_title,
 	community_queue_counts,
 	executors_count,
 	header_state_text,
@@ -159,9 +165,14 @@ _TABS = (TAB_OVERVIEW, TAB_QUEUE, TAB_SCHEDULED, TAB_MEMBERS, TAB_TASKS, TAB_SET
 _SNAPSHOT_TABS = (TAB_MEMBERS, TAB_TASKS)
 
 
-def community_route_key(community_id: int) -> str:
-	"""Ключ маршрута страницы сообщества в навигации (objectName)."""
-	return f"community_{community_id}"
+#: Ключ маршрута страницы (``objectName``). Страница одна, поэтому
+#: ключ постоянный: пункта навигации у неё нет (ADR-0041, п. 4).
+COMMUNITY_PAGE_ROUTE = "community_page"
+
+#: Ключи элементов строки пути (внутренние, наружу не выходят).
+_PATH_ROOT = "path_root"
+_PATH_GROUP = "path_group"
+_PATH_COMMUNITY = "path_community"
 
 
 def tab_title(key: str, count: int | None = None) -> str:
@@ -873,6 +884,9 @@ class CommunityPage(ScrollArea):
 	publish_requested = Signal(int)
 	#: «Вся очередь…» вкладки — экран «Очередь» с фильтром по этому сообществу.
 	queue_requested = Signal(int)
+	#: Клик по строке пути: вернуться на дашборд. Значение — вид
+	#: сообщества (его раздел) или None (раздел «все»).
+	dashboard_requested = Signal(object)  # CommunityKind | None
 
 	def __init__(
 		self,
@@ -885,7 +899,7 @@ class CommunityPage(ScrollArea):
 		вкладке «Очередь» нужен наблюдатель отправки, «Задачам» —
 		задач."""
 		super().__init__(parent)
-		self.setObjectName(community_route_key(community.id))
+		self.setObjectName(COMMUNITY_PAGE_ROUTE)
 		self._worker = worker
 		self._watchers = watchers
 		self._community = community
@@ -897,7 +911,10 @@ class CommunityPage(ScrollArea):
 		self._recheck_text: str | None = None
 		self._tabs: dict[str, QWidget] = {}
 		self._current_tab = TAB_OVERVIEW
+		# сборка строки пути шлёт тот же сигнал, что и клик по ней
+		self._building_path = False
 		self._build()
+		self._render_path()
 		self._render_header()
 		self._render_settings()
 		# числа очереди в шапке — из кэша наблюдателя по его уведомлениям
@@ -908,6 +925,41 @@ class CommunityPage(ScrollArea):
 	def community_id(self) -> int:
 		"""Идентификатор сообщества этой страницы."""
 		return self._community.id
+
+	def show_community(self, community: CommunityDto) -> None:
+		"""Показывает сообщество на этой странице (ADR-0041, п. 4).
+
+		То же сообщество — обычное обновление снимком. Другое — тела
+		вкладок снимаются целиком (они собраны по прежнему сообществу,
+		а панели очередей держат его карточки), страница открывается
+		на «Обзоре», числа очереди и статистики сбрасываются: чужие
+		они показывать не должны ни мгновения.
+		"""
+		if community.id == self._community.id:
+			self.update_community(community)
+			return
+		self._community = community
+		self._counts = QueueCounts()
+		self._stats = None
+		self._scheduled_count = None
+		self._recheck_text = None
+		self._drop_all_tabs()
+		self._mount_tab(TAB_SETTINGS)  # его строки рисует _render_settings
+		self._render_path()
+		self._render_header()
+		self._render_settings()
+		self._segments.setCurrentItem(TAB_OVERVIEW)
+		self._show_tab(TAB_OVERVIEW)
+
+	def _drop_all_tabs(self) -> None:
+		"""Снимает тела всех вкладок вместе с их подписками на наблюдателей."""
+		for key in list(self._tabs):
+			body = self._tabs.pop(key)
+			_set_active(body, False)
+			self._body.removeWidget(body)
+			body.setParent(None)
+			body.deleteLater()
+		self._current_tab = TAB_OVERVIEW
 
 	def update_community(self, community: CommunityDto) -> None:
 		"""Обновляет страницу свежим снимком (синхронизация главного окна).
@@ -922,6 +974,7 @@ class CommunityPage(ScrollArea):
 		пересобирается сразу, иначе человек смотрел бы на устаревшее.
 		"""
 		self._community = community
+		self._render_path()
 		self._render_header()
 		self._render_settings()
 		self._render_tab_titles()
@@ -948,10 +1001,18 @@ class CommunityPage(ScrollArea):
 	# --- сборка -----------------------------------------------------------------
 
 	def _build(self) -> None:
-		"""Каркас: шапка, сегменты вкладок, стопка тел."""
+		"""Каркас: строка пути, шапка, сегменты вкладок, стопка тел."""
 		layout = page_layout(self)
+		# путь и шапка — одним блоком: между ними интервал строки,
+		# а не блока (navigation.md, раздел 5)
+		top = QVBoxLayout()
+		top.setSpacing(density.spacing().row_spacing)
+		self._path = BreadcrumbBar(self)
+		self._path.currentItemChanged.connect(self._on_path_clicked)
+		top.addWidget(self._path, alignment=Qt.AlignmentFlag.AlignLeft)
 		self._header_box = QVBoxLayout()
-		layout.addLayout(self._header_box)
+		top.addLayout(self._header_box)
+		layout.addLayout(top)
 		# полоса вкладок — общая с разделами приложения (подписи с полосой
 		# под активной, разделитель под всей полосой, как в макете)
 		self._segments = tab_strip(self, layout)
@@ -973,6 +1034,28 @@ class CommunityPage(ScrollArea):
 		self._mount_tab(TAB_SETTINGS)
 		self._segments.setCurrentItem(TAB_OVERVIEW)
 		self._show_tab(TAB_OVERVIEW)
+
+	def _render_path(self) -> None:
+		"""Строка пути: дашборд › раздел вида › название сообщества.
+
+		Собирается заново на каждое сообщество: клик по элементу пути
+		снимает всё, что правее него (так устроен ``BreadcrumbBar``).
+		"""
+		community = self._community
+		self._building_path = True
+		try:
+			self._path.clear()
+			self._path.addItem(_PATH_ROOT, "Каналы и группы")
+			self._path.addItem(_PATH_GROUP, community_group_title(community.kind))
+			self._path.addItem(_PATH_COMMUNITY, community.title)
+		finally:
+			self._building_path = False
+
+	def _on_path_clicked(self, route_key: str) -> None:
+		"""Клик по строке пути: дашборд целиком или его раздел."""
+		if self._building_path or route_key == _PATH_COMMUNITY:
+			return
+		self.dashboard_requested.emit(None if route_key == _PATH_ROOT else self._community.kind)
 
 	def _render_header(self) -> None:
 		"""Шапка: логотип, название с плашкой, подстрочник, «Опубликовать», «…»."""
@@ -1278,17 +1361,22 @@ class CommunityPage(ScrollArea):
 	def _refresh(self, *_args: object) -> None:
 		"""Перечитывает снимок сообщества и сообщает об изменениях.
 
-		Сообщество могло быть удалено (ошибка «не найден») — страница
-		всё равно шлёт ``changed``: синхронизация главного окна снимет
-		её вместе с пунктом подменю.
+		Сообщество могло быть удалено (ошибка «не найден») — тогда
+		показывать его страницу нечем, и она просит окно вернуть
+		человека на дашборд (ADR-0041).
 		"""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.get_community(self._community.id),
 			self,
 			self._on_refreshed,
-			lambda _message: self.changed.emit(),
+			lambda _message: self._leave(),
 		)
+
+	def _leave(self) -> None:
+		"""Сообщества больше нет: обновить дашборд и вернуться на него."""
+		self.changed.emit()
+		self.dashboard_requested.emit(self._community.kind)
 
 	def _on_refreshed(self, community: CommunityDto) -> None:
 		self.update_community(community)
@@ -1403,7 +1491,7 @@ class CommunityPage(ScrollArea):
 			self._worker,
 			self._worker.engine.delete_community(self._community.id),
 			self,
-			lambda *_a: self.changed.emit(),
+			lambda *_a: self._leave(),
 			self._show_error,
 		)
 
@@ -1427,9 +1515,9 @@ def _now() -> Any:
 
 
 __all__ = [
+	"COMMUNITY_PAGE_ROUTE",
 	"CommunityPage",
 	"MembersPanel",
-	"community_route_key",
 	"open_members",
 	"queue_footer_text",
 	"recheck_summary",

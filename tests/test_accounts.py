@@ -525,6 +525,18 @@ async def test_bot_pause_and_publisher_counts(db: Database) -> None:
 	assert (accounts[account.id].memberships, accounts[account.id].publisher_of) == (2, 1)
 	assert (accounts[other.id].memberships, accounts[other.id].publisher_of) == (1, 0)
 
+	# снимок одного исполнителя (страница аккаунта, ADR-0041) считает то же,
+	# что и список, но по одному
+	one = await service.get_tg_account(account.id)
+	assert (one.memberships, one.publisher_of) == (2, 1)
+	assert one.display == accounts[account.id].display
+	single_bot = await service.get_bot(bot.id)
+	assert (single_bot.publisher_of, single_bot.paused) == (1, True)
+	with pytest.raises(AccountsError, match="не найден"):
+		await service.get_tg_account(999_999)
+	with pytest.raises(AccountsError, match="не найден"):
+		await service.get_bot(999_999)
+
 
 async def test_bot_label_rename_requires_text(db: Database) -> None:
 	"""Название бота меняется на месте; пустое — отказ, бот не найден — отказ."""

@@ -247,6 +247,25 @@ class AccountsService:
 			publisher_of = await _count_by(session, Community.default_bot_id)
 		return [self._bot_dto(b, publisher_of.get(b.id, 0)) for b in bots]
 
+	async def get_bot(self, bot_id: int) -> BotDto:
+		"""Свежий снимок одного бота (страница аккаунта в интерфейсе).
+
+		Парный к :meth:`get_tg_account` и к
+		``CommunitiesService.get_community``: страница сущности
+		перечитывает своё, а не весь список (ADR-0041).
+
+		Raises:
+			AccountsError: Бот не найден (например, уже удалён).
+		"""
+		async with self._db.session_factory() as session:
+			bot = await session.get(Bot, bot_id)
+			if bot is None:
+				raise _bot_not_found()
+			publisher_of = await _count_by(
+				session, Community.default_bot_id, Community.default_bot_id == bot_id
+			)
+		return self._bot_dto(bot, publisher_of.get(bot_id, 0))
+
 	async def set_bot_label(self, bot_id: int, label: str) -> BotDto:
 		"""Переименовывает бота (название — для себя, обязательно).
 
@@ -447,6 +466,39 @@ class AccountsService:
 			)
 			for a in rows
 		]
+
+	async def get_tg_account(self, account_id: int) -> TgAccountDto:
+		"""Свежий снимок одного userbot-аккаунта (страница аккаунта).
+
+		Считает то же, что :meth:`list_tg_accounts`, но по одному
+		аккаунту: странице сущности незачем читать весь список
+		(ADR-0041).
+
+		Raises:
+			AccountsError: Аккаунт не найден (например, уже удалён).
+		"""
+		async with self._db.session_factory() as session:
+			account = await session.get(TgAccount, account_id)
+			if account is None:
+				raise _account_not_found()
+			memberships = await _count_by(
+				session,
+				CommunityExecutor.tg_account_id,
+				CommunityExecutor.tg_account_id == account_id,
+				CommunityExecutor.status.in_(_PRESENT_STATUSES),
+			)
+			publisher_of = await _count_by(
+				session,
+				Community.default_tg_account_id,
+				Community.default_tg_account_id == account_id,
+			)
+		return self._acc_dto(
+			account,
+			premium=self._gateway.userbot_premium(account_id),
+			connected=self._gateway.userbot_connected(account_id),
+			memberships=memberships.get(account_id, 0),
+			publisher_of=publisher_of.get(account_id, 0),
+		)
 
 	async def set_tg_account_paused(self, account_id: int, paused: bool) -> TgAccountDto:
 		"""Приостанавливает userbot-аккаунт или возобновляет (ADR-0029).
