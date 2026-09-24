@@ -114,9 +114,12 @@ class MainWindow(FluentWindow):
 		# наблюдатели очередей — по одному на очередь, при окне (ADR-0034);
 		# страницы получают их зрителями, поэтому заводятся до навигации
 		self._watchers = QueueWatchers(worker, self)
-		self._build_navigation()
-		self._watch_publish_queue()
+		# режим панели — до пунктов: библиотека назначает пункту размер
+		# при смене режима, и ветку, раскрытую раньше, это ломает
 		self._restore_nav_mode()
+		self._build_navigation()
+		self._settle_branches()
+		self._watch_publish_queue()
 
 	def _restore_geometry(self) -> None:
 		"""Восстанавливает сохранённое состояние окна (движок уже готов).
@@ -334,6 +337,12 @@ class MainWindow(FluentWindow):
 		скрытой кнопке-«бутерброде» (``NavigationPanel.eventFilter``),
 		а она у нас видна — значит, состояние применяем сами. Панель
 		рождается свёрнутой, поэтому делать нужно только разворот.
+
+		Зовётся **до** сборки пунктов. Смена режима назначает каждому
+		пункту высоту в одну строку (``NavigationWidget.setCompacted``,
+		QFluentWidgets 1.11.3) — и ветке тоже, хотя под раскрытой веткой
+		стоят её дети. Пункты, добавленные в уже развёрнутую панель,
+		сразу получают свой размер, и смены режима под ними не бывает.
 		"""
 		self._nav_compact = ask_engine(
 			self._worker,
@@ -344,6 +353,31 @@ class MainWindow(FluentWindow):
 		if not self._nav_compact:
 			self.navigationInterface.panel.expand(useAni=False)
 		self.navigationInterface.displayModeChanged.connect(self._on_nav_mode_changed)
+
+	def _settle_branches(self) -> None:
+		"""Ветки навигации переживают сворачивание панели (ADR-0041, п. 7).
+
+		Сворачивая панель, библиотека закрывает ветки, а разворачивая —
+		снова задаёт пунктам высоту в одну строку; ветку она раскрывает
+		обратно (и тем возвращает ей высоту по детям), только если
+		ей велено помнить раскрытие — ``setRememberExpandState``, по
+		умолчанию выключено. Включаем его у всех веток.
+
+		Панель запущена свёрнутой — ветки закрываются так же, как это
+		сделала бы сама библиотека при сворачивании (запомнить
+		и закрыть): при развороте они откроются в прежнем виде, с верной
+		высотой. Раскрытая в свёрнутой панели ветка сломалась бы на первом
+		же развороте.
+		"""
+		nav = self.navigationInterface
+		for key in (self._users_key(), self._communities_key(), SECTION_ROUTE_KEY):
+			branch = nav.widget(key)
+			if branch is None:
+				continue
+			branch.setRememberExpandState(True)
+			if nav.panel.isCollapsed():
+				branch.saveExpandState()
+				branch.setExpanded(False)
 
 	def _on_nav_mode_changed(self, mode: NavigationDisplayMode) -> None:
 		"""Запоминает, свернул ли человек панель (ADR-0041, п. 7)."""
