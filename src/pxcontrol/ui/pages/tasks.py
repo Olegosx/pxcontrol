@@ -1865,14 +1865,20 @@ class _TaskDetail(QWidget):
 		"""Кнопка «Сохранить»."""
 		self.save()
 
-	def save(self, then: Callable[[], None] | None = None) -> None:
+	def save(
+		self,
+		then: Callable[[], None] | None = None,
+		failed: Callable[[], None] | None = None,
+	) -> None:
 		"""Сохраняет параметры и расписание одним вызовом движка.
 
 		``then`` — что сделать после ответа движка (уход с настройки):
 		сохранение асинхронное, и уходить раньше ответа нельзя — при
 		отказе движка человек остался бы без правок и без причины.
-		Проверка не прошла или включение не подтвердили — ``then``
-		не зовётся, человек остаётся с правками на месте.
+		Проверка не прошла, включение не подтвердили или движок отказал —
+		``then`` не зовётся, человек остаётся с правками на месте,
+		а ``failed`` возвращает на место то, что уход успел сдвинуть
+		(строку пути).
 
 		Вопрос о расписании задаётся только при его **включении**:
 		запуск по расписанию идёт без подтверждений, и спросить нужно
@@ -1880,6 +1886,8 @@ class _TaskDetail(QWidget):
 		"""
 		task, section, saved = self._task, self._section, self._saved
 		if task is None or section is None or not self._schedule.validate():
+			if failed is not None:
+				failed()
 			return
 		enabled = self._schedule.enabled
 		schedule = self._schedule.schedule()
@@ -1896,8 +1904,10 @@ class _TaskDetail(QWidget):
 			),
 			accept_text="Включить",
 		):
+			if failed is not None:
+				failed()
 			return
-		self._panel.save_task(task, params, schedule, enabled=enabled, then=then)
+		self._panel.save_task(task, params, schedule, enabled=enabled, then=then, failed=failed)
 
 	def discard(self) -> None:
 		"""Отбрасывает правки: форма возвращается к сохранённому."""
@@ -1929,6 +1939,29 @@ class _TaskDetail(QWidget):
 			section.show_report(item)
 
 
+def run_items(run: TaskRunDto) -> list[QTableWidgetItem]:
+	"""Ячейки строки запуска: когда, запуск, исполнитель, итог.
+
+	Одна сборка на таблицу последних запусков и окно журнала: итог
+	с ошибкой в обеих окрашен цветом ошибки (пара ``ERROR_TEXT``
+	под текущую тему — у ячейки нет API для пары).
+	"""
+	texts = (
+		format_local(run.started_at),
+		run_kind_text(run),
+		run.executor_label or "—",
+		run_result_text(run),
+	)
+	items = []
+	for text in texts:
+		item = QTableWidgetItem(text)
+		item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+		items.append(item)
+	if run.outcome is RunOutcome.ERROR:
+		items[-1].setForeground(theme_color(ERROR_TEXT))
+	return items
+
+
 def runs_table(parent: QWidget, runs: Sequence[TaskRunDto]) -> TableWidget:
 	"""Таблица запусков: когда, запуск, исполнитель, итог (ошибка — цветом)."""
 	table = TableWidget(parent)
@@ -1949,18 +1982,7 @@ def runs_table(parent: QWidget, runs: Sequence[TaskRunDto]) -> TableWidget:
 		for column, width in enumerate(_RUNS_COLUMN_WIDTHS):
 			table.setColumnWidth(column, width)  # макет
 	for index, run in enumerate(runs):
-		cells = (
-			format_local(run.started_at),
-			run_kind_text(run),
-			run.executor_label or "—",
-			run_result_text(run),
-		)
-		failed = run.outcome is RunOutcome.ERROR
-		for column, text in enumerate(cells):
-			item = QTableWidgetItem(text)
-			if failed and column == len(cells) - 1:
-				item.setForeground(theme_color(ERROR_TEXT))
-			item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+		for column, item in enumerate(run_items(run)):
 			table.setItem(index, column, item)
 	table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 	table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -2006,8 +2028,9 @@ class TasksPanel(QWidget):
 		# задания, о чьей ошибке уже узнали: снимаем их с очереди один раз
 		self._seen_errors: set[int] = set()
 		self._view = QueueView(on_state=self._on_jobs, on_finished=self._on_job_finished)
+		# задачи читаются при оживлении (:meth:`set_active`): его зовут
+		# и вкладка, и окно — второе чтение из конструктора было бы лишним
 		self._build()
-		self.reload()
 
 	def _build(self) -> None:
 		"""Каркас: стопка из двух страниц — обзор и настройка."""
@@ -2129,7 +2152,8 @@ class TasksPanel(QWidget):
 			return
 		choice = ask_save_changes(self, SAVE_ON_LEAVE_HINT)
 		if choice is SaveChoice.SAVE:
-			self._detail.save(then=then)
+			# не сохранилось — человек остаётся, как при «Отмене»
+			self._detail.save(then=then, failed=stay)
 		elif choice is SaveChoice.DISCARD:
 			self._detail.discard()
 			then()
@@ -2201,20 +2225,27 @@ class TasksPanel(QWidget):
 		*,
 		enabled: bool,
 		then: Callable[[], None] | None = None,
+		failed: Callable[[], None] | None = None,
 	) -> None:
-		"""Сохраняет параметры и расписание; ``then`` — после успеха."""
+		"""Сохраняет параметры и расписание; ``then`` — после успеха,
+		``failed`` — после отказа движка (причина показывается плашкой)."""
 
 		def saved(fresh: TaskDto) -> None:
 			self._on_saved(task.kind, fresh)
 			if then is not None:
 				then()
 
+		def refused(message: str) -> None:
+			self._show_error(message)
+			if failed is not None:
+				failed()
+
 		run_in_engine(
 			self._worker,
 			self._worker.engine.tasks.save_task(task.id, params, schedule, enabled=enabled),
 			self,
 			saved,
-			self._show_error,
+			refused,
 		)
 
 	def _on_saved(self, kind: TaskKind, task: TaskDto) -> None:
@@ -2343,15 +2374,7 @@ class TaskRunsDialog(WorkDialog):
 		self._runs = runs
 		self._table.setRowCount(len(runs))
 		for index, run in enumerate(runs):
-			cells = (
-				format_local(run.started_at),
-				run_kind_text(run),
-				run.executor_label or "—",
-				run_result_text(run),
-			)
-			for column, text in enumerate(cells):
-				item = QTableWidgetItem(text)
-				item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+			for column, item in enumerate(run_items(run)):
 				self._table.setItem(index, column, item)
 		self._events.setPlainText("" if runs else "Запусков ещё не было.")
 		if runs:
@@ -2387,6 +2410,7 @@ class TasksDialog(WorkDialog):
 		super().__init__(f"Задачи · {community.title}", parent)
 		self._on_members = on_members
 		panel = TasksPanel(worker, watcher, community, self)
+		self._panel = panel
 		# окно живёт присоединённым к наблюдателю, пока открыто; после
 		# закрытия окно удаляется, и наблюдатель отсеивает его сам
 		panel.set_active(True)
@@ -2400,8 +2424,20 @@ class TasksDialog(WorkDialog):
 	def _on_fix(self, target: str) -> None:
 		"""«Участники…» в строке ошибки: закрыть окно и открыть исполнителей."""
 		if target == TaskFixTarget.MEMBERS and self._on_members is not None:
-			self.accept()
+			self._panel.leave(self._go_members)
+
+	def _go_members(self) -> None:
+		self.accept()
+		if self._on_members is not None:
 			self._on_members()
+
+	def reject(self) -> None:
+		"""Крестик и Esc: с несохранёнными правками — через вопрос.
+
+		При «Отмене» окно остаётся: ``QDialog`` сам отменяет закрытие,
+		если после ``reject`` окно ещё видно.
+		"""
+		self._panel.leave(super().reject)
 
 
 def open_tasks(
