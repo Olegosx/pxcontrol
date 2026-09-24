@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
 	QAbstractItemView,
 	QHBoxLayout,
 	QHeaderView,
-	QPushButton,
 	QSizePolicy,
 	QTableWidgetItem,
 	QVBoxLayout,
@@ -51,6 +50,7 @@ from qfluentwidgets import (
 	ComboBox,
 	FluentIcon,
 	HorizontalSeparator,
+	HyperlinkButton,
 	InfoBadge,
 	LineEdit,
 	MessageBoxBase,
@@ -93,7 +93,6 @@ from pxcontrol.ui.pages.common import (
 	flow_columns,
 	font_px,
 	format_count,
-	list_button,
 	noop,
 	page_layout,
 	plural,
@@ -103,11 +102,12 @@ from pxcontrol.ui.pages.common import (
 )
 from pxcontrol.ui.pages.community_page import open_members
 from pxcontrol.ui.pages.community_state import (
-	ACTION_LABELS,
 	TASKS_UNAVAILABLE,
 	CardAction,
 	CardState,
 	action_available,
+	action_label,
+	cannot_publish,
 	card_actions,
 	card_state,
 	community_group_title,
@@ -117,6 +117,7 @@ from pxcontrol.ui.pages.community_state import (
 )
 from pxcontrol.ui.pages.dashboard import GridSection, Section, SectionHeader, SectionStack
 from pxcontrol.ui.pages.tasks import open_tasks
+from pxcontrol.ui.pages.user_actions import set_bot_paused, set_user_paused
 from pxcontrol.ui.queue_watcher import QueueView, QueueWatchers
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,13 @@ logger = logging.getLogger(__name__)
 #: Значения настройки вида дашборда (``UI_COMMUNITIES_VIEW``).
 VIEW_TILES = "tiles"
 VIEW_LIST = "list"
+#: Умолчание: вид выбирается по числу сообществ в разделе.
+VIEW_AUTO = "auto"
+
+#: Порог «авто»: больше — список, иначе плитка. Полтора десятка
+#: карточек на странице ещё читаются глазами, дальше выигрывает
+#: таблица (``screens/communities.md``, раздел 3).
+AUTO_LIST_THRESHOLD = 12
 
 
 class CommunityScope(StrEnum):
@@ -214,6 +222,12 @@ _COLUMN_WIDTHS = {"participants": 96, "queue": 104, "scheduled": 92, "state": 13
 #: Ширина поля поиска в шапке (пиксели).
 _SEARCH_WIDTH = 200
 
+#: Причины пустого состояния: фильтр «не могут публиковать», поиск
+#: без совпадений, ни одного подключённого сообщества.
+_EMPTY_PROBLEMS = "problems"
+_EMPTY_SEARCHED = "searched"
+_EMPTY_NONE = "none"
+
 # --- правила показа (чистые функции) -----------------------------------------
 
 
@@ -271,9 +285,16 @@ def matches_search(community: CommunityDto, query: str) -> bool:
 	return needle in community.title.casefold() or needle in (community.username or "").casefold()
 
 
-def view_from_setting(value: str) -> str:
-	"""Вид дашборда из настройки; незнакомое значение — плитка."""
-	return VIEW_LIST if value == VIEW_LIST else VIEW_TILES
+def effective_view(setting: str, count: int) -> str:
+	"""Вид раздела: выбор человека, а без выбора — по числу сообществ.
+
+	Настройка хранит либо явный выбор (``tiles`` / ``list``), либо
+	``auto`` — тогда решает число: маленький раздел приятнее плиткой,
+	большой — списком. Незнакомое значение читается как ``auto``.
+	"""
+	if setting in (VIEW_TILES, VIEW_LIST):
+		return setting
+	return VIEW_LIST if count > AUTO_LIST_THRESHOLD else VIEW_TILES
 
 
 @dataclass(frozen=True)
@@ -286,14 +307,15 @@ class SummaryCounts:
 		enabled: включённых сообществ.
 		total: подключённых сообществ.
 		errors: элементов очереди с ошибкой.
-		without_publisher: сообществ без единого способа публикации.
+		cannot_publish: включённых сообществ, которым публиковать некем:
+			публикатор не назначен, приостановлен или лишён прав.
 	"""
 
 	queued: int
 	enabled: int
 	total: int
 	errors: int
-	without_publisher: int
+	cannot_publish: int
 
 
 def summary_counts(
@@ -312,10 +334,17 @@ def summary_counts(
 		enabled=sum(1 for c in communities if c.enabled),
 		total=len(communities),
 		errors=sum(item.errors for item in mine),
-		without_publisher=sum(
-			1 for c in communities if not c.capabilities.userbot and not c.capabilities.bot
-		),
+		cannot_publish=sum(1 for c in communities if cannot_publish(c)),
 	)
+
+
+def matches_problem(community: CommunityDto) -> bool:
+	"""Проходит ли сообщество фильтр «не могут публиковать» (раздел 4.1).
+
+	Фильтр клиентский, как поиск, и правило у него то же самое, что
+	у второго числа сводки, — иначе число и список расходились бы.
+	"""
+	return cannot_publish(community)
 
 
 @dataclass(frozen=True)
@@ -489,19 +518,16 @@ class CommunityCard(CardWidget):
 
 		Кнопки перехватывают свои нажатия сами: клик по кнопке
 		не открывает страницу сообщества, клик мимо неё — открывает.
-		«Назначить публикатора» — главное действие карточки без
-		публикатора, поэтому ``PrimaryPushButton``.
+		Все кнопки обычные: акцентная среди них выглядела бы главным
+		действием страницы, а главное действие здесь — «Подключить…»
+		в шапке (``screens/communities.md``, раздел 6.2).
 		"""
 		box = QWidget(self)
 		layout = QHBoxLayout(box)
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.setSpacing(8)
 		for action in card_actions(community, counts):
-			button: QPushButton
-			if action is CardAction.ASSIGN_PUBLISHER:
-				button = PrimaryPushButton(ACTION_LABELS[action], box)
-			else:
-				button = PushButton(ACTION_LABELS[action], box)
+			button = PushButton(action_label(action, community), box)
 			button.setFixedHeight(_ACTION_HEIGHT)  # макет: 26 / 12.5 px
 			button.setFont(font_px(_ACTION_FONT_PX))
 			if not action_available(action, community):
@@ -576,15 +602,23 @@ def _name_cell(row: Row, parent: QWidget) -> QWidget:
 
 
 def _state_cell(row: Row, parent: QWidget) -> QWidget | None:
-	"""Ячейка состояния: та же плашка, что на карточке; штатное — «—» текстом."""
+	"""Ячейка состояния: та же плашка, что на карточке; штатное — «—» текстом.
+
+	Текст короткий — колонка узкая; полный уходит подсказкой, чтобы
+	причина не терялась (``screens/communities.md``, раздел 8).
+	"""
 	state = card_state(row.community, row.counts)
-	text = state_badge_text(state, row.counts)
+	text = state_badge_text(state, row.counts, short=True)
 	if text is None:
 		return None
 	box = QWidget(parent)
 	layout = QHBoxLayout(box)
 	layout.setContentsMargins(8, 0, 8, 0)
-	layout.addWidget(state_badge(box, state, text))
+	badge = state_badge(box, state, text)
+	full = state_badge_text(state, row.counts)
+	if full is not None and full != text:
+		badge.setToolTip(full)
+	layout.addWidget(badge)
 	layout.addStretch()
 	return box
 
@@ -737,7 +771,7 @@ class _Table(TableWidget):
 		community, counts = row.community, row.counts
 		menu = RoundMenu(parent=self)
 		for action in card_actions(community, counts):
-			item = Action(ACTION_LABELS[action], menu)
+			item = Action(action_label(action, community), menu)
 			if not action_available(action, community):
 				item.setEnabled(False)
 				item.setToolTip(TASKS_UNAVAILABLE)
@@ -901,12 +935,15 @@ class _SummaryBar:
 
 	``SimpleCardWidget`` (без реакции на наведение), числа —
 	``StrongBodyLabel``, подписи — ``BodyLabel``, между ними
-	``VerticalSeparator``; ошибки — кнопка (ведёт в очередь),
-	«без публикатора» — ``InfoBadge`` акцентом. Сегменты ошибок
-	и «без публикатора» показываются, только когда их числа ненулевые.
+	``VerticalSeparator``. У двух последних сегментов число живёт
+	в плашке (``InfoBadge`` уровнем), а текст — в ссылке
+	(``HyperlinkButton``): и то и другое — вход, а не украшение.
+	Оба сегмента показываются только при ненулевом числе.
 	"""
 
-	def __init__(self, page: QWidget, on_errors: Callable[[], None]) -> None:
+	def __init__(
+		self, page: QWidget, on_errors: Callable[[], None], on_problems: Callable[[], None]
+	) -> None:
 		bar = SimpleCardWidget(page)
 		self.widget: QWidget = bar
 		layout = QHBoxLayout(bar)
@@ -922,17 +959,20 @@ class _SummaryBar:
 		layout.addWidget(self._enabled_tail)
 		self._errors_separator = VerticalSeparator(bar)
 		layout.addWidget(self._errors_separator)
-		self._errors = list_button("", bar, height=_SUMMARY_BADGE_HEIGHT)
-		self._errors.setToolTip("Элементы очереди отправки с ошибкой — открыть очередь")
-		self._errors.clicked.connect(on_errors)
-		layout.addWidget(self._errors)
-		self._publisher_separator = VerticalSeparator(bar)
-		layout.addWidget(self._publisher_separator)
-		self._badge = InfoBadge.attension("", parent=bar)
-		self._badge.setFont(font_px(_ACTION_FONT_PX))
-		self._badge.setFixedHeight(_SUMMARY_BADGE_HEIGHT)
-		self._badge.setContentsMargins(8, 0, 8, 0)
-		layout.addWidget(self._badge)
+		self._errors_badge = InfoBadge.error("", parent=bar)
+		self._errors_link = HyperlinkButton("", "", bar)
+		self._errors_link.setToolTip("Элементы очереди отправки с ошибкой — открыть очередь")
+		self._errors_link.clicked.connect(on_errors)
+		_segment(layout, self._errors_badge, self._errors_link)
+		self._problems_separator = VerticalSeparator(bar)
+		layout.addWidget(self._problems_separator)
+		self._problems_badge = InfoBadge.warning("", parent=bar)
+		self._problems_link = HyperlinkButton("не могут публиковать", "", bar)
+		self._problems_link.setToolTip(
+			"Показать только те, у кого публикатора нет, он приостановлен или без прав"
+		)
+		self._problems_link.clicked.connect(on_problems)
+		_segment(layout, self._problems_badge, self._problems_link)
 		layout.addStretch()
 		bar.hide()
 
@@ -947,17 +987,31 @@ class _SummaryBar:
 		self._enabled_tail.setText(f"активных из {totals.total}")
 		errors = totals.errors > 0
 		self._errors_separator.setVisible(errors)
-		self._errors.setVisible(errors)
+		self._errors_badge.setVisible(errors)
+		self._errors_link.setVisible(errors)
 		if errors:
-			self._errors.setText(
-				f"{totals.errors} {plural(totals.errors, 'ошибка', 'ошибки', 'ошибок')}"
-			)
-		without = totals.without_publisher > 0
-		self._publisher_separator.setVisible(without)
-		self._badge.setVisible(without)
-		if without:
-			self._badge.setText(f"{totals.without_publisher} без публикатора")
+			self._errors_badge.setText(str(totals.errors))
+			self._errors_badge.adjustSize()
+			word = plural(totals.errors, "ошибка", "ошибки", "ошибок")
+			self._errors_link.setText(f"{word} в очереди")
+		problems = totals.cannot_publish > 0
+		self._problems_separator.setVisible(problems)
+		self._problems_badge.setVisible(problems)
+		self._problems_link.setVisible(problems)
+		if problems:
+			self._problems_badge.setText(str(totals.cannot_publish))
+			self._problems_badge.adjustSize()
 		self.widget.show()
+
+
+def _segment(layout: QHBoxLayout, badge: InfoBadge, link: HyperlinkButton) -> None:
+	"""Сегмент сводки «плашка + ссылка»: между ними 6 (макет)."""
+	box = QHBoxLayout()
+	box.setContentsMargins(0, 0, 0, 0)
+	box.setSpacing(6)
+	box.addWidget(badge)
+	box.addWidget(link)
+	layout.addLayout(box)
 
 
 # --- страница -------------------------------------------------------------------
@@ -972,8 +1026,9 @@ class CommunitiesPage(ScrollArea):
 	с предвыбранным сообществом), ``schedule_requested`` —
 	«Отложено» (экран раздела с фильтром по сообществу),
 	``queue_requested`` — «Очередь» (экран раздела с фильтром
-	по сообществу), ``queue_errors_requested`` — плашка ошибок сводки
-	(экран «Очередь» с фильтром «ошибки»).
+	по сообществу), ``queue_errors_requested`` — ссылка сводки
+	(экран «Очередь» с фильтром «ошибки»), ``queue_errors_for`` —
+	кнопка карточки (то же, но по одному сообществу).
 	"""
 
 	open_community = Signal(int)
@@ -981,6 +1036,7 @@ class CommunitiesPage(ScrollArea):
 	schedule_requested = Signal(int)
 	queue_requested = Signal(int)
 	queue_errors_requested = Signal()
+	queue_errors_for = Signal(int)
 
 	def __init__(
 		self, worker: EngineWorker, watchers: QueueWatchers, parent: QWidget | None = None
@@ -1000,13 +1056,17 @@ class CommunitiesPage(ScrollArea):
 		self._scope = CommunityScope.ALL
 		self._queue_counts: dict[int, QueueCounts] = {}
 		self._stats_cache: dict[int, CommunityStatsDto] = {}
+		# настройка вида: явный выбор человека или «авто» по числу
+		self._view_setting = VIEW_AUTO
 		self._view = VIEW_TILES
 		self._query = ""
+		# фильтр «не могут публиковать» — клиентский, как поиск
+		self._problems_only = False
 		self._sort: tuple[TableColumn, bool] = (TableColumn.TITLE, False)
 		# применение сохранённого вида не должно записывать его обратно
 		self._applying_view = False
 		self._empty: QWidget | None = None
-		self._empty_searched: bool | None = None
+		self._empty_kind: str | None = None
 		self._build()
 		# числа очереди — из кэша наблюдателя, по его уведомлениям: страница
 		# не запрашивает очередь при показе и видит её изменения живьём
@@ -1051,8 +1111,9 @@ class CommunitiesPage(ScrollArea):
 		connect_button.clicked.connect(self._on_connect)
 		header.addWidget(connect_button)
 		layout.addLayout(header)
-		self._summary = _SummaryBar(self, self._open_errors)
+		self._summary = _SummaryBar(self, self._open_errors, self._show_problems)
 		layout.addWidget(self._summary.widget)
+		layout.addWidget(self._build_filter_row())
 		self._sections = QVBoxLayout()
 		# интервал блоков — из плотности (16 обычный, 10 компактный)
 		self._sections.setSpacing(density.spacing().block_spacing)
@@ -1062,6 +1123,37 @@ class CommunitiesPage(ScrollArea):
 		)
 		layout.addStretch()
 		self._apply_scope_texts()
+
+	def _build_filter_row(self) -> QWidget:
+		"""Строка включённого фильтра «не могут публиковать» (раздел 4.1)."""
+		box = QWidget(self)
+		row = QHBoxLayout(box)
+		row.setContentsMargins(0, 0, 0, 0)
+		row.setSpacing(6)  # макет
+		row.addWidget(CaptionLabel("Показаны только те, кто не может публиковать", box))
+		show_all = HyperlinkButton("Показать все", "", box)
+		show_all.clicked.connect(self._show_all)
+		row.addWidget(show_all)
+		row.addStretch()
+		self._filter_row = box
+		box.hide()
+		return box
+
+	def _show_problems(self) -> None:
+		"""Ссылка сводки: оставить только тех, кто не может публиковать."""
+		if self._problems_only:
+			return
+		self._problems_only = True
+		self._filter_row.show()
+		self._render_sections()
+
+	def _show_all(self) -> None:
+		"""«Показать все»: снять фильтр (поиск при этом остаётся)."""
+		if not self._problems_only:
+			return
+		self._problems_only = False
+		self._filter_row.hide()
+		self._render_sections()
 
 	def _apply_scope_texts(self) -> None:
 		"""Заголовок, надстрочник и подсказка поиска — по текущему разделу."""
@@ -1141,22 +1233,35 @@ class CommunitiesPage(ScrollArea):
 	# --- вид и поиск -----------------------------------------------------------
 
 	def _apply_view_setting(self, value: str) -> None:
-		"""Ставит переключатель в сохранённое положение (без записи)."""
-		view = view_from_setting(value)
+		"""Принимает сохранённую настройку вида (без записи обратно)."""
+		self._view_setting = value
+		if self._sync_view():
+			self._rebuild_sections()
+
+	def _sync_view(self) -> bool:
+		"""Приводит вид и переключатель к настройке и числу сообществ.
+
+		Returns:
+			True — вид сменился, тела разделов нужно пересобрать.
+		"""
+		view = effective_view(self._view_setting, len(self._scoped()))
 		if view == self._view:
-			return
+			return False
+		self._view = view
 		self._applying_view = True
 		try:
 			self._view_switch.setCurrentItem(view)
 		finally:
 			self._applying_view = False
-		self._view = view
-		self._rebuild_sections()
+		return True
 
 	def _on_view_changed(self, route_key: str) -> None:
-		"""Переключатель: перестраиваются только тела разделов."""
-		view = view_from_setting(route_key)
-		if self._applying_view or view == self._view:
+		"""Переключатель: с этого мгновения вид задаёт человек, а не число."""
+		view = VIEW_LIST if route_key == VIEW_LIST else VIEW_TILES
+		if self._applying_view:
+			return
+		self._view_setting = view
+		if view == self._view:
 			return
 		self._view = view
 		self._rebuild_sections()
@@ -1166,7 +1271,7 @@ class CommunitiesPage(ScrollArea):
 			self,
 			noop,
 			self._show_error,
-		)
+		)  # выбор человека главнее «авто» и переживает перезапуск
 
 	def _on_search_changed(self, text: str) -> None:
 		"""Поиск фильтрует на клиенте — без обращения к движку."""
@@ -1184,6 +1289,8 @@ class CommunitiesPage(ScrollArea):
 	def _render(self) -> None:
 		"""Приводит сводку и разделы к данным — по отпечаткам, а не с нуля."""
 		self._summary.update(self._scoped(), self._queue_counts)
+		if self._sync_view():  # «авто»: число сообществ раздела могло измениться
+			self._stack.drop_all()
 		self._render_sections()
 
 	def _scoped(self) -> list[CommunityDto]:
@@ -1201,6 +1308,7 @@ class CommunitiesPage(ScrollArea):
 			)
 			for community in self._scoped()
 			if matches_search(community, self._query)
+			and (not self._problems_only or matches_problem(community))
 		]
 
 	def _render_sections(self) -> None:
@@ -1213,7 +1321,7 @@ class CommunitiesPage(ScrollArea):
 		rows = self._rows()
 		if not rows:
 			self._stack.drop_all()
-			self._show_empty(searched=bool(self._communities))
+			self._show_empty(self._empty_reason())
 			return
 		self._hide_empty()
 		kinds = scope_kinds(self._scope)
@@ -1274,13 +1382,19 @@ class CommunitiesPage(ScrollArea):
 		self._stack.drop_all()
 		self._render_sections()
 
-	def _show_empty(self, searched: bool) -> None:
-		"""Пустое состояние: ничего не подключено или поиск ничего не нашёл."""
-		if self._empty is not None and self._empty_searched == searched:
+	def _empty_reason(self) -> str:
+		"""Почему список пуст: фильтр, поиск или ничего не подключено."""
+		if self._problems_only:
+			return _EMPTY_PROBLEMS
+		return _EMPTY_SEARCHED if self._communities else _EMPTY_NONE
+
+	def _show_empty(self, reason: str) -> None:
+		"""Пустое состояние: фильтр, поиск или ничего не подключено."""
+		if self._empty is not None and self._empty_kind == reason:
 			return
 		self._hide_empty()
-		self._empty = self._empty_state(searched)
-		self._empty_searched = searched
+		self._empty = self._empty_state(reason)
+		self._empty_kind = reason
 		self._sections.addWidget(self._empty)
 
 	def _hide_empty(self) -> None:
@@ -1290,14 +1404,17 @@ class CommunitiesPage(ScrollArea):
 		self._empty.setParent(None)
 		self._empty.deleteLater()
 		self._empty = None
-		self._empty_searched = None
+		self._empty_kind = None
 
-	def _empty_state(self, searched: bool) -> QWidget:
-		"""Пустое состояние: ничего не подключено или поиск ничего не нашёл."""
+	def _empty_state(self, reason: str) -> QWidget:
+		"""Пустое состояние: фильтр, поиск или ничего не подключено."""
 		box = QWidget(self)
 		layout = QVBoxLayout(box)
 		layout.setContentsMargins(0, 48, 0, 0)
-		if searched:
+		if reason == _EMPTY_PROBLEMS:
+			title = SubtitleLabel("Все могут публиковать", box)
+			hint = BodyLabel("Ни одного сообщества без публикатора — фильтр пуст.", box)
+		elif reason == _EMPTY_SEARCHED:
 			title = SubtitleLabel("Ничего не найдено", box)
 			hint = BodyLabel("Проверьте запрос или подключите сообщество.", box)
 		else:
@@ -1307,6 +1424,10 @@ class CommunitiesPage(ScrollArea):
 		hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
 		layout.addWidget(title)
 		layout.addWidget(hint)
+		if reason == _EMPTY_PROBLEMS:
+			show_all = HyperlinkButton("Показать все", "", box)
+			show_all.clicked.connect(self._show_all)
+			layout.addWidget(show_all, alignment=Qt.AlignmentFlag.AlignCenter)
 		return box
 
 	# --- действия -----------------------------------------------------------------
@@ -1324,8 +1445,12 @@ class CommunitiesPage(ScrollArea):
 			self.schedule_requested.emit(community.id)
 		elif action is CardAction.QUEUE:
 			self.queue_requested.emit(community.id)
+		elif action is CardAction.QUEUE_ERRORS:
+			self.queue_errors_for.emit(community.id)
 		elif action is CardAction.ASSIGN_PUBLISHER:
 			open_members(self._worker, community, self, self.reload)
+		elif action is CardAction.RESUME_PUBLISHER:
+			self._resume_publisher(community)
 		elif action is CardAction.ENABLE:
 			run_in_engine(
 				self._worker,
@@ -1337,8 +1462,37 @@ class CommunitiesPage(ScrollArea):
 		elif action is CardAction.TASKS:
 			open_tasks(self._worker, self._watchers.tasks, community, self)
 
+	def _resume_publisher(self, community: CommunityDto) -> None:
+		"""Возобновляет приостановленного публикатора сообщества (ADR-0029).
+
+		Операция — та же самая, что кнопкой на странице исполнителя
+		(``user_actions``): расходиться двум экранам нельзя. Снимок
+		исполнителя читается по id — на дашборде сообществ его нет.
+		"""
+		accounts = self._worker.engine.accounts
+		if community.default_account_id is not None:
+			run_in_engine(
+				self._worker,
+				accounts.get_tg_account(community.default_account_id),
+				self,
+				lambda account: set_user_paused(self._worker, self, account, False, self.reload),
+				self._show_error,
+			)
+		elif community.default_bot_id is not None:
+			run_in_engine(
+				self._worker,
+				accounts.get_bot(community.default_bot_id),
+				self,
+				lambda bot: set_bot_paused(self._worker, self, bot, False, self.reload),
+				self._show_error,
+			)
+		else:
+			# приостановлен кто-то из пула, а публикатор по умолчанию
+			# не назначен: вернуть его можно только там, где виден пул
+			open_members(self._worker, community, self, self.reload)
+
 	def _open_errors(self) -> None:
-		"""Плашка ошибок сводки: очередь отправки с фильтром «ошибки»."""
+		"""Ссылка ошибок сводки: очередь отправки с фильтром «ошибки»."""
 		self.queue_errors_requested.emit()
 
 	# --- подключение -----------------------------------------------------------

@@ -83,16 +83,22 @@ def card_state(community: CommunityDto, counts: QueueCounts) -> CardState:
 	return CardState.NORMAL
 
 
-def state_badge_text(state: CardState, counts: QueueCounts) -> str | None:
-	"""Текст плашки состояния на карточке; None — плашка не нужна."""
+def state_badge_text(state: CardState, counts: QueueCounts, *, short: bool = False) -> str | None:
+	"""Текст плашки состояния; None — плашка не нужна.
+
+	``short`` — вариант для ячейки таблицы: колонка состояния узкая
+	(132 по макету), и «публикатор приостановлен» в неё не помещается.
+	Полный текст при этом никуда не девается — он идёт подсказкой
+	(``screens/communities.md``, раздел 8).
+	"""
 	if state is CardState.ERRORS:
 		return f"{counts.errors} {plural(counts.errors, 'ошибка', 'ошибки', 'ошибок')}"
 	if state is CardState.NO_PUBLISHER:
 		return "нет публикатора"
 	if state is CardState.PUBLISHER_PAUSED:
-		return "публикатор приостановлен"
+		return "приостановлен" if short else "публикатор приостановлен"
 	if state is CardState.PUBLISHER_INCAPABLE:
-		return "публикатор без прав"
+		return "без прав" if short else "публикатор без прав"
 	if state is CardState.DISABLED:
 		return "выключено"
 	return None
@@ -114,11 +120,16 @@ def header_state_text(community: CommunityDto, counts: QueueCounts) -> tuple[Car
 def state_badge(parent: QWidget, state: CardState, text: str) -> InfoBadge:
 	"""Плашка состояния — штатный ``InfoBadge`` пресетом уровня.
 
-	Ошибки — ``ERROR`` (красная), выключено — ``INFOAMTION`` (серая),
-	нет публикатора и штатное «активен» — ``ATTENTION`` (акцент темы).
+	Смысл уровней: акцент (``ATTENTION``) — только штатное состояние
+	в шапке страницы («активен»); всё, что мешает публиковать, —
+	``WARNING``; ошибки — ``ERROR``; выключено — серая ``INFOAMTION``.
+	Акцент на проблеме читался бы как «всё хорошо».
 	"""
 	levels = {
 		CardState.ERRORS: InfoLevel.ERROR,
+		CardState.NO_PUBLISHER: InfoLevel.WARNING,
+		CardState.PUBLISHER_PAUSED: InfoLevel.WARNING,
+		CardState.PUBLISHER_INCAPABLE: InfoLevel.WARNING,
 		CardState.DISABLED: InfoLevel.INFOAMTION,
 	}
 	badge = InfoBadge(text, parent, levels.get(state, InfoLevel.ATTENTION))
@@ -132,7 +143,12 @@ class CardAction(StrEnum):
 	PUBLISH = "publish"  # «Публикация» с этим сообществом
 	SCHEDULE = "schedule"  # «Публикация» → «Отложено» с фильтром по сообществу
 	QUEUE = "queue"  # «Публикация» → «Очередь» с фильтром по сообществу
+	# очередь этого сообщества с фильтром «ошибки»: кнопка проблемы
+	QUEUE_ERRORS = "queue_errors"
 	ASSIGN_PUBLISHER = "assign_publisher"  # диалог «Участники…»
+	# возобновить приостановленного публикатора — та же операция,
+	# что кнопкой на странице аккаунта (ADR-0029)
+	RESUME_PUBLISHER = "resume_publisher"
 	ENABLE = "enable"  # включить сообщество
 	TASKS = "tasks"  # окно задач сообщества (ADR-0038)
 
@@ -142,34 +158,71 @@ ACTION_LABELS: dict[CardAction, str] = {
 	CardAction.PUBLISH: "Опубликовать",
 	CardAction.SCHEDULE: "Отложено",
 	CardAction.QUEUE: "Очередь",
+	CardAction.QUEUE_ERRORS: "Ошибки в очереди",
 	CardAction.ASSIGN_PUBLISHER: "Назначить публикатора",
+	CardAction.RESUME_PUBLISHER: "Возобновить публикатора",
 	CardAction.ENABLE: "Включить",
 	CardAction.TASKS: "Задачи",
 }
+
+#: Предел длины имени в подписи «Возобновить «…»» (макет: кнопка
+#: шире прочих, но имя в ней не бесконечное).
+PUBLISHER_LABEL_LIMIT = 24
+
+
+def short_label(text: str) -> str:
+	"""Имя не длиннее предела; дальше — многоточие строкой."""
+	if len(text) <= PUBLISHER_LABEL_LIMIT:
+		return text
+	return text[: PUBLISHER_LABEL_LIMIT - 1].rstrip() + "…"
+
+
+def publisher_label(community: CommunityDto) -> str | None:
+	"""Имя назначенного публикатора (userbot или бот); None — не назначен."""
+	return community.default_account_label or community.default_bot_label
+
+
+def action_label(action: CardAction, community: CommunityDto) -> str:
+	"""Подпись действия: у «Возобновить» в ней имя публикатора.
+
+	Имя нужно, чтобы человек видел, кого возвращает в работу, — тот же
+	исполнитель виден на его странице. Публикатор не назначен (такое
+	бывает, когда на паузе кто-то из пула, а умолчания нет) — подпись
+	остаётся общей.
+	"""
+	if action is CardAction.RESUME_PUBLISHER:
+		name = publisher_label(community)
+		if name:
+			return f"Возобновить «{short_label(name)}»"
+	return ACTION_LABELS[action]
 
 
 def card_actions(community: CommunityDto, counts: QueueCounts) -> tuple[CardAction, ...]:
 	"""Набор действий карточки по её состоянию.
 
+	Правило одно: **у каждой проблемы своя первая кнопка** — та, что
+	эту проблему и решает (``screens/communities.md``, раздел 6.2).
 	Порядок проверок — от самого ограничивающего состояния: выключенному
-	сначала нужно включиться, сообществу без публикатора — публикатор
-	(остальные действия без него бессмысленны); у группы вместо
-	«Отложено» — «Задачи» (уборка нужна именно группам);
-	непустая очередь заслуживает кнопки «Очередь» вместо «Отложено».
+	сначала нужно включиться, дальше идут ошибки, потом публикатор.
+	Тому, кто публиковать не может, «Опубликовать» не предлагается
+	вовсе. У группы вместо «Отложено» — «Задачи» (уборка нужна именно
+	группам); непустая очередь заслуживает кнопки «Очередь».
 	"""
 	state = card_state(community, counts)
 	if state is CardState.DISABLED:
-		return (CardAction.ENABLE, CardAction.TASKS)
-	if state is CardState.NO_PUBLISHER:
+		# «Задачи» выключенному не предлагаются: они доступны с его страницы
+		return (CardAction.ENABLE,)
+	if state is CardState.ERRORS:
+		return (CardAction.QUEUE_ERRORS, CardAction.PUBLISH)
+	if state in (CardState.NO_PUBLISHER, CardState.PUBLISHER_INCAPABLE):
+		# прав лишили или публикатора нет — обоим нужен публикатор
 		return (CardAction.ASSIGN_PUBLISHER,)
 	if state is CardState.PUBLISHER_PAUSED:
-		# действие живёт в разделе «Пользователи и боты» — возобновить
-		# аккаунт или бота; с карточки сообщества ничего не предлагается,
-		# чтобы не звать назначать нового публикатора вместо возврата прежнего
-		return ()
+		# назначать нового незачем: прежний есть, его нужно возобновить
+		return (CardAction.RESUME_PUBLISHER,)
 	if community.kind is CommunityKind.GROUP:
 		return (CardAction.PUBLISH, CardAction.TASKS)
-	if counts.planned + counts.errors > 0:
+	if counts.planned > 0:
 		return (CardAction.PUBLISH, CardAction.QUEUE)
 	return (CardAction.PUBLISH, CardAction.SCHEDULE)
 
@@ -184,6 +237,18 @@ def action_available(action: CardAction, community: CommunityDto) -> bool:
 	if action is CardAction.TASKS:
 		return community.userbot_assigned
 	return True
+
+
+def cannot_publish(community: CommunityDto) -> bool:
+	"""Включено, но публиковать некем: нет публикатора, пауза или нет прав.
+
+	Одно правило на сводку дашборда и её фильтр: три состояния
+	(``NO_PUBLISHER``, ``PUBLISHER_PAUSED``, ``PUBLISHER_INCAPABLE``)
+	различаются причиной, а последствие у них общее — пост будет ждать.
+	Выключенное сюда не попадает: у него очередь и так не разбирается.
+	"""
+	caps = community.capabilities
+	return community.enabled and not caps.userbot and not caps.bot
 
 
 def audience_word(kind: CommunityKind, count: int) -> str:

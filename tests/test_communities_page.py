@@ -18,19 +18,22 @@ from pxcontrol.engine.telegram.rights import ExecutorRights, ParticipantStatus
 from pxcontrol.engine.telegram.types import CommunityKind, ExecutorRef, OwnerKind
 from pxcontrol.ui.pages.common import QueueCounts, bold_numbers, format_count, plural
 from pxcontrol.ui.pages.communities import (
+	AUTO_LIST_THRESHOLD,
+	VIEW_AUTO,
 	VIEW_LIST,
 	VIEW_TILES,
 	CommunityScope,
 	Row,
 	TableColumn,
+	effective_view,
 	grid_columns,
+	matches_problem,
 	matches_search,
 	metrics_text,
 	scope_kinds,
 	scope_texts,
 	sort_rows,
 	summary_counts,
-	view_from_setting,
 )
 from pxcontrol.ui.pages.community_page import (
 	TAB_MEMBERS,
@@ -44,7 +47,9 @@ from pxcontrol.ui.pages.community_state import (
 	CardAction,
 	CardState,
 	action_available,
+	action_label,
 	audience_word,
+	cannot_publish,
 	card_actions,
 	card_state,
 	community_group_title,
@@ -160,31 +165,60 @@ def test_state_badge_text_declines_errors() -> None:
 	assert state_badge_text(CardState.NORMAL, QueueCounts()) is None
 
 
+def test_state_badge_text_short_for_table() -> None:
+	"""В узкой колонке таблицы — короткий текст, остальные — как были."""
+	assert state_badge_text(CardState.PUBLISHER_PAUSED, QueueCounts(), short=True) == (
+		"приостановлен"
+	)
+	assert state_badge_text(CardState.PUBLISHER_INCAPABLE, QueueCounts(), short=True) == "без прав"
+	assert state_badge_text(CardState.NO_PUBLISHER, QueueCounts(), short=True) == "нет публикатора"
+	assert state_badge_text(CardState.ERRORS, QueueCounts(errors=2), short=True) == "2 ошибки"
+	assert state_badge_text(CardState.DISABLED, QueueCounts(), short=True) == "выключено"
+
+
 # --- набор действий -------------------------------------------------------------
 
 
 def test_card_actions_by_state() -> None:
+	"""У каждой проблемы своя первая кнопка; кто не может публиковать — без «Опубликовать»."""
 	assert card_actions(_community(), QueueCounts()) == (CardAction.PUBLISH, CardAction.SCHEDULE)
 	assert card_actions(_community(), QueueCounts(planned=5)) == (
 		CardAction.PUBLISH,
 		CardAction.QUEUE,
 	)
-	# ошибки — тоже непустая очередь: кнопка «Очередь» ведёт к ним
+	# ошибки — своя кнопка, и она первая
 	assert card_actions(_community(), QueueCounts(errors=2)) == (
+		CardAction.QUEUE_ERRORS,
 		CardAction.PUBLISH,
-		CardAction.QUEUE,
 	)
 	assert card_actions(_community(userbot=False), QueueCounts(planned=9)) == (
 		CardAction.ASSIGN_PUBLISHER,
 	)
-	assert card_actions(_community(enabled=False), QueueCounts(planned=9)) == (
-		CardAction.ENABLE,
-		CardAction.TASKS,
-	)
+	# выключенному предлагается только включиться: задачи — с его страницы
+	assert card_actions(_community(enabled=False), QueueCounts(planned=9)) == (CardAction.ENABLE,)
 	assert card_actions(_community(kind=CommunityKind.GROUP), QueueCounts(planned=1)) == (
 		CardAction.PUBLISH,
 		CardAction.TASKS,
 	)
+
+
+def test_action_label_names_paused_publisher() -> None:
+	"""Кнопка «Возобновить» зовёт публикатора по имени; длинное — с многоточием."""
+	from dataclasses import replace
+
+	community = _community()
+	assert action_label(CardAction.PUBLISH, community) == "Опубликовать"
+	assert action_label(CardAction.RESUME_PUBLISHER, community) == "Возобновить «аккаунт»"
+	long_name = replace(community, default_account_label="Основной публикатор проекта pX")
+	assert action_label(CardAction.RESUME_PUBLISHER, long_name) == (
+		"Возобновить «Основной публикатор про…»"
+	)
+	# бот, если userbot не назначен
+	bot_only = replace(community, default_account_label=None, default_bot_label="Публикатор")
+	assert action_label(CardAction.RESUME_PUBLISHER, bot_only) == "Возобновить «Публикатор»"
+	# публикатора нет вовсе — подпись общая
+	nobody = replace(community, default_account_label=None, default_bot_label=None)
+	assert action_label(CardAction.RESUME_PUBLISHER, nobody) == "Возобновить публикатора"
 
 
 def test_tasks_need_userbot() -> None:
@@ -263,11 +297,16 @@ def test_matches_search_by_title_and_username() -> None:
 	assert matches_search(_community(username=None), "@")
 
 
-def test_view_from_setting_falls_back_to_tiles() -> None:
-	assert view_from_setting(VIEW_LIST) == VIEW_LIST
-	assert view_from_setting(VIEW_TILES) == VIEW_TILES
-	assert view_from_setting("grid") == VIEW_TILES
-	assert view_from_setting("") == VIEW_TILES
+def test_effective_view_respects_choice_then_counts() -> None:
+	"""Выбор человека главнее числа; «авто» — плитка до порога, дальше список."""
+	assert effective_view(VIEW_LIST, 1) == VIEW_LIST
+	assert effective_view(VIEW_TILES, 500) == VIEW_TILES
+	assert effective_view(VIEW_AUTO, 0) == VIEW_TILES
+	assert effective_view(VIEW_AUTO, AUTO_LIST_THRESHOLD) == VIEW_TILES
+	assert effective_view(VIEW_AUTO, AUTO_LIST_THRESHOLD + 1) == VIEW_LIST
+	# незнакомое значение настройки читается как «авто»
+	assert effective_view("grid", 50) == VIEW_LIST
+	assert effective_view("", 3) == VIEW_TILES
 
 
 # --- сводка и сортировка таблицы ---------------------------------------------------
@@ -286,7 +325,23 @@ def test_summary_counts() -> None:
 	assert totals.enabled == 3
 	assert totals.total == 4
 	assert totals.errors == 2
-	assert totals.without_publisher == 1
+	assert totals.cannot_publish == 1
+
+
+def test_cannot_publish_counts_all_three_reasons() -> None:
+	"""Пауза и потеря прав считаются наравне с «публикатор не назначен»."""
+	from dataclasses import replace
+
+	assert not cannot_publish(_community())
+	assert cannot_publish(_community(userbot=False))
+	paused = replace(_community(), userbot_ready=False, publisher_paused=True)
+	incapable = replace(_community(), userbot_ready=False, publisher_incapable=True)
+	assert cannot_publish(paused) and cannot_publish(incapable)
+	assert all(matches_problem(c) for c in (paused, incapable))
+	# выключенное не в счёт: у него очередь и так не разбирается
+	assert not cannot_publish(replace(paused, enabled=False))
+	counts = {1: QueueCounts()}
+	assert summary_counts([paused, incapable, _community()], counts).cannot_publish == 2
 
 
 def test_summary_counts_ignores_queue_of_other_communities() -> None:
@@ -454,7 +509,7 @@ def test_card_state_publisher_paused_between_errors_and_no_publisher() -> None:
 	)
 	assert card_state(paused, QueueCounts()) is CardState.PUBLISHER_PAUSED
 	assert state_badge_text(CardState.PUBLISHER_PAUSED, QueueCounts()) == "публикатор приостановлен"
-	assert card_actions(paused, QueueCounts()) == ()
+	assert card_actions(paused, QueueCounts()) == (CardAction.RESUME_PUBLISHER,)
 	assert card_state(paused, QueueCounts(errors=1)) is CardState.ERRORS
 	# с активным ботом действующий публикатор есть — состояние штатное
 	with_bot = replace(_community(bot=True), default_account_paused=True, userbot_ready=False)

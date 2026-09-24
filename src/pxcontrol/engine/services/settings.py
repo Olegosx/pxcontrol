@@ -144,10 +144,12 @@ UI_FONT_SIZE: SettingKey[int] = SettingKey("ui_font_size", SettingScope.APP, 14,
 UI_NAV_COMPACT: SettingKey[bool] = SettingKey("ui_nav_compact", SettingScope.APP, False, bool)
 
 #: Вид дашборда «Каналы и группы»: ``"tiles"`` — сетка карточек,
-#: ``"list"`` — таблица. Положение переключателя в шапке страницы;
-#: незнакомое значение страница читает как плитку.
+#: ``"list"`` — таблица, ``"auto"`` (умолчание) — по числу сообществ
+#: в разделе. Явное значение пишется, когда человек нажал переключатель
+#: в шапке страницы, и дальше действует его выбор; незнакомое значение
+#: страница читает как ``"auto"``.
 UI_COMMUNITIES_VIEW: SettingKey[str] = SettingKey(
-	"ui_communities_view", SettingScope.APP, "tiles", str
+	"ui_communities_view", SettingScope.APP, "auto", str
 )
 
 

@@ -273,6 +273,7 @@ class MainWindow(FluentWindow):
 		self._communities_page.schedule_requested.connect(self._publish.show_scheduled)
 		self._communities_page.queue_requested.connect(self._publish.show_queue)
 		self._communities_page.queue_errors_requested.connect(self._publish.show_queue_errors)
+		self._communities_page.queue_errors_for.connect(self._publish.show_queue_errors_for)
 		self._video_page.publish_requested.connect(self._open_publish_with_video)
 		self._video_page.publish_files_requested.connect(self._publish.show_batch_files)
 		self._video_page.publish_folder_requested.connect(self._publish.show_batch_folder)

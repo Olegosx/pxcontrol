@@ -147,8 +147,12 @@ class PublishSection:
 		self.queue.show_filter(community_id, status)
 
 	def show_queue_errors(self) -> None:
-		"""Очередь с фильтром «ошибки» (плашка сводки дашборда)."""
+		"""Очередь с фильтром «ошибки» (ссылка сводки дашборда)."""
 		self.show_queue(None, QueueFilter.ERRORS)
+
+	def show_queue_errors_for(self, community_id: int) -> None:
+		"""Очередь с фильтром «ошибки» по одному сообществу (кнопка карточки)."""
+		self.show_queue(community_id, QueueFilter.ERRORS)
 
 	def show_scheduled(self, community_id: int | None = None) -> None:
 		"""Отложенные записи с фильтром по сообществу."""
