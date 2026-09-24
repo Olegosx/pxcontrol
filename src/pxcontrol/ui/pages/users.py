@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from functools import partial
 from typing import Any
 
@@ -367,6 +369,57 @@ _USERS = "users"
 _BOTS = "bots"
 
 
+class UserScope(StrEnum):
+	"""Раздел дашборда, выбранный в навигации (ADR-0041).
+
+	Как у сообществ: пункты «Пользователи» и «Боты» — не страницы,
+	а тот же дашборд с сужением.
+	"""
+
+	ALL = "all"  # оба раздела с заголовками
+	PEOPLE = "people"
+	BOTS = "bots"
+
+
+@dataclass(frozen=True)
+class ScopeTexts:
+	"""Шапка дашборда под выбранный раздел (см. :class:`UserScope`).
+
+	Attributes:
+		caption: надстрочник над заголовком («» — у раздела «все»).
+		title: заголовок страницы.
+		search_hint: подсказка в поле поиска.
+	"""
+
+	caption: str
+	title: str
+	search_hint: str
+
+
+#: Ключи разделов, которые показывает раздел навигации.
+_SCOPE_KEYS: dict[UserScope, tuple[str, ...]] = {
+	UserScope.ALL: (_USERS, _BOTS),
+	UserScope.PEOPLE: (_USERS,),
+	UserScope.BOTS: (_BOTS,),
+}
+
+_SCOPE_TEXTS: dict[UserScope, ScopeTexts] = {
+	UserScope.ALL: ScopeTexts("", "Пользователи и боты", "Поиск"),
+	UserScope.PEOPLE: ScopeTexts("Пользователи и боты", "Пользователи", "Поиск по пользователям"),
+	UserScope.BOTS: ScopeTexts("Пользователи и боты", "Боты", "Поиск по ботам"),
+}
+
+
+def scope_keys(scope: UserScope) -> tuple[str, ...]:
+	"""Ключи разделов, которые показывает раздел навигации."""
+	return _SCOPE_KEYS[scope]
+
+
+def scope_texts(scope: UserScope) -> ScopeTexts:
+	"""Надстрочник, заголовок и подсказка поиска для раздела."""
+	return _SCOPE_TEXTS[scope]
+
+
 class _SummaryBar:
 	"""Строка сводки: пользователи, боты, без входа, приостановлено — числа на месте."""
 
@@ -380,7 +433,8 @@ class _SummaryBar:
 		layout.addWidget(self._users)
 		self._users_tail = BodyLabel("", bar)
 		layout.addWidget(self._users_tail)
-		layout.addWidget(VerticalSeparator(bar))
+		self._kinds_separator = VerticalSeparator(bar)
+		layout.addWidget(self._kinds_separator)
 		self._bots = StrongBodyLabel("0", bar)
 		layout.addWidget(self._bots)
 		self._bots_tail = BodyLabel("", bar)
@@ -405,12 +459,26 @@ class _SummaryBar:
 		badge.setContentsMargins(8, 0, 8, 0)
 		return badge
 
-	def update(self, accounts: list[TgAccountDto], bots: list[BotDto]) -> None:
-		"""Показывает сводку по свежим спискам (без исполнителей — прячется)."""
+	def update(
+		self, accounts: list[TgAccountDto], bots: list[BotDto], scope: UserScope = UserScope.ALL
+	) -> None:
+		"""Показывает сводку по свежим спискам (без исполнителей — прячется).
+
+		Сводка — по разделу: в «Ботах» сегмент пользователей не рисуется,
+		иначе он утверждал бы, что пользователей ноль.
+		"""
 		if not accounts and not bots:
 			self.widget.hide()
 			return
+		keys = scope_keys(scope)
+		users_shown = _USERS in keys
+		bots_shown = _BOTS in keys
 		totals = users_summary(accounts, bots)
+		self._users.setVisible(users_shown)
+		self._users_tail.setVisible(users_shown)
+		self._kinds_separator.setVisible(users_shown and bots_shown)
+		self._bots.setVisible(bots_shown)
+		self._bots_tail.setVisible(bots_shown)
 		self._users.setText(str(totals.users))
 		self._users_tail.setText(
 			plural(totals.users, "пользователь", "пользователя", "пользователей")
@@ -448,6 +516,8 @@ class UsersPage(ScrollArea):
 		self._bots: list[BotDto] = []
 		self._api_key_set = True
 		self._query = ""
+		# раздел из навигации; между запусками не запоминается (ADR-0041)
+		self._scope = UserScope.ALL
 		self._activity: dict[ExecutorRef, OwnerActivityDto] = {}
 		self._empty: QWidget | None = None
 		self._empty_searched: bool | None = None
@@ -462,10 +532,15 @@ class UsersPage(ScrollArea):
 		layout = page_layout(self)
 		header = QHBoxLayout()
 		header.setSpacing(12)
-		header.addWidget(SubtitleLabel("Пользователи и боты", self))
+		column = QVBoxLayout()
+		column.setSpacing(2)  # макет
+		self._scope_caption = CaptionLabel(self)
+		column.addWidget(self._scope_caption)
+		self._title = SubtitleLabel(self)
+		column.addWidget(self._title)
+		header.addLayout(column)
 		header.addStretch()
 		self._search = SearchLineEdit(self)
-		self._search.setPlaceholderText("Поиск")
 		self._search.setFixedWidth(_SEARCH_WIDTH)
 		self._search.setToolTip("По имени, @имени, пометке и телефону, регистр не важен")
 		self._search.textChanged.connect(self._on_search_changed)
@@ -487,6 +562,28 @@ class UsersPage(ScrollArea):
 		layout.addLayout(self._sections)
 		self._stack: SectionStack[str] = SectionStack(self._sections, [_USERS, _BOTS])
 		layout.addStretch()
+		self._apply_scope_texts()
+
+	def _apply_scope_texts(self) -> None:
+		"""Заголовок, надстрочник и подсказка поиска — по текущему разделу."""
+		texts = scope_texts(self._scope)
+		self._scope_caption.setText(texts.caption)
+		self._scope_caption.setVisible(bool(texts.caption))
+		self._title.setText(texts.title)
+		self._search.setPlaceholderText(texts.search_hint)
+
+	def show_scope(self, scope: UserScope) -> None:
+		"""Показывает раздел, выбранный в навигации (ADR-0041).
+
+		Разделы собираются заново: у сужённого заголовка раздела нет,
+		а он задаётся при создании. Поиск сохраняется.
+		"""
+		if scope is self._scope:
+			return
+		self._scope = scope
+		self._apply_scope_texts()
+		self._stack.drop_all()
+		self._render()
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
 		"""Обновляет данные при каждом показе: состояние связи меняется само."""
@@ -578,10 +675,10 @@ class UsersPage(ScrollArea):
 		self._render_sections()
 
 	def _render(self) -> None:
-		self._summary.update(self._accounts, self._bots)
+		self._summary.update(self._scoped_accounts(), self._scoped_bots(), self._scope)
 		# подсказка о ключе — когда есть кому входить; без пользователей
 		# её несёт пустое состояние
-		show_hint = not self._api_key_set and bool(self._accounts)
+		show_hint = not self._api_key_set and bool(self._scoped_accounts())
 		self._api_hint.set_note(_NO_API_KEY_HINT if show_hint else "")
 		self._render_sections()
 
@@ -592,8 +689,8 @@ class UsersPage(ScrollArea):
 		карточка живёт, пока не сменился снимок её аккаунта; пустое
 		состояние заменяет разделы целиком.
 		"""
-		accounts = [a for a in self._accounts if matches_user_search(a, self._query)]
-		bots = [b for b in self._bots if matches_bot_search(b, self._query)]
+		accounts = [a for a in self._scoped_accounts() if matches_user_search(a, self._query)]
+		bots = [b for b in self._scoped_bots() if matches_bot_search(b, self._query)]
 		if not accounts and not bots:
 			self._stack.drop_all()
 			self._show_empty(searched=bool(self._accounts or self._bots))
@@ -626,8 +723,25 @@ class UsersPage(ScrollArea):
 		else:
 			self._stack.drop(_BOTS)
 
+	def _scoped_accounts(self) -> list[TgAccountDto]:
+		"""Пользователи текущего раздела (в разделе «Боты» — пусто)."""
+		return self._accounts if _USERS in scope_keys(self._scope) else []
+
+	def _scoped_bots(self) -> list[BotDto]:
+		"""Боты текущего раздела (в разделе «Пользователи» — пусто)."""
+		return self._bots if _BOTS in scope_keys(self._scope) else []
+
 	def _make_section(self, title: str, icon: FluentIcon) -> GridSection[Any]:
-		return GridSection(self, title, icon, min_width=CARD_MIN_WIDTH, spacing=GRID_SPACING)
+		"""Раздел карточек; в сужённом разделе заголовка нет — его роль
+		играет заголовок страницы."""
+		return GridSection(
+			self,
+			title,
+			icon,
+			min_width=CARD_MIN_WIDTH,
+			spacing=GRID_SPACING,
+			with_header=self._scope is UserScope.ALL,
+		)
 
 	def _make_user_card(self, account: TgAccountDto) -> QWidget:
 		card = UserCard(account, self._run_user_action, self._delete_user, self._rename_user, self)

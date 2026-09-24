@@ -20,11 +20,14 @@ from pxcontrol.ui.pages.common import QueueCounts, bold_numbers, format_count, p
 from pxcontrol.ui.pages.communities import (
 	VIEW_LIST,
 	VIEW_TILES,
+	CommunityScope,
 	Row,
 	TableColumn,
 	grid_columns,
 	matches_search,
 	metrics_text,
+	scope_kinds,
+	scope_texts,
 	sort_rows,
 	summary_counts,
 	view_from_setting,
@@ -283,6 +286,32 @@ def test_summary_counts() -> None:
 	assert totals.total == 4
 	assert totals.errors == 2
 	assert totals.without_publisher == 1
+
+
+def test_summary_counts_ignores_queue_of_other_communities() -> None:
+	"""Сводка раздела считает очередь только по своим сообществам."""
+	counts = {1: QueueCounts(planned=5, errors=2), 2: QueueCounts(planned=9)}
+	totals = summary_counts([_community(1)], counts)
+	assert totals.queued == 7
+	assert totals.errors == 2
+	assert totals.total == 1
+
+
+def test_scope_kinds() -> None:
+	"""Раздел «все» показывает оба вида, сужённый — только свой."""
+	assert scope_kinds(CommunityScope.ALL) == (CommunityKind.CHANNEL, CommunityKind.GROUP)
+	assert scope_kinds(CommunityScope.CHANNELS) == (CommunityKind.CHANNEL,)
+	assert scope_kinds(CommunityScope.GROUPS) == (CommunityKind.GROUP,)
+
+
+def test_scope_texts() -> None:
+	"""У «всех» надстрочника нет, у сужённого — название дашборда."""
+	assert scope_texts(CommunityScope.ALL).caption == ""
+	assert scope_texts(CommunityScope.ALL).title == "Каналы и группы"
+	channels = scope_texts(CommunityScope.CHANNELS)
+	assert (channels.caption, channels.title) == ("Каналы и группы", "Каналы")
+	assert channels.search_hint == "Поиск по каналам"
+	assert scope_texts(CommunityScope.GROUPS).title == "Группы"
 
 
 def _rows() -> list[Row]:

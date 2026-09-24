@@ -32,6 +32,7 @@ from pxcontrol.ui.pages.user_state import (
 	user_subtitle,
 	users_summary,
 )
+from pxcontrol.ui.pages.users import UserScope, scope_keys, scope_texts
 
 
 def _account(
@@ -316,3 +317,23 @@ def test_kind_rows_captions_and_memberships() -> None:
 	assert membership_caption(membership) == (
 		"Группа · админ · публикатор по умолчанию · выключено"
 	)
+
+
+# --- раздел дашборда из навигации (ADR-0041) ------------------------------------
+
+
+def test_scope_keys() -> None:
+	"""Раздел «все» показывает оба раздела карточек, сужённый — свой."""
+	assert scope_keys(UserScope.ALL) == ("users", "bots")
+	assert scope_keys(UserScope.PEOPLE) == ("users",)
+	assert scope_keys(UserScope.BOTS) == ("bots",)
+
+
+def test_scope_texts() -> None:
+	"""У «всех» надстрочника нет, у сужённого — название дашборда."""
+	assert scope_texts(UserScope.ALL).caption == ""
+	assert scope_texts(UserScope.ALL).title == "Пользователи и боты"
+	people = scope_texts(UserScope.PEOPLE)
+	assert (people.caption, people.title) == ("Пользователи и боты", "Пользователи")
+	assert people.search_hint == "Поиск по пользователям"
+	assert scope_texts(UserScope.BOTS).title == "Боты"

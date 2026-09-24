@@ -32,10 +32,15 @@ _K = TypeVar("_K", bound=Hashable)
 
 
 class Section(Protocol):
-	"""Раздел дашборда: заголовок и тело — два виджета в стопке."""
+	"""Раздел дашборда: заголовок и тело в стопке.
+
+	Заголовка может не быть: когда страница показывает один раздел,
+	выбранный в навигации, его заголовок повторял бы заголовок
+	страницы (``screens/communities.md``, раздел 2.1).
+	"""
 
 	@property
-	def header(self) -> QWidget: ...
+	def header(self) -> QWidget | None: ...
 
 	@property
 	def body(self) -> QWidget: ...
@@ -79,16 +84,18 @@ class GridSection(Generic[_T]):
 		*,
 		min_width: int,
 		spacing: int,
+		with_header: bool = True,
 	) -> None:
-		self._header = SectionHeader(page, title, icon)
+		"""``with_header`` — рисовать ли заголовок раздела (см. :class:`Section`)."""
+		self._header = SectionHeader(page, title, icon) if with_header else None
 		self._grid = FlowGrid([], page, min_width=min_width, spacing=spacing)
 		self._cards: dict[Hashable, QWidget] = {}
 		self._signatures: dict[Hashable, tuple[Any, ...]] = {}
 
 	@property
-	def header(self) -> QWidget:
-		"""Заголовок раздела (виджет для стопки)."""
-		return self._header.widget
+	def header(self) -> QWidget | None:
+		"""Заголовок раздела (None — раздел показывается без заголовка)."""
+		return self._header.widget if self._header is not None else None
 
 	@property
 	def body(self) -> QWidget:
@@ -128,7 +135,8 @@ class GridSection(Generic[_T]):
 			self._cards[item_key] = make(by_key[item_key])
 		self._signatures = {key(item): signature(item) for item in items}
 		self._grid.set_cards([self._cards[item_key] for item_key in plan.order])
-		self._header.set_count(len(items))
+		if self._header is not None:
+			self._header.set_count(len(items))
 
 	def _drop(self, item_key: Hashable) -> None:
 		card = self._cards.pop(item_key, None)
@@ -161,10 +169,15 @@ class SectionStack(Generic[_K]):
 			return section
 		section = factory()
 		self._sections[key] = section
-		# место — после разделов, стоящих раньше в порядке и уже показанных
-		ahead = sum(1 for other in self._order[: self._order.index(key)] if other in self._sections)
-		self._layout.insertWidget(2 * ahead, section.header)
-		self._layout.insertWidget(2 * ahead + 1, section.body)
+		# место — после виджетов разделов, стоящих раньше в порядке
+		# и уже показанных (у раздела их один или два — см. Section)
+		ahead = sum(
+			len(_widgets(self._sections[other]))
+			for other in self._order[: self._order.index(key)]
+			if other in self._sections
+		)
+		for offset, widget in enumerate(_widgets(section)):
+			self._layout.insertWidget(ahead + offset, widget)
 		return section
 
 	def drop(self, key: _K) -> None:
@@ -172,7 +185,7 @@ class SectionStack(Generic[_K]):
 		section = self._sections.pop(key, None)
 		if section is None:
 			return
-		for widget in (section.header, section.body):
+		for widget in _widgets(section):
 			self._layout.removeWidget(widget)
 			widget.setParent(None)
 			widget.deleteLater()
@@ -184,3 +197,8 @@ class SectionStack(Generic[_K]):
 
 	def __contains__(self, key: object) -> bool:
 		return key in self._sections
+
+
+def _widgets(section: Section) -> list[QWidget]:
+	"""Виджеты раздела в порядке показа: заголовок (если есть) и тело."""
+	return [widget for widget in (section.header, section.body) if widget is not None]

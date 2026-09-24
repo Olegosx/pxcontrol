@@ -124,6 +124,60 @@ logger = logging.getLogger(__name__)
 VIEW_TILES = "tiles"
 VIEW_LIST = "list"
 
+
+class CommunityScope(StrEnum):
+	"""Раздел дашборда, выбранный в навигации (ADR-0041).
+
+	Дашборд один на все сообщества, а пункты «Каналы» и «Группы»
+	в навигации показывают его же с сужением: ни своей страницы,
+	ни своего состояния у них нет.
+	"""
+
+	ALL = "all"  # оба раздела с заголовками
+	CHANNELS = "channels"
+	GROUPS = "groups"
+
+
+@dataclass(frozen=True)
+class ScopeTexts:
+	"""Шапка дашборда под выбранный раздел.
+
+	Attributes:
+		caption: надстрочник над заголовком («» — раздел «все»,
+			надстрочник не нужен: заголовок и так полный).
+		title: заголовок страницы.
+		search_hint: подсказка в поле поиска.
+	"""
+
+	caption: str
+	title: str
+	search_hint: str
+
+
+#: Виды сообществ, которые показывает раздел (порядок — как на странице).
+_SCOPE_KINDS: dict[CommunityScope, tuple[CommunityKind, ...]] = {
+	CommunityScope.ALL: (CommunityKind.CHANNEL, CommunityKind.GROUP),
+	CommunityScope.CHANNELS: (CommunityKind.CHANNEL,),
+	CommunityScope.GROUPS: (CommunityKind.GROUP,),
+}
+
+_SCOPE_TEXTS: dict[CommunityScope, ScopeTexts] = {
+	CommunityScope.ALL: ScopeTexts("", "Каналы и группы", "Поиск"),
+	CommunityScope.CHANNELS: ScopeTexts("Каналы и группы", "Каналы", "Поиск по каналам"),
+	CommunityScope.GROUPS: ScopeTexts("Каналы и группы", "Группы", "Поиск по группам"),
+}
+
+
+def scope_kinds(scope: CommunityScope) -> tuple[CommunityKind, ...]:
+	"""Виды сообществ раздела: у «всех» — оба, у остальных — свой."""
+	return _SCOPE_KINDS[scope]
+
+
+def scope_texts(scope: CommunityScope) -> ScopeTexts:
+	"""Надстрочник, заголовок и подсказка поиска для раздела."""
+	return _SCOPE_TEXTS[scope]
+
+
 #: Сетка карточек: минимальная ширина карточки и интервал (пиксели).
 #: Число колонок — сколько таких карточек помещается в ширину области;
 #: колонки растягиваются, поэтому пустого поля справа нет.
@@ -244,12 +298,19 @@ class SummaryCounts:
 def summary_counts(
 	communities: list[CommunityDto], counts: dict[int, QueueCounts]
 ) -> SummaryCounts:
-	"""Считает строку сводки (фильтр поиска на неё не влияет)."""
+	"""Считает строку сводки по переданным сообществам.
+
+	Поиск на сводку не влияет, а раздел влияет: в «Каналах» сводка
+	говорит о каналах (``screens/communities.md``, раздел 2.1).
+	Поэтому очередь складывается не по всему кэшу наблюдателя,
+	а по сообществам этого списка.
+	"""
+	mine = [counts.get(community.id, QueueCounts()) for community in communities]
 	return SummaryCounts(
-		queued=sum(item.planned + item.errors for item in counts.values()),
+		queued=sum(item.planned + item.errors for item in mine),
 		enabled=sum(1 for c in communities if c.enabled),
 		total=len(communities),
-		errors=sum(item.errors for item in counts.values()),
+		errors=sum(item.errors for item in mine),
 		without_publisher=sum(
 			1 for c in communities if not c.capabilities.userbot and not c.capabilities.bot
 		),
@@ -797,21 +858,22 @@ class _TableSection:
 		on_sort: Callable[[TableColumn], None],
 		on_open: Callable[[int], None],
 		on_action: Callable[[CardAction, CommunityDto], None],
+		with_header: bool = True,
 	) -> None:
 		self._page = page
 		self._kind = kind
 		self._on_sort = on_sort
 		self._on_open = on_open
 		self._on_action = on_action
-		self._header = SectionHeader(page, title, icon)
+		self._header = SectionHeader(page, title, icon) if with_header else None
 		self._body = QWidget(page)
 		self._box = QVBoxLayout(self._body)
 		self._box.setContentsMargins(0, 0, 0, 0)
 		self._signature: tuple[Any, ...] | None = None
 
 	@property
-	def header(self) -> QWidget:
-		return self._header.widget
+	def header(self) -> QWidget | None:
+		return self._header.widget if self._header is not None else None
 
 	@property
 	def body(self) -> QWidget:
@@ -819,7 +881,8 @@ class _TableSection:
 
 	def sync(self, rows: list[Row], sort: tuple[TableColumn, bool]) -> None:
 		"""Пересобирает таблицу, только если строки или сортировка изменились."""
-		self._header.set_count(len(rows))
+		if self._header is not None:
+			self._header.set_count(len(rows))
 		signature = (tuple(row_signature(row) for row in rows), sort)
 		if signature == self._signature:
 			return
@@ -934,6 +997,8 @@ class CommunitiesPage(ScrollArea):
 		self._show_error = error_reporter(self)
 		self._communities: list[CommunityDto] = []
 		self._loaded = False  # список сообществ уже прочитан хоть раз
+		# раздел из навигации; между запусками не запоминается (ADR-0041)
+		self._scope = CommunityScope.ALL
 		self._queue_counts: dict[int, QueueCounts] = {}
 		self._stats_cache: dict[int, CommunityStatsDto] = {}
 		self._view = VIEW_TILES
@@ -961,10 +1026,15 @@ class CommunitiesPage(ScrollArea):
 		layout = page_layout(self)
 		header = QHBoxLayout()
 		header.setSpacing(12)
-		header.addWidget(SubtitleLabel("Каналы и группы", self))
+		column = QVBoxLayout()
+		column.setSpacing(2)  # макет
+		self._scope_caption = CaptionLabel(self)
+		column.addWidget(self._scope_caption)
+		self._title = SubtitleLabel(self)
+		column.addWidget(self._title)
+		header.addLayout(column)
 		header.addStretch()
 		self._search = SearchLineEdit(self)
-		self._search.setPlaceholderText("Поиск")
 		self._search.setFixedWidth(_SEARCH_WIDTH)
 		self._search.setToolTip("По названию и @имени, регистр не важен")
 		self._search.textChanged.connect(self._on_search_changed)
@@ -992,6 +1062,30 @@ class CommunitiesPage(ScrollArea):
 			self._sections, [kind for kind, _title, _icon in _SECTIONS]
 		)
 		layout.addStretch()
+		self._apply_scope_texts()
+
+	def _apply_scope_texts(self) -> None:
+		"""Заголовок, надстрочник и подсказка поиска — по текущему разделу."""
+		texts = scope_texts(self._scope)
+		self._scope_caption.setText(texts.caption)
+		self._scope_caption.setVisible(bool(texts.caption))
+		self._title.setText(texts.title)
+		self._search.setPlaceholderText(texts.search_hint)
+
+	def show_scope(self, scope: CommunityScope) -> None:
+		"""Показывает раздел, выбранный в навигации (ADR-0041).
+
+		Разделы собираются заново: у одного вида заголовка раздела нет,
+		а он задаётся при создании. Поиск сохраняется — он про то же,
+		что человек искал, только в более узком месте.
+		"""
+		if scope is self._scope:
+			return
+		self._scope = scope
+		self._apply_scope_texts()
+		self._stack.drop_all()
+		if self._loaded:
+			self._render()
 
 	def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 — API Qt
 		"""Обновляет данные при каждом показе: страница возвратная
@@ -1091,18 +1185,23 @@ class CommunitiesPage(ScrollArea):
 
 	def _render(self) -> None:
 		"""Приводит сводку и разделы к данным — по отпечаткам, а не с нуля."""
-		self._summary.update(self._communities, self._queue_counts)
+		self._summary.update(self._scoped(), self._queue_counts)
 		self._render_sections()
 
+	def _scoped(self) -> list[CommunityDto]:
+		"""Сообщества текущего раздела (поиск на это не влияет)."""
+		kinds = scope_kinds(self._scope)
+		return [community for community in self._communities if community.kind in kinds]
+
 	def _rows(self) -> list[Row]:
-		"""Строки показа по текущему поиску (сводку поиск не трогает)."""
+		"""Строки показа по текущему разделу и поиску (сводку поиск не трогает)."""
 		return [
 			Row(
 				community,
 				self._queue_counts.get(community.id, QueueCounts()),
 				self._stats_cache.get(community.id),
 			)
-			for community in self._communities
+			for community in self._scoped()
 			if matches_search(community, self._query)
 		]
 
@@ -1119,7 +1218,11 @@ class CommunitiesPage(ScrollArea):
 			self._show_empty(searched=bool(self._communities))
 			return
 		self._hide_empty()
+		kinds = scope_kinds(self._scope)
 		for kind, title, icon in _SECTIONS:
+			if kind not in kinds:
+				self._stack.drop(kind)
+				continue
 			section_rows = [row for row in rows if row.community.kind is kind]
 			if not section_rows:
 				self._stack.drop(kind)
@@ -1136,7 +1239,12 @@ class CommunitiesPage(ScrollArea):
 				)
 
 	def _make_section(self, kind: CommunityKind, title: str, icon: FluentIcon) -> Section:
-		"""Раздел под текущий вид: сетка карточек или таблица."""
+		"""Раздел под текущий вид: сетка карточек или таблица.
+
+		В сужённом разделе заголовка нет: его роль играет заголовок
+		страницы (``screens/communities.md``, раздел 2.1).
+		"""
+		with_header = self._scope is CommunityScope.ALL
 		if self._view == VIEW_LIST:
 			return _TableSection(
 				self,
@@ -1146,8 +1254,16 @@ class CommunitiesPage(ScrollArea):
 				on_sort=self._on_sort,
 				on_open=self.open_community.emit,
 				on_action=self._run_action,
+				with_header=with_header,
 			)
-		return GridSection(self, title, icon, min_width=CARD_MIN_WIDTH, spacing=GRID_SPACING)
+		return GridSection(
+			self,
+			title,
+			icon,
+			min_width=CARD_MIN_WIDTH,
+			spacing=GRID_SPACING,
+			with_header=with_header,
+		)
 
 	def _make_card(self, row: Row) -> QWidget:
 		"""Карточка сообщества; клик мимо кнопок открывает его страницу."""
