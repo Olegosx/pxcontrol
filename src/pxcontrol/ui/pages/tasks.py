@@ -1,30 +1,49 @@
-"""Задачи сообщества: разделы по видам, запуск, ход работы, журнал (ADR-0038).
+"""Задачи сообщества: обзор карточками и настройка одной задачи (ADR-0038).
 
 Вкладка «Задачи» страницы сообщества и содержимое рабочего окна
-с дашборда. Разделы-сегменты — по одному на вид задачи: **служебные
-записи** («такой-то вступил», «сообщение закреплено») и **удалённые
-аккаунты** — мёртвые души в списке участников. У каждого раздела свои
-параметры, свой итог и своя кнопка «Журнал…» — запуски этой задачи
-в этом сообществе.
+с дашборда. Два вида (спека ``screens/tasks.md``):
 
-Ручной запуск идёт по одному правилу: сначала «Просмотреть» — он
-ничего не меняет и отвечает числами, — и только потом удаление
+- **обзор** — карточка на каждую доступную задачу: что она делает,
+  расписание, итог последнего запуска и тумблер «по расписанию».
+  Карточка кликабельна целиком;
+- **настройка одной задачи** — строка пути, шапка с двумя запусками
+  («без изменений» и настоящий), блоки параметров формой
+  «подпись — поле», расписание, одна кнопка «Сохранить» на всё
+  и три последних запуска таблицей.
+
+Ручной запуск идёт по одному правилу: сначала «без изменений» — он
+ничего не меняет и отвечает числами, — и только потом настоящий
 с подтверждением. Порядок не для удобства: удаление необратимо.
 
-Ход работы виден панелью очереди (той же, что на «Публикации»
-и «Видео»): прогресс, отмена, повтор после ошибки.
+Ход работы виден там, где задача живёт: полосой на её карточке
+в обзоре и полосой с «Отменить» в её настройке; общей панели очереди
+больше нет.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from functools import partial
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import (
+	QAbstractTableModel,
+	QModelIndex,
+	QObject,
+	QPersistentModelIndex,
+	QSortFilterProxyModel,
+	Qt,
+	Signal,
+)
 from PySide6.QtWidgets import (
 	QAbstractItemView,
+	QGridLayout,
 	QHBoxLayout,
 	QHeaderView,
+	QSizePolicy,
 	QStackedWidget,
 	QTableWidgetItem,
 	QVBoxLayout,
@@ -32,16 +51,28 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
 	BodyLabel,
+	BreadcrumbBar,
 	CaptionLabel,
+	CardWidget,
 	CheckBox,
 	ComboBox,
 	DoubleSpinBox,
+	HorizontalSeparator,
+	InfoBadge,
+	InfoBar,
+	InfoBarPosition,
 	LineEdit,
+	MessageBox,
+	PrimaryPushButton,
+	ProgressBar,
 	PushButton,
-	SegmentedWidget,
+	SearchLineEdit,
+	SimpleCardWidget,
 	SpinBox,
 	StrongBodyLabel,
+	SubtitleLabel,
 	SwitchButton,
+	TableView,
 	TableWidget,
 	TextEdit,
 )
@@ -53,12 +84,9 @@ from pxcontrol.engine.services.tasks import TaskDto, TaskJobDto, TaskRunDto
 from pxcontrol.engine.tasks import (
 	DeletedAccountsParams,
 	JoinRequestsParams,
-	JoinRequestsReport,
-	MembersReport,
 	ReactionChoice,
 	ReactionScope,
 	ReactionsParams,
-	ReactionsReport,
 	RunOutcome,
 	ServiceMessagesParams,
 	ServiceReport,
@@ -81,7 +109,6 @@ from pxcontrol.engine.telegram.types import (
 	ChatReactions,
 	CommunityKind,
 	ExecutorRef,
-	OwnerKind,
 	ReactionOption,
 	ServiceMessageKind,
 )
@@ -89,16 +116,29 @@ from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
 from pxcontrol.ui.pages.common import (
 	ErrorLabel,
+	FlowGrid,
 	WorkDialog,
 	clear_layout,
 	confirm_delete,
+	elide_text,
 	error_reporter,
 	exec_dialog,
+	font_px,
 	format_local,
-	list_area,
+	list_button,
+	noop,
+	section_header,
+	status_caption,
 )
-from pxcontrol.ui.pages.queue_panel import QueuePanel
-from pxcontrol.ui.queue_watcher import QueueWatcher
+from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher
+
+#: Индекс модели, как его отдаёт Qt (временный или постоянный).
+_Index = QModelIndex | QPersistentModelIndex
+
+#: Что спросить, уходя с настройки с несохранёнными правками.
+SAVE_ON_LEAVE_HINT = (
+	"В настройке задачи остались несохранённые изменения. Сохранить их перед уходом?"
+)
 
 #: Почему защищённые записи не предлагаются к удалению.
 _PROTECTED_HINT = (
@@ -121,10 +161,13 @@ TRIGGER_WORDS: dict[TaskTrigger, str] = {
 	TaskTrigger.SCHEDULE: "по расписанию",
 }
 
-#: Сколько запусков читать в журнал за раз.
+#: Сколько запусков читать в окно журнала за раз.
 RUNS_SHOWN = 100
 
-#: Названия видов задач по-русски (заголовки сегментов и журнала).
+#: Сколько последних запусков показывать в настройке задачи (макет).
+RUNS_IN_DETAIL = 3
+
+#: Названия видов задач по-русски (карточки, заголовки, журнал).
 KIND_TITLES: dict[TaskKind, str] = {
 	TaskKind.SERVICE_MESSAGES: service_messages.TITLE.noun,
 	TaskKind.DELETED_ACCOUNTS: deleted_accounts.TITLE.noun,
@@ -133,34 +176,264 @@ KIND_TITLES: dict[TaskKind, str] = {
 }
 
 
-def reactor_label(executor: ExecutorDto) -> str:
-	"""Подпись пользователя в списке реагирующих: имя и состояние."""
-	notes = []
-	if executor.paused:
-		notes.append("приостановлен")
-	if not executor.status.in_community:
-		notes.append("не состоит")
-	return f"{executor.label} ({', '.join(notes)})" if notes else executor.label
+@dataclass(frozen=True)
+class TaskTexts:
+	"""Тексты задачи в интерфейсе (спека ``tasks.md``, раздел 9).
 
+	Attributes:
+		card: суть одной строкой — на карточке обзора.
+		detail: суть в настройке, с пояснением «почему так».
+		dry_run: подпись запуска без изменений.
+		run: подпись настоящего запуска.
+		status: строка состояния во время настоящего запуска.
+	"""
+
+	card: str
+	detail: str
+	dry_run: str
+	run: str
+	status: str
+
+
+TASK_TEXTS: dict[TaskKind, TaskTexts] = {
+	TaskKind.SERVICE_MESSAGES: TaskTexts(
+		card="Удаляет «вступил», «закрепил», смену оформления",
+		detail=(
+			"Удаляет служебные сообщения Telegram. Историю приходится читать "
+			"целиком: поиска «только служебные» у Telegram нет."
+		),
+		dry_run="Просмотреть",
+		run="Удалить отмеченное",
+		status="Чистка идёт…",
+	),
+	TaskKind.DELETED_ACCOUNTS: TaskTexts(
+		card="Находит мёртвые души и исключает порциями",
+		detail=("Находит в списке участников удалённые аккаунты и исключает их порциями."),
+		dry_run="Найти",
+		run="Исключить найденные",
+		status="Чистка идёт…",
+	),
+	TaskKind.REACTIONS: TaskTexts(
+		card="Пользователи пула ставят реакции по кругу",
+		detail=(
+			"Пользователи пула ставят реакции записям по кругу — по одному пользователю за запуск."
+		),
+		dry_run="Подобрать записи",
+		run="Провести проход",
+		status="Проход идёт…",
+	),
+	TaskKind.JOIN_REQUESTS: TaskTexts(
+		card="Одобряет заявки на вступление по правилам",
+		detail=(
+			"Разбирает заявки на вступление: принимает, ограничивает или отклоняет по правилам."
+		),
+		dry_run="Посмотреть заявки",
+		run="Разобрать заявки",
+		status="Приём идёт…",
+	),
+}
 
 #: Виды расписания в порядке показа и их подписи в выпадающем списке.
 SCHEDULE_KINDS: tuple[tuple[ScheduleKind, str], ...] = (
 	(ScheduleKind.NONE, "Только по требованию"),
-	(ScheduleKind.INTERVAL, "С интервалом (минуты, случайно в промежутке)"),
-	(ScheduleKind.DAILY, "В моменты суток (ЧЧ:ММ через запятую)"),
+	(ScheduleKind.INTERVAL, "С интервалом"),
+	(ScheduleKind.DAILY, "В моменты суток"),
+)
+
+#: Размеры по макету (пиксели).
+_CARD_MIN_WIDTH = 340  # карточка обзора в сетке
+_CARD_SPACING = 10
+_REACTION_MIN_WIDTH = 150  # плитка реакции — ширина постоянная
+_LABEL_COLUMN = 220  # колонка подписей формы
+_NUMBER_WIDTH = 110  # поле числа
+_RANGE_WIDTH = 96  # поле числа в диапазоне «от — до»
+_COMBO_MAX_WIDTH = 300
+_TIMES_WIDTH = 220
+_SEARCH_WIDTH = 220
+_EMOJI_WIDTH = 24
+_WEIGHT_WIDTH = 84
+_TABLE_ROW_HEIGHT = 34
+_REACTOR_ROW_HEIGHT = 40
+_REACTOR_ROWS_SHOWN = 6
+_CHECK_COLUMN_WIDTH = 36
+_TABLE_FONT_PX = 13
+_RUNS_COLUMN_WIDTHS = (120, 180, 130)
+
+
+class TaskFixTarget(StrEnum):
+	"""Куда вести человека чинить ошибку запуска."""
+
+	MEMBERS = "members"  # вкладка «Участники»: пул и права
+
+
+class ReactorFilter(StrEnum):
+	"""Отбор в таблице «Кто ставит»."""
+
+	ALL = "all"
+	CHECKED = "checked"
+	CAPABLE = "capable"
+
+
+#: Подписи отбора в выпадающем списке.
+REACTOR_FILTERS: tuple[tuple[ReactorFilter, str], ...] = (
+	(ReactorFilter.ALL, "Все"),
+	(ReactorFilter.CHECKED, "Отмеченные"),
+	(ReactorFilter.CAPABLE, "Могут ставить"),
 )
 
 
-def next_run_text(task: TaskDto) -> str:
-	"""Строка о расписании под формой: что задано и когда следующий запуск."""
-	text = schedule_text(task.schedule)
-	if task.schedule.kind is ScheduleKind.NONE:
-		return f"Расписание: {text}"
+# --- правила показа (чистые функции) -----------------------------------------
+
+
+def available_kinds(kind: CommunityKind) -> tuple[TaskKind, ...]:
+	"""Какие задачи доступны сообществу этого вида.
+
+	«Удалённые аккаунты» — только у групп: список участников канала
+	Telegram отдаёт иначе, а исключать оттуда мёртвые души незачем.
+	Остальные три работают у обоих видов; в канале «Приём заявок»
+	принимает заявки как есть — ограничивать права там нечем.
+	"""
+	if kind is CommunityKind.GROUP:
+		return (
+			TaskKind.SERVICE_MESSAGES,
+			TaskKind.DELETED_ACCOUNTS,
+			TaskKind.REACTIONS,
+			TaskKind.JOIN_REQUESTS,
+		)
+	return (TaskKind.SERVICE_MESSAGES, TaskKind.REACTIONS, TaskKind.JOIN_REQUESTS)
+
+
+def when_text(moment: datetime, now: datetime | None = None) -> str:
+	"""Момент по-человечески: «сегодня 04:00», «вчера 18:10», «12.09 07:30»."""
+	local = moment.astimezone()
+	today = (now or datetime.now(UTC)).astimezone().date()
+	if local.date() == today:
+		return f"сегодня {local:%H:%M}"
+	if local.date() == today - timedelta(days=1):
+		return f"вчера {local:%H:%M}"
+	return f"{local:%d.%m %H:%M}"
+
+
+def schedule_caption(task: TaskDto) -> str:
+	"""Строка расписания на карточке: что задано и когда следующий запуск.
+
+	Следующий запуск называется только при включённом расписании:
+	у выключенного он не назначен, и обещать время было бы неправдой.
+	"""
+	schedule = task.schedule
+	if schedule.kind is ScheduleKind.NONE:
+		return "по требованию"
+	if schedule.kind is ScheduleKind.DAILY:
+		text = "каждый день в " + ", ".join(schedule.times)
+	elif schedule.min_minutes == schedule.max_minutes:
+		text = f"каждые {schedule.min_minutes} мин"
+	else:
+		text = f"каждые {schedule.min_minutes}–{schedule.max_minutes} мин"
 	if not task.enabled:
-		return f"Расписание выключено ({text})"
+		return f"{text} · выключено"
 	if task.next_run_at is None:
-		return f"Расписание: {text} — следующий запуск не назначен"
-	return f"Расписание: {text} — следующий запуск {format_local(task.next_run_at)}"
+		return text
+	return f"{text} · следующий в {task.next_run_at.astimezone():%H:%M}"
+
+
+def last_run_caption(run: TaskRunDto | None, now: datetime | None = None) -> str:
+	"""Строка итога на карточке: когда был последний запуск и чем кончился."""
+	if run is None:
+		return "ещё не запускалась"
+	when = when_text(run.started_at, now)
+	if run.outcome is RunOutcome.ERROR:
+		return f"{when} · {run.error or OUTCOME_WORDS[run.outcome]}"
+	if run.summary:
+		return f"последний: {when} · {run.summary}"
+	return f"последний: {when} · {OUTCOME_WORDS[run.outcome]}"
+
+
+def progress_caption(item: TaskJobDto) -> str:
+	"""Строка хода работы: что задание сообщает о себе прямо сейчас."""
+	if item.note:
+		return str(item.note)
+	if item.progress:
+		return f"{round(item.progress * 100)} %"
+	return "идёт обращение к Telegram"
+
+
+def error_fix_target(run: TaskRunDto | None) -> TaskFixTarget | None:
+	"""Куда вести чинить ошибку запуска; None — чинить не кнопкой.
+
+	Чинятся у нас ошибки про пул и права («некому вести запуск»,
+	«нет права…»): их правят на вкладке «Участники» — вводом исполнителя,
+	возобновлением или выдачей прав в Telegram. Сетевые отказы и запреты
+	Telegram кнопкой не чинятся, и предлагать переход незачем.
+	"""
+	if run is None or run.outcome is not RunOutcome.ERROR or not run.error:
+		return None
+	text = run.error.casefold()
+	if "некому" in text or "прав" in text or "приостановлен" in text:
+		return TaskFixTarget.MEMBERS
+	return None
+
+
+@dataclass(frozen=True)
+class TaskForm:
+	"""Снимок формы настройки: параметры, расписание и его включённость."""
+
+	params: TaskParams
+	schedule: Schedule
+	enabled: bool
+
+
+def form_dirty(saved: TaskForm | None, current: TaskForm) -> bool:
+	"""Отличается ли форма от сохранённого (пока не прочитано — нет)."""
+	if saved is None:
+		return False
+	return saved != current
+
+
+@dataclass(frozen=True)
+class ReactorRow:
+	"""Строка таблицы «Кто ставит»: исполнитель, отметка и последний проход."""
+
+	executor: ExecutorDto
+	checked: bool
+	last_at: datetime | None
+
+	@property
+	def capable(self) -> bool:
+		"""Может ли вести проход прямо сейчас (состоит и не на паузе)."""
+		return self.executor.status.in_community and not self.executor.paused
+
+
+def reactor_state(executor: ExecutorDto) -> str:
+	"""Колонка «Состояние»: что мешает вести проход (пусто — ничего)."""
+	if executor.paused:
+		return "приостановлен"
+	if not executor.status.in_community:
+		return "не состоит"
+	return "может ставить"
+
+
+def reactor_matches(row: ReactorRow, query: str, mode: ReactorFilter) -> bool:
+	"""Проходит ли строка поиск по имени и выбранный отбор."""
+	needle = query.strip().casefold()
+	if needle and needle not in row.executor.label.casefold():
+		return False
+	if mode is ReactorFilter.CHECKED:
+		return row.checked
+	if mode is ReactorFilter.CAPABLE:
+		return row.capable
+	return True
+
+
+def last_reaction_times(runs: Sequence[TaskRunDto]) -> dict[ExecutorRef, datetime]:
+	"""Когда каждый исполнитель последний раз вёл проход (по журналу)."""
+	times: dict[ExecutorRef, datetime] = {}
+	for run in runs:
+		if run.executor is None or run.dry_run:
+			continue
+		known = times.get(run.executor)
+		if known is None or run.started_at > known:
+			times[run.executor] = run.started_at
+	return times
 
 
 def parse_times(text: str) -> tuple[str, ...]:
@@ -168,9 +441,16 @@ def parse_times(text: str) -> tuple[str, ...]:
 	return tuple(token.strip() for token in text.split(",") if token.strip())
 
 
-#: Высота строки таблицы журнала и кегль (как у списка дашборда).
-_TABLE_ROW_HEIGHT = 34
-_TABLE_FONT_PX = 13
+def next_run_text(task: TaskDto) -> str:
+	"""Подпись под блоком расписания: что задано и когда следующий запуск."""
+	text = schedule_text(task.schedule)
+	if task.schedule.kind is ScheduleKind.NONE:
+		return "Расписание не задано — задача запускается только по требованию."
+	if not task.enabled:
+		return f"Расписание выключено ({text})."
+	if task.next_run_at is None:
+		return f"Расписание: {text} — следующий запуск не назначен."
+	return f"Следующий запуск {format_local(task.next_run_at)} ({text})."
 
 
 def run_kind_text(run: TaskRunDto) -> str:
@@ -196,40 +476,453 @@ def run_events_text(run: TaskRunDto) -> str:
 	return "\n".join(f"{at.astimezone().strftime('%H:%M:%S')}  {text}" for at, text in run.events)
 
 
-class _TaskSection(QWidget):
-	"""Раздел одного вида задачи: форма параметров, запуск, итог, журнал.
+# --- подтверждения (чистые тексты) --------------------------------------------
 
-	Строка задачи читается из движка при показе (заводится с умолчаниями,
-	если её ещё не было), и до её прихода кнопки запуска неактивны:
-	запускать нечего — параметры и номер задачи ещё не известны.
+
+def _service_rules(params: ServiceMessagesParams) -> str:
+	"""Какие виды записей будут удалены — перечнем."""
+	return "\n".join(
+		f"— {service_messages.kind_title(kind)};"
+		for kind in service_messages.selectable_kinds(params.kinds)
+	)
+
+
+def _join_rules(params: JoinRequestsParams) -> str:
+	"""Правила разбора заявок словами."""
+	rules = ["остальных принять"]
+	if params.decline_deleted:
+		rules.insert(0, "удалённые аккаунты отклонить")
+	if params.restrict_bio_links:
+		rules.append("со ссылкой в описании — принять с полным ограничением")
+	if params.restrict_personal_channel:
+		rules.append("с каналом в профиле — принять с полным ограничением")
+	return "; ".join(rules).capitalize() + "."
+
+
+def schedule_confirmation(
+	kind: TaskKind, params: TaskParams, schedule: Schedule, title: str
+) -> str:
+	"""Что спросить перед включением расписания (ADR-0038).
+
+	Запуск по расписанию идёт без подтверждений и необратим, а спросить
+	перед ночным запуском некого — поэтому спрашивают один раз здесь,
+	и вопрос перечисляет, что именно будет делаться.
+	"""
+	when = schedule_text(schedule)
+	head = f"Включить «{KIND_TITLES[kind]}» в «{title}» по расписанию ({when})?"
+	if isinstance(params, ServiceMessagesParams):
+		return (
+			f"{head}\n\n{_service_rules(params)}\n\nКаждый запуск удалит не больше "
+			f"{params.delete_limit} записей без дополнительного подтверждения. "
+			"Удаление необратимо."
+		)
+	if isinstance(params, DeletedAccountsParams):
+		return (
+			f"{head}\n\nКаждый запуск исключит не больше {params.kick_limit} удалённых "
+			"аккаунтов без дополнительного подтверждения. Исключение необратимо "
+			"и уменьшает число участников."
+		)
+	if isinstance(params, ReactionsParams):
+		return (
+			f"{head}\n\nПользователей по кругу: {len(params.users)}; охват — "
+			f"{reactions.SCOPE_TITLES[params.scope]}; за проход не больше {params.limit} "
+			"реакций. Каждый запуск — проход одного пользователя без дополнительного "
+			"подтверждения."
+		)
+	if isinstance(params, JoinRequestsParams):
+		return (
+			f"{head}\n\n{_join_rules(params)} Каждый запуск разберёт не больше "
+			f"{params.limit} заявок без дополнительного подтверждения."
+		)
+	return head
+
+
+def run_confirmation(kind: TaskKind, params: TaskParams, title: str) -> str:
+	"""Что спросить перед настоящим запуском; пусто — вопроса нет.
+
+	Спрашивают там, где проход необратим: удаление записей, исключение
+	участников, разбор заявок. Проход реакций обратим руками человека
+	и вопроса не заслуживает.
+	"""
+	if isinstance(params, ServiceMessagesParams):
+		return (
+			f"Удалить служебные записи в «{title}»?\n\n{_service_rules(params)}\n\n"
+			f"Удаление необратимо. За проход будет удалено не больше "
+			f"{params.delete_limit} записей."
+		)
+	if isinstance(params, DeletedAccountsParams):
+		return (
+			f"Исключить удалённые аккаунты из «{title}»?\n\nЗа проход будет исключено "
+			f"не больше {params.kick_limit}. Исключение необратимо и уменьшит число "
+			"участников."
+		)
+	if isinstance(params, JoinRequestsParams):
+		return (
+			f"Разобрать заявки в «{title}»?\n\n{_join_rules(params)} За проход — "
+			f"не больше {params.limit}. Одобрение и отклонение необратимы."
+		)
+	return ""
+
+
+# --- сборки формы -------------------------------------------------------------
+
+
+def on_change(handler: Callable[[], None], *widgets: QWidget) -> None:
+	"""Связывает изменение любого из полей формы с одним обработчиком.
+
+	Поля разные (число, выбор, флажок, строка, тумблер), и сигнал
+	у каждого свой; перебор имён держится здесь, чтобы не повторять
+	десяток связок в каждом разделе.
+	"""
+	names = (
+		"valueChanged",
+		"currentIndexChanged",
+		"checkedChanged",
+		"stateChanged",
+		"textChanged",
+	)
+	for widget in widgets:
+		for name in names:
+			signal = getattr(widget, name, None)
+			if signal is not None and hasattr(signal, "connect"):
+				signal.connect(handler)
+				break
+
+
+class _FormBlock:
+	"""Блок параметров: заголовок и карточка с сеткой «подпись — поле».
+
+	Сетка одна на блок: подписи в первой колонке выровнены по общей
+	ширине, поля — своей ширины во второй, лишнее место забирает
+	растяжка. Фраз с полем внутри («Удалять не больше: [200]») нет —
+	подпись слева, поле справа (спека, раздел 4.1).
+	"""
+
+	def __init__(
+		self,
+		parent: QWidget,
+		layout: QVBoxLayout,
+		title: str,
+		*,
+		trailing: Sequence[QWidget] | None = None,
+	) -> None:
+		layout.addWidget(section_header(parent, title, trailing=trailing))
+		card = SimpleCardWidget(parent)
+		self.card = card
+		self.body = QVBoxLayout(card)
+		self.body.setContentsMargins(16, 14, 16, 14)  # макет
+		self.body.setSpacing(12)  # макет
+		layout.addWidget(card)
+		self._parent = parent
+		self._grid: QGridLayout | None = None
+
+	def grid(self) -> QGridLayout:
+		"""Сетка формы блока (заводится при первой строке)."""
+		if self._grid is None:
+			grid = QGridLayout()
+			grid.setContentsMargins(0, 0, 0, 0)
+			grid.setColumnMinimumWidth(0, _LABEL_COLUMN)  # макет
+			grid.setHorizontalSpacing(16)  # макет
+			grid.setVerticalSpacing(12)  # макет
+			grid.setColumnStretch(1, 1)
+			self.body.addLayout(grid)
+			self._grid = grid
+		return self._grid
+
+	def row(self, label: str, *fields: QWidget, note: str = "", unit: str = "") -> None:
+		"""Строка формы: подпись (с уточнением) и поля своей ширины."""
+		grid = self.grid()
+		line = grid.rowCount()
+		column = QVBoxLayout()
+		column.setSpacing(2)
+		column.addWidget(BodyLabel(label, self._parent))
+		if note:
+			hint = CaptionLabel(note, self._parent)
+			hint.setWordWrap(True)
+			column.addWidget(hint)
+		grid.addLayout(column, line, 0, Qt.AlignmentFlag.AlignTop)
+		box = QHBoxLayout()
+		box.setSpacing(8)
+		for field in fields:
+			box.addWidget(field)
+		if unit:
+			box.addWidget(BodyLabel(unit, self._parent))
+		box.addStretch()
+		grid.addLayout(box, line, 1)
+
+	def add(self, widget: QWidget) -> None:
+		"""Виджет во всю ширину блока (таблица, сетка плиток, пояснение)."""
+		self.body.addWidget(widget)
+
+	def note(self, text: str) -> CaptionLabel:
+		"""Пояснение под содержимым блока."""
+		label = CaptionLabel(text, self._parent)
+		label.setWordWrap(True)
+		self.body.addWidget(label)
+		return label
+
+
+def number_field(parent: QWidget, limits: tuple[int, int], value: int, *, step: int = 1) -> SpinBox:
+	"""Поле целого числа своей ширины (макет)."""
+	field = SpinBox(parent)
+	field.setRange(*limits)
+	field.setSingleStep(step)
+	field.setValue(value)
+	field.setFixedWidth(_NUMBER_WIDTH)  # макет
+	return field
+
+
+def seconds_field(parent: QWidget, limits: tuple[float, float], value: float) -> DoubleSpinBox:
+	"""Поле дробного числа в диапазоне «от — до» (макет)."""
+	field = DoubleSpinBox(parent)
+	field.setRange(*limits)
+	field.setSingleStep(0.1)
+	field.setValue(value)
+	field.setFixedWidth(_RANGE_WIDTH)  # макет
+	return field
+
+
+# --- обзор задач --------------------------------------------------------------
+
+
+class _TaskCard(CardWidget):
+	"""Карточка задачи в обзоре: суть, расписание, итог и тумблер.
+
+	Кнопок нет: карточка открывается целиком, а тумблер включает
+	расписание. Строка расписания уступает место полосе хода, пока
+	задача работает (спека, раздел 3).
+	"""
+
+	def __init__(self, kind: TaskKind, parent: QWidget, on_toggle: Callable[[bool], None]) -> None:
+		super().__init__(parent)
+		self._kind = kind
+		self.setCursor(Qt.CursorShape.PointingHandCursor)
+		box = QVBoxLayout(self)
+		box.setContentsMargins(16, 14, 16, 14)  # макет
+		box.setSpacing(10)  # макет
+		head = QHBoxLayout()
+		head.setSpacing(12)  # макет
+		head.setAlignment(Qt.AlignmentFlag.AlignTop)
+		column = QVBoxLayout()
+		column.setSpacing(2)
+		column.addWidget(StrongBodyLabel(KIND_TITLES[kind], self))
+		hint = CaptionLabel(self)
+		hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		elide_text(hint, TASK_TEXTS[kind].card)
+		column.addWidget(hint)
+		head.addLayout(column, stretch=1)
+		self._switch = SwitchButton(self)
+		self._switch.setOnText("")
+		self._switch.setOffText("")
+		self._switch.checkedChanged.connect(on_toggle)
+		head.addWidget(self._switch)
+		box.addLayout(head)
+		box.addWidget(HorizontalSeparator(self))
+		self._schedule = BodyLabel(self)
+		self._schedule.setFont(font_px(13))  # макет
+		self._schedule.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		box.addWidget(self._schedule)
+		self._progress = ProgressBar(self)
+		self._progress.hide()
+		box.addWidget(self._progress)
+		result = QHBoxLayout()
+		result.setSpacing(8)
+		self._error_badge = InfoBadge.error("ошибка", parent=self)
+		self._error_badge.hide()
+		result.addWidget(self._error_badge)
+		self._result = CaptionLabel(self)
+		self._result.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		result.addWidget(self._result, stretch=1)
+		box.addLayout(result)
+
+	def show_task(
+		self, task: TaskDto | None, run: TaskRunDto | None, job: TaskJobDto | None
+	) -> None:
+		"""Приводит карточку к свежим данным задачи."""
+		self._switch.blockSignals(True)
+		try:
+			self._switch.setChecked(bool(task and task.enabled))
+		finally:
+			self._switch.blockSignals(False)
+		manual = task is not None and task.schedule.kind is ScheduleKind.NONE
+		self._switch.setEnabled(task is not None and not manual)
+		self._switch.setToolTip("Расписание не задано" if manual else "Запускать по расписанию")
+		if job is not None:
+			self._schedule.hide()
+			self._progress.show()
+			self._progress.setValue(int(job.progress * 100))
+			self._error_badge.hide()
+			elide_text(self._result, progress_caption(job))
+			return
+		self._progress.hide()
+		self._schedule.show()
+		elide_text(self._schedule, schedule_caption(task) if task else "читаю задачу…")
+		failed = run is not None and run.outcome is RunOutcome.ERROR
+		self._error_badge.setVisible(failed)
+		elide_text(self._result, last_run_caption(run))
+
+
+class _TasksOverview(QWidget):
+	"""Обзор задач: пояснение и сетка карточек (спека, раздел 3)."""
+
+	def __init__(
+		self,
+		kinds: Sequence[TaskKind],
+		parent: QWidget,
+		*,
+		on_open: Callable[[TaskKind], None],
+		on_toggle: Callable[[TaskKind, bool], None],
+	) -> None:
+		super().__init__(parent)
+		box = QVBoxLayout(self)
+		box.setContentsMargins(0, 0, 0, 0)
+		box.setSpacing(density.spacing().block_spacing)
+		self._hint = CaptionLabel(self)
+		self._hint.setWordWrap(True)
+		box.addWidget(self._hint)
+		self.cards = {kind: _TaskCard(kind, self, partial(on_toggle, kind)) for kind in kinds}
+		for kind, card in self.cards.items():
+			card.clicked.connect(partial(on_open, kind))
+		box.addWidget(
+			FlowGrid(
+				list(self.cards.values()), self, min_width=_CARD_MIN_WIDTH, spacing=_CARD_SPACING
+			)
+		)
+		box.addStretch()
+
+	def set_publisher(self, label: str | None) -> None:
+		"""Пояснение сверху: чьими руками идут задачи."""
+		who = f"«{label}»" if label else "userbot-публикатор сообщества"
+		self._hint.setText(
+			f"Задачи выполняет userbot-публикатор {who}. "
+			"По расписанию — без подтверждений, в пределах своих лимитов."
+		)
+
+
+# --- расписание ---------------------------------------------------------------
+
+
+class _ScheduleBlock(QWidget):
+	"""Блок «Расписание» формы задачи: включённость, вид и его поля.
+
+	Своей кнопки сохранения нет — расписание пишется вместе
+	с параметрами одной «Сохранить» (спека, раздел 4.4). Поля вида,
+	которого нет, скрываются, а не делаются неактивными: неактивное
+	поле обещает, что им когда-то можно будет пользоваться здесь же.
+	"""
+
+	def __init__(
+		self, parent: QWidget, layout: QVBoxLayout, on_changed: Callable[[], None]
+	) -> None:
+		super().__init__(parent)
+		block = _FormBlock(parent, layout, "Расписание")
+		self._switch = SwitchButton(parent)
+		self._switch.setOnText("включено")
+		self._switch.setOffText("выключено")
+		block.row("По расписанию", self._switch)
+		self._kind = ComboBox(parent)
+		self._kind.setMaximumWidth(_COMBO_MAX_WIDTH)  # макет
+		for kind, title in SCHEDULE_KINDS:
+			self._kind.addItem(title, userData=kind)
+		self._kind.currentIndexChanged.connect(self._on_kind)
+		block.row("Как часто", self._kind)
+		self._min = number_field(parent, INTERVAL_MINUTES_RANGE, INTERVAL_MINUTES_RANGE[0])
+		self._min.setFixedWidth(_RANGE_WIDTH)  # макет
+		self._max = number_field(parent, INTERVAL_MINUTES_RANGE, INTERVAL_MINUTES_RANGE[0])
+		self._max.setFixedWidth(_RANGE_WIDTH)  # макет
+		self._dash = BodyLabel("—", parent)
+		block.row(
+			"Пауза между запусками",
+			self._min,
+			self._dash,
+			self._max,
+			unit="мин, случайно",
+		)
+		self._interval_row = (self._min, self._dash, self._max)
+		self._times = LineEdit(parent)
+		self._times.setFixedWidth(_TIMES_WIDTH)  # макет
+		self._times.setPlaceholderText("04:00, 16:30…")
+		block.row("Моменты", self._times, note="ЧЧ:ММ через запятую")
+		self._caption = block.note("")
+		self._error = ErrorLabel(parent)
+		block.add(self._error)
+		on_change(on_changed, self._switch, self._kind, self._min, self._max, self._times)
+		self._on_kind()
+
+	def present(self, task: TaskDto) -> None:
+		"""Раскладывает сохранённое расписание по полям и обновляет подпись."""
+		schedule = task.schedule
+		for index, (kind, _title) in enumerate(SCHEDULE_KINDS):
+			if kind is schedule.kind:
+				self._kind.setCurrentIndex(index)
+		self._min.setValue(schedule.min_minutes)
+		self._max.setValue(schedule.max_minutes)
+		self._times.setText(", ".join(schedule.times))
+		self._switch.setChecked(task.enabled)
+		self._caption.setText(next_run_text(task))
+		self._error.succeed()
+		self._on_kind()
+
+	@property
+	def enabled(self) -> bool:
+		"""Включено ли расписание в форме."""
+		return bool(self._switch.isChecked())
+
+	def schedule(self) -> Schedule:
+		"""Расписание из полей формы (без проверки — её делает движок)."""
+		kind = self._kind.currentData()
+		return Schedule(
+			kind=kind if isinstance(kind, ScheduleKind) else ScheduleKind.NONE,
+			min_minutes=self._min.value(),
+			max_minutes=self._max.value(),
+			times=parse_times(self._times.text()),
+		)
+
+	def validate(self) -> bool:
+		"""Проверяет расписание перед сохранением (ошибка — под блоком)."""
+		schedule = self.schedule()
+		try:
+			schedule.validate()
+			if self.enabled and schedule.kind is ScheduleKind.NONE:
+				raise TaskError("Выберите расписание — «только по требованию» включать нечего.")
+		except TaskError as exc:
+			return self._error.fail(str(exc))
+		return self._error.succeed()
+
+	def _on_kind(self, *_args: object) -> None:
+		"""Показывает поля выбранного вида, прячет остальные."""
+		kind = self._kind.currentData()
+		for widget in self._interval_row:
+			widget.setVisible(kind is ScheduleKind.INTERVAL)
+		self._times.setVisible(kind is ScheduleKind.DAILY)
+
+
+# --- разделы задач ------------------------------------------------------------
+
+
+class _TaskSection(QWidget):
+	"""Блоки параметров одной задачи: форма, подтверждения, отчёт.
+
+	Раздел отвечает только за своё — что показать в блоках и что
+	отдать движку; путь, шапку, расписание, сохранение и последние
+	запуски строит общий :class:`_TaskDetail`.
 	"""
 
 	kind: TaskKind
 
-	def __init__(self, panel: TasksPanel, page_parent: QWidget) -> None:
-		super().__init__(page_parent)
+	def __init__(self, panel: TasksPanel, parent: QWidget, on_changed: Callable[[], None]) -> None:
+		super().__init__(parent)
 		self._panel = panel
-		self._task: TaskDto | None = None
-		self._run_buttons: list[PushButton] = []
-		self._schedule: _ScheduleEditor
+		self._changed = on_changed
+		self._box = QVBoxLayout(self)
+		self._box.setContentsMargins(0, 0, 0, 0)
+		self._box.setSpacing(density.spacing().block_spacing)
+		self.build()
 
 	# --- контракт раздела ------------------------------------------------------------
 
-	def mount(self, task: TaskDto) -> None:
-		"""Принимает строку задачи: параметры и расписание — в форму, кнопки — включить."""
-		self._task = task
-		self.apply_params(task.params)
-		self._schedule.present(task)
-		for button in self._run_buttons:
-			button.setEnabled(True)
-
-	def confirm_schedule(self, schedule: Schedule) -> bool:
-		"""Подтверждение включения расписания — один раз при сохранении.
-
-		Обычный запуск по расписанию необратим (удаляет, исключает),
-		а спросить перед каждым ночным запуском некого (ADR-0038);
-		раздел перечисляет, что именно будет делаться.
-		"""
+	def build(self) -> None:
+		"""Собирает блоки параметров в свою компоновку."""
 		raise NotImplementedError
 
 	def apply_params(self, params: TaskParams) -> None:
@@ -240,262 +933,138 @@ class _TaskSection(QWidget):
 		"""Параметры из полей формы."""
 		raise NotImplementedError
 
+	def valid(self) -> bool:
+		"""Годится ли форма для запуска (ошибку раздел показывает сам)."""
+		return True
+
 	def show_report(self, item: TaskJobDto) -> None:
-		"""Показывает отчёт завершённого запуска."""
-		raise NotImplementedError
+		"""Показывает числа завершённого запуска (у кого они есть в блоках)."""
 
-	def set_status(self, text: str) -> None:
-		"""Строка состояния раздела («Просмотр идёт…», «Не удалось: …»)."""
-		raise NotImplementedError
-
-	# --- общее -------------------------------------------------------------------
-
-	@property
-	def task(self) -> TaskDto | None:
-		"""Строка задачи (None — ещё не прочитана)."""
-		return self._task
-
-	def run_button(self, text: str, parent: QWidget) -> PushButton:
-		"""Кнопка запуска: неактивна, пока задача не прочитана."""
-		button = PushButton(text, parent)
-		button.setEnabled(False)
-		self._run_buttons.append(button)
-		return button
-
-	def journal_row(self, parent: QWidget) -> QHBoxLayout:
-		"""Строка с кнопкой «Журнал…» — запуски этой задачи."""
-		row = QHBoxLayout()
-		row.addStretch()
-		button = self.run_button("Журнал…", parent)
-		button.clicked.connect(self._open_journal)
-		row.addWidget(button)
-		return row
-
-	def schedule_block(self, parent: QWidget) -> QWidget:
-		"""Блок расписания: вид, границы, включено, «Сохранить расписание»."""
-		self._schedule = _ScheduleEditor(parent, on_save=self._on_save_schedule)
-		self._run_buttons.append(self._schedule.save_button)
-		return self._schedule
-
-	def _on_save_schedule(self, schedule: Schedule, enabled: bool) -> None:
-		"""Сохраняет расписание через панель (с подтверждением при включении)."""
-		if self._task is None:
-			return
-		if enabled and not self.confirm_schedule(schedule):
-			return
-		self._panel.save_schedule(self, self._task, schedule, enabled=enabled)
-
-	def _open_journal(self) -> None:
-		"""Открывает окно журнала запусков этой задачи."""
-		if self._task is not None:
-			self._panel.open_journal(self._task)
-
-	def launch(self, *, dry_run: bool, status_text: str) -> None:
-		"""Ставит запуск с параметрами из формы (через панель)."""
-		if self._task is None:
-			return
-		self._panel.launch(
-			self, self._task, self.params(), dry_run=dry_run, status_text=status_text
-		)
+	def community_title(self) -> str:
+		"""Название сообщества — для текстов подтверждений."""
+		return self._panel.community.title
 
 
 class _ServiceMessagesSection(_TaskSection):
-	"""Раздел «служебные записи»: глубина, просмотр, виды галочками, чистка."""
+	"""«Служебные записи»: что удалять строками с числами и границы прохода."""
 
 	kind = TaskKind.SERVICE_MESSAGES
 
-	def __init__(self, panel: TasksPanel, page_parent: QWidget) -> None:
-		super().__init__(panel, page_parent)
-		self._boxes: dict[ServiceMessageKind, CheckBox] = {}
-		self._chosen: tuple[ServiceMessageKind, ...] = service_messages.DEFAULT_KINDS
-		box = QVBoxLayout(self)
-		box.setContentsMargins(0, 0, 0, 0)
-		box.setSpacing(density.spacing().row_spacing)
-		hint = BodyLabel(service_messages.TITLE.hint, self)
-		hint.setWordWrap(True)
-		box.addWidget(hint)
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Просмотреть последних сообщений:", self))
-		self._depth = SpinBox(self)
-		self._depth.setRange(*service_messages.DEPTH_RANGE)
-		self._depth.setSingleStep(500)
-		self._depth.setValue(service_messages.DEFAULT_DEPTH)
-		self._depth.setToolTip(
-			"У Telegram нет поиска «только служебные» — историю приходится "
-			"читать целиком, поэтому у прохода есть глубина"
-		)
-		row.addWidget(self._depth)
-		row.addStretch()
-		scan = self.run_button("Просмотреть", self)
-		scan.clicked.connect(lambda: self.launch(dry_run=True, status_text="Просмотр идёт…"))
-		row.addWidget(scan)
-		box.addLayout(row)
-		self._label = BodyLabel("Просмотр ещё не выполнялся.", self)
-		self._label.setWordWrap(True)
-		box.addWidget(self._label)
-		area, self._kinds_box = list_area(self, density.spacing().list_spacing)
-		box.addWidget(area, stretch=1)
-		# проверка заполнения — красной подписью рядом с формой, а не
-		# всплывающей плашкой: плашка уезжает и не привязана к месту,
-		# где человеку нужно что-то поправить (единый приём проекта)
-		self._error = ErrorLabel(self)
-		box.addWidget(self._error)
-		box.addLayout(self._clean_row())
-		box.addWidget(self.schedule_block(self))
-		box.addLayout(self.journal_row(self))
+	#: Виды записей в порядке показа (защищённый — последним, без флажка).
+	_KINDS: tuple[ServiceMessageKind, ...] = (
+		ServiceMessageKind.MEMBERS,
+		ServiceMessageKind.PINS,
+		ServiceMessageKind.APPEARANCE,
+		ServiceMessageKind.CALLS,
+		ServiceMessageKind.OTHER,
+		ServiceMessageKind.PROTECTED,
+	)
 
-	def _clean_row(self) -> QHBoxLayout:
-		"""Предел удаления и кнопка чистки записей."""
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Удалять за проход не больше:", self))
-		self._delete_limit = SpinBox(self)
-		self._delete_limit.setRange(*service_messages.DELETE_LIMIT_RANGE)
-		self._delete_limit.setSingleStep(100)
-		self._delete_limit.setValue(service_messages.DEFAULT_DELETE_LIMIT)
-		self._delete_limit.setToolTip(
-			"Сотни однотипных действий подряд с пользовательского аккаунта "
-			"Telegram не приветствует — предел сдерживает поток"
+	def build(self) -> None:
+		self._boxes: dict[ServiceMessageKind, CheckBox] = {}
+		self._counts: dict[ServiceMessageKind, BodyLabel] = {}
+		self._error = ErrorLabel(self)
+		block = _FormBlock(
+			self, self._box, "Что удалять", trailing=[CaptionLabel("по просмотру", self)]
 		)
-		row.addWidget(self._delete_limit)
-		row.addStretch()
-		self._clean_button = PushButton("Удалить выбранное", self)
-		self._clean_button.setEnabled(False)
-		self._clean_button.clicked.connect(self._on_clean)
-		row.addWidget(self._clean_button)
-		return row
+		for position, kind in enumerate(self._KINDS):
+			if position:
+				block.add(HorizontalSeparator(self))
+			block.add(self._kind_row(kind))
+		self._scan_note = block.note("Просмотр ещё не выполнялся.")
+		block.add(self._error)
+		limits = _FormBlock(self, self._box, "Границы")
+		self._depth = number_field(
+			self, service_messages.DEPTH_RANGE, service_messages.DEFAULT_DEPTH, step=500
+		)
+		limits.row("Просматривать последних", self._depth, unit="сообщений истории")
+		self._delete_limit = number_field(
+			self,
+			service_messages.DELETE_LIMIT_RANGE,
+			service_messages.DEFAULT_DELETE_LIMIT,
+			step=100,
+		)
+		limits.row(
+			"Удалять за проход не больше",
+			self._delete_limit,
+			note="сотни действий подряд с аккаунта — риск ограничений",
+		)
+		on_change(self._changed, self._depth, self._delete_limit)
+
+	def _kind_row(self, kind: ServiceMessageKind) -> QWidget:
+		"""Строка вида: флажок (или пояснение у защищённого) и число справа."""
+		box = QWidget(self)
+		row = QHBoxLayout(box)
+		row.setContentsMargins(0, 0, 0, 0)
+		row.setSpacing(8)
+		if kind.removable():
+			check = CheckBox(service_messages.kind_title(kind), box)
+			self._boxes[kind] = check
+			on_change(self._changed, check)
+			row.addWidget(check, stretch=1)
+		else:
+			column = QVBoxLayout()
+			column.setSpacing(2)
+			locked = CheckBox(service_messages.kind_title(kind), box)
+			locked.setEnabled(False)
+			column.addWidget(locked)
+			hint = CaptionLabel(_PROTECTED_HINT, box)
+			hint.setWordWrap(True)
+			column.addWidget(hint)
+			row.addLayout(column, stretch=1)
+		count = BodyLabel("—", box)
+		count.setFont(font_px(_TABLE_FONT_PX))
+		count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+		self._counts[kind] = count
+		row.addWidget(count)
+		return box
 
 	def apply_params(self, params: TaskParams) -> None:
 		if not isinstance(params, ServiceMessagesParams):
 			return
 		self._depth.setValue(params.depth)
 		self._delete_limit.setValue(params.delete_limit)
-		self._chosen = params.kinds
+		for kind, check in self._boxes.items():
+			check.setChecked(kind in params.kinds)
 
 	def params(self) -> ServiceMessagesParams:
-		chosen = tuple(kind for kind, box in self._boxes.items() if box.isChecked())
 		return ServiceMessagesParams(
 			depth=self._depth.value(),
-			# пока найденное не показано, галочек нет — сохранённый набор
-			# видов остаётся прежним, а не стирается пустотой
-			kinds=chosen if self._boxes else self._chosen,
+			kinds=tuple(kind for kind, check in self._boxes.items() if check.isChecked()),
 			delete_limit=self._delete_limit.value(),
 		)
 
-	def set_status(self, text: str) -> None:
-		self._label.setText(text)
-
-	def confirm_schedule(self, schedule: Schedule) -> bool:
-		params = self.params()
-		chosen = service_messages.selectable_kinds(params.kinds)
-		if not chosen:
-			self._error.fail("Для чистки по расписанию отметьте хотя бы один вид записей.")
-			return False
-		self._error.succeed()
-		names = "\n".join(f"— {service_messages.kind_title(kind)};" for kind in chosen)
-		return confirm_delete(
-			self,
-			f"Включить чистку служебных записей в «{self._panel.community.title}» "
-			f"по расписанию ({schedule_text(schedule)})?\n\n{names}\n\n"
-			f"Каждый запуск удалит не больше {params.delete_limit} записей без "
-			"дополнительного подтверждения. Удаление необратимо.",
-			accept_text="Включить",
-		)
-
-	def _on_clean(self) -> None:
-		"""Спрашивает подтверждение и ставит чистку записей."""
-		chosen = [kind for kind, box in self._boxes.items() if box.isChecked()]
-		if not chosen:
-			self._error.fail("Отметьте хотя бы один вид записей.")
-			return
-		self._error.succeed()
-		names = "\n".join(f"— {service_messages.kind_title(kind)};" for kind in chosen)
-		community = self._panel.community
-		if not confirm_delete(
-			self,
-			f"Удалить служебные записи в «{community.title}»?\n\n{names}\n\n"
-			f"Удаление необратимо. За проход будет удалено не больше "
-			f"{self._delete_limit.value()} записей.",
-		):
-			return
-		self._clean_button.setEnabled(False)
-		self.launch(dry_run=False, status_text="Чистка идёт…")
+	def valid(self) -> bool:
+		if not self.params().kinds:
+			return self._error.fail("Отметьте хотя бы один вид записей.")
+		return self._error.succeed()
 
 	def show_report(self, item: TaskJobDto) -> None:
-		"""Показывает найденные записи: строка на вид, галочка у удаляемых."""
 		report = item.report
 		if not isinstance(report, ServiceReport):
 			return
-		self._label.setText(service_messages.service_summary(report))
-		clear_layout(self._kinds_box)
-		self._boxes.clear()
-		if report.deleted or report.skipped:
-			# после чистки числа устарели — честнее попросить посмотреть заново
-			self._clean_button.setEnabled(False)
-			return
-		for kind, count in sorted(report.found.items(), key=lambda pair: -pair[1]):
-			self._kinds_box.addWidget(self._kind_row(kind, count))
-		self._clean_button.setEnabled(report.removable > 0)
-
-	def _kind_row(self, kind: ServiceMessageKind, count: int) -> QWidget:
-		"""Строка вида: галочка (если удаляем), название и число."""
-		box = QWidget(self)
-		row = QHBoxLayout(box)
-		row.setContentsMargins(0, 0, 0, 0)
-		if kind.removable():
-			check = CheckBox(service_messages.kind_title(kind), box)
-			check.setChecked(kind in self._chosen)
-			self._boxes[kind] = check
-			row.addWidget(check, stretch=1)
-		else:
-			label = BodyLabel(f"{service_messages.kind_title(kind)} — {_PROTECTED_HINT}", box)
-			label.setWordWrap(True)
-			row.addWidget(label, stretch=1)
-		row.addWidget(StrongBodyLabel(str(count), box))
-		return box
+		for kind, count in self._counts.items():
+			found = report.found.get(kind)
+			count.setText("—" if found is None else str(found))
+		self._scan_note.setText(service_messages.service_summary(report))
 
 
 class _DeletedAccountsSection(_TaskSection):
-	"""Раздел «удалённые аккаунты»: поиск, предел, исключение."""
+	"""«Удалённые аккаунты»: единственная граница — сколько исключать за проход."""
 
 	kind = TaskKind.DELETED_ACCOUNTS
 
-	def __init__(self, panel: TasksPanel, page_parent: QWidget) -> None:
-		super().__init__(panel, page_parent)
-		box = QVBoxLayout(self)
-		box.setContentsMargins(0, 0, 0, 0)
-		box.setSpacing(density.spacing().row_spacing)
-		hint = BodyLabel(deleted_accounts.TITLE.hint, self)
-		hint.setWordWrap(True)
-		box.addWidget(hint)
-		row = QHBoxLayout()
-		scan = self.run_button("Найти удалённые аккаунты", self)
-		scan.clicked.connect(lambda: self.launch(dry_run=True, status_text="Поиск идёт…"))
-		row.addWidget(scan)
-		row.addStretch()
-		box.addLayout(row)
-		self._label = BodyLabel("Поиск ещё не выполнялся.", self)
-		self._label.setWordWrap(True)
-		box.addWidget(self._label)
-		box.addStretch()
-		kick = QHBoxLayout()
-		kick.addWidget(BodyLabel("Исключать за проход не больше:", self))
-		self._kick_limit = SpinBox(self)
-		self._kick_limit.setRange(*deleted_accounts.KICK_LIMIT_RANGE)
-		self._kick_limit.setSingleStep(5)
-		self._kick_limit.setValue(deleted_accounts.DEFAULT_KICK_LIMIT)
-		self._kick_limit.setToolTip(
-			"Число участников видно всем: резкое падение бьёт по охватам, "
-			"поэтому чистить лучше порциями"
+	def build(self) -> None:
+		block = _FormBlock(self, self._box, "Границы")
+		self._kick_limit = number_field(
+			self, deleted_accounts.KICK_LIMIT_RANGE, deleted_accounts.DEFAULT_KICK_LIMIT, step=5
 		)
-		kick.addWidget(self._kick_limit)
-		kick.addStretch()
-		self._kick_button = PushButton("Исключить удалённые", self)
-		self._kick_button.setEnabled(False)
-		self._kick_button.clicked.connect(self._on_clean)
-		kick.addWidget(self._kick_button)
-		box.addLayout(kick)
-		box.addWidget(self.schedule_block(self))
-		box.addLayout(self.journal_row(self))
+		block.row(
+			"Исключать за проход не больше",
+			self._kick_limit,
+			note="резкое падение числа участников бьёт по охватам",
+		)
+		on_change(self._changed, self._kick_limit)
 
 	def apply_params(self, params: TaskParams) -> None:
 		if isinstance(params, DeletedAccountsParams):
@@ -504,247 +1073,405 @@ class _DeletedAccountsSection(_TaskSection):
 	def params(self) -> DeletedAccountsParams:
 		return DeletedAccountsParams(kick_limit=self._kick_limit.value())
 
-	def set_status(self, text: str) -> None:
-		self._label.setText(text)
 
-	def confirm_schedule(self, schedule: Schedule) -> bool:
-		limit = self._kick_limit.value()
-		return confirm_delete(
-			self,
-			f"Включить исключение удалённых аккаунтов из «{self._panel.community.title}» "
-			f"по расписанию ({schedule_text(schedule)})?\n\n"
-			f"Каждый запуск исключит не больше {limit} без дополнительного "
-			"подтверждения. Исключение необратимо и уменьшает число участников.",
-			accept_text="Включить",
+class _JoinRequestsSection(_TaskSection):
+	"""«Приём заявок»: правила разбора и предел за проход."""
+
+	kind = TaskKind.JOIN_REQUESTS
+
+	def build(self) -> None:
+		is_group = self._panel.community.kind is CommunityKind.GROUP
+		rules = _FormBlock(self, self._box, "Правила")
+		self._decline_deleted = CheckBox("Отклонять заявки удалённых аккаунтов", self)
+		self._restrict_bio = CheckBox(
+			"Принимать с полным ограничением, если в описании профиля есть ссылка", self
+		)
+		self._restrict_channel = CheckBox(
+			"…и если в профиле указан канал (один запрос к Telegram на заявителя)", self
+		)
+		for check in (self._decline_deleted, self._restrict_bio, self._restrict_channel):
+			rules.add(check)
+		for check in (self._restrict_bio, self._restrict_channel):
+			check.setEnabled(is_group)
+			if not is_group:
+				check.setToolTip(
+					"В канале ограничить участника нечем — правило действует в группах"
+				)
+		rules.note(
+			"Остальных — принимать. Ограничение прав есть только у групп; "
+			"в канале заявки принимаются как есть."
+		)
+		limits = _FormBlock(self, self._box, "Границы")
+		self._limit = number_field(self, join_requests.LIMIT_RANGE, join_requests.DEFAULT_LIMIT)
+		limits.row("Разбирать за проход не больше", self._limit, unit="заявок")
+		on_change(
+			self._changed,
+			self._decline_deleted,
+			self._restrict_bio,
+			self._restrict_channel,
+			self._limit,
 		)
 
-	def _on_clean(self) -> None:
-		"""Спрашивает подтверждение и ставит исключение."""
-		limit = self._kick_limit.value()
-		community = self._panel.community
-		if not confirm_delete(
-			self,
-			f"Исключить удалённые аккаунты из «{community.title}»?\n\n"
-			f"За проход будет исключено не больше {limit}. Исключение "
-			"необратимо и уменьшит число участников.",
-			accept_text="Исключить",
-		):
+	def apply_params(self, params: TaskParams) -> None:
+		if not isinstance(params, JoinRequestsParams):
 			return
-		self._kick_button.setEnabled(False)
-		self.launch(dry_run=False, status_text="Чистка идёт…")
+		self._decline_deleted.setChecked(params.decline_deleted)
+		self._restrict_bio.setChecked(params.restrict_bio_links)
+		self._restrict_channel.setChecked(params.restrict_personal_channel)
+		self._limit.setValue(params.limit)
 
-	def show_report(self, item: TaskJobDto) -> None:
-		"""Показывает итог по участникам."""
-		report = item.report
-		if not isinstance(report, MembersReport):
-			return
-		self._label.setText(deleted_accounts.members_summary(report))
-		# после исключения числа устарели: пусть поищет заново
-		self._kick_button.setEnabled(report.removed == 0 and report.found > 0)
+	def params(self) -> JoinRequestsParams:
+		return JoinRequestsParams(
+			decline_deleted=self._decline_deleted.isChecked(),
+			restrict_bio_links=self._restrict_bio.isChecked(),
+			restrict_personal_channel=self._restrict_channel.isChecked(),
+			limit=self._limit.value(),
+		)
+
+
+# --- «Реакции»: кто ставит ----------------------------------------------------
+
+
+class _ReactorsModel(QAbstractTableModel):
+	"""Модель таблицы «Кто ставит»: отметка, имя, роль, состояние, последний проход.
+
+	Модель и представление, а не таблица виджетов: исполнителей может
+	быть сотня, и строить сотню карточек с флажками ради выбора —
+	ровно тот случай, из-за которого затевается переход на модели
+	(спека, раздел 5.1).
+	"""
+
+	#: Заголовки колонок; первая — флажок без подписи.
+	COLUMNS: tuple[str, ...] = ("", "Пользователь", "Роль", "Состояние", "Последняя реакция")
+
+	def __init__(self, on_changed: Callable[[], None], parent: QObject | None = None) -> None:
+		super().__init__(parent)
+		self._rows: list[ReactorRow] = []
+		self._on_changed = on_changed
+
+	def set_rows(self, rows: Sequence[ReactorRow]) -> None:
+		"""Меняет строки целиком (список пришёл из движка)."""
+		self.beginResetModel()
+		self._rows = list(rows)
+		self.endResetModel()
+
+	def row(self, position: int) -> ReactorRow:
+		"""Строка по номеру (нужна отбору прокси)."""
+		return self._rows[position]
+
+	def checked_owners(self) -> tuple[ExecutorRef, ...]:
+		"""Отмеченные исполнители в порядке показа."""
+		return tuple(row.executor.owner for row in self._rows if row.checked)
+
+	def set_checked(self, owners: set[ExecutorRef]) -> None:
+		"""Расставляет отметки по сохранённому выбору."""
+		self.beginResetModel()
+		self._rows = [
+			ReactorRow(row.executor, row.executor.owner in owners, row.last_at)
+			for row in self._rows
+		]
+		self.endResetModel()
+
+	def check_all(self, *, capable_only: bool = True) -> None:
+		"""Отмечает всех подходящих («Отметить всех подходящих»)."""
+		self.beginResetModel()
+		self._rows = [
+			ReactorRow(row.executor, row.capable if capable_only else True, row.last_at)
+			for row in self._rows
+		]
+		self.endResetModel()
+		self._on_changed()
+
+	# --- контракт модели Qt ---------------------------------------------------------
+
+	def rowCount(self, parent: _Index | None = None) -> int:  # noqa: N802 — API Qt
+		return 0 if parent is not None and parent.isValid() else len(self._rows)
+
+	def columnCount(self, parent: _Index | None = None) -> int:  # noqa: N802 — API Qt
+		return 0 if parent is not None and parent.isValid() else len(self.COLUMNS)
+
+	def data(self, index: _Index, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
+		if not index.isValid():
+			return None
+		row = self._rows[index.row()]
+		column = index.column()
+		if role == Qt.ItemDataRole.CheckStateRole and column == 0:
+			return Qt.CheckState.Checked if row.checked else Qt.CheckState.Unchecked
+		if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.UserRole):
+			if column == 1:
+				return row.executor.label
+			if column == 2:
+				return status_caption(row.executor.status)
+			if column == 3:
+				return reactor_state(row.executor)
+			if column == 4:
+				if role == Qt.ItemDataRole.UserRole:
+					# сортировка — по моменту, а не по его записи словами
+					return row.last_at.timestamp() if row.last_at else 0.0
+				return when_text(row.last_at) if row.last_at else "—"
+		return None
+
+	def setData(  # noqa: N802 — API Qt
+		self, index: _Index, value: Any, role: int = Qt.ItemDataRole.EditRole
+	) -> bool:
+		if role != Qt.ItemDataRole.CheckStateRole or index.column() != 0:
+			return False
+		row = self._rows[index.row()]
+		if not row.capable:
+			return False
+		self._rows[index.row()] = ReactorRow(
+			row.executor, value == Qt.CheckState.Checked.value, row.last_at
+		)
+		self.dataChanged.emit(index, index, [role])
+		self._on_changed()
+		return True
+
+	def flags(self, index: _Index) -> Qt.ItemFlag:
+		if not index.isValid():
+			return Qt.ItemFlag.NoItemFlags
+		row = self._rows[index.row()]
+		if not row.capable:
+			# приостановленный или не состоящий проход не поведёт —
+			# и отметить его нельзя: причина в колонке «Состояние»
+			return Qt.ItemFlag.NoItemFlags
+		flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+		if index.column() == 0:
+			flags |= Qt.ItemFlag.ItemIsUserCheckable
+		return flags
+
+	def headerData(  # noqa: N802 — API Qt
+		self,
+		section: int,
+		orientation: Qt.Orientation,
+		role: int = Qt.ItemDataRole.DisplayRole,
+	) -> Any:
+		if orientation is Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+			return self.COLUMNS[section]
+		return None
+
+
+class _ReactorsProxy(QSortFilterProxyModel):
+	"""Отбор и сортировка таблицы «Кто ставит» (правило — ``reactor_matches``)."""
+
+	def __init__(self, model: _ReactorsModel, parent: QObject | None = None) -> None:
+		super().__init__(parent)
+		self._model = model
+		self.setSourceModel(model)
+		self.setSortRole(Qt.ItemDataRole.UserRole)
+		self._query = ""
+		self._mode = ReactorFilter.ALL
+
+	def set_filter(self, query: str, mode: ReactorFilter) -> None:
+		"""Меняет поиск и отбор."""
+		self._query = query
+		self._mode = mode
+		self.invalidateFilter()
+
+	def filterAcceptsRow(self, source_row: int, _parent: _Index) -> bool:  # noqa: N802 — API Qt
+		return reactor_matches(self._model.row(source_row), self._query, self._mode)
 
 
 class _ReactionsSection(_TaskSection):
-	"""Раздел «реакции»: кто ставит, какие, каким записям, с какими паузами.
-
-	Два списка приходят из движка позже строки задачи — пользователи
-	с правом реагировать и разрешённые в сообществе реакции; сохранённые
-	параметры раскладываются по галочкам, когда списки на месте.
-	"""
+	"""«Реакции»: кто ставит таблицей, какие реакции плитками, каким записям."""
 
 	kind = TaskKind.REACTIONS
 
-	def __init__(self, panel: TasksPanel, page_parent: QWidget) -> None:
-		super().__init__(panel, page_parent)
-		self._user_boxes: dict[int, CheckBox] = {}
-		self._reaction_rows: dict[str, tuple[CheckBox, SpinBox]] = {}
+	def build(self) -> None:
 		self._pending: ReactionsParams | None = None
-		box = QVBoxLayout(self)
-		box.setContentsMargins(0, 0, 0, 0)
-		box.setSpacing(density.spacing().row_spacing)
-		hint = BodyLabel(reactions.TITLE.hint, self)
-		hint.setWordWrap(True)
-		box.addWidget(hint)
-		columns = QHBoxLayout()
-		box.addLayout(columns, stretch=1)
-		users_column = QVBoxLayout()
-		users_column.addWidget(StrongBodyLabel("Кто ставит (по кругу)", self))
-		self._users_note = CaptionLabel("Читаю пользователей…", self)
-		users_column.addWidget(self._users_note)
-		users_area, self._users_box = list_area(self, density.spacing().list_spacing)
-		users_column.addWidget(users_area, stretch=1)
-		columns.addLayout(users_column, stretch=1)
-		reactions_column = QVBoxLayout()
-		reactions_column.addWidget(StrongBodyLabel("Какие реакции и их вес, %", self))
-		self._reactions_note = CaptionLabel("Читаю разрешённые реакции…", self)
-		reactions_column.addWidget(self._reactions_note)
-		reactions_area, self._reactions_box = list_area(self, density.spacing().list_spacing)
-		reactions_column.addWidget(reactions_area, stretch=1)
-		columns.addLayout(reactions_column, stretch=1)
-		box.addLayout(self._scope_row())
-		box.addLayout(self._limits_row())
-		box.addLayout(self._pause_row())
-		self._label = BodyLabel("Проход ещё не выполнялся.", self)
-		self._label.setWordWrap(True)
-		box.addWidget(self._label)
+		self._reaction_rows: dict[str, tuple[CheckBox, SpinBox]] = {}
 		self._error = ErrorLabel(self)
-		box.addWidget(self._error)
-		box.addLayout(self._run_row())
-		box.addWidget(self.schedule_block(self))
-		box.addLayout(self.journal_row(self))
+		self._build_reactors()
+		self._build_reactions()
+		self._build_scope()
+		self._box.addWidget(self._error)
 
-	def _scope_row(self) -> QHBoxLayout:
-		"""Охват: каким записям ставить, и число случайных."""
+	# --- блок «Кто ставит» ----------------------------------------------------------
+
+	def _build_reactors(self) -> None:
+		block = _FormBlock(self, self._box, "Кто ставит")
 		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Каким записям:", self))
+		row.setSpacing(10)  # макет
+		self._search = SearchLineEdit(self)
+		self._search.setFixedWidth(_SEARCH_WIDTH)  # макет
+		self._search.setPlaceholderText("Поиск по имени")
+		self._search.textChanged.connect(self._on_filter)
+		row.addWidget(self._search)
+		self._filter = ComboBox(self)
+		for mode, title in REACTOR_FILTERS:
+			self._filter.addItem(title, userData=mode)
+		self._filter.currentIndexChanged.connect(self._on_filter)
+		row.addWidget(self._filter)
+		self._counter = CaptionLabel(self)
+		row.addWidget(self._counter)
+		row.addStretch()
+		mark_all = PushButton("Отметить всех подходящих", self)
+		mark_all.setToolTip("Отметить всех, кто состоит в сообществе и не приостановлен")
+		mark_all.clicked.connect(self._on_mark_all)
+		row.addWidget(mark_all)
+		holder = QWidget(self)
+		holder.setLayout(row)
+		block.add(holder)
+		self._model = _ReactorsModel(self._on_reactors_changed, self)
+		self._proxy = _ReactorsProxy(self._model, self)
+		self._table = TableView(self)
+		self._table.setModel(self._proxy)
+		self._table.setSortingEnabled(True)
+		self._table.sortByColumn(4, Qt.SortOrder.DescendingOrder)
+		self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+		self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+		self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+		self._table.setWordWrap(False)
+		vertical = self._table.verticalHeader()
+		if vertical is not None:
+			vertical.hide()
+			vertical.setDefaultSectionSize(_REACTOR_ROW_HEIGHT)  # макет
+		header = self._table.horizontalHeader()
+		if header is not None:
+			header.setStretchLastSection(True)
+			header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+			header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+		self._table.setColumnWidth(0, _CHECK_COLUMN_WIDTH)  # макет
+		height = _REACTOR_ROWS_SHOWN * _REACTOR_ROW_HEIGHT
+		if header is not None:
+			height += header.height()
+		self._table.setFixedHeight(height)  # макет: 6 строк, дальше прокрутка
+		block.add(self._table)
+		block.note("Отмеченные ставят реакции по очереди, по одному за запуск.")
+
+	def _on_filter(self, *_args: object) -> None:
+		"""Поиск и отбор — клиентские, как на дашборде."""
+		mode = self._filter.currentData()
+		self._proxy.set_filter(
+			self._search.text(), mode if isinstance(mode, ReactorFilter) else ReactorFilter.ALL
+		)
+
+	def _on_mark_all(self) -> None:
+		self._model.check_all()
+		self._update_counter()
+
+	def _on_reactors_changed(self) -> None:
+		self._update_counter()
+		self._changed()
+
+	def _update_counter(self) -> None:
+		total = self._model.rowCount()
+		self._counter.setText(f"отмечено {len(self._model.checked_owners())} из {total}")
+
+	# --- блок «Какие реакции» -------------------------------------------------------
+
+	def _build_reactions(self) -> None:
+		block = _FormBlock(self, self._box, "Какие реакции и их вес")
+		self._reactions_grid = FlowGrid(
+			[], self, min_width=_REACTION_MIN_WIDTH, spacing=_CARD_SPACING, stretch=False
+		)
+		block.add(self._reactions_grid)
+		self._reactions_note = block.note("Читаю разрешённые реакции…")
+
+	def _reaction_tile(self, option: ReactionOption) -> QWidget:
+		"""Плитка реакции постоянной ширины: флажок, эмодзи и вес."""
+		tile = QWidget(self)
+		tile.setFixedWidth(_REACTION_MIN_WIDTH)  # макет
+		row = QHBoxLayout(tile)
+		row.setContentsMargins(0, 0, 0, 0)
+		row.setSpacing(10)  # макет
+		check = CheckBox(tile)
+		check.setToolTip(option.title + (" · Premium" if option.premium else ""))
+		row.addWidget(check)
+		emoji = BodyLabel(option.emoji, tile)
+		emoji.setFont(font_px(18))  # макет
+		emoji.setFixedWidth(_EMOJI_WIDTH)  # макет
+		row.addWidget(emoji)
+		weight = SpinBox(tile)
+		weight.setRange(*reactions.WEIGHT_RANGE)
+		weight.setValue(100)
+		weight.setFixedWidth(_WEIGHT_WIDTH)  # макет
+		row.addWidget(weight)
+		self._reaction_rows[option.emoji] = (check, weight)
+		on_change(self._changed, check, weight)
+		return tile
+
+	# --- блок «Каким записям» -------------------------------------------------------
+
+	def _build_scope(self) -> None:
+		block = _FormBlock(self, self._box, "Каким записям")
 		self._scope = ComboBox(self)
+		self._scope.setMaximumWidth(_COMBO_MAX_WIDTH)  # макет
 		for scope, title in reactions.SCOPE_TITLES.items():
 			self._scope.addItem(title, userData=scope)
 		self._scope.currentIndexChanged.connect(self._on_scope)
-		row.addWidget(self._scope, stretch=1)
-		self._random_label = BodyLabel("сколько:", self)
-		row.addWidget(self._random_label)
-		self._random_count = SpinBox(self)
-		self._random_count.setRange(*reactions.RANDOM_COUNT_RANGE)
-		self._random_count.setValue(reactions.DEFAULT_RANDOM_COUNT)
-		row.addWidget(self._random_count)
-		self._on_scope()
-		return row
-
-	def _limits_row(self) -> QHBoxLayout:
-		"""Границы прохода: глубина просмотра и потолок реакций."""
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Просматривать последних записей:", self))
-		self._depth = SpinBox(self)
-		self._depth.setRange(*reactions.DEPTH_RANGE)
-		self._depth.setValue(reactions.DEFAULT_DEPTH)
-		row.addWidget(self._depth)
-		row.addWidget(BodyLabel("реакций за проход не больше:", self))
-		self._limit = SpinBox(self)
-		self._limit.setRange(*reactions.LIMIT_RANGE)
-		self._limit.setValue(reactions.DEFAULT_LIMIT)
-		row.addWidget(self._limit)
-		row.addStretch()
-		return row
-
-	def _pause_row(self) -> QHBoxLayout:
-		"""Пауза между реакциями и две реакции у Premium."""
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Пауза между реакциями от", self))
-		self._pause_min = DoubleSpinBox(self)
-		self._pause_min.setRange(*reactions.PAUSE_RANGE)
-		self._pause_min.setSingleStep(0.1)
-		self._pause_min.setValue(reactions.DEFAULT_PAUSE_S[0])
-		row.addWidget(self._pause_min)
-		row.addWidget(BodyLabel("до", self))
-		self._pause_max = DoubleSpinBox(self)
-		self._pause_max.setRange(*reactions.PAUSE_RANGE)
-		self._pause_max.setSingleStep(0.1)
-		self._pause_max.setValue(reactions.DEFAULT_PAUSE_S[1])
-		row.addWidget(self._pause_max)
-		row.addWidget(BodyLabel("с", self))
-		row.addStretch()
-		self._premium_double = CheckBox("Premium ставит две реакции", self)
-		self._premium_double.setToolTip(
-			"Аккаунт с подпиской Premium может поставить несколько реакций — "
-			"выпадут две разные из набора"
+		block.row("Охват", self._scope)
+		self._random_count = number_field(
+			self, reactions.RANDOM_COUNT_RANGE, reactions.DEFAULT_RANDOM_COUNT
 		)
-		row.addWidget(self._premium_double)
-		return row
-
-	def _run_row(self) -> QHBoxLayout:
-		"""Кнопки: подобрать записи (без изменений) и провести проход."""
-		row = QHBoxLayout()
-		row.addStretch()
-		preview = self.run_button("Подобрать записи", self)
-		preview.setToolTip("Прочитать ленту и посчитать подходящие записи — реакции не ставятся")
-		preview.clicked.connect(lambda: self._launch_checked(dry_run=True))
-		row.addWidget(preview)
-		run = self.run_button("Провести проход", self)
-		run.setToolTip("Следующий по кругу пользователь поставит реакции прямо сейчас")
-		run.clicked.connect(lambda: self._launch_checked(dry_run=False))
-		row.addWidget(run)
-		return row
-
-	def _launch_checked(self, *, dry_run: bool) -> None:
-		"""Проверяет заполнение формы и ставит запуск."""
-		params = self.params()
-		if not params.users:
-			self._error.fail("Отметьте хотя бы одного пользователя.")
-			return
-		if not any(choice.weight > 0 for choice in params.reactions):
-			self._error.fail("Отметьте хотя бы одну реакцию с ненулевым весом.")
-			return
-		self._error.succeed()
-		self.launch(dry_run=dry_run, status_text="Подбор идёт…" if dry_run else "Проход идёт…")
+		self._random_label = BodyLabel("Сколько случайных", self)
+		block.row("Сколько случайных", self._random_count, unit="записей")
+		self._depth = number_field(self, reactions.DEPTH_RANGE, reactions.DEFAULT_DEPTH)
+		block.row("Просматривать последних", self._depth, unit="записей ленты")
+		self._limit = number_field(self, reactions.LIMIT_RANGE, reactions.DEFAULT_LIMIT)
+		block.row("За проход не больше", self._limit, unit="реакций")
+		self._pause_min = seconds_field(self, reactions.PAUSE_RANGE, reactions.DEFAULT_PAUSE_S[0])
+		self._pause_max = seconds_field(self, reactions.PAUSE_RANGE, reactions.DEFAULT_PAUSE_S[1])
+		block.row(
+			"Пауза между реакциями",
+			self._pause_min,
+			BodyLabel("—", self),
+			self._pause_max,
+			unit="с",
+		)
+		self._premium_double = CheckBox("ставит две разные реакции", self)
+		block.row("Premium", self._premium_double)
+		on_change(
+			self._changed,
+			self._scope,
+			self._random_count,
+			self._depth,
+			self._limit,
+			self._pause_min,
+			self._pause_max,
+			self._premium_double,
+		)
+		self._on_scope()
 
 	def _on_scope(self, *_args: object) -> None:
 		"""Число случайных записей нужно только охвату «случайные»."""
 		is_random = self._scope.currentData() is ReactionScope.RANDOM_WITHOUT_MINE
-		self._random_label.setVisible(is_random)
 		self._random_count.setVisible(is_random)
+		self._random_label.setVisible(is_random)
 
-	# --- списки из движка ---------------------------------------------------------
+	# --- списки из движка -----------------------------------------------------------
 
-	def mount(self, task: TaskDto) -> None:
-		super().mount(task)
-		self._panel.read_reactors(self.show_reactors)
-		self._panel.read_reaction_options(self.show_reaction_options, self._options_failed)
-
-	def show_reactors(self, executors: list[ExecutorDto]) -> None:
-		"""Раскладывает пользователей с правом реагировать галочками."""
-		clear_layout(self._users_box)
-		self._user_boxes.clear()
-		for executor in executors:
-			check = CheckBox(reactor_label(executor), self)
-			self._user_boxes[executor.owner.id] = check
-			self._users_box.addWidget(check)
-		self._users_note.setText(
-			"Пользователей с правом реагировать в пуле нет — введите их на «Участниках»"
-			if not executors
-			else "Отмеченные ставят реакции по очереди, по одному за запуск"
+	def show_reactors(self, executors: list[ExecutorDto], runs: Sequence[TaskRunDto]) -> None:
+		"""Раскладывает пользователей пула строками таблицы."""
+		times = last_reaction_times(runs)
+		chosen = set(self._pending.users) if self._pending else set()
+		self._model.set_rows(
+			[
+				ReactorRow(executor, executor.owner in chosen, times.get(executor.owner))
+				for executor in executors
+			]
 		)
-		self._apply_pending()
+		self._update_counter()
 
 	def show_reaction_options(self, allowed: ChatReactions) -> None:
-		"""Раскладывает разрешённые реакции: галочка и вес."""
-		clear_layout(self._reactions_box)
+		"""Раскладывает разрешённые реакции плитками."""
 		self._reaction_rows.clear()
-		for option in allowed.options:
-			self._reactions_box.addWidget(self._reaction_row(option))
+		self._reactions_grid.set_cards([self._reaction_tile(option) for option in allowed.options])
 		self._reactions_note.setText(
 			"В сообществе реакции запрещены — задача невыполнима"
 			if not allowed.options
-			else "Вес относительный: 50 и 50 — то же, что 100 и 100; 0 — не выпадает"
+			else "Вес относительный: 50 и 50 — то же, что 100 и 100; 0 — не выпадает."
 		)
 		self._apply_pending()
 
-	def _options_failed(self, message: str) -> None:
+	def options_failed(self, message: str) -> None:
 		"""Перечень реакций не прочитался — причина на месте, форма живая."""
 		self._reactions_note.setText(f"Разрешённые реакции не прочитаны: {message}")
 
-	def _reaction_row(self, option: ReactionOption) -> QWidget:
-		"""Строка реакции: галочка с эмодзи и названием, вес."""
-		box = QWidget(self)
-		row = QHBoxLayout(box)
-		row.setContentsMargins(0, 0, 0, 0)
-		title = f"{option.emoji}  {option.title}" + ("  · Premium" if option.premium else "")
-		check = CheckBox(title, box)
-		row.addWidget(check, stretch=1)
-		weight = SpinBox(box)
-		weight.setRange(*reactions.WEIGHT_RANGE)
-		weight.setValue(100)
-		row.addWidget(weight)
-		self._reaction_rows[option.emoji] = (check, weight)
-		return box
-
 	def _apply_pending(self) -> None:
-		"""Сохранённые параметры — по галочкам, когда списки уже на экране."""
+		"""Сохранённые параметры — по плиткам, когда те уже на экране."""
 		params = self._pending
 		if params is None:
 			return
-		chosen_users = {user.id for user in params.users}
-		for account_id, check in self._user_boxes.items():
-			check.setChecked(account_id in chosen_users)
 		weights = {choice.emoji: choice.weight for choice in params.reactions}
 		for emoji, (check, weight) in self._reaction_rows.items():
 			check.setChecked(emoji in weights)
@@ -766,15 +1493,12 @@ class _ReactionsSection(_TaskSection):
 		self._pause_min.setValue(params.pause_min_s)
 		self._pause_max.setValue(params.pause_max_s)
 		self._premium_double.setChecked(params.premium_double)
+		self._model.set_checked(set(params.users))
+		self._update_counter()
 		self._apply_pending()
 
 	def params(self) -> ReactionsParams:
 		scope = self._scope.currentData()
-		users = tuple(
-			ExecutorRef(OwnerKind.USER, account_id)
-			for account_id, check in self._user_boxes.items()
-			if check.isChecked()
-		)
 		chosen = tuple(
 			ReactionChoice(emoji, weight.value())
 			for emoji, (check, weight) in self._reaction_rows.items()
@@ -782,9 +1506,9 @@ class _ReactionsSection(_TaskSection):
 		)
 		pending = self._pending
 		return ReactionsParams(
-			# пока списки не пришли, галочек нет — сохранённый выбор
-			# остаётся прежним, а не стирается пустотой
-			users=users if self._user_boxes or pending is None else pending.users,
+			# пока перечень реакций не пришёл, плиток нет — сохранённый
+			# выбор остаётся прежним, а не стирается пустотой
+			users=self._model.checked_owners(),
 			reactions=chosen if self._reaction_rows or pending is None else pending.reactions,
 			scope=scope if isinstance(scope, ReactionScope) else ReactionScope.ALL_WITHOUT_MINE,
 			random_count=self._random_count.value(),
@@ -795,269 +1519,353 @@ class _ReactionsSection(_TaskSection):
 			premium_double=self._premium_double.isChecked(),
 		)
 
-	def set_status(self, text: str) -> None:
-		self._label.setText(text)
-
-	def confirm_schedule(self, schedule: Schedule) -> bool:
+	def valid(self) -> bool:
 		params = self.params()
-		if not params.users or not any(choice.weight > 0 for choice in params.reactions):
-			self._error.fail("Для расписания отметьте пользователей и хотя бы одну реакцию.")
-			return False
-		self._error.succeed()
-		return confirm_delete(
-			self,
-			f"Включить реакции в «{self._panel.community.title}» по расписанию "
-			f"({schedule_text(schedule)})?\n\nПользователей по кругу: {len(params.users)}; "
-			f"охват — {reactions.SCOPE_TITLES[params.scope]}; за проход не больше "
-			f"{params.limit} реакций. Каждый запуск — проход одного пользователя без "
-			"дополнительного подтверждения.",
-			accept_text="Включить",
-		)
-
-	def show_report(self, item: TaskJobDto) -> None:
-		report = item.report
-		if isinstance(report, ReactionsReport):
-			self._label.setText(reactions.reactions_summary(report, dry_run=item.dry_run))
+		if not params.users:
+			return self._error.fail("Отметьте хотя бы одного пользователя.")
+		if not any(choice.weight > 0 for choice in params.reactions):
+			return self._error.fail("Отметьте хотя бы одну реакцию с ненулевым весом.")
+		return self._error.succeed()
 
 
-class _JoinRequestsSection(_TaskSection):
-	"""Раздел «приём заявок»: удалённые, ссылки в профиле, потолок, запуск.
+# --- настройка одной задачи ---------------------------------------------------
 
-	Правила ограничения есть только у групп: в канале ограничить
-	участника нечем, поэтому у канала эти флажки неактивны с объяснением.
+
+class _TaskDetail(QWidget):
+	"""Настройка задачи: путь, шапка с запусками, блоки, расписание, запуски.
+
+	Сохранение одно на всё (спека, раздел 4.4): параметры и расписание
+	пишутся вместе, потому что запуск по расписанию идёт именно с этими
+	параметрами. Пока форма совпадает с сохранённым, обе кнопки ряда
+	неактивны — правило ``form_dirty``.
 	"""
 
-	kind = TaskKind.JOIN_REQUESTS
+	def __init__(
+		self,
+		panel: TasksPanel,
+		parent: QWidget,
+		*,
+		on_back: Callable[[], None],
+		on_fix: Callable[[TaskFixTarget], None],
+	) -> None:
+		super().__init__(parent)
+		self._panel = panel
+		self._on_fix = on_fix
+		self._task: TaskDto | None = None
+		self._saved: TaskForm | None = None
+		self._section: _TaskSection | None = None
+		self._job: TaskJobDto | None = None
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(16)  # макет
+		self._path = BreadcrumbBar(self)
+		self._building_path = False
+		self._path.currentItemChanged.connect(partial(self._on_path, on_back))
+		layout.addWidget(self._path, alignment=Qt.AlignmentFlag.AlignLeft)
+		layout.addLayout(self._build_header())
+		layout.addWidget(self._build_progress())
+		self._error_box = QVBoxLayout()
+		layout.addLayout(self._error_box)
+		self._section_box = QVBoxLayout()
+		self._section_box.setContentsMargins(0, 0, 0, 0)
+		self._section_box.setSpacing(density.spacing().block_spacing)
+		layout.addLayout(self._section_box)
+		self._schedule = _ScheduleBlock(self, layout, self._on_form_changed)
+		layout.addLayout(self._build_save_row())
+		self._runs_box = QVBoxLayout()
+		self._runs_box.setSpacing(density.spacing().row_spacing)
+		layout.addLayout(self._runs_box)
+		layout.addStretch()
 
-	def __init__(self, panel: TasksPanel, page_parent: QWidget) -> None:
-		super().__init__(panel, page_parent)
-		is_group = panel.community.kind is CommunityKind.GROUP
-		box = QVBoxLayout(self)
-		box.setContentsMargins(0, 0, 0, 0)
-		box.setSpacing(density.spacing().row_spacing)
-		hint = BodyLabel(join_requests.TITLE.hint, self)
-		hint.setWordWrap(True)
-		box.addWidget(hint)
-		self._decline_deleted = CheckBox("Отклонять заявки удалённых аккаунтов", self)
-		self._decline_deleted.setChecked(True)
-		box.addWidget(self._decline_deleted)
-		self._restrict_bio = CheckBox(
-			"Принимать с полным ограничением, если в описании профиля есть ссылка", self
-		)
-		self._restrict_channel = CheckBox(
-			"…и если в профиле указан канал (один запрос к Telegram на заявителя)", self
-		)
-		for check in (self._restrict_bio, self._restrict_channel):
-			check.setEnabled(is_group)
-			if not is_group:
-				check.setToolTip(
-					"В канале ограничить участника нечем — правило действует в группах"
-				)
-			box.addWidget(check)
-		if not is_group:
-			note = CaptionLabel(
-				"Ограничение прав есть только у групп; в канале заявки принимаются как есть.", self
-			)
-			note.setWordWrap(True)
-			box.addWidget(note)
+	# --- каркас --------------------------------------------------------------------
+
+	def _build_header(self) -> QHBoxLayout:
+		"""Шапка: название, суть и две кнопки запуска."""
 		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Разбирать за проход не больше:", self))
-		self._limit = SpinBox(self)
-		self._limit.setRange(*join_requests.LIMIT_RANGE)
-		self._limit.setValue(join_requests.DEFAULT_LIMIT)
-		row.addWidget(self._limit)
-		row.addStretch()
-		preview = self.run_button("Посмотреть заявки", self)
-		preview.setToolTip("Прочитать ожидающие заявки и посчитать решения — ничего не меняется")
-		preview.clicked.connect(lambda: self.launch(dry_run=True, status_text="Просмотр идёт…"))
-		row.addWidget(preview)
-		run = self.run_button("Разобрать заявки", self)
-		run.clicked.connect(self._on_run)
-		row.addWidget(run)
-		box.addLayout(row)
-		self._label = BodyLabel("Просмотр ещё не выполнялся.", self)
-		self._label.setWordWrap(True)
-		box.addWidget(self._label)
-		box.addStretch()
-		box.addWidget(self.schedule_block(self))
-		box.addLayout(self.journal_row(self))
+		row.setSpacing(12)  # макет
+		column = QVBoxLayout()
+		column.setSpacing(2)
+		self._title = SubtitleLabel(self)
+		column.addWidget(self._title)
+		self._hint = CaptionLabel(self)
+		self._hint.setWordWrap(True)
+		column.addWidget(self._hint)
+		row.addLayout(column, stretch=1)
+		self._dry_run = PushButton(self)
+		self._dry_run.clicked.connect(partial(self._launch, True))
+		row.addWidget(self._dry_run, alignment=Qt.AlignmentFlag.AlignTop)
+		self._run = PrimaryPushButton(self)
+		self._run.clicked.connect(partial(self._launch, False))
+		row.addWidget(self._run, alignment=Qt.AlignmentFlag.AlignTop)
+		return row
 
-	def _on_run(self) -> None:
-		"""Подтверждение и обычный запуск: одобрение необратимо."""
-		params = self.params()
-		if not confirm_delete(
+	def _build_progress(self) -> QWidget:
+		"""Полоса хода работы с отменой — видна, только пока задача работает."""
+		card: QWidget = SimpleCardWidget(self)
+		row = QHBoxLayout(card)
+		row.setContentsMargins(14, 10, 14, 10)  # макет
+		row.setSpacing(12)  # макет
+		self._progress_title = StrongBodyLabel(self)
+		row.addWidget(self._progress_title)
+		self._progress_note = CaptionLabel(self)
+		row.addWidget(self._progress_note)
+		self._progress = ProgressBar(card)
+		row.addWidget(self._progress, stretch=1)
+		cancel = PushButton("Отменить", card)
+		cancel.clicked.connect(self._on_cancel)
+		row.addWidget(cancel)
+		card.hide()
+		self._progress_card = card
+		return card
+
+	def _build_save_row(self) -> QHBoxLayout:
+		"""Ряд сохранения: одна кнопка на параметры и расписание."""
+		row = QHBoxLayout()
+		row.setSpacing(8)  # макет
+		row.addStretch()
+		self._revert = PushButton("Отменить изменения", self)
+		self._revert.clicked.connect(self._on_revert)
+		row.addWidget(self._revert)
+		self._save = PushButton("Сохранить", self)
+		self._save.clicked.connect(self._on_save)
+		row.addWidget(self._save)
+		self._set_dirty(False)
+		return row
+
+	# --- показ задачи ---------------------------------------------------------------
+
+	def show_task(self, task: TaskDto, runs: Sequence[TaskRunDto]) -> None:
+		"""Показывает задачу: блоки раздела, расписание, запуски, ошибку."""
+		fresh = self._task is None or self._task.kind is not task.kind
+		self._task = task
+		if fresh:
+			self._mount_section(task.kind)
+			self._render_path(task.kind)
+			texts = TASK_TEXTS[task.kind]
+			self._title.setText(KIND_TITLES[task.kind])
+			self._hint.setText(texts.detail)
+			self._dry_run.setText(texts.dry_run)
+			self._run.setText(texts.run)
+		section = self._section
+		if section is not None:
+			section.apply_params(task.params)
+		self._schedule.present(task)
+		self._saved = TaskForm(task.params, task.schedule, task.enabled)
+		self._set_dirty(False)
+		self._render_runs(runs)
+		self._render_error(runs[0] if runs else None)
+
+	def _mount_section(self, kind: TaskKind) -> None:
+		"""Меняет блоки параметров на блоки этой задачи."""
+		clear_layout(self._section_box)
+		section = SECTIONS[kind](self._panel, self, self._on_form_changed)
+		self._section_box.addWidget(section)
+		self._section = section
+
+	def _render_path(self, kind: TaskKind) -> None:
+		"""Строка пути: «Задачи» › название задачи."""
+		self._building_path = True
+		try:
+			self._path.clear()
+			self._path.addItem("tasks", "Задачи")
+			self._path.addItem(str(kind), KIND_TITLES[kind])
+		finally:
+			self._building_path = False
+
+	def _on_path(self, on_back: Callable[[], None], route_key: str) -> None:
+		if not self._building_path and route_key == "tasks":
+			on_back()
+
+	def _render_runs(self, runs: Sequence[TaskRunDto]) -> None:
+		"""Последние запуски таблицей; без запусков — строка вместо неё."""
+		clear_layout(self._runs_box)
+		journal = list_button("Весь журнал…", self)
+		journal.clicked.connect(self._on_journal)
+		self._runs_box.addWidget(section_header(self, "Последние запуски", trailing=[journal]))
+		if not runs:
+			self._runs_box.addWidget(CaptionLabel("Запусков ещё не было.", self))
+			return
+		self._runs_box.addWidget(runs_table(self, runs[:RUNS_IN_DETAIL]))
+
+	def _render_error(self, run: TaskRunDto | None) -> None:
+		"""Строка ошибки последнего запуска — с переходом туда, где её чинят."""
+		clear_layout(self._error_box)
+		if run is None or run.outcome is not RunOutcome.ERROR:
+			return
+		bar = InfoBar.error(
+			title="Последний запуск не удался",
+			content=f"{when_text(run.started_at)}: {run.error or 'причина не записана'}",
+			isClosable=False,
+			duration=-1,
+			position=InfoBarPosition.NONE,
+			parent=self,
+		)
+		target = error_fix_target(run)
+		if target is not None:
+			fix = PushButton("Участники…", bar)
+			fix.clicked.connect(partial(self._on_fix, target))
+			bar.addWidget(fix)
+		self._error_box.addWidget(bar)
+
+	# --- ход работы -----------------------------------------------------------------
+
+	def set_job(self, job: TaskJobDto | None) -> None:
+		"""Показывает или прячет полосу хода работы этой задачи."""
+		self._job = job
+		self._progress_card.setVisible(job is not None)
+		self._dry_run.setEnabled(job is None)
+		self._run.setEnabled(job is None)
+		if job is None:
+			return
+		self._progress_title.setText("Идёт работа")
+		self._progress_note.setText(progress_caption(job))
+		self._progress.setValue(int(job.progress * 100))
+
+	def _on_cancel(self) -> None:
+		if self._job is not None:
+			self._panel.cancel(self._job.id)
+
+	# --- форма ----------------------------------------------------------------------
+
+	def _current_form(self) -> TaskForm | None:
+		section = self._section
+		if section is None:
+			return None
+		return TaskForm(section.params(), self._schedule.schedule(), self._schedule.enabled)
+
+	def _on_form_changed(self) -> None:
+		current = self._current_form()
+		self._set_dirty(current is not None and form_dirty(self._saved, current))
+
+	def _set_dirty(self, dirty: bool) -> None:
+		self._dirty = dirty
+		self._save.setEnabled(dirty)
+		self._revert.setEnabled(dirty)
+
+	@property
+	def dirty(self) -> bool:
+		"""Есть ли несохранённые правки."""
+		return self._dirty
+
+	@property
+	def kind(self) -> TaskKind | None:
+		"""Вид открытой задачи; None — настройку ещё не открывали."""
+		return self._task.kind if self._task is not None else None
+
+	@property
+	def section(self) -> _TaskSection | None:
+		"""Блоки открытой задачи (нужны спискам «Реакций»)."""
+		return self._section
+
+	def _on_revert(self) -> None:
+		"""Возвращает форму к сохранённому снимку."""
+		if self._task is not None:
+			self.show_task(self._task, self._panel.runs_of(self._task.kind))
+
+	def _on_save(self) -> None:
+		"""Сохраняет параметры и расписание одним вызовом движка."""
+		task, section = self._task, self._section
+		if task is None or section is None or not self._schedule.validate():
+			return
+		enabled = self._schedule.enabled
+		schedule = self._schedule.schedule()
+		params = section.params()
+		if enabled and not confirm_delete(
 			self,
-			f"Разобрать заявки в «{self._panel.community.title}»?\n\n"
-			f"{self._rules_text(params)} За проход — не больше {params.limit}. "
-			"Одобрение и отклонение необратимы.",
-			accept_text="Разобрать",
+			schedule_confirmation(task.kind, params, schedule, self._panel.community.title),
+			accept_text="Включить",
 		):
 			return
-		self.launch(dry_run=False, status_text="Приём идёт…")
+		self._panel.save_task(task, params, schedule, enabled=enabled)
 
-	@staticmethod
-	def _rules_text(params: JoinRequestsParams) -> str:
-		"""Правила задачи словами — для подтверждений."""
-		rules = ["остальных принять"]
-		if params.decline_deleted:
-			rules.insert(0, "удалённые аккаунты отклонить")
-		if params.restrict_bio_links:
-			rules.append("со ссылкой в описании — принять с полным ограничением")
-		if params.restrict_personal_channel:
-			rules.append("с каналом в профиле — принять с полным ограничением")
-		return "; ".join(rules).capitalize() + "."
+	def save_now(self) -> bool:
+		"""Сохраняет по просьбе владельца (уход с несохранёнными правками)."""
+		if not self._dirty:
+			return True
+		self._on_save()
+		return not self._dirty
 
-	def apply_params(self, params: TaskParams) -> None:
-		if not isinstance(params, JoinRequestsParams):
+	def _launch(self, dry_run: bool) -> None:
+		"""Ставит запуск с текущими значениями формы."""
+		task, section = self._task, self._section
+		if task is None or section is None or not section.valid():
 			return
-		self._decline_deleted.setChecked(params.decline_deleted)
-		self._restrict_bio.setChecked(params.restrict_bio_links)
-		self._restrict_channel.setChecked(params.restrict_personal_channel)
-		self._limit.setValue(params.limit)
+		params = section.params()
+		if not dry_run:
+			text = run_confirmation(task.kind, params, self._panel.community.title)
+			if text and not confirm_delete(self, text, accept_text=TASK_TEXTS[task.kind].run):
+				return
+		self._panel.launch(task, params, dry_run=dry_run)
 
-	def params(self) -> JoinRequestsParams:
-		return JoinRequestsParams(
-			decline_deleted=self._decline_deleted.isChecked(),
-			restrict_bio_links=self._restrict_bio.isChecked(),
-			restrict_personal_channel=self._restrict_channel.isChecked(),
-			limit=self._limit.value(),
-		)
-
-	def set_status(self, text: str) -> None:
-		self._label.setText(text)
-
-	def confirm_schedule(self, schedule: Schedule) -> bool:
-		params = self.params()
-		return confirm_delete(
-			self,
-			f"Включить приём заявок в «{self._panel.community.title}» по расписанию "
-			f"({schedule_text(schedule)})?\n\n{self._rules_text(params)} Каждый запуск "
-			f"разберёт не больше {params.limit} заявок без дополнительного подтверждения.",
-			accept_text="Включить",
-		)
+	def _on_journal(self) -> None:
+		if self._task is not None:
+			self._panel.open_journal(self._task)
 
 	def show_report(self, item: TaskJobDto) -> None:
-		report = item.report
-		if isinstance(report, JoinRequestsReport):
-			self._label.setText(join_requests.join_requests_summary(report, dry_run=item.dry_run))
+		"""Отдаёт отчёт разделу, если открыта его задача."""
+		section = self._section
+		if section is not None and self._task is not None and self._task.kind is item.kind:
+			section.show_report(item)
 
 
-class _ScheduleEditor(QWidget):
-	"""Форма расписания раздела: вид, границы, включено, сохранение.
-
-	Поля вида показываются по выбранному виду: у интервала — две границы
-	в минутах (равные — интервал постоянный), у моментов суток — строка
-	«ЧЧ:ММ» через запятую (формат тот же, что у времён публикации).
-	Подпись под формой — сохранённое расписание и следующий запуск.
-	"""
-
-	def __init__(self, parent: QWidget, *, on_save: Callable[[Schedule, bool], None]) -> None:
-		super().__init__(parent)
-		self._on_save = on_save
-		box = QVBoxLayout(self)
-		box.setContentsMargins(0, 0, 0, 0)
-		box.setSpacing(density.spacing().row_spacing)
-		row = QHBoxLayout()
-		row.addWidget(BodyLabel("Расписание:", self))
-		self._kind = ComboBox(self)
-		for kind, title in SCHEDULE_KINDS:
-			self._kind.addItem(title, userData=kind)
-		self._kind.currentIndexChanged.connect(self._on_kind)
-		row.addWidget(self._kind, stretch=1)
-		self._switch = SwitchButton(self)
-		self._switch.setOnText("включено")
-		self._switch.setOffText("выключено")
-		row.addWidget(self._switch)
-		box.addLayout(row)
-		self._interval = QWidget(self)
-		interval = QHBoxLayout(self._interval)
-		interval.setContentsMargins(0, 0, 0, 0)
-		interval.addWidget(BodyLabel("Пауза между запусками от", self._interval))
-		self._min = SpinBox(self._interval)
-		self._min.setRange(*INTERVAL_MINUTES_RANGE)
-		interval.addWidget(self._min)
-		interval.addWidget(BodyLabel("до", self._interval))
-		self._max = SpinBox(self._interval)
-		self._max.setRange(*INTERVAL_MINUTES_RANGE)
-		interval.addWidget(self._max)
-		interval.addWidget(BodyLabel("мин — случайно в промежутке", self._interval))
-		interval.addStretch()
-		box.addWidget(self._interval)
-		self._daily = QWidget(self)
-		daily = QHBoxLayout(self._daily)
-		daily.setContentsMargins(0, 0, 0, 0)
-		daily.addWidget(BodyLabel("В моменты суток:", self._daily))
-		self._times = LineEdit(self._daily)
-		self._times.setPlaceholderText("04:00, 16:30…")
-		daily.addWidget(self._times, stretch=1)
-		box.addWidget(self._daily)
-		footer = QHBoxLayout()
-		self._caption = CaptionLabel("", self)
-		self._caption.setWordWrap(True)
-		footer.addWidget(self._caption, stretch=1)
-		self.save_button = PushButton("Сохранить расписание", self)
-		self.save_button.setEnabled(False)
-		self.save_button.clicked.connect(self._save)
-		footer.addWidget(self.save_button)
-		box.addLayout(footer)
-		self._error = ErrorLabel(self)
-		box.addWidget(self._error)
-		self._on_kind()
-
-	def present(self, task: TaskDto) -> None:
-		"""Раскладывает сохранённое расписание по полям и обновляет подпись."""
-		schedule = task.schedule
-		for index, (kind, _title) in enumerate(SCHEDULE_KINDS):
-			if kind is schedule.kind:
-				self._kind.setCurrentIndex(index)
-		self._min.setValue(schedule.min_minutes)
-		self._max.setValue(schedule.max_minutes)
-		self._times.setText(", ".join(schedule.times))
-		self._switch.setChecked(task.enabled)
-		self._caption.setText(next_run_text(task))
-		self._error.succeed()
-		self._on_kind()
-
-	def schedule(self) -> Schedule:
-		"""Расписание из полей формы (без проверки — её делает движок)."""
-		kind = self._kind.currentData()
-		return Schedule(
-			kind=kind if isinstance(kind, ScheduleKind) else ScheduleKind.NONE,
-			min_minutes=self._min.value(),
-			max_minutes=self._max.value(),
-			times=parse_times(self._times.text()),
+def runs_table(parent: QWidget, runs: Sequence[TaskRunDto]) -> TableWidget:
+	"""Таблица запусков: когда, запуск, исполнитель, итог (ошибка — цветом)."""
+	table = TableWidget(parent)
+	table.setColumnCount(4)
+	table.setHorizontalHeaderLabels(["Когда", "Запуск", "Исполнитель", "Итог"])
+	table.setBorderRadius(6)
+	table.setWordWrap(False)
+	table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+	table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+	table.setRowCount(len(runs))
+	vertical = table.verticalHeader()
+	if vertical is not None:
+		vertical.hide()
+		vertical.setDefaultSectionSize(_TABLE_ROW_HEIGHT)
+	header = table.horizontalHeader()
+	if header is not None:
+		header.setStretchLastSection(True)
+		for column, width in enumerate(_RUNS_COLUMN_WIDTHS):
+			table.setColumnWidth(column, width)  # макет
+	for index, run in enumerate(runs):
+		cells = (
+			format_local(run.started_at),
+			run_kind_text(run),
+			run.executor_label or "—",
+			run_result_text(run),
 		)
+		for column, text in enumerate(cells):
+			item = QTableWidgetItem(text)
+			item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+			table.setItem(index, column, item)
+	table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+	table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+	height = len(runs) * _TABLE_ROW_HEIGHT + (header.height() if header is not None else 0) + 2
+	table.setFixedHeight(height)
+	return table
 
-	def _on_kind(self, *_args: object) -> None:
-		"""Показывает поля выбранного вида, прячет остальные."""
-		kind = self._kind.currentData()
-		self._interval.setVisible(kind is ScheduleKind.INTERVAL)
-		self._daily.setVisible(kind is ScheduleKind.DAILY)
 
-	def _save(self) -> None:
-		"""Проверяет расписание и отдаёт его владельцу."""
-		schedule = self.schedule()
-		enabled = self._switch.isChecked()
-		try:
-			schedule.validate()
-			if enabled and schedule.kind is ScheduleKind.NONE:
-				raise TaskError("Выберите расписание — «только по требованию» включать нечего.")
-		except TaskError as exc:
-			self._error.fail(str(exc))
-			return
-		self._error.succeed()
-		self._on_save(schedule, enabled)
+#: Раздел параметров по виду задачи (карта вместо цепочки условий).
+SECTIONS: dict[TaskKind, type[_TaskSection]] = {
+	TaskKind.SERVICE_MESSAGES: _ServiceMessagesSection,
+	TaskKind.DELETED_ACCOUNTS: _DeletedAccountsSection,
+	TaskKind.REACTIONS: _ReactionsSection,
+	TaskKind.JOIN_REQUESTS: _JoinRequestsSection,
+}
 
 
 class TasksPanel(QWidget):
-	"""Тело задач: сегменты видов, их разделы и панель хода работы.
+	"""Тело задач: обзор карточками и настройка одной задачи (ADR-0038).
 
-	Один и тот же виджет живёт во вкладке страницы сообщества
-	и в рабочем окне с дашборда. Панель хода работы — зритель
-	наблюдателя очереди задач при главном окне (ADR-0034); вкладка
-	присоединяет и отсоединяет её через :meth:`set_active`
-	(невидимая вкладка карточки не обновляет), окно живёт присоединённым.
+	Один и тот же виджет живёт во вкладке страницы сообщества и в рабочем
+	окне с дашборда. Ход работы приходит от наблюдателя очереди задач
+	при главном окне (ADR-0034): вкладка присоединяется и отсоединяется
+	через :meth:`set_active` (невидимая вкладка ничего не перерисовывает),
+	окно живёт присоединённым.
 	"""
+
+	#: Ошибку чинят на другой вкладке — владелец знает, как туда попасть.
+	fix_requested = Signal(str)
 
 	def __init__(
 		self, worker: EngineWorker, watcher: QueueWatcher, community: CommunityDto, parent: QWidget
@@ -1067,189 +1875,261 @@ class TasksPanel(QWidget):
 		self._watcher = watcher
 		self.community = community
 		self._show_error = error_reporter(self)
-		# id задания → раздел, который ждёт его исхода. Чужие задания
-		# (окно открывали для другого сообщества) в словарь не попадают
-		# и на этот экран не влияют
-		self._jobs: dict[int, _TaskSection] = {}
+		self._kinds = available_kinds(community.kind)
+		self._tasks: dict[TaskKind, TaskDto] = {}
+		self._runs: dict[TaskKind, list[TaskRunDto]] = {}
+		self._jobs: dict[TaskKind, TaskJobDto] = {}
+		# задания, о чьей ошибке уже узнали: снимаем их с очереди один раз
+		self._seen_errors: set[int] = set()
+		self._view = QueueView(on_state=self._on_jobs, on_finished=self._on_job_finished)
 		self._build()
-
-	def set_active(self, active: bool) -> None:
-		"""Присоединяет панель хода работы к наблюдателю или отсоединяет."""
-		self._panel.set_active(active)
-
-	# --- каркас -------------------------------------------------------------------
+		self.reload()
 
 	def _build(self) -> None:
-		"""Каркас: сегменты видов, их разделы и панель хода."""
-		spacing = density.spacing()
+		"""Каркас: стопка из двух страниц — обзор и настройка."""
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
-		layout.setSpacing(spacing.row_spacing)
-		self._segments = SegmentedWidget(self)
-		self._pages = QStackedWidget(self)
-		#: ключ раздела → его страница: связь явная, а не по номеру в стопке
-		self._by_key: dict[str, QWidget] = {}
-		layout.addWidget(self._segments)
-		layout.addWidget(self._pages, stretch=1)
-		self._sections: list[_TaskSection] = [
-			_ServiceMessagesSection(self, self),
-			_DeletedAccountsSection(self, self),
-			_ReactionsSection(self, self),
-			_JoinRequestsSection(self, self),
-		]
-		for section in self._sections:
-			self._add_page(str(section.kind), KIND_TITLES[section.kind], section)
-			self._read_task(section)
-		self._segments.currentItemChanged.connect(self._show)
-		self._segments.setCurrentItem(str(self._sections[0].kind))
-		layout.addWidget(CaptionLabel("Ход работы", self))
-		queue_box = QVBoxLayout()
-		queue_box.setSpacing(spacing.list_spacing)
-		layout.addLayout(queue_box)
-		self._panel = QueuePanel(
-			self,
-			queue_box,
-			watcher=self._watcher,
-			subtitle=self._job_subtitle,
-			on_finished=self._on_job_finished,
-			# задание с ошибкой очередь не покидает — до `on_finished`
-			# оно не доходит, и без этой сверки строка раздела навсегда
-			# осталась бы «Просмотр идёт…»
-			on_refreshed=self._on_jobs_refreshed,
+		layout.setSpacing(density.spacing().block_spacing)
+		self._stack = QStackedWidget(self)
+		self._overview = _TasksOverview(
+			self._kinds, self, on_open=self.open_task, on_toggle=self._on_toggle
 		)
+		self._overview.set_publisher(self.community.default_account_label)
+		self._detail = _TaskDetail(self, self, on_back=self.show_overview, on_fix=self._on_fix)
+		self._stack.addWidget(self._overview)
+		self._stack.addWidget(self._detail)
+		layout.addWidget(self._stack)
+		self._show_page(self._overview)
 
-	def _add_page(self, key: str, title: str, page: QWidget) -> None:
-		"""Добавляет раздел: сегмент сверху и страницу в стопке."""
-		self._pages.addWidget(page)
-		self._by_key[key] = page
-		self._segments.addItem(routeKey=key, text=title, onClick=lambda: self._show(key))
+	def _show_page(self, page: QWidget) -> None:
+		"""Показывает страницу стопки; скрытая не участвует в её высоте.
 
-	def _show(self, key: str) -> None:
-		"""Показывает страницу раздела — по ключу, а не по номеру в стопке."""
-		page = self._by_key.get(key)
-		if page is not None:
-			self._pages.setCurrentWidget(page)
+		Штатный ``QStackedWidget`` меряет все страницы разом, и под
+		короткой настройкой оставалась бы пустота высотой в обзор.
+		"""
+		for widget in (self._overview, self._detail):
+			policy = QSizePolicy.Policy.Preferred if widget is page else QSizePolicy.Policy.Ignored
+			widget.setSizePolicy(policy, policy)
+		self._stack.setCurrentWidget(page)
 
-	def _read_task(self, section: _TaskSection) -> None:
-		"""Читает строку задачи раздела из движка (заводя её при нужде)."""
+	def set_active(self, active: bool) -> None:
+		"""Присоединяет панель к наблюдателю очереди задач или отсоединяет."""
+		if active:
+			self._watcher.attach(self, self._view)
+			self.reload()
+		else:
+			self._watcher.detach(self._view)
+
+	# --- данные ---------------------------------------------------------------------
+
+	def reload(self) -> None:
+		"""Перечитывает задачи сообщества и их последние запуски."""
+		for kind in self._kinds:
+			run_in_engine(
+				self._worker,
+				self._worker.engine.tasks.task(self.community.id, kind),
+				self,
+				partial(self._on_task, kind),
+				self._show_error,
+			)
+
+	def _on_task(self, kind: TaskKind, task: TaskDto) -> None:
+		"""Строка задачи получена — читаем её последние запуски."""
+		self._tasks[kind] = task
+		self._refresh_card(kind)
+		# «Реакции» показывают, когда каждый исполнитель ходил последний
+		# раз, — это считается по журналу, поэтому запусков нужно больше
+		limit = RUNS_SHOWN if kind is TaskKind.REACTIONS else RUNS_IN_DETAIL
 		run_in_engine(
 			self._worker,
-			self._worker.engine.tasks.task(self.community.id, section.kind),
+			self._worker.engine.tasks.runs(task.id, limit),
 			self,
-			section.mount,
+			partial(self._on_runs, kind),
 			self._show_error,
 		)
 
-	# --- запуск и исходы ------------------------------------------------------------
+	def _on_runs(self, kind: TaskKind, runs: list[TaskRunDto]) -> None:
+		self._runs[kind] = runs
+		self._refresh_card(kind)
+		task = self._tasks.get(kind)
+		if task is not None and self._detail.kind is kind and not self._detail.dirty:
+			self._detail.show_task(task, runs)
 
-	def launch(
-		self,
-		section: _TaskSection,
-		task: TaskDto,
-		params: TaskParams,
-		*,
-		dry_run: bool,
-		status_text: str,
-	) -> None:
-		"""Ставит запуск задачи и запоминает, какой раздел ждёт исхода."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.tasks.run_now(task.id, params, dry_run=dry_run),
-			self,
-			lambda job_id: self._track(job_id, section, status_text),
-			self._show_error,
-		)
+	def runs_of(self, kind: TaskKind) -> list[TaskRunDto]:
+		"""Последние запуски задачи (то, что уже прочитано)."""
+		return self._runs.get(kind, [])
 
-	def _track(self, job_id: int, section: _TaskSection, text: str) -> None:
-		"""Запоминает, какой раздел ждёт исхода этого задания."""
-		self._jobs[job_id] = section
-		section.set_status(text)
+	def _last_run(self, kind: TaskKind) -> TaskRunDto | None:
+		runs = self._runs.get(kind)
+		return runs[0] if runs else None
 
-	def save_schedule(
-		self, section: _TaskSection, task: TaskDto, schedule: Schedule, *, enabled: bool
-	) -> None:
-		"""Сохраняет расписание задачи и показывает разделу свежую строку."""
-		run_in_engine(
-			self._worker,
-			self._worker.engine.tasks.save_schedule(task.id, schedule, enabled=enabled),
-			self,
-			section.mount,
-			self._show_error,
-		)
+	def _refresh_card(self, kind: TaskKind) -> None:
+		"""Приводит карточку обзора к свежим данным задачи."""
+		card = self._overview.cards.get(kind)
+		if card is not None:
+			card.show_task(self._tasks.get(kind), self._last_run(kind), self._jobs.get(kind))
 
-	def read_reactors(self, ready: Callable[[list[ExecutorDto]], None]) -> None:
-		"""Читает пользователей пула с правом реагировать."""
+	# --- переходы -------------------------------------------------------------------
+
+	def open_task(self, kind: TaskKind) -> None:
+		"""Открывает настройку задачи (клик по карточке обзора)."""
+		task = self._tasks.get(kind)
+		if task is None:
+			return
+		self._detail.show_task(task, self.runs_of(kind))
+		self._detail.set_job(self._jobs.get(kind))
+		self._read_reaction_lists(kind)
+		self._show_page(self._detail)
+
+	def show_overview(self) -> None:
+		"""Возвращает к обзору; несохранённые правки спрашивают, что с ними."""
+		if not self._leave_detail():
+			return
+		self._show_page(self._overview)
+
+	def _leave_detail(self) -> bool:
+		"""Спрашивает про несохранённые правки; False — уходить не нужно."""
+		if not self._detail.dirty:
+			return True
+		box = MessageBox("Сохранить изменения?", SAVE_ON_LEAVE_HINT, self.window())
+		box.yesButton.setText("Сохранить")
+		box.cancelButton.setText("Не сохранять")
+		if exec_dialog(box):
+			return self._detail.save_now()
+		return True
+
+	def _read_reaction_lists(self, kind: TaskKind) -> None:
+		"""Списки «Реакций» приходят из движка позже строки задачи."""
+		section = self._detail.section
+		if kind is not TaskKind.REACTIONS or not isinstance(section, _ReactionsSection):
+			return
 		run_in_engine(
 			self._worker,
 			self._worker.engine.tasks.reactors(self.community.id),
 			self,
-			ready,
+			lambda users: section.show_reactors(users, self.runs_of(kind)),
 			self._show_error,
 		)
-
-	def read_reaction_options(
-		self, ready: Callable[[ChatReactions], None], failed: Callable[[str], None]
-	) -> None:
-		"""Читает разрешённые в сообществе реакции (одно обращение к Telegram)."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.tasks.reaction_options(self.community.id),
 			self,
-			ready,
-			failed,
+			section.show_reaction_options,
+			section.options_failed,
+		)
+
+	def _on_fix(self, target: TaskFixTarget) -> None:
+		"""Кнопка в строке ошибки: владелец переключит нужную вкладку."""
+		self.fix_requested.emit(str(target))
+
+	# --- операции -------------------------------------------------------------------
+
+	def _on_toggle(self, kind: TaskKind, enabled: bool) -> None:
+		"""Тумблер карточки: включает или выключает расписание задачи."""
+		task = self._tasks.get(kind)
+		if task is None or task.enabled == enabled:
+			return
+		if enabled and not confirm_delete(
+			self,
+			schedule_confirmation(kind, task.params, task.schedule, self.community.title),
+			accept_text="Включить",
+		):
+			self._refresh_card(kind)  # тумблер возвращается на место
+			return
+		run_in_engine(
+			self._worker,
+			self._worker.engine.tasks.save_schedule(task.id, task.schedule, enabled=enabled),
+			self,
+			partial(self._on_saved, kind),
+			partial(self._on_toggle_failed, kind),
+		)
+
+	def _on_toggle_failed(self, kind: TaskKind, message: str) -> None:
+		"""Движок отказал (например, параметры не годятся) — сказать и вернуть тумблер."""
+		self._show_error(message)
+		self._refresh_card(kind)
+
+	def save_task(
+		self, task: TaskDto, params: TaskParams, schedule: Schedule, *, enabled: bool
+	) -> None:
+		"""Сохраняет параметры и расписание задачи одним вызовом движка."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.tasks.save_task(task.id, params, schedule, enabled=enabled),
+			self,
+			partial(self._on_saved, task.kind),
+			self._show_error,
+		)
+
+	def _on_saved(self, kind: TaskKind, task: TaskDto) -> None:
+		"""Свежая строка задачи: карточка и открытая настройка."""
+		self._tasks[kind] = task
+		self._refresh_card(kind)
+		if self._detail.kind is kind:
+			self._detail.show_task(task, self.runs_of(kind))
+
+	def launch(self, task: TaskDto, params: TaskParams, *, dry_run: bool) -> None:
+		"""Ставит запуск задачи с текущими значениями формы."""
+		run_in_engine(
+			self._worker,
+			self._worker.engine.tasks.run_now(task.id, params, dry_run=dry_run),
+			self,
+			noop,
+			self._show_error,
+		)
+
+	def cancel(self, job_id: int) -> None:
+		"""Отменяет идущее задание («Отменить» в полосе хода)."""
+		run_in_engine(
+			self._worker, self._worker.engine.tasks.cancel(job_id), self, noop, self._show_error
 		)
 
 	def open_journal(self, task: TaskDto) -> None:
 		"""Открывает окно журнала запусков задачи."""
 		exec_dialog(TaskRunsDialog(self._worker, task, self.community, self.window()))
 
-	def _on_job_finished(self, item: TaskJobDto, done: bool) -> None:
-		"""Панель сообщила об исходе задания — забираем отчёт.
+	# --- ход работы -----------------------------------------------------------------
 
-		Панель снимает завершённые с показа, поэтому отчёт берётся
-		здесь: иначе он исчез бы вместе с карточкой. Сюда доходят
-		только исходы, покидающие очередь (готово и отменено);
-		ошибку ловит :meth:`_on_jobs_refreshed`.
-		"""
-		section = self._jobs.pop(item.id, None)
-		if section is None:
-			return  # задание другого окна
-		if not done:
-			section.set_status("Отменено — числа не обновлялись.")
+	def _on_jobs(self, items: list[Any]) -> None:
+		"""Снимок очереди задач: полосы хода на карточках и в настройке."""
+		mine = [item for item in items if item.community_id == self.community.id]
+		self._jobs = {item.kind: item for item in mine if item.status is not JobStatus.ERROR}
+		for item in mine:
+			if item.status is JobStatus.ERROR and item.id not in self._seen_errors:
+				# задание с ошибкой очередь не покидает; причина уже
+				# записана в журнал запусков, и держать его невидимым
+				# в очереди незачем — снимаем и перечитываем задачу
+				self._seen_errors.add(item.id)
+				self._dismiss(item.id)
+				self._read_task(item.kind)
+		for kind in self._kinds:
+			self._refresh_card(kind)
+		open_kind = self._detail.kind
+		self._detail.set_job(self._jobs.get(open_kind) if open_kind is not None else None)
+
+	def _dismiss(self, job_id: int) -> None:
+		run_in_engine(
+			self._worker, self._worker.engine.tasks.dismiss(job_id), self, noop, self._show_error
+		)
+
+	def _read_task(self, kind: TaskKind) -> None:
+		"""Перечитывает одну задачу (после исхода запуска)."""
+		if kind in self._kinds:
+			run_in_engine(
+				self._worker,
+				self._worker.engine.tasks.task(self.community.id, kind),
+				self,
+				partial(self._on_task, kind),
+				self._show_error,
+			)
+
+	def _on_job_finished(self, item: Any, done: bool) -> None:
+		"""Задание покинуло очередь: отчёт — разделу, свежий журнал — всем."""
+		if item.community_id != self.community.id:
 			return
-		section.show_report(item)
-
-	def _on_jobs_refreshed(self, items: list[Any]) -> None:
-		"""Замечает задание, остановившееся на ошибке.
-
-		Элемент с ошибкой остаётся в очереди (его повторяют или
-		убирают руками), поэтому реакции на завершение панель для него
-		не зовёт. Без этой сверки раздел показывал бы «идёт…» до
-		закрытия окна, а причина отказа была бы видна только в журнале.
-		"""
-		for item in items:
-			if item.status is not JobStatus.ERROR:
-				continue
-			section = self._jobs.pop(item.id, None)
-			if section is not None:
-				section.set_status(f"Не удалось: {item.error}")
-
-	@staticmethod
-	def _job_subtitle(item: Any) -> str:
-		"""Подпись карточки задания в панели хода работы.
-
-		Показывает исход, а не только ход работы: у задания с ошибкой
-		причина обязана быть на карточке — рядом с кнопкой «Повторить».
-		"""
-		if item.status is JobStatus.ERROR:
-			return f"ошибка: {item.error}"
-		if item.status is JobStatus.CANCELLED:
-			return "отменено"
-		if item.status is JobStatus.DONE:
-			return "готово"
-		if item.note:
-			return str(item.note)
-		return "идёт обращение к Telegram"
+		if done:
+			self._detail.show_report(item)
+		self._read_task(item.kind)
 
 
 class TaskRunsDialog(WorkDialog):
@@ -1338,7 +2218,11 @@ class TasksDialog(WorkDialog):
 		self, worker: EngineWorker, watcher: QueueWatcher, community: CommunityDto, parent: QWidget
 	) -> None:
 		super().__init__(f"Задачи · {community.title}", parent)
-		self.content.addWidget(TasksPanel(worker, watcher, community, self), stretch=1)
+		panel = TasksPanel(worker, watcher, community, self)
+		# окно живёт присоединённым к наблюдателю: пока оно открыто,
+		# ход работы виден (вкладка присоединяется по показу сама)
+		panel.set_active(True)
+		self.content.addWidget(panel, stretch=1)
 
 
 def open_tasks(

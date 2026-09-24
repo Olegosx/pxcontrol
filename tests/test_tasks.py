@@ -25,6 +25,7 @@ from pxcontrol.engine.services.tasks import (
 	EVENTS_CAP,
 	TaskDto,
 	TaskJobDto,
+	TaskRunDto,
 	TasksService,
 	_TaskJob,
 )
@@ -1480,15 +1481,24 @@ def test_schedule_texts_for_ui() -> None:
 		)
 
 	at = datetime(2026, 3, 12, 10, 30, tzinfo=UTC)
-	assert next_run_text(task(Schedule(), enabled=False, next_at=None)) == (
-		"Расписание: только по требованию"
+	assert next_run_text(task(Schedule(), enabled=False, next_at=None)).startswith(
+		"Расписание не задано"
 	)
 	off = next_run_text(
 		task(Schedule(ScheduleKind.DAILY, times=("04:00",)), enabled=False, next_at=None)
 	)
 	assert off.startswith("Расписание выключено")
 	on = next_run_text(task(Schedule(ScheduleKind.INTERVAL, 35, 96), enabled=True, next_at=at))
-	assert "следующий запуск" in on and "2026" in on
+	assert "Следующий запуск" in on and "2026" in on
+
+	# строка расписания на карточке обзора — короче: без «Расписание:»
+	from pxcontrol.ui.pages.tasks import schedule_caption
+
+	assert schedule_caption(task(Schedule(), enabled=False, next_at=None)) == "по требованию"
+	daily = task(Schedule(ScheduleKind.DAILY, times=("04:00",)), enabled=True, next_at=at)
+	assert schedule_caption(daily).startswith("каждый день в 04:00 · следующий в ")
+	interval = task(Schedule(ScheduleKind.INTERVAL, 30, 60), enabled=False, next_at=None)
+	assert schedule_caption(interval) == "каждые 30–60 мин · выключено"
 	assert parse_times(" 04:00, 16:30 ,,") == ("04:00", "16:30")
 
 
@@ -1817,7 +1827,7 @@ async def test_reactors_and_reaction_options_for_the_form(db: Database) -> None:
 
 def test_reactions_summary_and_reactor_label() -> None:
 	"""Итог прохода одной строкой и подпись пользователя в форме."""
-	from pxcontrol.ui.pages.tasks import reactor_label
+	from pxcontrol.ui.pages.tasks import reactor_state
 
 	report = ReactionsReport(
 		executor="@ub", scanned=50, candidates=4, reacted=3, skipped=1, by_emoji={"👍": 3}
@@ -1835,7 +1845,7 @@ def test_reactions_summary_and_reactor_label() -> None:
 		paused=True,
 		can_publish=False,
 	)
-	assert reactor_label(executor) == "@a (приостановлен)"
+	assert reactor_state(executor) == "приостановлен"
 
 
 # --- приём заявок (этап D, ADR-0040) ----------------------------------------------
@@ -2064,3 +2074,187 @@ def test_join_requests_summary_texts() -> None:
 	assert "Принято: 3" in text and "ограничением: 1" in text and "отклонено удалённых: 1" in text
 	assert "к приёму 3" in join_requests_summary(report, dry_run=True)
 	assert join_requests_summary(JoinRequestsReport(), dry_run=True) == "Заявок на вступление нет."
+
+
+# --- правила вкладки «Задачи» (спека `screens/tasks.md`) -------------------------------
+
+
+def _run(
+	*,
+	outcome: RunOutcome = RunOutcome.DONE,
+	summary: str = "",
+	error: str | None = None,
+	executor: ExecutorRef | None = None,
+	dry_run: bool = False,
+	at: datetime | None = None,
+) -> TaskRunDto:
+	"""Запуск задачи для проверки правил показа."""
+	moment = at or datetime(2026, 9, 24, 4, 0, tzinfo=UTC)
+	return TaskRunDto(
+		id=1,
+		task_id=1,
+		kind=TaskKind.SERVICE_MESSAGES,
+		trigger=TaskTrigger.SCHEDULE,
+		dry_run=dry_run,
+		executor=executor,
+		executor_label=None,
+		started_at=moment,
+		finished_at=moment,
+		outcome=outcome,
+		summary=summary,
+		error=error,
+		events=(),
+	)
+
+
+def test_available_kinds_by_community_kind() -> None:
+	"""Чистка участников — только у групп; остальные задачи есть у обоих видов."""
+	from pxcontrol.ui.pages.tasks import available_kinds
+
+	assert TaskKind.DELETED_ACCOUNTS in available_kinds(CommunityKind.GROUP)
+	assert TaskKind.DELETED_ACCOUNTS not in available_kinds(CommunityKind.CHANNEL)
+	# заявки в канале принимаются как есть — задача остаётся
+	assert TaskKind.JOIN_REQUESTS in available_kinds(CommunityKind.CHANNEL)
+	assert len(available_kinds(CommunityKind.GROUP)) == 4
+
+
+def test_last_run_caption_and_when_text() -> None:
+	"""Итог на карточке: когда и чем кончилось; ошибка называет причину."""
+	from pxcontrol.ui.pages.tasks import last_run_caption, when_text
+
+	# моменты берутся в местном поясе: подписи говорят о местном времени,
+	# и от часового пояса машины проверка зависеть не должна
+	def local(day: int, hour: int, minute: int) -> datetime:
+		return datetime(2026, 9, day, hour, minute).astimezone()
+
+	now = local(24, 12, 0)
+	assert last_run_caption(None) == "ещё не запускалась"
+	done = last_run_caption(_run(summary="удалено 132", at=local(24, 4, 0)), now)
+	assert done == "последний: сегодня 04:00 · удалено 132"
+	yesterday = _run(
+		outcome=RunOutcome.ERROR,
+		error="нет права одобрять заявки",
+		at=local(23, 18, 10),
+	)
+	assert last_run_caption(yesterday, now) == "вчера 18:10 · нет права одобрять заявки"
+	assert when_text(local(12, 7, 30), now) == "12.09 07:30"
+
+
+def test_error_fix_target_points_to_members_only_for_rights() -> None:
+	"""Кнопка перехода предлагается там, где ошибку чинят правами и пулом."""
+	from pxcontrol.ui.pages.tasks import TaskFixTarget, error_fix_target
+
+	assert error_fix_target(None) is None
+	assert error_fix_target(_run(summary="готово")) is None
+	rights = _run(outcome=RunOutcome.ERROR, error="У «@ub» нет права одобрять заявки.")
+	assert error_fix_target(rights) is TaskFixTarget.MEMBERS
+	nobody = _run(outcome=RunOutcome.ERROR, error="В пуле «Чат» некому читать историю.")
+	assert error_fix_target(nobody) is TaskFixTarget.MEMBERS
+	network = _run(outcome=RunOutcome.ERROR, error="Telegram не ответил: таймаут.")
+	assert error_fix_target(network) is None
+
+
+def test_form_dirty_compares_params_and_schedule() -> None:
+	"""Кнопки сохранения оживают, только когда форма отличается от сохранённого."""
+	from dataclasses import replace
+
+	from pxcontrol.ui.pages.tasks import TaskForm, form_dirty
+
+	saved = TaskForm(ServiceMessagesParams(), Schedule(), False)
+	assert not form_dirty(saved, TaskForm(ServiceMessagesParams(), Schedule(), False))
+	# пока задача не прочитана, сравнивать не с чем
+	assert not form_dirty(None, TaskForm(ServiceMessagesParams(depth=10), Schedule(), True))
+	other_params = TaskForm(replace(ServiceMessagesParams(), depth=999), Schedule(), False)
+	assert form_dirty(saved, other_params)
+	other_schedule = TaskForm(ServiceMessagesParams(), Schedule(ScheduleKind.INTERVAL), False)
+	assert form_dirty(saved, other_schedule)
+	assert form_dirty(saved, TaskForm(ServiceMessagesParams(), Schedule(), True))
+
+
+def test_reactor_matches_filters_search_and_mode() -> None:
+	"""Отбор таблицы «Кто ставит»: поиск по имени и три режима."""
+	from pxcontrol.ui.pages.tasks import ReactorFilter, ReactorRow, reactor_matches
+
+	rights = ExecutorRights(ParticipantStatus.MEMBER, AdminRights(), ALL_MEMBER_RIGHTS)
+
+	def row(label: str, *, checked: bool = False, paused: bool = False) -> ReactorRow:
+		executor = ExecutorDto(
+			owner=ExecutorRef(OwnerKind.USER, 1),
+			label=label,
+			status=ParticipantStatus.MEMBER,
+			rights=rights,
+			is_default=False,
+			paused=paused,
+			can_publish=True,
+		)
+		return ReactorRow(executor, checked, None)
+
+	lara = row("Лара")
+	assert reactor_matches(lara, "", ReactorFilter.ALL)
+	assert reactor_matches(lara, "лар", ReactorFilter.ALL)
+	assert not reactor_matches(lara, "петя", ReactorFilter.ALL)
+	assert not reactor_matches(lara, "", ReactorFilter.CHECKED)
+	assert reactor_matches(row("Лара", checked=True), "", ReactorFilter.CHECKED)
+	# приостановленный проход не поведёт — в отбор «могут ставить» не попадает
+	assert not reactor_matches(row("Лара", paused=True), "", ReactorFilter.CAPABLE)
+	assert reactor_matches(lara, "", ReactorFilter.CAPABLE)
+
+
+def test_last_reaction_times_take_real_passes_only() -> None:
+	"""Колонка «Последняя реакция» считается по настоящим проходам, не по подбору."""
+	from pxcontrol.ui.pages.tasks import last_reaction_times
+
+	owner = ExecutorRef(OwnerKind.USER, 3)
+	early = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+	late = datetime(2026, 9, 22, 10, 0, tzinfo=UTC)
+	runs = [
+		_run(executor=owner, at=late, dry_run=True),
+		_run(executor=owner, at=early),
+		_run(executor=None, at=late),
+	]
+	assert last_reaction_times(runs) == {owner: early}
+
+
+def test_confirmations_name_what_will_happen() -> None:
+	"""Подтверждения перечисляют, что именно сделает запуск."""
+	from pxcontrol.ui.pages.tasks import run_confirmation, schedule_confirmation
+
+	schedule = Schedule(ScheduleKind.DAILY, times=("04:00",))
+	text = schedule_confirmation(
+		TaskKind.SERVICE_MESSAGES, ServiceMessagesParams(), schedule, "Чат"
+	)
+	assert "ежедневно в 04:00" in text and "Удаление необратимо" in text
+	kick = schedule_confirmation(
+		TaskKind.DELETED_ACCOUNTS, DeletedAccountsParams(kick_limit=7), schedule, "Чат"
+	)
+	assert "не больше 7" in kick
+	assert "не больше 5" in run_confirmation(
+		TaskKind.JOIN_REQUESTS, JoinRequestsParams(limit=5), "Чат"
+	)
+	# проход реакций обратим руками — вопроса нет
+	assert run_confirmation(TaskKind.REACTIONS, ReactionsParams(), "Чат") == ""
+
+
+def test_progress_caption_prefers_engine_note() -> None:
+	"""Строка хода работы: пометка движка, иначе проценты."""
+	from pxcontrol.engine.jobs import JobStatus
+	from pxcontrol.engine.services.tasks import TaskJobDto
+	from pxcontrol.ui.pages.tasks import progress_caption
+
+	def job(note: str | None, progress: float) -> TaskJobDto:
+		return TaskJobDto(
+			id=1,
+			task_id=1,
+			kind=TaskKind.SERVICE_MESSAGES,
+			title="Просмотр · Чат",
+			community_id=1,
+			status=JobStatus.RUNNING,
+			progress=progress,
+			error=None,
+			note=note,
+			dry_run=True,
+		)
+
+	assert progress_caption(job("1 200 из 2 104", 0.5)) == "1 200 из 2 104"
+	assert progress_caption(job(None, 0.42)) == "42 %"
+	assert progress_caption(job(None, 0.0)) == "идёт обращение к Telegram"

@@ -611,6 +611,7 @@ class UserPage(ScrollArea):
 		"""
 		self.changed.emit()
 		accounts = self._worker.engine.accounts
+
 		def gone(_message: str) -> None:
 			"""Исполнителя больше нет — вернуть человека на дашборд."""
 			self.dashboard_requested.emit(self._owner.kind)

@@ -146,7 +146,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 )
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.scheduled_panel import ScheduledPanel, scheduled_subtitle
-from pxcontrol.ui.pages.tasks import TasksPanel, open_tasks
+from pxcontrol.ui.pages.tasks import TaskFixTarget, TasksPanel, open_tasks
 from pxcontrol.ui.pages.user_actions import set_bot_paused, set_user_paused
 from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher, QueueWatchers
 
@@ -1448,7 +1448,10 @@ class CommunityPage(ScrollArea):
 	def _tasks_tab(self) -> QWidget:
 		"""Вкладка «Задачи»: панель или объяснение, почему нельзя."""
 		if self._community.userbot_assigned:
-			return TasksPanel(self._worker, self._watchers.tasks, self._community, self)
+			panel = TasksPanel(self._worker, self._watchers.tasks, self._community, self)
+			# ошибку запуска чинят правами и пулом — там же, где они видны
+			panel.fix_requested.connect(self._show_fix_tab)
+			return panel
 		box = QWidget(self)
 		layout = QVBoxLayout(box)
 		layout.setContentsMargins(0, 24, 0, 0)
@@ -1465,6 +1468,11 @@ class CommunityPage(ScrollArea):
 		layout.addWidget(go, alignment=Qt.AlignmentFlag.AlignLeft)
 		layout.addStretch()
 		return box
+
+	def _show_fix_tab(self, target: str) -> None:
+		"""Переход из строки ошибки задачи на вкладку, где её чинят."""
+		if target == TaskFixTarget.MEMBERS:
+			self._segments.setCurrentItem(TAB_MEMBERS)
 
 	def _on_queue_counts(self, counts: QueueCounts) -> None:
 		"""Панель очереди сообщила свежие числа — шапка и вкладка."""

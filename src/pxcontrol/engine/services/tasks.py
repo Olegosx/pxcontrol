@@ -403,6 +403,47 @@ class TasksService:
 			await session.refresh(row)
 			return _task_dto(row)
 
+	async def save_task(
+		self, task_id: int, params: TaskParams, schedule: Schedule, *, enabled: bool
+	) -> TaskDto:
+		"""Сохраняет параметры и расписание задачи одним разом.
+
+		Форма настройки задачи одна, и «Сохранить» у неё одна: параметры
+		и расписание связаны (запуск по расписанию идёт с этими
+		параметрами), поэтому сохраняться они должны вместе — иначе
+		между двумя записями есть мгновение, когда расписание уже новое,
+		а параметры ещё старые, и ночной запуск взял бы их.
+
+		Raises:
+			TaskError: Задача не найдена, параметры или расписание
+				негодны, включается «только по требованию».
+		"""
+		schedule.validate()
+		if enabled and schedule.kind is ScheduleKind.NONE:
+			raise TaskError("Выберите расписание — «только по требованию» включать нечего.")
+		async with self._db.session_factory() as session:
+			row = await self._task_in_session(session, task_id)
+			spec = spec_of(TaskKind(row.kind))
+			# параметры проверяются под тот запуск, который им предстоит:
+			# по расписанию он обычный, а не «без изменений»
+			spec.validate(params, dry_run=not enabled)
+			row.params = spec.params_to_payload(params)
+			row.schedule = schedule.to_payload()
+			row.enabled = enabled
+			row.next_run_at = (
+				next_run(schedule, datetime.now(UTC), self._tz, self._rng) if enabled else None
+			)
+			await session.commit()
+			await session.refresh(row)
+			logger.info(
+				"Задача id=%s сохранена: расписание %s, %s; следующий запуск %s.",
+				row.id,
+				schedule.kind,
+				"включено" if enabled else "выключено",
+				row.next_run_at,
+			)
+			return _task_dto(row)
+
 	async def save_schedule(self, task_id: int, schedule: Schedule, *, enabled: bool) -> TaskDto:
 		"""Сохраняет расписание и назначает следующий запуск.
 

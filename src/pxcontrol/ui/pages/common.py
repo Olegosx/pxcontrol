@@ -667,12 +667,25 @@ class FlowGrid(QWidget):
 	"""
 
 	def __init__(
-		self, cards: Sequence[QWidget], parent: QWidget, *, min_width: int, spacing: int
+		self,
+		cards: Sequence[QWidget],
+		parent: QWidget,
+		*,
+		min_width: int,
+		spacing: int,
+		stretch: bool = True,
 	) -> None:
+		"""``stretch`` — тянуть ли колонки на всю ширину.
+
+		Карточки дашбордов тянутся, чтобы справа не оставалось поля;
+		плитки постоянной ширины (реакции задачи) — нет, иначе поля
+		расползлись бы внутри плитки.
+		"""
 		super().__init__(parent)
 		self._cards = list(cards)
 		self._min_width = min_width
 		self._spacing = spacing
+		self._stretch = stretch
 		self._columns = 0
 		self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 		self._grid = QGridLayout(self)
@@ -710,8 +723,11 @@ class FlowGrid(QWidget):
 			self._grid.takeAt(0)
 		for index, card in enumerate(self._cards):
 			self._grid.addWidget(card, index // columns, index % columns)
-		for column in range(max(columns, previous)):
-			self._grid.setColumnStretch(column, 1 if column < columns else 0)
+		for column in range(max(columns, previous) + 1):
+			# колонка за последней забирает лишнее место, когда сами
+			# колонки не тянутся: иначе плитки разъехались бы по ширине
+			fills = column < columns if self._stretch else column == columns
+			self._grid.setColumnStretch(column, 1 if fills else 0)
 
 
 def dim_widget(widget: QWidget, opacity: float) -> None:
