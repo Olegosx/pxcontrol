@@ -455,8 +455,16 @@ class MainWindow(FluentWindow):
 			page.dashboard_requested.connect(self._open_communities_dashboard)
 			self.stackedWidget.addWidget(page)
 			self._community_page = page
-		else:
-			page.show_community(community)
+		elif page.community_id != community.id:
+			# другое сообщество снимает тела вкладок: правки «Задач» —
+			# сначала через вопрос, переход — после ответа
+			page.leave(partial(self._present_community, page, community))
+			return
+		self._present_community(page, community)
+
+	def _present_community(self, page: CommunityPage, community: CommunityDto) -> None:
+		"""Кладёт сообщество на страницу и показывает её."""
+		page.show_community(community)
 		self.switchTo(page)
 		# у страницы сущности своего пункта нет: подсвечена её группа
 		_scope, route_key = _COMMUNITY_SCOPES[community.kind]

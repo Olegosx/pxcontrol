@@ -1220,9 +1220,14 @@ class CommunityPage(ScrollArea):
 	def _drop_snapshot_tabs(self) -> None:
 		"""Снимает тела вкладок, сложенных по прежнему снимку сообщества."""
 		for key in _SNAPSHOT_TABS:
-			body = self._tabs.pop(key, None)
+			body = self._tabs.get(key)
 			if body is None:
 				continue
+			if isinstance(body, TasksPanel) and body.dirty:
+				# открыта настройка задачи с правками: пересборка стёрла бы
+				# их молча; тело пересоберётся при следующем снимке
+				continue
+			self._tabs.pop(key)
 			_set_active(body, False)
 			self._body.removeWidget(body)
 			body.deleteLater()
@@ -1264,7 +1269,7 @@ class CommunityPage(ScrollArea):
 			# без обработчика клика: библиотека зовёт его с флагом, которого
 			# обработчик не ждёт, а переключение и так идёт по currentItemChanged
 			self._segments.addWidget(key, item)
-		self._segments.currentItemChanged.connect(self._show_tab)
+		self._segments.currentItemChanged.connect(self._on_tab_requested)
 		self._mount_tab(TAB_SETTINGS)
 		self._segments.setCurrentItem(TAB_OVERVIEW)
 		self._show_tab(TAB_OVERVIEW)
@@ -1371,6 +1376,32 @@ class CommunityPage(ScrollArea):
 			item.set_count(counts.get(key), active=key == self._current_tab)
 
 	# --- вкладки ------------------------------------------------------------------
+
+	def leave(self, then: Callable[[], None]) -> None:
+		"""Уход со страницы на другое сообщество: правки «Задач» — через вопрос.
+
+		Смена сообщества снимает тела вкладок, и открытая настройка
+		задачи с правками пропала бы молча (спека «Задачи», раздел 4.4).
+		"""
+		tasks = self._tabs.get(TAB_TASKS)
+		if isinstance(tasks, TasksPanel):
+			tasks.leave(then)
+		else:
+			then()
+
+	def _on_tab_requested(self, key: str) -> None:
+		"""Клик по вкладке: из «Задач» с правками — только через вопрос.
+
+		Переключатель к этому мгновению уже стоит на новой вкладке —
+		его возвращают на место до ответа, а переключают заново, когда
+		правки сохранены или отброшены; «Отмена» оставляет всё как было.
+		"""
+		leaving = self._tabs.get(self._current_tab)
+		if key != self._current_tab and isinstance(leaving, TasksPanel) and leaving.dirty:
+			self._segments.setCurrentItem(self._current_tab)
+			leaving.leave(partial(self._segments.setCurrentItem, key))
+			return
+		self._show_tab(key)
 
 	def _show_tab(self, key: str) -> None:
 		"""Показывает вкладку; тело строится при первом открытии."""
@@ -1641,7 +1672,13 @@ class CommunityPage(ScrollArea):
 
 	def _on_open_tasks(self) -> None:
 		"""Меню «…» → окно задач (та же панель, что во вкладке)."""
-		open_tasks(self._worker, self._watchers.tasks, self._community, self)
+		open_tasks(
+			self._worker,
+			self._watchers.tasks,
+			self._community,
+			self,
+			on_members=partial(self._segments.setCurrentItem, TAB_MEMBERS),
+		)
 
 	def _recheck(self) -> None:
 		"""Перепроверяет оба способа администрирования."""

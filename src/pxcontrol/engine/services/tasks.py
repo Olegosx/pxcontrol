@@ -208,6 +208,9 @@ class TaskRunDto:
 		summary: итог одной строкой (по отчёту вида); пусто — отчёта нет.
 		error: текст ошибки при исходе «ошибка».
 		events: события запуска.
+		report: отчёт вида целиком; None — отчёта нет (запуск не дошёл
+			до итога). Нужен форме задачи: числа последнего просмотра
+			восстанавливаются из журнала, а не живут только до перезапуска.
 	"""
 
 	id: int
@@ -223,6 +226,7 @@ class TaskRunDto:
 	summary: str
 	error: str | None
 	events: tuple[RunEvent, ...]
+	report: TaskReport | None = None
 
 
 @dataclass(frozen=True)
@@ -1080,8 +1084,9 @@ def _run_dto(row: TaskRun, kind: TaskKind, labels: dict[ExecutorRef, str]) -> Ta
 		if row.executor_kind is not None and row.executor_id is not None
 		else None
 	)
-	report = row.report if isinstance(row.report, dict) else None
-	summary = spec.summary(spec.report_from_payload(report), dry_run=row.dry_run) if report else ""
+	payload = row.report if isinstance(row.report, dict) else None
+	report = spec.report_from_payload(payload) if payload else None
+	summary = spec.summary(report, dry_run=row.dry_run) if report is not None else ""
 	events = tuple(
 		(datetime.fromisoformat(at), str(text))
 		for at, text in (row.events or [])
@@ -1101,4 +1106,5 @@ def _run_dto(row: TaskRun, kind: TaskKind, labels: dict[ExecutorRef, str]) -> Ta
 		summary=summary,
 		error=row.error,
 		events=events,
+		report=report,
 	)

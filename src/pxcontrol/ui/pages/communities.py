@@ -1460,7 +1460,13 @@ class CommunitiesPage(ScrollArea):
 				self._show_error,
 			)
 		elif action is CardAction.TASKS:
-			open_tasks(self._worker, self._watchers.tasks, community, self)
+			open_tasks(
+				self._worker,
+				self._watchers.tasks,
+				community,
+				self,
+				on_members=partial(open_members, self._worker, community, self, self.reload),
+			)
 
 	def _resume_publisher(self, community: CommunityDto) -> None:
 		"""Возобновляет приостановленного публикатора сообщества (ADR-0029).

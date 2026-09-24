@@ -743,6 +743,9 @@ async def test_run_is_recorded_in_journal(db: Database) -> None:
 	assert "Найдено служебных записей: 1" in run.summary
 	assert any("исполнитель" in text for _at, text in run.events)
 	assert task.last_run_at is not None
+	# отчёт отдаётся целиком: форма восстанавливает по нему числа просмотра
+	assert isinstance(run.report, ServiceReport)
+	assert run.report.found == {ServiceMessageKind.MEMBERS: 1}
 
 
 async def test_failed_run_is_recorded_with_reason(db: Database) -> None:
@@ -2258,3 +2261,29 @@ def test_progress_caption_prefers_engine_note() -> None:
 	assert progress_caption(job("1 200 из 2 104", 0.5)) == "1 200 из 2 104"
 	assert progress_caption(job(None, 0.42)) == "42 %"
 	assert progress_caption(job(None, 0.0)) == "идёт обращение к Telegram"
+
+
+def test_last_scan_takes_latest_dry_run_report() -> None:
+	"""Числа «Служебных записей» — из последнего просмотра, а не из чистки."""
+	from dataclasses import replace
+
+	from pxcontrol.ui.pages.tasks import last_scan, scan_caption
+
+	old_scan = ServiceReport(found={ServiceMessageKind.MEMBERS: 7}, scanned=500)
+	cleaning = ServiceReport(found={ServiceMessageKind.MEMBERS: 3}, scanned=500, deleted=3)
+	early = datetime(2026, 9, 20, 4, 0, tzinfo=UTC)
+	late = datetime(2026, 9, 22, 4, 0, tzinfo=UTC)
+	# журнал отдаёт запуски новыми сначала: чистка новее просмотра
+	runs = [
+		replace(_run(at=late), report=cleaning),
+		replace(_run(at=early, dry_run=True), report=old_scan),
+	]
+	assert last_scan(runs) == (old_scan, early)
+	assert last_scan([replace(_run(at=late), report=cleaning)]) is None
+	assert last_scan([]) is None
+	now = datetime(2026, 9, 20, 12, 0).astimezone()
+	moment = datetime(2026, 9, 20, 4, 0).astimezone()
+	big = ServiceReport(found={}, scanned=5000)
+	assert scan_caption(big, moment, now) == (
+		"Числа — по последнему просмотру: сегодня 04:00, 5 000 сообщений."
+	)

@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -66,6 +67,7 @@ from qfluentwidgets import (
 	TextEdit,
 	TransparentToolButton,
 	getFont,
+	isDarkTheme,
 )
 
 from pxcontrol.engine.jobs import JobStatus
@@ -623,10 +625,29 @@ WARNING_TEXT = ("#9d5d00", "#fff100")
 DIM_TEXT = ("#5f5f5f", "#9c9c9c")
 
 
-def font_px(size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
-	"""Шрифт библиотеки нужного кегля (уважает масштаб из настроек)."""
+def font_px(
+	size: int, weight: QFont.Weight = QFont.Weight.Normal, *, tabular: bool = False
+) -> QFont:
+	"""Шрифт библиотеки нужного кегля (уважает масштаб из настроек).
+
+	``tabular`` — цифры одной ширины (функция шрифта OpenType ``tnum``):
+	числа в столбик по правому краю стоят ровно, разряд под разрядом.
+	Шрифт без этой функции просто рисует свои цифры — вреда нет.
+	"""
 	font: QFont = getFont(size, weight)
+	if tabular:
+		font.setFeature(QFont.Tag.fromString("tnum"), 1)
 	return font
+
+
+def theme_color(pair: tuple[str, str]) -> QColor:
+	"""Цвет именованной пары под текущую тему — для API, у которого пар нет.
+
+	Надписи красятся своим ``setTextColor`` сразу для обеих тем
+	(:func:`tinted`); у ячейки таблицы такого API нет, есть только
+	``setForeground`` — ему и нужен цвет текущей темы.
+	"""
+	return QColor(pair[1] if isDarkTheme() else pair[0])
 
 
 def tinted(label: Any, pair: tuple[str, str]) -> Any:
@@ -1051,6 +1072,39 @@ def exec_dialog(dialog: QDialog) -> bool:
 	accepted = bool(dialog.exec())
 	dialog.deleteLater()
 	return accepted
+
+
+class SaveChoice(StrEnum):
+	"""Исход вопроса об уходе с несохранёнными правками."""
+
+	SAVE = "save"  # сохранить и уйти
+	DISCARD = "discard"  # уйти, правки отбросить
+	STAY = "stay"  # остаться на месте с правками
+
+
+def ask_save_changes(parent: QWidget, text: str) -> SaveChoice:
+	"""Спрашивает, что делать с несохранёнными правками: три исхода.
+
+	Штатный ``MessageBox`` на два ответа, а здесь их три — третья
+	кнопка «Отмена» добавляется в его же ряд кнопок. Закрытие окна
+	без выбора (Esc) — «остаться»: правки дороже лишнего вопроса.
+	"""
+	box = MessageBox("Сохранить изменения?", text, parent.window())
+	box.yesButton.setText("Сохранить")
+	box.cancelButton.setText("Не сохранять")
+	chosen: list[SaveChoice] = []
+	box.cancelButton.clicked.connect(lambda: chosen.append(SaveChoice.DISCARD))
+	stay = PushButton("Отмена", box.buttonGroup)
+
+	def on_stay() -> None:
+		chosen.append(SaveChoice.STAY)
+		box.reject()
+
+	stay.clicked.connect(on_stay)
+	box.buttonLayout.addWidget(stay, 1, Qt.AlignmentFlag.AlignVCenter)
+	if exec_dialog(box):
+		return SaveChoice.SAVE
+	return chosen[0] if chosen else SaveChoice.STAY
 
 
 def confirm_delete(parent: QWidget, text: str, accept_text: str = "Удалить") -> bool:
