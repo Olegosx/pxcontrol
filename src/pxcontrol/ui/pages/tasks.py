@@ -136,6 +136,7 @@ from pxcontrol.ui.pages.common import (
 	status_caption,
 	theme_color,
 )
+from pxcontrol.ui.pages.community_state import audience_many
 from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher
 
 #: Индекс модели, как его отдаёт Qt (временный или постоянный).
@@ -191,7 +192,8 @@ class TaskTexts:
 
 	Attributes:
 		card: суть одной строкой — на карточке обзора.
-		detail: суть в настройке, с пояснением «почему так».
+		detail: суть в настройке, с пояснением «почему так»; ``{audience}``
+			в тексте — аудитория сообщества (:func:`audience_many`).
 		dry_run: подпись запуска без изменений.
 		run: подпись настоящего запуска.
 		status: заголовок полосы хода во время настоящего запуска.
@@ -220,7 +222,8 @@ TASK_TEXTS: dict[TaskKind, TaskTexts] = {
 	),
 	TaskKind.DELETED_ACCOUNTS: TaskTexts(
 		card="Находит мёртвые души и исключает порциями",
-		detail=("Находит в списке участников удалённые аккаунты и исключает их порциями."),
+		# «{audience}» — аудитория сообщества: у канала подписчики
+		detail=("Находит в списке {audience} удалённые аккаунты и исключает их порциями."),
 		dry_run="Найти",
 		run="Исключить найденные",
 		status="Чистка идёт…",
@@ -301,21 +304,22 @@ REACTOR_FILTERS: tuple[tuple[ReactorFilter, str], ...] = (
 
 
 def available_kinds(kind: CommunityKind) -> tuple[TaskKind, ...]:
-	"""Какие задачи доступны сообществу этого вида.
+	"""Какие задачи доступны сообществу этого вида (порядок показа).
 
-	«Удалённые аккаунты» — только у групп: список участников канала
-	Telegram отдаёт иначе, а исключать оттуда мёртвые души незачем.
-	Остальные три работают у обоих видов; в канале «Приём заявок»
-	принимает заявки как есть — ограничивать права там нечем.
+	Сейчас все четыре — у обоих видов: движок ведёт каждую и в канале,
+	и в группе. Различается только поведение внутри задачи: в канале
+	«Приём заявок» принимает заявки как есть (ограничивать права там
+	нечем), а «Удалённые аккаунты» чистят список подписчиков. Функция
+	остаётся точкой, где вид сообщества отсекает задачу, если такая
+	появится.
 	"""
-	if kind is CommunityKind.GROUP:
-		return (
-			TaskKind.SERVICE_MESSAGES,
-			TaskKind.DELETED_ACCOUNTS,
-			TaskKind.REACTIONS,
-			TaskKind.JOIN_REQUESTS,
-		)
-	return (TaskKind.SERVICE_MESSAGES, TaskKind.REACTIONS, TaskKind.JOIN_REQUESTS)
+	del kind  # все задачи доступны обоим видам
+	return (
+		TaskKind.SERVICE_MESSAGES,
+		TaskKind.DELETED_ACCOUNTS,
+		TaskKind.REACTIONS,
+		TaskKind.JOIN_REQUESTS,
+	)
 
 
 def when_text(moment: datetime, now: datetime | None = None) -> str:
@@ -537,13 +541,19 @@ def _join_rules(params: JoinRequestsParams) -> str:
 
 
 def schedule_confirmation(
-	kind: TaskKind, params: TaskParams, schedule: Schedule, title: str
+	kind: TaskKind,
+	params: TaskParams,
+	schedule: Schedule,
+	title: str,
+	*,
+	community_kind: CommunityKind,
 ) -> str:
 	"""Что спросить перед включением расписания (ADR-0038).
 
 	Запуск по расписанию идёт без подтверждений и необратим, а спросить
 	перед ночным запуском некого — поэтому спрашивают один раз здесь,
-	и вопрос перечисляет, что именно будет делаться.
+	и вопрос перечисляет, что именно будет делаться. ``community_kind`` —
+	чтобы назвать аудиторию: у канала подписчики, у группы участники.
 	"""
 	when = schedule_text(schedule)
 	head = f"Включить «{KIND_TITLES[kind]}» в «{title}» по расписанию ({when})?"
@@ -557,7 +567,7 @@ def schedule_confirmation(
 		return (
 			f"{head}\n\nКаждый запуск исключит не больше {params.kick_limit} удалённых "
 			"аккаунтов без дополнительного подтверждения. Исключение необратимо "
-			"и уменьшает число участников."
+			f"и уменьшает число {audience_many(community_kind)}."
 		)
 	if isinstance(params, ReactionsParams):
 		return (
@@ -574,12 +584,14 @@ def schedule_confirmation(
 	return head
 
 
-def run_confirmation(kind: TaskKind, params: TaskParams, title: str) -> str:
+def run_confirmation(
+	kind: TaskKind, params: TaskParams, title: str, *, community_kind: CommunityKind
+) -> str:
 	"""Что спросить перед настоящим запуском; пусто — вопроса нет.
 
 	Спрашивают там, где проход необратим: удаление записей, исключение
-	участников, разбор заявок. Проход реакций обратим руками человека
-	и вопроса не заслуживает.
+	удалённых аккаунтов, разбор заявок. Проход реакций обратим руками
+	человека и вопроса не заслуживает.
 	"""
 	if isinstance(params, ServiceMessagesParams):
 		return (
@@ -591,7 +603,7 @@ def run_confirmation(kind: TaskKind, params: TaskParams, title: str) -> str:
 		return (
 			f"Исключить удалённые аккаунты из «{title}»?\n\nЗа проход будет исключено "
 			f"не больше {params.kick_limit}. Исключение необратимо и уменьшит число "
-			"участников."
+			f"{audience_many(community_kind)}."
 		)
 	if isinstance(params, JoinRequestsParams):
 		return (
@@ -1136,7 +1148,8 @@ class _DeletedAccountsSection(_TaskSection):
 		block.row(
 			"Исключать за проход не больше",
 			self._kick_limit,
-			note="резкое падение числа участников бьёт по охватам",
+			note=f"резкое падение числа {audience_many(self._panel.community.kind)} "
+			"бьёт по охватам",
 		)
 		on_change(self._changed, self._kick_limit)
 
@@ -1723,7 +1736,8 @@ class _TaskDetail(QWidget):
 			self._mount_section(task.kind)
 			texts = TASK_TEXTS[task.kind]
 			self._title.setText(KIND_TITLES[task.kind])
-			self._hint.setText(texts.detail)
+			audience = audience_many(self._panel.community.kind)
+			self._hint.setText(texts.detail.format(audience=audience))
 			self._dry_run.setText(texts.dry_run)
 			self._run.setText(texts.run)
 		section = self._section
@@ -1873,7 +1887,13 @@ class _TaskDetail(QWidget):
 		turning_on = enabled and (saved is None or not saved.enabled)
 		if turning_on and not confirm_delete(
 			self,
-			schedule_confirmation(task.kind, params, schedule, self._panel.community.title),
+			schedule_confirmation(
+				task.kind,
+				params,
+				schedule,
+				self._panel.community.title,
+				community_kind=self._panel.community.kind,
+			),
 			accept_text="Включить",
 		):
 			return
@@ -1890,7 +1910,10 @@ class _TaskDetail(QWidget):
 			return
 		params = section.params()
 		if not dry_run:
-			text = run_confirmation(task.kind, params, self._panel.community.title)
+			community = self._panel.community
+			text = run_confirmation(
+				task.kind, params, community.title, community_kind=community.kind
+			)
 			if text and not confirm_delete(self, text, accept_text=TASK_TEXTS[task.kind].run):
 				return
 		self._panel.launch(task, params, dry_run=dry_run)
@@ -2146,7 +2169,13 @@ class TasksPanel(QWidget):
 			return
 		if enabled and not confirm_delete(
 			self,
-			schedule_confirmation(kind, task.params, task.schedule, self.community.title),
+			schedule_confirmation(
+				kind,
+				task.params,
+				task.schedule,
+				self.community.title,
+				community_kind=self.community.kind,
+			),
 			accept_text="Включить",
 		):
 			self._refresh_card(kind)  # тумблер возвращается на место

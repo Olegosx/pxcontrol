@@ -2111,14 +2111,18 @@ def _run(
 
 
 def test_available_kinds_by_community_kind() -> None:
-	"""Чистка участников — только у групп; остальные задачи есть у обоих видов."""
+	"""Все четыре задачи — и у канала, и у группы: движок ведёт каждую в обоих."""
 	from pxcontrol.ui.pages.tasks import available_kinds
 
-	assert TaskKind.DELETED_ACCOUNTS in available_kinds(CommunityKind.GROUP)
-	assert TaskKind.DELETED_ACCOUNTS not in available_kinds(CommunityKind.CHANNEL)
-	# заявки в канале принимаются как есть — задача остаётся
-	assert TaskKind.JOIN_REQUESTS in available_kinds(CommunityKind.CHANNEL)
-	assert len(available_kinds(CommunityKind.GROUP)) == 4
+	every = (
+		TaskKind.SERVICE_MESSAGES,
+		TaskKind.DELETED_ACCOUNTS,
+		TaskKind.REACTIONS,
+		TaskKind.JOIN_REQUESTS,
+	)
+	assert available_kinds(CommunityKind.GROUP) == every
+	# канал чистит удалённые аккаунты среди подписчиков, заявки принимает как есть
+	assert available_kinds(CommunityKind.CHANNEL) == every
 
 
 def test_last_run_caption_and_when_text() -> None:
@@ -2222,20 +2226,27 @@ def test_confirmations_name_what_will_happen() -> None:
 	"""Подтверждения перечисляют, что именно сделает запуск."""
 	from pxcontrol.ui.pages.tasks import run_confirmation, schedule_confirmation
 
+	group, channel = CommunityKind.GROUP, CommunityKind.CHANNEL
 	schedule = Schedule(ScheduleKind.DAILY, times=("04:00",))
 	text = schedule_confirmation(
-		TaskKind.SERVICE_MESSAGES, ServiceMessagesParams(), schedule, "Чат"
+		TaskKind.SERVICE_MESSAGES, ServiceMessagesParams(), schedule, "Чат", community_kind=group
 	)
 	assert "ежедневно в 04:00" in text and "Удаление необратимо" in text
+	params = DeletedAccountsParams(kick_limit=7)
 	kick = schedule_confirmation(
-		TaskKind.DELETED_ACCOUNTS, DeletedAccountsParams(kick_limit=7), schedule, "Чат"
+		TaskKind.DELETED_ACCOUNTS, params, schedule, "Чат", community_kind=group
 	)
-	assert "не больше 7" in kick
+	assert "не больше 7" in kick and "число участников" in kick
+	# у канала аудитория — подписчики
+	in_channel = run_confirmation(TaskKind.DELETED_ACCOUNTS, params, "Кино", community_kind=channel)
+	assert "число подписчиков" in in_channel
 	assert "не больше 5" in run_confirmation(
-		TaskKind.JOIN_REQUESTS, JoinRequestsParams(limit=5), "Чат"
+		TaskKind.JOIN_REQUESTS, JoinRequestsParams(limit=5), "Чат", community_kind=group
 	)
 	# проход реакций обратим руками — вопроса нет
-	assert run_confirmation(TaskKind.REACTIONS, ReactionsParams(), "Чат") == ""
+	assert (
+		run_confirmation(TaskKind.REACTIONS, ReactionsParams(), "Чат", community_kind=group) == ""
+	)
 
 
 def test_progress_caption_prefers_engine_note() -> None:
