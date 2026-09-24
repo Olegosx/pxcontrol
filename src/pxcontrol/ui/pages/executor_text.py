@@ -1,18 +1,23 @@
-"""Правила показа исполнителя сообщества: строка, права, исходы ввода (ADR-0035).
+"""Правила показа исполнителя сообщества: строка, плашка, права, исходы ввода (ADR-0035).
 
-Чистые функции без Qt — как :mod:`community_state` для сообщества, только
-предмет другой: не «что с сообществом», а «кто в нём работает и что ему
-можно». Здесь же словарь прав по-русски: снимок хранит телеграмные имена
-(``post_messages``, ``send_reactions``), а человеку нужны слова.
+Чистые функции без виджетов — как :mod:`community_state` для сообщества,
+только предмет другой: не «что с сообществом», а «кто в нём работает
+и что ему можно». Единственное, что берётся у библиотеки, — перечисление
+уровней плашки (``InfoLevel``): это данные о том, каким цветом говорить,
+а не элемент интерфейса. Здесь же словарь прав по-русски: снимок хранит
+телеграмные имена (``post_messages``, ``send_reactions``), а человеку
+нужны слова.
 
-Перечень прав раскрывается в карточке целиком и **только выданное**:
-список из тридцати с лишним строк, где половина «нельзя», читать
-невозможно, а отсутствие права и означает «не выдано».
+Перечень прав показывается целиком и **только выданное**: список
+из тридцати с лишним строк, где половина «нельзя», читать невозможно,
+а отсутствие права и означает «не выдано».
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+
+from qfluentwidgets import InfoLevel
 
 from pxcontrol.engine.services.communities import (
 	CommunityDto,
@@ -25,41 +30,50 @@ from pxcontrol.engine.telegram.types import OwnerKind
 from pxcontrol.ui.pages.common import format_local, status_caption
 
 
-def executor_summary(executor: ExecutorDto) -> str:
-	"""Сводка под именем: «админ · публикатор · публиковать не может».
+def member_caption(executor: ExecutorDto, username: str | None = None) -> str:
+	"""Подпись под именем в карточке пула: роль; у бота — «@имя · роль».
 
-	Сначала участие, затем назначение, затем то, что мешает работе
-	прямо сейчас. Пауза и нехватка прав не складываются: приостановленного
-	приложение не использует вовсе, и говорить про его права — сбивать
-	с толку.
+	Коротко: назначение и помехи работе говорит плашка рядом с именем,
+	и повторять их словами незачем.
 	"""
-	parts = [status_caption(executor.status)]
+	role = status_caption(executor.status)
+	if username:
+		return f"@{username} · {role}"
+	return role
+
+
+def member_badge(executor: ExecutorDto) -> tuple[str, InfoLevel] | None:
+	"""Плашка карточки исполнителя: текст и уровень; None — плашки нет.
+
+	Плашка одна, приоритет сверху вниз: назначение важнее всего (по нему
+	человек находит того, кем публикуют), затем пауза — приложение его
+	не использует вовсе, и говорить про его права было бы обманом, затем
+	нехватка прав. Уровни те же, что у сообщества (``communities.md``,
+	6.1): акцент — назначению, серое — паузе (это решение человека,
+	а не беда), предупреждение — тому, что мешает публиковать.
+	"""
 	if executor.is_default:
-		parts.append("публикатор по умолчанию")
+		return "по умолчанию", InfoLevel.ATTENTION
 	if executor.paused:
-		parts.append("приостановлен")
-	elif not executor.can_publish:
-		parts.append("публиковать не может")
-	return " · ".join(parts)
+		return "приостановлен", InfoLevel.INFOAMTION
+	if not executor.can_publish:
+		return "не может публиковать", InfoLevel.WARNING
+	return None
 
 
-def executor_signature(executor: ExecutorDto) -> tuple[object, ...]:
-	"""Отпечаток карточки: всё, от чего зависит её вид (ADR-0034).
+def default_candidates(executors: list[ExecutorDto], kind: OwnerKind) -> list[ExecutorDto]:
+	"""Кого предлагать публикатором по умолчанию: свой вид, может, не на паузе.
 
-	Права входят целиком: карточка раскрывается их перечнем, и смена
-	любого флага должна быть видна без пересборки всего списка.
+	Назначить можно и того, кто сейчас публиковать не может (ADR-0035:
+	права — знание Telegram, назначение — решение человека), но
+	**предлагать** такого в списке смены незачем: человек выбирает
+	из тех, кем публикация пойдёт прямо сейчас.
 	"""
-	payload = executor.rights.to_payload()
-	return (
-		executor.label,
-		executor.status,
-		executor.is_default,
-		executor.paused,
-		executor.can_publish,
-		executor.checked_at,
-		tuple(sorted(payload["admin"])),
-		tuple(sorted(payload["allowed"])),
-	)
+	return [
+		executor
+		for executor in executors
+		if executor.owner.kind is kind and executor.can_publish and not executor.paused
+	]
 
 
 #: Что сказать человеку про исход ввода исполнителя (ADR-0035). Ввод

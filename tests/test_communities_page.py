@@ -60,8 +60,6 @@ from pxcontrol.ui.pages.community_state import (
 )
 from pxcontrol.ui.pages.executor_text import (
 	executor_rights_rows,
-	executor_signature,
-	executor_summary,
 	remove_executor_text,
 	snapshot_caption,
 )
@@ -566,13 +564,39 @@ def _executor(
 	)
 
 
-def test_executor_summary_names_participation_then_trouble() -> None:
-	"""Сводка карточки: участие, назначение и то, что мешает работе сейчас."""
-	assert executor_summary(_executor()) == "админ"
-	assert executor_summary(_executor(is_default=True)) == "админ · публикатор по умолчанию"
-	assert executor_summary(_executor(can_publish=False)) == "админ · публиковать не может"
-	# пауза и права не складываются: приостановленного не используют вовсе
-	assert executor_summary(_executor(paused=True, can_publish=False)) == "админ · приостановлен"
+def test_member_caption_and_badge() -> None:
+	"""Подпись — роль (у бота с @именем), плашка — одна по приоритету."""
+	from qfluentwidgets import InfoLevel
+
+	from pxcontrol.ui.pages.executor_text import member_badge, member_caption
+
+	assert member_caption(_executor()) == "админ"
+	assert member_caption(_executor(kind=OwnerKind.BOT), "pub_bot") == "@pub_bot · админ"
+	assert member_badge(_executor()) is None
+	assert member_badge(_executor(is_default=True)) == ("по умолчанию", InfoLevel.ATTENTION)
+	# назначение главнее паузы: по плашке находят того, кем публикуют
+	assert member_badge(_executor(is_default=True, paused=True))[0] == "по умолчанию"
+	assert member_badge(_executor(paused=True)) == ("приостановлен", InfoLevel.INFOAMTION)
+	# приостановленному про права не говорят: его не используют вовсе
+	assert member_badge(_executor(paused=True, can_publish=False))[0] == "приостановлен"
+	assert member_badge(_executor(can_publish=False)) == (
+		"не может публиковать",
+		InfoLevel.WARNING,
+	)
+
+
+def test_default_candidates_offer_only_working_executors() -> None:
+	"""В списке смены публикатора — свой вид, кто может публиковать и не на паузе."""
+	from pxcontrol.ui.pages.executor_text import default_candidates
+
+	ready = _executor(label="Вася")
+	paused = _executor(label="Петя", paused=True)
+	lost = _executor(label="Катя", can_publish=False)
+	bot = _executor(kind=OwnerKind.BOT, label="бот")
+	pool = [ready, paused, lost, bot]
+	assert [e.label for e in default_candidates(pool, OwnerKind.USER)] == ["Вася"]
+	assert [e.label for e in default_candidates(pool, OwnerKind.BOT)] == ["бот"]
+	assert default_candidates([paused, lost], OwnerKind.USER) == []
 
 
 def test_rights_rows_speak_russian_and_spare_the_admin() -> None:
@@ -625,25 +649,6 @@ def test_snapshot_caption_admits_transferred_rights() -> None:
 
 	assert "перенесены из прежней модели" in snapshot_caption(None)
 	assert snapshot_caption(datetime(2026, 9, 20, 16, 40, tzinfo=UTC)).startswith("снимок от ")
-
-
-def test_executor_signature_notices_changed_rights() -> None:
-	"""Отпечаток карточки меняется вместе с правами.
-
-	Карточка раскрывается перечнем прав: не заметив их смену, список
-	показывал бы вчерашние права до полной пересборки.
-	"""
-	from dataclasses import replace
-
-	from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights
-
-	before = _executor()
-	after = replace(
-		before,
-		rights=ExecutorRights(ParticipantStatus.ADMIN, AdminRights(delete_messages=True)),
-	)
-	assert executor_signature(before) != executor_signature(after)
-	assert executor_signature(before) == executor_signature(_executor())
 
 
 def test_remove_executor_text_warns_about_publisher() -> None:

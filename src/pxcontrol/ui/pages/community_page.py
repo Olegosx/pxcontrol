@@ -38,20 +38,26 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QHideEvent, QShowEvent
-from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
 	Action,
 	BodyLabel,
 	BreadcrumbBar,
 	CaptionLabel,
+	CardWidget,
 	FluentIcon,
+	Flyout,
+	FlyoutViewBase,
 	HorizontalSeparator,
+	InfoBadge,
 	LineEdit,
 	MessageBoxBase,
 	PrimaryPushButton,
 	PushButton,
 	RoundMenu,
 	ScrollArea,
+	SimpleCardWidget,
+	StrongBodyLabel,
 	SubtitleLabel,
 	SwitchButton,
 	TitleLabel,
@@ -82,26 +88,26 @@ from pxcontrol.engine.services.video import PresetDto
 from pxcontrol.engine.telegram.types import ExecutorRef, OwnerKind
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
-from pxcontrol.ui.pages.card_list import CardList
 from pxcontrol.ui.pages.common import (
+	LIST_BUTTON_HEIGHT,
 	DtoComboBox,
 	ErrorLabel,
+	FlowGrid,
 	FormDialog,
 	QueueCounts,
 	TabItem,
 	WorkDialog,
 	account_caption,
-	bind,
 	bot_caption,
 	clear_layout,
 	community_kind_caption,
 	confirm_delete,
+	dim_widget,
 	elide_text,
 	entity_avatar,
 	error_reporter,
 	exec_dialog,
 	format_local,
-	list_area,
 	list_button,
 	page_layout,
 	section_header,
@@ -122,10 +128,11 @@ from pxcontrol.ui.pages.community_state import (
 )
 from pxcontrol.ui.pages.executor_text import (
 	INVITE_LINK_PROMPT,
+	default_candidates,
 	executor_rights_rows,
-	executor_signature,
-	executor_summary,
 	join_result_text,
+	member_badge,
+	member_caption,
 	remove_executor_text,
 )
 from pxcontrol.ui.pages.list_view import ListPage, PagerRow, paginate, step_page
@@ -140,6 +147,7 @@ from pxcontrol.ui.pages.publish_queue_view import (
 from pxcontrol.ui.pages.queue_panel import QueuePanel
 from pxcontrol.ui.pages.scheduled_panel import ScheduledPanel, scheduled_subtitle
 from pxcontrol.ui.pages.tasks import TasksPanel, open_tasks
+from pxcontrol.ui.pages.user_actions import set_bot_paused, set_user_paused
 from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher, QueueWatchers
 
 #: Размер логотипа в шапке страницы (пиксели).
@@ -278,23 +286,271 @@ def read_executors(
 	)
 
 
+#: Вкладка «Участники» по макету (пиксели).
+_MEMBER_MIN_WIDTH = 340  # минимальная ширина карточки в сетке
+_MEMBER_SPACING = 10
+_MEMBER_CARD_HEIGHT = 62  # постоянная: карточка не раскрывается
+_MEMBER_AVATAR = 32
+_CANDIDATE_WIDTH = 220  # список кандидатов в заголовке раздела
+_PUBLISHER_COMBO_WIDTH = 150  # список смены публикатора
+_RIGHTS_WIDTH = 420  # всплывающая панель прав
+_RIGHTS_LABEL_WIDTH = 130
+#: Приглушение аватара приостановленного исполнителя (как у выключенного
+#: сообщества на дашборде).
+_PAUSED_OPACITY = 0.62
+
+#: Разделы пула: вид исполнителя, заголовок, роль в блоке публикатора,
+#: пустое состояние и подсказка кнопки ввода.
+_MEMBER_SECTIONS: tuple[tuple[OwnerKind, str, str, str, str], ...] = (
+	(
+		OwnerKind.USER,
+		"Пользователи",
+		"Пользователь",
+		"Пользователей нет — введите вошедший аккаунт.",
+		"Если исполнитель ещё не в сообществе, приложение введёт его: "
+		"вступит по @имени, по ссылке-приглашению или пригласит своими силами",
+	),
+	(
+		OwnerKind.BOT,
+		"Боты",
+		"Бот",
+		"Ботов нет — введите бота, если нужны кнопки.",
+		"Бот сам вступить не может: в группу его пригласит, а в канал "
+		"примет администратором исполнитель из пула",
+	),
+)
+
+
+class _RightsView(FlyoutViewBase):
+	"""Права исполнителя всплывающей панелью (макет «Участники», 1b).
+
+	Карточка пула больше не раскрывается: перечень прав нужен изредка,
+	а раскрытие тянуло за собой высоту всего ряда сетки. Панель
+	закрывается штатно — кликом мимо.
+	"""
+
+	def __init__(self, executor: ExecutorDto, parent: QWidget | None = None) -> None:
+		super().__init__(parent)
+		self.setFixedWidth(_RIGHTS_WIDTH)  # макет
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(*density.spacing().card_margins)
+		layout.setSpacing(density.spacing().row_spacing)
+		layout.addWidget(StrongBodyLabel(f"Права · {executor.label}", self))
+		grid = QGridLayout()
+		grid.setHorizontalSpacing(14)  # макет
+		grid.setVerticalSpacing(6)  # макет
+		for row, (caption, value) in enumerate(executor_rights_rows(executor)):
+			label = CaptionLabel(caption, self)
+			label.setFixedWidth(_RIGHTS_LABEL_WIDTH)  # макет
+			grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop)
+			text = BodyLabel(value, self)
+			text.setWordWrap(True)
+			grid.addWidget(text, row, 1)
+		grid.setColumnStretch(1, 1)
+		layout.addLayout(grid)
+
+
+class _MemberCard(CardWidget):
+	"""Карточка исполнителя пула: аватар, имя с плашкой, роль и три значка.
+
+	Высота постоянная (макет): карточка не раскрывается, поэтому
+	соседние карточки ряда не растягиваются. В ряду — только
+	кнопки-значки: текстовая кнопка съедала колонку имени.
+	"""
+
+	def __init__(
+		self,
+		executor: ExecutorDto,
+		parent: QWidget,
+		*,
+		caption_text: str,
+		on_resume: Callable[[], None],
+		on_rights: Callable[[QWidget], None],
+		on_remove: Callable[[], None],
+	) -> None:
+		super().__init__(parent)
+		self.setFixedHeight(_MEMBER_CARD_HEIGHT)  # макет
+		row = QHBoxLayout(self)
+		row.setContentsMargins(14, 10, 8, 10)  # макет
+		row.setSpacing(10)  # макет
+		avatar = entity_avatar(self, executor.owner.id, executor.label, None, _MEMBER_AVATAR)
+		if executor.paused:
+			dim_widget(avatar, _PAUSED_OPACITY)
+		row.addWidget(avatar)
+		column = QVBoxLayout()
+		column.setSpacing(2)  # макет
+		name_row = QHBoxLayout()
+		name_row.setSpacing(8)  # макет
+		name = StrongBodyLabel(self)
+		name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		elide_text(name, executor.label)
+		name_row.addWidget(name, stretch=1)
+		badge = member_badge(executor)
+		if badge is not None:
+			text, level = badge
+			plate = InfoBadge(text, self, level)
+			plate.adjustSize()
+			name_row.addWidget(plate)
+		name_row.addStretch()
+		column.addLayout(name_row)
+		caption = CaptionLabel(self)
+		caption.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		elide_text(caption, caption_text)
+		column.addWidget(caption)
+		row.addLayout(column, stretch=1)
+		if executor.paused:
+			row.addWidget(self._icon(FluentIcon.PLAY, "Возобновить", on_resume))
+		rights = TransparentToolButton(FluentIcon.INFO, self)
+		rights.setToolTip("Права в сообществе")
+		rights.clicked.connect(partial(on_rights, rights))
+		row.addWidget(rights)
+		row.addWidget(
+			self._icon(
+				FluentIcon.DELETE,
+				"Убрать из пула приложения — в Telegram исполнитель останется",
+				on_remove,
+			)
+		)
+
+	def _icon(
+		self, icon: FluentIcon, hint: str, handler: Callable[[], None]
+	) -> TransparentToolButton:
+		"""Кнопка-значок карточки: штатная, с подсказкой."""
+		button = TransparentToolButton(icon, self)
+		button.setToolTip(hint)
+		button.clicked.connect(handler)
+		return button
+
+
+class _PublisherCard(SimpleCardWidget):
+	"""Публикатор по умолчанию одного вида: кто сейчас и список смены."""
+
+	def __init__(
+		self,
+		kind: OwnerKind,
+		role: str,
+		panel: QWidget,
+		on_change: Callable[[ExecutorDto], None],
+	) -> None:
+		super().__init__(panel)
+		self._kind = kind
+		self._on_change = on_change
+		layout = QVBoxLayout(self)
+		layout.setContentsMargins(14, 12, 14, 12)  # макет
+		layout.setSpacing(10)  # макет
+		layout.addWidget(BodyLabel(role, self))
+		layout.addWidget(HorizontalSeparator(self))
+		self._row = QHBoxLayout()
+		self._row.setSpacing(10)  # макет
+		layout.addLayout(self._row)
+		self._combo: DtoComboBox[ExecutorDto] = DtoComboBox(self, placeholder="Сменить…")
+		self._combo.setFixedWidth(_PUBLISHER_COMBO_WIDTH)  # макет
+		self._combo.currentIndexChanged.connect(self._on_selected)
+
+	def sync(self, executors: list[ExecutorDto], caption: Callable[[ExecutorDto], str]) -> None:
+		"""Показывает назначенного и обновляет список смены."""
+		clear_layout(self._row)
+		current = next(
+			(
+				executor
+				for executor in executors
+				if executor.owner.kind is self._kind and executor.is_default
+			),
+			None,
+		)
+		if current is None:
+			self._row.addWidget(CaptionLabel("не назначен", self), stretch=1)
+		else:
+			self._row.addWidget(
+				entity_avatar(self, current.owner.id, current.label, None, _MEMBER_AVATAR)
+			)
+			column = QVBoxLayout()
+			column.setSpacing(2)
+			name = StrongBodyLabel(self)
+			name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+			elide_text(name, current.label)
+			column.addWidget(name)
+			column.addWidget(CaptionLabel(caption(current), self))
+			self._row.addLayout(column, stretch=1)
+		self._combo.setParent(self)
+		self._combo.set_items(
+			default_candidates(executors, self._kind),
+			label=lambda executor: executor.label,
+		)
+		self._row.addWidget(self._combo, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+	def _on_selected(self, _index: int) -> None:
+		"""Выбор в списке смены — назначение (пункт-заглушка не считается)."""
+		executor = self._combo.selected()
+		if executor is not None:
+			self._on_change(executor)
+
+
+class _MembersSection:
+	"""Раздел пула: заголовок с вводом, сетка карточек, пустое состояние."""
+
+	def __init__(
+		self,
+		panel: QWidget,
+		layout: QVBoxLayout,
+		title: str,
+		empty: str,
+		hint: str,
+		on_add: Callable[[], None],
+	) -> None:
+		self._panel = panel
+		self._title = title
+		self._header_box = QVBoxLayout()
+		layout.addLayout(self._header_box)
+		self.combo: DtoComboBox[Any] = DtoComboBox(panel)
+		self.combo.setFixedWidth(_CANDIDATE_WIDTH)  # макет
+		self.combo.setFixedHeight(LIST_BUTTON_HEIGHT)  # макет: как у кнопки ввода
+		self.button = list_button("Ввести", panel)
+		self.button.setToolTip(hint)
+		self.button.clicked.connect(on_add)
+		self.error = ErrorLabel(panel)
+		layout.addWidget(self.error)
+		self.grid = FlowGrid([], panel, min_width=_MEMBER_MIN_WIDTH, spacing=_MEMBER_SPACING)
+		layout.addWidget(self.grid)
+		self.empty = BodyLabel(empty, panel)
+		layout.addWidget(self.empty)
+		self._cards: list[QWidget] = []
+		self.set_count(0)
+
+	def set_count(self, count: int) -> None:
+		"""Пересобирает заголовок с числом (ввод переезжает в новый)."""
+		clear_layout(self._header_box)
+		self.combo.setParent(self._panel)
+		self.button.setParent(self._panel)
+		self._header_box.addWidget(
+			section_header(self._panel, self._title, count, trailing=[self.combo, self.button])
+		)
+
+	def set_cards(self, cards: list[QWidget]) -> None:
+		"""Меняет карточки раздела; прежние удаляются."""
+		for card in self._cards:
+			card.setParent(None)
+			card.deleteLater()
+		self._cards = cards
+		self.grid.set_cards(cards)
+		self.grid.setVisible(bool(cards))
+		self.empty.setVisible(not cards)
+
+
 class MembersPanel(QWidget):
-	"""Исполнители сообщества: пул обоих видов карточками (ADR-0035).
+	"""Исполнители сообщества: публикаторы по умолчанию и пул обоих видов (ADR-0035).
 
-	Два раздела одного пула. **Пользователи** — userbot-аккаунты:
-	публикует назначенный, остальные нужны чтению, реакциям
-	и обслуживанию. **Боты** — тоже пул: публикатор-бот один
-	(запасной путь и единственный, кто умеет кнопки под постом,
-	ADR-0031), прочие боты состоят в сообществе наравне.
+	Порядок сверху вниз (макет «Участники», 1b): **публикатор
+	по умолчанию** — по карточке на вид, с именем назначенного и списком
+	смены; затем **Пользователи** — userbot-аккаунты (публикует
+	назначенный, остальные нужны чтению, реакциям и обслуживанию)
+	и **Боты** (публикатор-бот один — запасной путь и единственный, кто
+	умеет кнопки под постом, ADR-0031; прочие боты состоят наравне).
 
-	Карточка **раскрывается перечнем прав**: в шапке — то, что нужно
-	знать сразу (участие, назначение, помехи работе), в теле — что
-	исполнителю можно и когда права прочитаны. Так человек видит,
-	почему публикация недоступна, не уходя в Telegram.
-
-	Список общий с очередями (``CardList``): обновление точечное,
-	раскрытая карточка переживает приход нового снимка — иначе перечень
-	прав закрывался бы сам, стоило соседней строке измениться.
+	Карточка пула не раскрывается: права показывает всплывающая панель
+	по кнопке-значку. Раскрытие тянуло высоту всего ряда сетки, а права
+	нужны изредка. Своей прокрутки у панели нет — пул это единицы строк,
+	он растёт вместе со страницей.
 
 	Живой список: операции выполняются сразу (движком), список
 	перечитывается после каждой, а владелец узнаёт об изменении
@@ -322,74 +578,37 @@ class MembersPanel(QWidget):
 		self._executors: list[ExecutorDto] = []
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(0, 0, 0, 0)
-		layout.setSpacing(density.spacing().row_spacing)
-		self._user_list, self._user_empty = self._section(
-			layout,
-			"Пользователи",
-			"Публикует назначенный аккаунт; остальные — пул сообщества: "
-			"чтение, реакции, обслуживание. Права публиковать для этого не нужны.",
-			"Пользователей нет — введите вошедший аккаунт.",
-		)
-		self._add_combo: DtoComboBox[TgAccountDto] = DtoComboBox(self)
-		layout.addLayout(self._add_row(self._add_combo, self._on_add_user, is_bot=False))
-		self._bot_list, self._bot_empty = self._section(
-			layout,
-			"Боты",
-			"Запасной путь публикации: файлы до 50 МБ, только «сейчас». "
-			"Кнопки под постом ставит только бот.",
-			"Ботов нет — введите бота, если нужны кнопки.",
-		)
-		self._bot_combo: DtoComboBox[BotDto] = DtoComboBox(self)
-		layout.addLayout(self._add_row(self._bot_combo, self._on_add_bot, is_bot=True))
-		self._error = ErrorLabel(self)
-		layout.addWidget(self._error)
+		layout.setSpacing(density.spacing().block_spacing)
+		self._build_publisher(layout)
+		self._sections: dict[OwnerKind, _MembersSection] = {}
+		for kind, title, _role, empty, hint in _MEMBER_SECTIONS:
+			self._sections[kind] = _MembersSection(
+				self, layout, title, empty, hint, partial(self._on_add, kind)
+			)
 		self.reload()
 
-	def _section(
-		self, layout: QVBoxLayout, title: str, hint: str, empty: str
-	) -> tuple[CardList, CaptionLabel]:
-		"""Раздел пула: заголовок, пояснение, список карточек и пустое состояние."""
-		layout.addWidget(section_header(self, title))
-		note = CaptionLabel(hint, self)
+	def _build_publisher(self, layout: QVBoxLayout) -> None:
+		"""Блок «Публикатор по умолчанию»: заголовок, пояснение, две карточки."""
+		layout.addWidget(section_header(self, "Публикатор по умолчанию"))
+		note = CaptionLabel(
+			"Им уходит пост, если при публикации не выбран другой. "
+			"Публиковать может любой из пула, у кого есть права.",
+			self,
+		)
 		note.setWordWrap(True)
 		layout.addWidget(note)
-		area, box = list_area(self, spacing=density.spacing().list_spacing)
-		layout.addWidget(area, stretch=1)
-		empty_label = BodyLabel(empty, self)
-		layout.addWidget(empty_label)
-		cards = CardList(
-			self,
-			box,
-			subtitle=executor_summary,
-			signature=executor_signature,
-			key=lambda executor: executor.owner,
-			title=lambda executor: executor.label,
-			actions=self._actions,
-			actions_signature=lambda executor: (executor.is_default,),
-			# раскрывается любая карточка: в теле не правка, а перечень
-			# прав, и он нужен и у приостановленного, и у потерявшего права
-			editable=lambda _executor: True,
-			fill_body=self._fill_rights,
-			compact=True,
-			lost_edit_text="Исполнитель покинул пул — его права больше не показываются.",
+		self._publishers = {
+			kind: _PublisherCard(kind, role, self, self._on_set_default)
+			for kind, _title, role, _empty, _hint in _MEMBER_SECTIONS
+		}
+		layout.addWidget(
+			FlowGrid(
+				list(self._publishers.values()),
+				self,
+				min_width=_MEMBER_MIN_WIDTH,
+				spacing=_MEMBER_SPACING,
+			)
 		)
-		return cards, empty_label
-
-	def _add_row(self, combo: QWidget, handler: Callable[[], None], *, is_bot: bool) -> QHBoxLayout:
-		"""Строка ввода нового исполнителя: выбор кандидата и кнопка."""
-		row = QHBoxLayout()
-		row.addWidget(combo, stretch=1)
-		button = PushButton("Ввести", self)
-		button.setToolTip(
-			"Бот сам вступить не может: в группу его пригласит, а в канал "
-			"примет администратором исполнитель из пула"
-			if is_bot
-			else "Если исполнитель ещё не в сообществе, приложение введёт его: "
-			"вступит по @имени, по ссылке-приглашению или пригласит своими силами"
-		)
-		button.clicked.connect(handler)
-		row.addWidget(button)
-		return row
 
 	def reload(self) -> None:
 		"""Перечитывает пул исполнителей из движка."""
@@ -402,79 +621,74 @@ class MembersPanel(QWidget):
 		)
 
 	def _show_executors(self, executors: list[ExecutorDto]) -> None:
-		"""Приводит оба раздела к снимку и обновляет списки кандидатов."""
+		"""Приводит блок публикаторов, оба раздела и списки кандидатов к снимку."""
 		self._executors = executors
-		users = [dto for dto in executors if dto.owner.kind is OwnerKind.USER]
-		bots = [dto for dto in executors if dto.owner.kind is OwnerKind.BOT]
-		self._user_list.sync(users)
-		self._user_empty.setVisible(not users)
-		self._bot_list.sync(bots)
-		self._bot_empty.setVisible(not bots)
-		taken_accounts = {dto.owner.id for dto in users}
-		self._add_combo.set_items(
+		for card in self._publishers.values():
+			card.sync(executors, self._caption)
+		for kind, section in self._sections.items():
+			mine = [dto for dto in executors if dto.owner.kind is kind]
+			section.set_count(len(mine))
+			section.set_cards([self._make_card(executor) for executor in mine])
+		taken_accounts = {dto.owner.id for dto in executors if dto.owner.kind is OwnerKind.USER}
+		self._sections[OwnerKind.USER].combo.set_items(
 			[account for account in self._accounts if account.id not in taken_accounts],
 			label=lambda acc: account_caption(acc.display, acc.phone),
 			key=lambda acc: acc.id,
 		)
-		taken_bots = {dto.owner.id for dto in bots}
-		self._bot_combo.set_items(
+		taken_bots = {dto.owner.id for dto in executors if dto.owner.kind is OwnerKind.BOT}
+		self._sections[OwnerKind.BOT].combo.set_items(
 			[bot for bot in self._bots if bot.id not in taken_bots],
 			label=lambda bot: bot_caption(bot.label, bot.username),
 			key=lambda bot: bot.id,
 		)
 
-	def _actions(self, executor: ExecutorDto, parent: QWidget) -> list[QWidget]:
-		"""Кнопки шапки карточки: назначение публикатором и удаление из пула."""
-		buttons: list[QWidget] = []
-		if not executor.is_default:
-			make_default = list_button("Публикатор", parent)
-			make_default.setToolTip("Публиковать от имени этого исполнителя по умолчанию")
-			make_default.clicked.connect(bind(self._on_set_default, executor))
-			buttons.append(make_default)
-		remove = list_button("Убрать", parent)
-		remove.setToolTip("Убрать из пула приложения — в самом Telegram исполнитель останется")
-		remove.clicked.connect(bind(self._on_remove, executor))
-		buttons.append(remove)
-		return buttons
+	def _caption(self, executor: ExecutorDto) -> str:
+		"""Подпись под именем: роль, а у бота — «@имя · роль» (имя — из списка ботов)."""
+		username = None
+		if executor.owner.kind is OwnerKind.BOT:
+			username = next(
+				(bot.username for bot in self._bots if bot.id == executor.owner.id), None
+			)
+		return member_caption(executor, username)
 
-	def _fill_rights(
-		self, executor: ExecutorDto, box: QVBoxLayout, _collapse: Callable[[], None]
-	) -> None:
-		"""Тело карточки — полный перечень прав исполнителя (ADR-0035)."""
-		for caption, value in executor_rights_rows(executor):
-			row = QHBoxLayout()
-			row.setContentsMargins(0, 0, 0, 0)
-			row.addWidget(CaptionLabel(f"{caption}:", self))
-			text = BodyLabel(value, self)
-			text.setWordWrap(True)
-			row.addWidget(text, stretch=1)
-			box.addLayout(row)
+	def _make_card(self, executor: ExecutorDto) -> QWidget:
+		"""Карточка исполнителя со своими тремя действиями."""
+		return _MemberCard(
+			executor,
+			self,
+			caption_text=self._caption(executor),
+			on_resume=partial(self._on_resume, executor),
+			on_rights=partial(self._on_rights, executor),
+			on_remove=partial(self._on_remove, executor),
+		)
+
+	def _on_rights(self, executor: ExecutorDto, anchor: QWidget) -> None:
+		"""Показывает права исполнителя всплывающей панелью у кнопки."""
+		Flyout.make(_RightsView(executor, self.window()), target=anchor, parent=self.window())
 
 	def _after_change(self, executors: list[ExecutorDto]) -> None:
 		"""Операция прошла: перерисовать и сообщить владельцу."""
 		self._show_executors(executors)
 		self.changed.emit()
 
-	def _on_add_user(self) -> None:
-		account = self._add_combo.selected()
-		if account is None:
-			self._error.fail(
+	def _on_add(self, kind: OwnerKind) -> None:
+		"""«Ввести»: выбранный кандидат своего вида входит в пул."""
+		section = self._sections[kind]
+		section.error.succeed()
+		item = section.combo.selected()
+		if item is None:
+			section.error.fail(
 				"Нет свободных вошедших активных аккаунтов — войдите или возобновите: "
+				"«Пользователи и боты»."
+				if kind is OwnerKind.USER
+				else "Нет свободных активных ботов — добавьте или возобновите: "
 				"«Пользователи и боты»."
 			)
 			return
-		self._add(
-			ExecutorRef(OwnerKind.USER, account.id), account.display, "Проверяю права аккаунта…"
-		)
-
-	def _on_add_bot(self) -> None:
-		bot = self._bot_combo.selected()
-		if bot is None:
-			self._error.fail(
-				"Нет свободных активных ботов — добавьте или возобновите: «Пользователи и боты»."
-			)
-			return
-		self._add(ExecutorRef(OwnerKind.BOT, bot.id), bot.label, "Проверяю права бота…")
+		if kind is OwnerKind.USER:
+			self._add(ExecutorRef(kind, item.id), item.display, "Проверяю права аккаунта…")
+		else:
+			self._add(ExecutorRef(kind, item.id), item.label, "Проверяю права бота…")
 
 	def _add(self, owner: ExecutorRef, label: str, note: str, invite: str | None = None) -> None:
 		"""Вводит исполнителя в сообщество (ADR-0035).
@@ -484,7 +698,6 @@ class MembersPanel(QWidget):
 		без готовой ссылки возвращает исход «нужна ссылка»: тогда её
 		просят и повторяют тем же путём.
 		"""
-		self._error.succeed()
 		show_info(self, "Проверка", note)
 		run_in_engine(
 			self._worker,
@@ -518,11 +731,12 @@ class MembersPanel(QWidget):
 			return
 		link = dialog.value("link").strip()
 		if not link:
-			self._error.fail("Ссылка не указана — ввести исполнителя нечем.")
+			self._sections[owner.kind].error.fail("Ссылка не указана — ввести исполнителя нечем.")
 			return
 		self._add(owner, label, "Вступаю по ссылке…", invite=link)
 
 	def _on_set_default(self, executor: ExecutorDto) -> None:
+		"""Смена публикатора по умолчанию — существующая операция движка."""
 		run_in_engine(
 			self._worker,
 			self._worker.engine.communities.set_default_publisher(
@@ -532,6 +746,26 @@ class MembersPanel(QWidget):
 			lambda _dto: self._reload_and_notify(),
 			self._show_error,
 		)
+
+	def _on_resume(self, executor: ExecutorDto) -> None:
+		"""Возобновляет приостановленного исполнителя — та же операция, что в его разделе."""
+		done = self._reload_and_notify
+		if executor.owner.kind is OwnerKind.USER:
+			run_in_engine(
+				self._worker,
+				self._worker.engine.accounts.get_tg_account(executor.owner.id),
+				self,
+				lambda account: set_user_paused(self._worker, self, account, False, done),
+				self._show_error,
+			)
+		else:
+			run_in_engine(
+				self._worker,
+				self._worker.engine.accounts.get_bot(executor.owner.id),
+				self,
+				lambda bot: set_bot_paused(self._worker, self, bot, False, done),
+				self._show_error,
+			)
 
 	def _reload_and_notify(self) -> None:
 		self.reload()
