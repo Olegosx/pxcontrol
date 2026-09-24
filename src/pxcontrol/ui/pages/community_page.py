@@ -382,7 +382,11 @@ class _MemberCard(CardWidget):
 		name_row = QHBoxLayout()
 		name_row.setSpacing(8)  # макет
 		name = StrongBodyLabel(self)
+		# «занимай, что дадут», но не шире своего текста: плашка встаёт
+		# сразу за именем, а длинное имя сокращается многоточием (тот же
+		# приём, что у названия в шапке страницы)
 		name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+		name.setMaximumWidth(name.fontMetrics().horizontalAdvance(executor.label) + 8)
 		elide_text(name, executor.label)
 		name_row.addWidget(name, stretch=1)
 		badge = member_badge(executor)
@@ -500,6 +504,11 @@ class _MembersSection:
 	) -> None:
 		self._panel = panel
 		self._title = title
+		# блок раздела: внутри — интервал строки, между блоками — блока
+		block = QVBoxLayout()
+		block.setSpacing(density.spacing().row_spacing)
+		layout.addLayout(block)
+		layout = block
 		self._header_box = QVBoxLayout()
 		layout.addLayout(self._header_box)
 		self.combo: DtoComboBox[Any] = DtoComboBox(panel)
@@ -589,6 +598,10 @@ class MembersPanel(QWidget):
 
 	def _build_publisher(self, layout: QVBoxLayout) -> None:
 		"""Блок «Публикатор по умолчанию»: заголовок, пояснение, две карточки."""
+		block = QVBoxLayout()
+		block.setSpacing(density.spacing().row_spacing)
+		layout.addLayout(block)
+		layout = block
 		layout.addWidget(section_header(self, "Публикатор по умолчанию"))
 		note = CaptionLabel(
 			"Им уходит пост, если при публикации не выбран другой. "
@@ -799,7 +812,13 @@ class _MembersDialog(WorkDialog):
 		parent: QWidget,
 	) -> None:
 		super().__init__(f"Участники — {community.title}", parent, size=(560, 600))
-		self.content.addWidget(MembersPanel(worker, community, accounts, bots, self), stretch=1)
+		# во вкладке панель прокручивает страница, здесь страницы нет —
+		# без прокрутки длинный пул вышел бы за окно (спека, раздел 7)
+		area = ScrollArea(self)
+		area.setWidget(MembersPanel(worker, community, accounts, bots, area))
+		area.setWidgetResizable(True)
+		area.enableTransparentBackground()
+		self.content.addWidget(area, stretch=1)
 		self.add_close_button("Готово")
 
 
