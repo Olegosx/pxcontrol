@@ -2298,3 +2298,22 @@ def test_last_scan_takes_latest_dry_run_report() -> None:
 	assert scan_caption(big, moment, now) == (
 		"Числа — по последнему просмотру: сегодня 04:00, 5 000 сообщений."
 	)
+
+
+def test_members_summary_names_audience_by_community_kind() -> None:
+	"""Итог «Удалённых аккаунтов» в канале говорит о подписчиках, в группе — об участниках."""
+	from pxcontrol.engine.tasks.deleted_accounts import DeletedAccountsTask
+	from pxcontrol.engine.telegram.types import audience_many
+
+	spec = DeletedAccountsTask()
+
+	assert audience_many(CommunityKind.CHANNEL) == "подписчиков"
+	assert audience_many(CommunityKind.GROUP) == "участников"
+	channel = MembersReport(found=0, scanned=200, total=900, community_kind=CommunityKind.CHANNEL)
+	assert "просмотрено подписчиков: 200 из 900" in members_summary(channel)
+	assert "просмотрено участников" in members_summary(MembersReport(found=0, scanned=5))
+	# вид сохраняется с отчётом; отчёт без вида (до 24.09) читается как групповой
+	payload = spec.report_to_payload(channel)
+	assert spec.report_from_payload(payload).community_kind is CommunityKind.CHANNEL
+	del payload["community_kind"]
+	assert spec.report_from_payload(payload).community_kind is CommunityKind.GROUP

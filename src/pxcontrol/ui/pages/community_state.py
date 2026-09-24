@@ -258,15 +258,6 @@ def audience_word(kind: CommunityKind, count: int) -> str:
 	return plural(count, "подписчик", "подписчика", "подписчиков")
 
 
-def audience_many(kind: CommunityKind) -> str:
-	"""Аудитория вообще, без числа: «подписчиков» у канала, «участников» у группы.
-
-	Для фраз вроде «число участников», «в списке подписчиков» — родительный
-	падеж множественного числа, тот же, что у :func:`audience_word` при «5».
-	"""
-	return audience_word(kind, 5)
-
-
 def subtitle_text(community: CommunityDto, participants: int | None) -> str:
 	"""Подстрочник карточки: «@имя · 18 420 подписчиков».
 

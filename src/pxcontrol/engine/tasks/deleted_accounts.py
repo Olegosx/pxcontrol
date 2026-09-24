@@ -30,7 +30,12 @@ from pxcontrol.engine.tasks.model import (
 	first_capable,
 )
 from pxcontrol.engine.telegram.mtproto import UserbotAccessError
-from pxcontrol.engine.telegram.types import DeletedAccount, ParticipantsPage
+from pxcontrol.engine.telegram.types import (
+	CommunityKind,
+	DeletedAccount,
+	ParticipantsPage,
+	audience_many,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +113,11 @@ class MembersReport:
 			того самого предела выдачи, который обсуждался при
 			проектировании (ADR-0026) — теперь он виден в отчёте,
 			а не предполагается.
+		community_kind: вид сообщества прохода — итог называет аудиторию
+			по нему: у канала подписчики, у группы участники. Итог строится
+			из сохранённого отчёта, когда сообщества под рукой нет, поэтому
+			вид живёт в самом отчёте. Отчёты до 24.09.2026 его не несут
+			и читаются как групповые.
 	"""
 
 	found: int = 0
@@ -119,10 +129,19 @@ class MembersReport:
 	limited: bool = False
 	exhausted: bool = False
 	capped: bool = False
+	community_kind: CommunityKind = CommunityKind.GROUP
+
+
+def _kind_from(raw: object) -> CommunityKind:
+	"""Вид сообщества из отчёта; нет или незнаком — группа (прежние отчёты)."""
+	try:
+		return CommunityKind(str(raw)) if raw is not None else CommunityKind.GROUP
+	except ValueError:
+		return CommunityKind.GROUP
 
 
 def members_summary(report: MembersReport) -> str:
-	"""Итог прохода по участникам одной строкой."""
+	"""Итог прохода по участникам (подписчикам) одной строкой."""
 	if report.removed or report.skipped:
 		parts = [f"Исключено удалённых аккаунтов: {report.removed}"]
 		if report.skipped:
@@ -135,7 +154,7 @@ def members_summary(report: MembersReport) -> str:
 				"(нет права удалять сообщения)"
 			)
 		return ". ".join(parts) + "."
-	seen = f"просмотрено участников: {report.scanned}"
+	seen = f"просмотрено {audience_many(report.community_kind)}: {report.scanned}"
 	if report.total:
 		seen += f" из {report.total}"
 	if report.capped:
@@ -190,6 +209,7 @@ class DeletedAccountsTask:
 			limited=bool(payload.get("limited", False)),
 			exhausted=bool(payload.get("exhausted", False)),
 			capped=bool(payload.get("capped", False)),
+			community_kind=_kind_from(payload.get("community_kind")),
 		)
 
 	def report_to_payload(self, report: MembersReport) -> dict[str, Any]:
@@ -203,6 +223,7 @@ class DeletedAccountsTask:
 			"limited": report.limited,
 			"exhausted": report.exhausted,
 			"capped": report.capped,
+			"community_kind": str(report.community_kind),
 		}
 
 	def summary(self, report: MembersReport, *, dry_run: bool) -> str:
@@ -215,6 +236,7 @@ class DeletedAccountsTask:
 		account_id = ctx.executor.owner.id
 		chat_id = ctx.community.tg_chat_id
 		clean = not ctx.dry_run
+		audience = audience_many(ctx.community.kind)
 		# чистка исключением попутно убирает служебные записи о выходах —
 		# если этому же исполнителю их удалять разрешено
 		can_delete = can(ctx.executor.rights, ExecutorAction.DELETE_OTHERS, ctx.community.kind)
@@ -256,7 +278,7 @@ class DeletedAccountsTask:
 							service_ids.append(service_id)
 				ctx.progress(
 					min(1.0, scanned / total) if total else 0.0,
-					f"просмотрено участников {scanned}",
+					f"просмотрено {audience} {scanned}",
 				)
 				if page.next_offset is None:
 					exhausted = True
@@ -270,7 +292,7 @@ class DeletedAccountsTask:
 			# исключение участника необратимо: итог в журнал при любом
 			# исходе, включая отмену и флуд-лимит
 			ctx.log(
-				f"участников просмотрено {scanned} из "
+				f"{audience} просмотрено {scanned} из "
 				f"{total if total is not None else '?'}, мёртвых {found}, "
 				f"исключено {removed}, пропущено {skipped}"
 			)
@@ -297,6 +319,7 @@ class DeletedAccountsTask:
 			exhausted=exhausted,
 			# Telegram перестал отдавать участников раньше конца списка
 			capped=exhausted and total is not None and scanned < total,
+			community_kind=ctx.community.kind,
 		)
 
 	@staticmethod

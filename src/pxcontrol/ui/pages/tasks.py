@@ -111,6 +111,7 @@ from pxcontrol.engine.telegram.types import (
 	ExecutorRef,
 	ReactionOption,
 	ServiceMessageKind,
+	audience_many,
 )
 from pxcontrol.ui import density
 from pxcontrol.ui.async_bridge import run_in_engine
@@ -136,7 +137,6 @@ from pxcontrol.ui.pages.common import (
 	status_caption,
 	theme_color,
 )
-from pxcontrol.ui.pages.community_state import audience_many
 from pxcontrol.ui.queue_watcher import QueueView, QueueWatcher
 
 #: Индекс модели, как его отдаёт Qt (временный или постоянный).
