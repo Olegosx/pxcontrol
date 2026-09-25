@@ -27,6 +27,11 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
+from pxcontrol.engine.community_settings.model import (
+	CommunitySettings,
+	LinkedChat,
+	SettingChange,
+)
 from pxcontrol.engine.telegram.bot_api import (
 	check_community,
 	check_token,
@@ -63,6 +68,7 @@ from pxcontrol.engine.telegram.types import (
 	ChatReactions,
 	CommunityAnalytics,
 	CommunityInfo,
+	CommunityKind,
 	CommunityStatsInfo,
 	DeletedAccount,
 	ExecutorRef,
@@ -707,6 +713,41 @@ class TelegramGateway:
 		"""
 		async with self._userbot_slot(account_id, TelegramPriority.MAINTENANCE) as transport:
 			return await transport.available_reactions(chat_id)
+
+	async def userbot_community_settings(
+		self, account_id: int, chat_id: str, kind: CommunityKind
+	) -> CommunitySettings:
+		"""Снимок настроек сообщества глазами аккаунта (ADR-0043).
+
+		Приоритет «человек ждёт ответа»: снимок читается при открытии
+		экрана настроек.
+
+		Raises: см. :meth:`MtprotoTransport.community_settings`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.community_settings(chat_id, kind)
+
+	async def userbot_apply_setting(
+		self, account_id: int, chat_id: str, change: SettingChange
+	) -> None:
+		"""Записывает одно изменение настройки (ADR-0043).
+
+		Каждое изменение — своя операция на дорожке: зазор дорожки
+		между ними бережёт от флуд-лимита, который сервер ставит уже
+		после десятка быстрых правок подряд (живая проба 25.09.2026).
+
+		Raises: см. :meth:`MtprotoTransport.apply_setting`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			await transport.apply_setting(chat_id, change)
+
+	async def userbot_discussion_candidates(self, account_id: int) -> list[LinkedChat]:
+		"""Группы, пригодные для обсуждения канала (ADR-0043).
+
+		Raises: см. :meth:`MtprotoTransport.discussion_candidates`.
+		"""
+		async with self._userbot_slot(account_id, TelegramPriority.INTERACTIVE) as transport:
+			return await transport.discussion_candidates()
 
 	async def userbot_reactions_page(
 		self, account_id: int, chat_id: str, offset_id: int, limit: int

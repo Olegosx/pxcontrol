@@ -157,8 +157,12 @@ ALL_MEMBER_RIGHTS: MemberRights = _all_true(MemberRights)
 NO_ADMIN_RIGHTS = AdminRights()
 NO_MEMBER_RIGHTS = MemberRights()
 
-#: Ограничение ``send_media`` — зонтик над всеми видами вложений: оно
-#: старше гранулярных прав 2023 года, и сервер присылает его вместо них.
+#: Ограничение ``send_media`` — зонтик над файловыми вложениями: оно
+#: старше гранулярных прав 2023 года. Сервер раскрывает его ровно
+#: в эти шесть видов; стикеры, гифки, игры и встроенные боты он
+#: оставляет разрешёнными (живая проба 25.09.2026, ADR-0043), и описание
+#: ``chatBannedRights`` их к ``send_media`` тоже не относит. До 25.09.2026
+#: зонтик здесь покрывал все десять видов — шире, чем у сервера.
 _MEDIA_RIGHTS = (
 	"send_photos",
 	"send_videos",
@@ -166,16 +170,21 @@ _MEDIA_RIGHTS = (
 	"send_audios",
 	"send_voices",
 	"send_docs",
-	"send_stickers",
-	"send_gifs",
-	"send_games",
-	"send_inline",
 )
+
+#: Виды отправки, у которых свои флаги и нет зонтика, кроме ``send_messages``.
+_OTHER_MEDIA_RIGHTS = ("send_stickers", "send_gifs", "send_games", "send_inline")
 
 #: Ограничение ``send_messages`` — зонтик надо всем, что вообще шлют
 #: в ленту. Реакции, приглашения, закрепление и оформление под него
 #: не попадают: это не отправка сообщений.
-_SENDING_RIGHTS = ("send_plain", *_MEDIA_RIGHTS, "send_polls", "embed_links")
+_SENDING_RIGHTS = (
+	"send_plain",
+	*_MEDIA_RIGHTS,
+	*_OTHER_MEDIA_RIGHTS,
+	"send_polls",
+	"embed_links",
+)
 
 
 @dataclass(frozen=True)
@@ -252,7 +261,8 @@ def _forbids(banned: Any, right: str) -> bool:
 	"""Запрещает ли набор ограничений Telegram названное разрешение.
 
 	Учитывает зонтики: ``send_messages`` закрывает всё отправляемое,
-	``send_media`` — все виды вложений. Пустой набор (``None``)
+	``send_media`` — шесть файловых видов вложений (не стикеры, гифки,
+	игры и встроенных ботов — у них свои флаги). Пустой набор (``None``)
 	не запрещает ничего.
 
 	Args:
@@ -327,6 +337,34 @@ def userbot_rights(perms: Any, default_banned: Any = None) -> ExecutorRights:
 		return ExecutorRights(status)
 	personal = getattr(getattr(perms, "participant", None), "banned_rights", None)
 	return ExecutorRights(status, NO_ADMIN_RIGHTS, _allowed_after(default_banned, personal))
+
+
+def default_permissions(default_banned: Any) -> MemberRights:
+	"""Что общие ограничения сообщества оставляют участникам (ADR-0043).
+
+	Чтение для экрана настроек: тот же разбор слоя, что у снимка прав
+	исполнителя (с зонтиками ``send_messages``/``send_media``), но
+	только общий слой — без личных ограничений.
+
+	Args:
+		default_banned: ``channel.default_banned_rights``; ``None`` —
+			ограничений нет, разрешено всё.
+	"""
+	return _allowed_after(default_banned)
+
+
+def banned_flags(allowed: MemberRights) -> dict[str, bool]:
+	"""Флаги ``chatBannedRights`` для записи общих ограничений (ADR-0043).
+
+	Обратное к :func:`default_permissions`: каждое разрешение, которого
+	нет, становится запретом с тем же именем. Зонтики не ставятся:
+	``send_media`` сервер выставляет сам, когда запрещены все виды
+	по отдельности (живая проба 25.09.2026), а ``send_messages`` закрыл бы
+	и текст, и медиа, и опросы разом — экран же правит их по отдельности.
+	``view_messages`` — исключение из сообщества, к общим ограничениям
+	не относится.
+	"""
+	return {field.name: not getattr(allowed, field.name) for field in fields(MemberRights)}
 
 
 def _creator_rights(anonymous: bool) -> AdminRights:

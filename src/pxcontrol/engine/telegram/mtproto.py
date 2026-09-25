@@ -18,8 +18,25 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+from pxcontrol.engine.community_settings.model import (
+	CommunitySettings,
+	LinkedChat,
+	SettingChange,
+)
 from pxcontrol.engine.errors import EngineError
 from pxcontrol.engine.telegram.markup import ButtonKind, PostButton, PostMarkup
+from pxcontrol.engine.telegram.mtproto_settings import (
+	NOT_MODIFIED,
+	WRITERS,
+	RawSettings,
+	WriteTarget,
+	discussion_groups,
+	json_value,
+	read_settings,
+	refusal_text,
+	rpc_code,
+	standard_reactions,
+)
 from pxcontrol.engine.telegram.refs import (
 	CHANNEL_ID_PREFIX,
 	invite_hash,
@@ -119,6 +136,15 @@ class UserbotSessionExpiredError(UserbotUnavailableError):
 
 class UserbotAccessError(UserbotUnavailableError):
 	"""Подтверждённый отказ Telegram: нет прав или канал не виден."""
+
+
+class UserbotSettingRefusedError(UserbotAccessError):
+	"""Telegram отказал в правке настройки сообщества (ADR-0043).
+
+	Подтверждённый отказ с текстом из таблицы отказов
+	(:data:`~pxcontrol.engine.telegram.mtproto_settings.REFUSALS`):
+	сервис настроек показывает его у самой настройки.
+	"""
 
 
 class UserbotNotInCommunityError(UserbotAccessError):
@@ -933,6 +959,11 @@ class MtprotoTransport:
 		#: страницы заявок — «дата + пользователь», и пользователя нужно
 		#: адресовать с хешем (ADR-0040)
 		self._known_hashes: dict[int, int] = {}
+		#: справочники сервера для экрана настроек (ADR-0043): конфигурация
+		#: приложения и стандартные реакции меняются редко — читаются один
+		#: раз за запуск, а не на каждое открытие экрана
+		self._app_config: dict[str, Any] | None = None
+		self._reaction_emojis: tuple[str, ...] | None = None
 
 	@property
 	def premium(self) -> bool:
@@ -1964,6 +1995,102 @@ class MtprotoTransport:
 		# честнее показать «запрещены», чем предложить эмодзи, которые
 		# сервер отвергнет (проверяется живьём, ADR-0039)
 		return ChatReactions(ChatReactionsMode.NONE)
+
+	async def community_settings(self, chat_id: str, kind: CommunityKind) -> CommunitySettings:
+		"""Снимок настроек сообщества глазами аккаунта (ADR-0043).
+
+		Один запрос ``GetFullChannelRequest`` — и справочники сервера
+		(конфигурация приложения, стандартные реакции), прочитанные
+		один раз за запуск.
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Флуд-лимит.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.channels import GetFullChannelRequest
+
+		client, entity = await self._client_and_entity(chat_id)
+		async with _mtproto_errors():
+			result = await client(GetFullChannelRequest(entity))
+			config = await self._server_config(client)
+			emojis = await self._standard_reactions(client)
+		chats = {chat.id: chat for chat in result.chats}
+		channel = chats.get(result.full_chat.id)
+		raw = RawSettings(channel, result.full_chat, chats, config, emojis)
+		return read_settings(raw, kind)
+
+	async def _server_config(self, client: Any) -> dict[str, Any]:
+		"""Конфигурация приложения — пределы и условия сервера (один раз за запуск)."""
+		if self._app_config is None:
+			from telethon.tl.functions.help import GetAppConfigRequest
+
+			answer = await client(GetAppConfigRequest(hash=0))
+			values = json_value(getattr(answer, "config", None))
+			self._app_config = values if isinstance(values, dict) else {}
+		return self._app_config
+
+	async def _standard_reactions(self, client: Any) -> tuple[str, ...]:
+		"""Стандартные реакции Telegram (один раз за запуск)."""
+		if self._reaction_emojis is None:
+			from telethon.tl.functions.messages import GetAvailableReactionsRequest
+
+			self._reaction_emojis = standard_reactions(
+				await client(GetAvailableReactionsRequest(hash=0))
+			)
+		return self._reaction_emojis
+
+	async def apply_setting(self, chat_id: str, change: SettingChange) -> None:
+		"""Записывает одно изменение настройки сообщества (ADR-0043).
+
+		Ответ «ничего не изменилось» — успех: цель правки достигнута.
+		Отказ из таблицы :data:`REFUSALS` — :class:`UserbotSettingRefusedError`
+		с понятным текстом; прочее (флуд, сессия, связь) переводится общим
+		переводчиком.
+
+		Raises:
+			UserbotSettingRefusedError: Telegram отказал в правке.
+			UserbotAccessError: Сообщество не видно аккаунту.
+			UserbotFloodError: Флуд-лимит — дальнейшие правки ждут.
+			UserbotUnavailableError: Настройку userbot не пишет и прочие отказы.
+		"""
+		writer = WRITERS.get(change.key)
+		if writer is None:
+			raise UserbotUnavailableError(f"Настройку «{change.key}» userbot не записывает.")
+		client, entity = await self._client_and_entity(chat_id)
+		target = WriteTarget(client, entity, self._input_entity)
+		try:
+			await writer(target, change.value)
+		except Exception as exc:  # noqa: BLE001 — переводим в понятный текст
+			code = rpc_code(exc)
+			if code in NOT_MODIFIED:
+				return
+			text = refusal_text(code)
+			if text is not None:
+				raise UserbotSettingRefusedError(text) from exc
+			raise _translate_error(exc) from exc
+		logger.info("Настройка «%s» сообщества %s изменена.", change.key, chat_id)
+
+	async def _input_entity(self, chat_id: str) -> Any:
+		"""Сущность другого сообщества по id в формате Bot API."""
+		client = await self._connected_client()
+		async with _mtproto_errors():
+			return await client.get_input_entity(_peer_id(chat_id))
+
+	async def discussion_candidates(self) -> list[LinkedChat]:
+		"""Группы, которые сервер разрешает сделать обсуждением канала (ADR-0043).
+
+		Raises:
+			UserbotNotConnectedError: Аккаунт не активирован или нет связи.
+			UserbotUnavailableError: Прочие отказы Telegram.
+		"""
+		from telethon.tl.functions.channels import GetGroupsForDiscussionRequest
+
+		client = await self._connected_client()
+		async with _mtproto_errors():
+			answer = await client(GetGroupsForDiscussionRequest())
+		return discussion_groups(getattr(answer, "chats", ()))
 
 	async def reactions_page(self, chat_id: str, offset_id: int, limit: int) -> ReactionsPage:
 		"""Читает страницу ленты с реакциями текущего аккаунта (ADR-0039).

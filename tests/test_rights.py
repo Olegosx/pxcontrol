@@ -37,11 +37,14 @@ from telethon.tl.types import (
 )
 
 from pxcontrol.engine.telegram.rights import (
+	ALL_MEMBER_RIGHTS,
 	AdminRights,
 	ExecutorRights,
 	MemberRights,
 	ParticipantStatus,
+	banned_flags,
 	bot_rights,
+	default_permissions,
 	userbot_rights,
 )
 
@@ -150,15 +153,33 @@ def test_member_obeys_community_restrictions_but_may_react() -> None:
 	assert rights.allowed.send_reactions
 
 
-def test_media_ban_covers_every_kind_of_attachment() -> None:
-	"""Зонтик ``send_media`` закрывает все виды вложений, но не текст."""
+def test_media_ban_covers_file_attachments_only() -> None:
+	"""Зонтик ``send_media`` — шесть файловых видов, как у сервера (ADR-0043).
+
+	Стикеры, гифки, игры и встроенные боты у сервера под ним не лежат
+	(живая проба 25.09.2026): одиночный ``send_media`` он раскрывает
+	только в файловые виды. Текст и опросы — тем более.
+	"""
 	participant = ChannelParticipantSelf(user_id=1, inviter_id=2, date=None)
 	rights = userbot_rights(perms(participant), banned_rights(send_media=True))
 	assert rights.allowed.send_plain and rights.allowed.send_polls
-	assert not rights.allowed.send_photos
-	assert not rights.allowed.send_videos
-	assert not rights.allowed.send_docs
-	assert not rights.allowed.send_stickers
+	for name in ("send_photos", "send_videos", "send_roundvideos", "send_audios"):
+		assert not getattr(rights.allowed, name), name
+	assert not rights.allowed.send_voices and not rights.allowed.send_docs
+	for name in ("send_stickers", "send_gifs", "send_games", "send_inline"):
+		assert getattr(rights.allowed, name), name
+
+
+def test_default_permissions_round_trip() -> None:
+	"""Общие ограничения: запись по видам и чтение обратно без потерь (ADR-0043)."""
+	from dataclasses import replace
+
+	allowed = replace(ALL_MEMBER_RIGHTS, send_polls=False, send_stickers=False, edit_rank=False)
+	flags = banned_flags(allowed)
+	assert "send_media" not in flags and "send_messages" not in flags, "зонтики — дело сервера"
+	assert flags["send_polls"] and flags["send_stickers"] and not flags["send_plain"]
+	assert default_permissions(banned_rights(**flags)) == allowed
+	assert default_permissions(None) == ALL_MEMBER_RIGHTS
 
 
 def test_personal_restrictions_add_to_community_ones() -> None:
