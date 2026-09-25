@@ -632,23 +632,83 @@ def test_parse_bitrate_prefers_stream_over_format() -> None:
 	assert _parse_bitrate_kbps({}, {}) is None
 
 
-def test_video_quality_args_modes() -> None:
-	"""Приоритет: битрейт пресета → битрейт исходника → CRF."""
+def _quality_info(kbps: int | None, width: int = 3840, height: int = 2160) -> VideoInfo:
+	"""Метаданные исходника для проверок выбора качества (по умолчанию 4K)."""
+	return VideoInfo(
+		width=width, height=height, duration=10.0, fps=25.0, has_audio=True, bitrate_kbps=kbps
+	)
+
+
+def test_video_quality_args_priority() -> None:
+	"""Явный битрейт главнее всего; без битрейта исходника — CRF (ADR-0044)."""
 	from pxcontrol.engine.video.pipeline import _video_quality_args
 
-	def _info(kbps: int | None) -> VideoInfo:
-		return VideoInfo(
-			width=1920,
-			height=1080,
-			duration=10.0,
-			fps=25.0,
-			has_audio=True,
-			bitrate_kbps=kbps,
-		)
+	fullhd = (1920, 1080)
+	scaled = _options(video_bitrate_kbps=3000, rescale_bitrate_mode="scale")
+	assert _video_quality_args(scaled, _quality_info(40000), fullhd) == ["-b:v", "3000k"]
+	unknown = _options(video_bitrate_kbps=None, rescale_bitrate_mode="scale")
+	assert _video_quality_args(unknown, _quality_info(None), fullhd) == ["-crf", "20"]
 
-	assert _video_quality_args(_options(video_bitrate_kbps=3000), _info(1500)) == ["-b:v", "3000k"]
-	assert _video_quality_args(_options(video_bitrate_kbps=None), _info(1500)) == ["-b:v", "1500k"]
-	assert _video_quality_args(_options(video_bitrate_kbps=None), _info(None)) == ["-crf", "20"]
+
+def test_video_quality_args_same_frame_keeps_source_bitrate() -> None:
+	"""Кадр не меняет размер — битрейт исходника в любом режиме."""
+	from pxcontrol.engine.video.pipeline import _video_quality_args
+
+	info = _quality_info(8000, 1920, 1080)
+	for mode in ("crf", "scale"):
+		opts = _options(video_bitrate_kbps=None, rescale_bitrate_mode=mode)
+		assert _video_quality_args(opts, info, (1920, 1080)) == ["-b:v", "8000k"]
+
+
+def test_video_quality_args_resize_modes() -> None:
+	"""Смена размера: CRF по умолчанию, пересчёт битрейта — по выбору."""
+	from pxcontrol.engine.video.pipeline import _video_quality_args
+
+	info, fullhd = _quality_info(40000), (1920, 1080)
+	assert _video_quality_args(_options(), info, fullhd) == ["-crf", "20"]  # умолчание пресета
+	scaled = _options(rescale_bitrate_mode="scale")
+	assert _video_quality_args(scaled, info, fullhd) == ["-b:v", "16443k"]
+
+
+def test_video_quality_args_rejects_unknown_mode() -> None:
+	"""Незнакомый режим — понятная ошибка, а не молчаливый выбор."""
+	from pxcontrol.engine.video.pipeline import _video_quality_args
+
+	opts = _options(rescale_bitrate_mode="нет-такого")
+	with pytest.raises(ValueError):
+		_video_quality_args(opts, _quality_info(40000), (1920, 1080))
+
+
+def test_rescaled_bitrate_follows_power_rule_with_margin() -> None:
+	"""Битрейт × (отношение площадей)^0,71 × 1,1 — вниз медленнее площади, вверх тоже."""
+	from pxcontrol.engine.video.constants import rescaled_bitrate_kbps
+
+	# 4K → 1080: площадь в 4 раза меньше, битрейт — лишь в 2,4 раза
+	assert rescaled_bitrate_kbps(40000, (3840, 2160), (1920, 1080)) == 16443
+	# апскейл 720 → 1080: площадь ×2,25, битрейт ×1,96
+	assert rescaled_bitrate_kbps(5000, (1280, 720), (1920, 1080)) == 9782
+	# тот же размер — только запас
+	assert rescaled_bitrate_kbps(8000, (1920, 1080), (1920, 1080)) == 8800
+	# книжный кадр считается так же: важна площадь, не ориентация
+	assert rescaled_bitrate_kbps(40000, (2160, 3840), (1080, 1920)) == 16443
+
+
+@pytest.mark.parametrize(
+	("kbps", "source", "target"),
+	[
+		(0, (1920, 1080), (1280, 720)),
+		(1000, (0, 1080), (1280, 720)),
+		(1000, (1920, 1080), (1280, -2)),
+	],
+)
+def test_rescaled_bitrate_rejects_degenerate_input(
+	kbps: int, source: tuple[int, int], target: tuple[int, int]
+) -> None:
+	"""Нулевой битрейт или сторона кадра — ошибка, а не деление на ноль."""
+	from pxcontrol.engine.video.constants import rescaled_bitrate_kbps
+
+	with pytest.raises(ValueError):
+		rescaled_bitrate_kbps(kbps, source, target)
 
 
 # --- надёжность конвейера (аудит 2026-08-15) --------------------------------------

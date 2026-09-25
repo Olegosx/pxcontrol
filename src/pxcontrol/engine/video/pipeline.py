@@ -17,11 +17,13 @@ from pathlib import Path
 from pxcontrol.engine.video.constants import (
 	AUDIO_BITRATE,
 	AUDIO_CODEC,
+	CONSTANT_QUALITY_CRF,
 	ENCODE_PRESET,
-	FALLBACK_CRF,
 	TARGET_PIX_FMT,
 	VIDEO_CODEC,
+	RescaleBitrateMode,
 	preview_path,
+	rescaled_bitrate_kbps,
 	scaled_size,
 )
 from pxcontrol.engine.video.ffmpeg import ProgressCallback, run_streaming, run_tool
@@ -54,6 +56,8 @@ class ProcessingOptions:
 	None — «как в оригинале» (битрейт исходника, а если он неизвестен —
 	CRF 20). ``target_resolution``: ступень разрешения кадра;
 	None — «как в оригинале» (размер исходника).
+	``rescale_bitrate_mode``: значение :class:`RescaleBitrateMode` —
+	как выбрать битрейт «как в оригинале», когда кадр меняет размер.
 	"""
 
 	input: str
@@ -70,6 +74,7 @@ class ProcessingOptions:
 	# (у альбома это высота, у книги — ширина); None — «как в оригинале»
 	target_resolution: int | None
 	video_bitrate_kbps: int | None
+	rescale_bitrate_mode: str
 	watermark_path: str | None
 	wm_corner: str
 	wm_margin: int
@@ -195,16 +200,43 @@ def _build_inputs(
 	return inputs, wm_index, still_index
 
 
-def _video_quality_args(opts: ProcessingOptions, info: VideoInfo) -> list[str]:
-	"""Аргументы качества видео: заданный битрейт, битрейт исходника или CRF.
+def _video_quality_args(
+	opts: ProcessingOptions, info: VideoInfo, frame: tuple[int, int]
+) -> list[str]:
+	"""Аргументы качества видео: битрейт (``-b:v``) или постоянное качество (``-crf``).
 
-	Приоритет: явный битрейт пресета → битрейт исходника («как в оригинале»,
-	режим по умолчанию) → CRF, если ffprobe битрейт не сообщил.
+	Приоритет (ADR-0044): явный битрейт пресета → CRF, если ffprobe
+	битрейт исходника не сообщил → битрейт исходника, если размер кадра
+	не меняется → при смене размера — по ``rescale_bitrate_mode``: CRF
+	или битрейт исходника, пересчитанный под площадь нового кадра.
+
+	Args:
+		opts: параметры обработки.
+		info: метаданные исходника (размеры и битрейт видеопотока).
+		frame: (ширина, высота) итогового кадра — из :func:`scaled_size`.
+
+	Raises:
+		ValueError: Режим битрейта при смене размера неизвестен.
 	"""
-	kbps = opts.video_bitrate_kbps or info.bitrate_kbps
-	if kbps:
-		return ["-b:v", f"{kbps}k"]
-	return ["-crf", FALLBACK_CRF]
+	if opts.video_bitrate_kbps:
+		return ["-b:v", f"{opts.video_bitrate_kbps}k"]
+	source_kbps = info.bitrate_kbps
+	if not source_kbps:
+		return ["-crf", CONSTANT_QUALITY_CRF]
+	if frame == scaled_size(info.width, info.height, None):
+		return ["-b:v", f"{source_kbps}k"]
+	if RescaleBitrateMode(opts.rescale_bitrate_mode) is RescaleBitrateMode.CONSTANT_QUALITY:
+		return ["-crf", CONSTANT_QUALITY_CRF]
+	kbps = rescaled_bitrate_kbps(source_kbps, (info.width, info.height), frame)
+	logger.info(
+		"Битрейт пересчитан под новый кадр: %s кбит/с (%d×%d) → %s кбит/с (%d×%d).",
+		source_kbps,
+		info.width,
+		info.height,
+		kbps,
+		*frame,
+	)
+	return ["-b:v", f"{kbps}k"]
 
 
 def _assemble_command(
@@ -270,7 +302,7 @@ def _run_main(
 		graph.filter_complex,
 		graph.video_label,
 		graph.audio_label,
-		_video_quality_args(opts, info),
+		_video_quality_args(opts, info, (width, height)),
 		opts.meta_comment,
 		output,
 	)

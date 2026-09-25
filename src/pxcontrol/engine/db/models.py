@@ -197,6 +197,9 @@ class VideoPreset(TimestampMixin, Base):
 	target_resolution: Mapped[int | None] = mapped_column(Integer)
 	# NULL — «как в оригинале»: целевой битрейт берётся из исходника
 	video_bitrate_kbps: Mapped[int | None] = mapped_column(Integer)
+	# как выбрать битрейт «как в оригинале», когда кадр меняет размер
+	# (ADR-0044): значение RescaleBitrateMode — "crf" или "scale"
+	rescale_bitrate_mode: Mapped[str] = mapped_column(String(16))
 	# комментарий в метаданные файла (тег comment): «ссылка — описание»
 	meta_comment: Mapped[str | None] = mapped_column(String(512))
 	# подпапка внутри базовых папок видео (исходники/результаты/опубликованные);

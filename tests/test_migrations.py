@@ -383,6 +383,31 @@ def test_preset_resolution_defaults_to_fullhd(tmp_path: Path) -> None:
 	assert row == ("Старый", 1080)
 
 
+def test_preset_rescale_mode_defaults_to_constant_quality(tmp_path: Path) -> None:
+	"""Миграция b8d4e27a6c15: существующие пресеты получают режим ``crf``.
+
+	Прежнее поведение — битрейт исходника без пересчёта при смене размера
+	кадра — не сохраняется сознательно (ADR-0044): при уменьшении кадра
+	оно раздувало итог в разы.
+	"""
+	db_file = tmp_path / "rescale.db"
+	_upgrade(db_file, "c2e6f18a4d93")  # состояние до режима
+	with sqlite3.connect(db_file) as conn:
+		conn.execute(
+			"INSERT INTO video_presets (name, wm_corner, wm_margin, wm_opacity, wm_scale,"
+			" intro, intro_source, intro_hold, xfade, cover, no_audio, wm_fade,"
+			" trim_start, trim_end, fade_in, fade_out, subdir, target_resolution,"
+			" created_at, updated_at)"
+			" VALUES ('Старый', 'tr', 24, 1.0, 0.15, 0, 'random-middle', 1.0, 0.5, 0, 0, 0.0,"
+			" 0.0, 0.0, 0.0, 0.0, '', 1080, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+		)
+		conn.commit()
+	_upgrade(db_file, "head")
+	with sqlite3.connect(db_file) as conn:
+		row = conn.execute("SELECT name, rescale_bitrate_mode FROM video_presets").fetchone()
+	assert row == ("Старый", "crf")
+
+
 def _queue_row(conn: sqlite3.Connection, text: str, entities: str | None = None) -> int:
 	"""Кладёт элемент очереди с заданным текстом и разметкой."""
 	cur = conn.execute(

@@ -37,7 +37,13 @@ from pxcontrol.engine.services.video import (
 	build_intro_source,
 	parse_intro_source,
 )
-from pxcontrol.engine.video.constants import RESOLUTION_STEPS
+from pxcontrol.engine.video.constants import (
+	CONSTANT_QUALITY_CRF,
+	RESCALE_BITRATE_EXPONENT,
+	RESCALE_BITRATE_MARGIN,
+	RESOLUTION_STEPS,
+	RescaleBitrateMode,
+)
 from pxcontrol.engine.video.filtergraph import CORNER_POSITIONS
 from pxcontrol.ui import density
 from pxcontrol.ui.pages.common import (
@@ -94,6 +100,29 @@ _RESOLUTIONS: list[tuple[str, int | None]] = [
 #: пресета движка, как и остальные умолчания панели.
 _RESOLUTION_FALLBACK = next(
 	index for index, (_, step) in enumerate(_RESOLUTIONS) if step == _DEFAULTS.target_resolution
+)
+
+#: Режимы битрейта при смене размера кадра (ADR-0044): подпись в списке,
+#: режим движка, фраза для сводки карточки «Вывод».
+_RESCALE_MODES: list[tuple[str, RescaleBitrateMode, str]] = [
+	(
+		f"Постоянное качество (CRF {CONSTANT_QUALITY_CRF})",
+		RescaleBitrateMode.CONSTANT_QUALITY,
+		f"при смене размера — CRF {CONSTANT_QUALITY_CRF}",
+	),
+	(
+		f"Пересчитать от исходника (+{round((RESCALE_BITRATE_MARGIN - 1) * 100)} %)",
+		RescaleBitrateMode.SCALED_SOURCE,
+		"при смене размера — пересчёт",
+	),
+]
+
+#: Пункт по умолчанию и запасной для незнакомого режима (запись из
+#: будущей версии) — как у ступени разрешения.
+_RESCALE_FALLBACK = next(
+	index
+	for index, (_, mode, _) in enumerate(_RESCALE_MODES)
+	if mode == _DEFAULTS.rescale_bitrate_mode
 )
 
 #: Источники кадра заставки: подпись → вид (протокол — в сервисе видео).
@@ -356,6 +385,7 @@ class PresetForm(QWidget):
 		row.addWidget(CaptionLabel("0 — как в оригинале", card))
 		row.addStretch()
 		box.addLayout(row)
+		box.addLayout(self._rescale_row(card))
 		comment_row = QHBoxLayout()
 		comment_row.addWidget(BodyLabel("Комментарий (метаданные):", card))
 		self._meta_comment = LineEdit(card)
@@ -388,11 +418,44 @@ class PresetForm(QWidget):
 			self._output_summary,
 			self._resolution.currentIndexChanged,
 			self._bitrate.valueChanged,
+			self._rescale.currentIndexChanged,
 			self._cover.checkedChanged,
 			self._no_audio.checkedChanged,
 			self._subdir.textChanged,
 		)
 		return card
+
+	def _rescale_row(self, card: QWidget) -> QHBoxLayout:
+		"""Строка «Битрейт при смене разрешения» (ADR-0044).
+
+		Список активен, только когда режим может подействовать: битрейт
+		не задан («0 — как в оригинале») и выбрана ступень разрешения.
+		"""
+		row = QHBoxLayout()
+		self._rescale = ComboBox(card)
+		self._rescale.addItems([title for title, _, _ in _RESCALE_MODES])
+		self._rescale.setCurrentIndex(_RESCALE_FALLBACK)
+		exponent = _fmt_num(RESCALE_BITRATE_EXPONENT)
+		margin = _fmt_num(RESCALE_BITRATE_MARGIN)
+		self._rescale.setToolTip(
+			"Как выбрать битрейт, когда кадр меняет размер, а «Качество» — 0.\n"
+			"Постоянное качество: кодек сам тратит столько бит, сколько нужно "
+			"картинке нового размера; размер файла заранее неизвестен.\n"
+			"Пересчёт: битрейт исходника × (площадь итога / площадь исходника)"
+			f"^{exponent} × {margin} — размер файла предсказуем."
+		)
+		self._labeled(row, "Битрейт при смене разрешения:", self._rescale)
+		row.addStretch()
+		self._resolution.currentIndexChanged.connect(self._sync_rescale_enabled)
+		self._bitrate.valueChanged.connect(self._sync_rescale_enabled)
+		self._sync_rescale_enabled()
+		return row
+
+	def _sync_rescale_enabled(self, *_args: object) -> None:
+		"""Режим битрейта при смене размера действует только без явного битрейта."""
+		self._rescale.setEnabled(
+			float(self._bitrate.value()) == 0 and self._target_resolution() is not None
+		)
 
 	def _spin(self, card: QWidget, tip: str, lo: int, hi: int, val: int) -> SpinBox:
 		"""Целочисленный регулятор: диапазон lo..hi, старт val, подсказка tip."""
@@ -461,11 +524,7 @@ class PresetForm(QWidget):
 
 	def _output_summary(self) -> str:
 		"""«Вывод»: разрешение, битрейт и особенности (всегда непустая)."""
-		mbps = float(self._bitrate.value())
-		parts = [
-			self._resolution_summary(),
-			f"{_fmt_num(mbps)} Мбит/с" if mbps > 0 else "битрейт исходника",
-		]
+		parts = [self._resolution_summary(), self._bitrate_summary()]
 		if self._cover.isChecked():
 			parts.append("обложка")
 		if self._no_audio.isChecked():
@@ -474,6 +533,15 @@ class PresetForm(QWidget):
 		if subdir:
 			parts.append(f"подпапка «{subdir}»")
 		return ", ".join(parts)
+
+	def _bitrate_summary(self) -> str:
+		"""Битрейт для сводки: явный, исходника или исходника с режимом смены размера."""
+		mbps = float(self._bitrate.value())
+		if mbps > 0:
+			return f"{_fmt_num(mbps)} Мбит/с"
+		if self._target_resolution() is None:
+			return "битрейт исходника"
+		return f"битрейт исходника, {_RESCALE_MODES[int(self._rescale.currentIndex())][2]}"
 
 	def _resolution_summary(self) -> str:
 		"""Ступень для сводки: «1080p» или «разрешение исходника»."""
@@ -530,6 +598,16 @@ class PresetForm(QWidget):
 		)
 		kbps = fields.video_bitrate_kbps
 		self._bitrate.setValue(kbps / 1000 if kbps else 0.0)
+		self._rescale.setCurrentIndex(
+			next(
+				(
+					index
+					for index, (_, mode, _) in enumerate(_RESCALE_MODES)
+					if mode == fields.rescale_bitrate_mode
+				),
+				_RESCALE_FALLBACK,
+			)
+		)
 		self._meta_comment.setText(fields.meta_comment or "")
 		self._subdir.setText(fields.subdir)
 
@@ -565,6 +643,7 @@ class PresetForm(QWidget):
 			cover=self._cover.isChecked(),
 			no_audio=self._no_audio.isChecked(),
 			video_bitrate_kbps=self._bitrate_kbps(),
+			rescale_bitrate_mode=_RESCALE_MODES[int(self._rescale.currentIndex())][1].value,
 			target_resolution=self._target_resolution(),
 			meta_comment=str(self._meta_comment.text()).strip() or None,
 			subdir=str(self._subdir.text()).strip(),

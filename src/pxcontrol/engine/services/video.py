@@ -39,6 +39,7 @@ from pxcontrol.engine.telegram.types import USERBOT_PREMIUM_MAX_FILE_BYTES, limi
 from pxcontrol.engine.video import ProcessingOptions, process
 from pxcontrol.engine.video.constants import (
 	AUDIO_KBPS,
+	DEFAULT_RESCALE_BITRATE_MODE,
 	DEFAULT_RESOLUTION,
 	preview_path,
 )
@@ -419,6 +420,10 @@ class PresetFields:
 	``video_bitrate_kbps``: целевой битрейт видео в кбит/с;
 	None — «как в оригинале» (по умолчанию).
 
+	``rescale_bitrate_mode``: значение ``RescaleBitrateMode`` — как
+	выбрать битрейт «как в оригинале», когда кадр меняет размер
+	(ADR-0044); явный ``video_bitrate_kbps`` главнее.
+
 	``target_resolution``: ступень разрешения итогового кадра — число
 	по короткой стороне (``RESOLUTION_STEPS``); None — «как в оригинале»,
 	кадр не масштабируется.
@@ -444,6 +449,7 @@ class PresetFields:
 	cover: bool = False
 	no_audio: bool = False
 	video_bitrate_kbps: int | None = None
+	rescale_bitrate_mode: str = DEFAULT_RESCALE_BITRATE_MODE.value
 	target_resolution: int | None = DEFAULT_RESOLUTION
 	meta_comment: str | None = None  # тег comment: «ссылка на канал — описание»
 	subdir: str = ""  # подпапка внутри базовых папок видео (пусто — без неё)

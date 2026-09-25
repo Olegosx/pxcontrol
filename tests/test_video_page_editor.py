@@ -152,3 +152,26 @@ def test_suggest_bitrate_on_open_card_goes_to_form(page: QWidget) -> None:
 	editor.detach()
 	assert entry.fields.video_bitrate_kbps == 4200
 	assert entry.bitrate_suggested
+
+
+# --- режим битрейта при смене разрешения (ADR-0044) -----------------------------
+
+
+def test_form_round_trips_rescale_mode(page: QWidget) -> None:
+	"""Режим из пресета доходит до формы и обратно; незнакомый — умолчание."""
+	form = _EntryEditor(page).form
+	form.fill(PresetFields(name="п", rescale_bitrate_mode="scale"))
+	assert form.fields("п").rescale_bitrate_mode == "scale"
+	form.fill(PresetFields(name="п", rescale_bitrate_mode="из-будущей-версии"))
+	assert form.fields("п").rescale_bitrate_mode == "crf"
+
+
+def test_rescale_mode_active_only_without_bitrate_and_with_step(page: QWidget) -> None:
+	"""Список активен, лишь когда режим может подействовать."""
+	form = _EntryEditor(page).form
+	form.fill(PresetFields(name="п"))  # ступень 1080, битрейт «как в оригинале»
+	assert form._rescale.isEnabled()
+	form.fill(PresetFields(name="п", video_bitrate_kbps=4000))
+	assert not form._rescale.isEnabled()  # явный битрейт главнее
+	form.fill(PresetFields(name="п", target_resolution=None))
+	assert not form._rescale.isEnabled()  # кадр не масштабируется

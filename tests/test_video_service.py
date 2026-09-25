@@ -42,6 +42,7 @@ FIELDS = PresetFields(
 	intro_source="time:5.0",
 	cover=True,
 	video_bitrate_kbps=2500,
+	rescale_bitrate_mode="scale",
 	meta_comment="https://t.me/mych — мой канал",
 	target_resolution=1440,
 )
@@ -55,6 +56,7 @@ async def test_preset_crud(db: Database) -> None:
 	fields = await service.get_preset_fields(preset.id)
 	assert fields.intro_source == "time:5.0" and fields.wm_opacity == 0.8
 	assert fields.video_bitrate_kbps == 2500
+	assert fields.rescale_bitrate_mode == "scale"
 	assert fields.target_resolution == 1440
 	assert fields.trim_start == 3.5 and fields.trim_end == 1.5
 	assert fields.fade_in == 0.5 and fields.fade_out == 1.0
