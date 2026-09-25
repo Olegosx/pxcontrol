@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights
+from pxcontrol.engine.telegram.rights import AdminRights, ExecutorRights, ParticipantStatus
 from pxcontrol.engine.telegram.types import CommunityKind
 
 
@@ -31,7 +31,8 @@ class ExecutorAction(StrEnum):
 	(маршруты постов), удаление и исключение (обслуживание), приглашение,
 	чтение ссылки-приглашения и назначение (ввод исполнителя), чтение
 	истории (обслуживание же), реакции (задача реакций, ADR-0039),
-	приём заявок на вступление (ADR-0040).
+	приём заявок на вступление (ADR-0040), правка настроек сообщества
+	в Telegram (ADR-0043): оформление, ограничения, решения владельца.
 	Новое действие — одна ветка в :func:`can` и один потребитель; заводить
 	их про запас в проекте не принято.
 	"""
@@ -47,6 +48,9 @@ class ExecutorAction(StrEnum):
 	READ_HISTORY = "read_history"  # читать ленту и список участников
 	REACT = "react"  # ставить реакции на записи (задача реакций, ADR-0039)
 	APPROVE_REQUESTS = "approve_requests"  # принимать заявки на вступление (ADR-0040)
+	CHANGE_INFO = "change_info"  # менять информацию и оформление сообщества (ADR-0043)
+	RESTRICT_MEMBERS = "restrict_members"  # ограничивать участников: разрешения, медленный режим
+	OWN = "own"  # то, что Telegram оставляет только владельцу (ADR-0043)
 
 
 def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> bool:
@@ -73,6 +77,10 @@ def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> 
 		# ленту и участников видит тот, кто состоит: отдельного права
 		# на чтение Telegram не выдаёт
 		return rights.status.in_community
+	if action is ExecutorAction.OWN:
+		# @имя, запрет копирования, темы: по TDLib — «owner privileges»,
+		# никакое право администратора их не открывает
+		return rights.status is ParticipantStatus.CREATOR
 	if action is ExecutorAction.REACT:
 		# реакции — разрешение участника (chatBannedRights.send_reactions);
 		# администратору ограничения не мешают
@@ -101,6 +109,13 @@ def can(rights: ExecutorRights, action: ExecutorAction, kind: CommunityKind) -> 
 		# can_invite_users (ADR-0040; проверяется живьём)
 		ExecutorAction.APPROVE_REQUESTS: rights.admin.invite_users,
 		ExecutorAction.PROMOTE: rights.admin.add_admins,
+		# настройки сообщества (ADR-0043). Участнику группы Telegram
+		# тоже может оставить право менять информацию, но экран настроек
+		# на него не рассчитывает: какие из настроек оно открывает,
+		# документация не говорит, а угадывать правила нельзя
+		ExecutorAction.CHANGE_INFO: rights.admin.change_info,
+		# TDLib называет его can_restrict_members, MTProto — ban_users
+		ExecutorAction.RESTRICT_MEMBERS: rights.admin.ban_users,
 	}[action]
 
 
@@ -153,6 +168,9 @@ ACTION_WORDS: dict[ExecutorAction, str] = {
 	ExecutorAction.READ_HISTORY: "читать историю и участников",
 	ExecutorAction.REACT: "ставить реакции",
 	ExecutorAction.APPROVE_REQUESTS: "принимать заявки на вступление",
+	ExecutorAction.CHANGE_INFO: "менять информацию сообщества",
+	ExecutorAction.RESTRICT_MEMBERS: "ограничивать участников",
+	ExecutorAction.OWN: "распоряжаться как владелец",
 }
 
 
