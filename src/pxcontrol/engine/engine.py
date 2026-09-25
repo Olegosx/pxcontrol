@@ -12,6 +12,7 @@ from pxcontrol.engine.services.accounts import AccountsService
 from pxcontrol.engine.services.activity import ActivityService
 from pxcontrol.engine.services.captions import CaptionsService
 from pxcontrol.engine.services.communities import CommunitiesService
+from pxcontrol.engine.services.community_settings import CommunitySettingsService
 from pxcontrol.engine.services.community_stats import CommunityStatsService
 from pxcontrol.engine.services.markups import MarkupsService
 from pxcontrol.engine.services.posts import PostsService
@@ -54,6 +55,7 @@ class Engine:
 			self.db, self.gateway, self.settings, profile_sync=self.accounts.sync_profile
 		)
 		self.community_stats = CommunityStatsService(self.db, self.gateway, self.settings)
+		self.community_settings = CommunitySettingsService(self.db, self.gateway, self.communities)
 		# задачи сообщества (ADR-0038): чистка служебных записей и удалённых
 		# аккаунтов, журнал запусков; итог прохода по удалённым аккаунтам
 		# уходит в кэш статистики крючком — очередь задач о кэше не знает

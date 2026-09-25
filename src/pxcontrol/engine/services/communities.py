@@ -1030,26 +1030,57 @@ class CommunitiesService:
 					info.kind,
 					community.kind,
 				)
+		await self.update_mutable(
+			community_id, title=info.title, username=info.username or "", forum=info.forum
+		)
+
+	async def update_mutable(
+		self,
+		community_id: int,
+		*,
+		title: str | None = None,
+		username: str | None = None,
+		forum: bool | None = None,
+	) -> bool:
+		"""Записывает изменчивые свойства сообщества, пришедшие из Telegram.
+
+		Единственное место записи названия, @имени и признака форума:
+		его зовут перепроверка доступов и экран настроек (ADR-0043) —
+		после правки там запись не должна ждать следующей перепроверки.
+		None — свойство не трогается. У @имени пустая строка значит «имя
+		сняли, сообщество стало частным» (в записи это None) — так же @имя
+		выглядит и в снимке настроек.
+
+		Returns:
+			Изменилось ли что-то в записи.
+
+		Raises:
+			CommunityError: Сообщество не найдено.
+		"""
+		async with self._db.session_factory() as session:
+			community = await self._community_in_session(session, community_id)
 			changed = False
-			if community.forum != info.forum:
-				community.forum = info.forum
+			if forum is not None and community.forum != forum:
+				logger.info("Сообщество «%s»: признак форума → %s.", community.title, forum)
+				community.forum = forum
 				changed = True
-				logger.info("Сообщество «%s»: признак форума → %s.", info.title, info.forum)
-			if community.title != info.title:
-				logger.info("Сообщество «%s» переименовано → «%s».", community.title, info.title)
-				community.title = info.title
+			if title is not None and community.title != title:
+				logger.info("Сообщество «%s» переименовано → «%s».", community.title, title)
+				community.title = title
 				changed = True
-			if community.username != info.username:
+			stored = (username or None) if username is not None else community.username
+			if community.username != stored:
 				logger.info(
 					"Сообщество «%s»: @имя %s → %s.",
-					info.title,
+					community.title,
 					community.username or "—",
-					info.username or "— (стало приватным)",
+					stored or "— (стало приватным)",
 				)
-				community.username = info.username
+				community.username = stored
 				changed = True
 			if changed:
 				await session.commit()
+		return changed
 
 	async def delete_community(self, community_id: int) -> None:
 		"""Удаляет канал со всем хозяйством (из приложения, не из Telegram).

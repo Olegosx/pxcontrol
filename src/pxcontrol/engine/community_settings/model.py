@@ -192,20 +192,3 @@ class ChangeResult:
 	@property
 	def applied(self) -> bool:
 		return self.error is None
-
-
-@dataclass(frozen=True)
-class SaveReport:
-	"""Итог сохранения: что применилось, что нет и снимок после.
-
-	У Telegram нет общей транзакции на несколько настроек: каждая
-	меняется своим запросом, поэтому итог — по каждой отдельно.
-	"""
-
-	results: tuple[ChangeResult, ...]
-	settings: CommunitySettings | None = None
-
-	@property
-	def failed(self) -> tuple[ChangeResult, ...]:
-		"""Изменения, которые Telegram не принял (или до которых не дошло)."""
-		return tuple(result for result in self.results if not result.applied)

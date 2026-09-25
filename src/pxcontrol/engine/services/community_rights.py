@@ -84,6 +84,21 @@ def publisher_row(community: Community, kind: OwnerKind) -> CommunityExecutor | 
 	return None
 
 
+def settings_executor(community: Community) -> CommunityExecutor | None:
+	"""Кто правит настройки сообщества в Telegram (ADR-0043).
+
+	Публикатор по умолчанию: пользовательский, а если его нет или человек
+	его приостановил (ADR-0029) — бот. Bot API меняет меньше, чем userbot,
+	поэтому пользователь идёт первым. None — править некому.
+	Связи ``executors → tg_account / bot`` должны быть подгружены.
+	"""
+	for kind in (OwnerKind.USER, OwnerKind.BOT):
+		row = publisher_row(community, kind)
+		if row is not None and not executor_paused(row):
+			return row
+	return None
+
+
 def bot_ref(row: CommunityExecutor) -> BotRef:
 	"""Адрес бота для шлюза из строки пула (id и токен).
 
