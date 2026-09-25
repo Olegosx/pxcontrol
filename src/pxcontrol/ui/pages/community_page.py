@@ -140,6 +140,7 @@ from pxcontrol.ui.pages.community_state import (
 	state_badge,
 	subtitle_text,
 )
+from pxcontrol.ui.pages.community_tg_settings import TelegramSettingsScreen
 from pxcontrol.ui.pages.executor_text import (
 	INVITE_LINK_PROMPT,
 	default_candidates,
@@ -1139,13 +1140,22 @@ class _ScheduledTab(QWidget):
 
 
 class _SettingsTab(QWidget):
-	"""Тело вкладки «Настройки»: строки настроек, пресеты подписи, экран пресета.
+	"""Тело вкладки «Настройки»: обзор и экраны правки в той же вкладке.
 
-	Два вида в стопке, как у «Задач»: обзор (строки настроек — их рисует
+	Виды в стопке, как у «Задач»: обзор (строки настроек — их рисует
 	страница в :attr:`rows` и :attr:`tail` — и список пресетов подписи
-	между ними) и экран пресета (ADR-0042). Уход с экрана пресета
-	с правками — через вопрос (:meth:`leave`, признак ``UnsavedChanges``).
+	между ними) и экраны правки со строкой пути «Настройки › …»: экран
+	пресета подписи (ADR-0042) и настройки сообщества в Telegram
+	(ADR-0043). Уход с экрана с правками — через вопрос (:meth:`leave`,
+	признак ``UnsavedChanges``).
+
+	Сигналы экрана настроек в Telegram — наружу, странице:
+	``members_requested`` (править некому — на «Участники»)
+	и ``community_changed`` (сохранение изменило сообщество).
 	"""
+
+	members_requested = Signal()
+	community_changed = Signal()
 
 	def __init__(self, worker: EngineWorker, community: CommunityDto, parent: QWidget) -> None:
 		super().__init__(parent)
@@ -1155,23 +1165,32 @@ class _SettingsTab(QWidget):
 		layout.setContentsMargins(0, 0, 0, 0)
 		self._stack = QStackedWidget(self)
 		layout.addWidget(self._stack)
-		self._overview = QWidget(self)
-		column = QVBoxLayout(self._overview)
+		self._overview = self._build_overview(worker, community)
+		self._editor = PresetEditor(worker, community, self)
+		self._editor.presets_changed.connect(self._presets.reload)
+		self._editor.closed.connect(partial(self._show_page, self._overview))
+		self._telegram = TelegramSettingsScreen(worker, community, self)
+		self._telegram.members_requested.connect(self.members_requested)
+		self._telegram.community_changed.connect(self.community_changed)
+		for page in (self._overview, self._editor, self._telegram):
+			self._stack.addWidget(page)
+		for screen in (self._editor, self._telegram):
+			screen.back_requested.connect(self.show_overview)
+		self._show_page(self._overview)
+
+	def _build_overview(self, worker: EngineWorker, community: CommunityDto) -> QWidget:
+		"""Обзор: строки страницы, пресеты подписи, хвост с удалением."""
+		overview = QWidget(self)
+		column = QVBoxLayout(overview)
 		column.setContentsMargins(0, 0, 0, 0)
 		column.setSpacing(density.spacing().block_spacing)
 		self.rows = self._sub_layout(column)
-		self._presets = PresetList(worker, community, self._overview)
+		self._presets = PresetList(worker, community, overview)
 		self._presets.open_requested.connect(self.open_preset)
 		column.addWidget(self._presets)
 		self.tail = self._sub_layout(column)
 		column.addStretch()
-		self._editor = PresetEditor(worker, community, self)
-		self._editor.back_requested.connect(self.show_overview)
-		self._editor.presets_changed.connect(self._presets.reload)
-		self._editor.closed.connect(partial(self._show_page, self._overview))
-		self._stack.addWidget(self._overview)
-		self._stack.addWidget(self._editor)
-		self._show_page(self._overview)
+		return overview
 
 	@staticmethod
 	def _sub_layout(column: QVBoxLayout) -> QVBoxLayout:
@@ -1182,13 +1201,13 @@ class _SettingsTab(QWidget):
 		return box
 
 	def _show_page(self, page: QWidget) -> None:
-		"""Показывает вид стопки; скрытый не участвует в её высоте.
+		"""Показывает вид стопки; скрытые не участвуют в её высоте.
 
 		Штатный ``QStackedWidget`` меряет все страницы разом (как
 		в «Задачах»): под коротким обзором оставалась бы пустота высотой
-		в экран пресета.
+		в самый длинный экран правки.
 		"""
-		for widget in (self._overview, self._editor):
+		for widget in (self._overview, self._editor, self._telegram):
 			policy = QSizePolicy.Policy.Preferred if widget is page else QSizePolicy.Policy.Ignored
 			widget.setSizePolicy(policy, policy)
 		self._stack.setCurrentWidget(page)
@@ -1202,6 +1221,7 @@ class _SettingsTab(QWidget):
 		"""Свежий снимок сообщества (имя канала — в предпросмотре имени файла)."""
 		self._presets.community = community
 		self._editor.community = community
+		self._telegram.community = community
 
 	def open_preset(self, preset: CaptionPresetDto | None) -> None:
 		"""Открывает экран пресета (None — новый) с полями сообщества."""
@@ -1223,21 +1243,37 @@ class _SettingsTab(QWidget):
 		self._editor.open(preset, pool, others)
 		self._show_page(self._editor)
 
+	def open_telegram(self) -> None:
+		"""Открывает экран настроек сообщества в Telegram (читает их заново)."""
+		self._telegram.open()
+		self._show_page(self._telegram)
+
+	def _screen(self) -> PresetEditor | TelegramSettingsScreen | None:
+		"""Открытый экран правки (None — показан обзор)."""
+		current = self._stack.currentWidget()
+		if current is self._editor or current is self._telegram:
+			return current
+		return None
+
 	def show_overview(self) -> None:
 		"""Путь «Настройки»: к обзору; с правками — через вопрос."""
-		self.leave(partial(self._show_page, self._overview), stay=self._editor.render_path)
+		screen = self._screen()
+		stay = screen.render_path if screen is not None else None
+		self.leave(partial(self._show_page, self._overview), stay=stay)
 
 	@property
 	def dirty(self) -> bool:
-		"""Есть ли на открытом экране пресета несохранённые правки."""
-		return self._stack.currentWidget() is self._editor and self._editor.dirty
+		"""Есть ли на открытом экране правки несохранённые правки."""
+		screen = self._screen()
+		return screen is not None and screen.dirty
 
 	def leave(self, then: Callable[[], None], *, stay: Callable[[], None] | None = None) -> None:
-		"""Уход со вкладки: правки экрана пресета — только через вопрос."""
-		if not self.dirty:
+		"""Уход со вкладки: правки открытого экрана — только через вопрос."""
+		screen = self._screen()
+		if screen is None or not screen.dirty:
 			then()
 			return
-		self._editor.leave(then, stay=stay)
+		screen.leave(then, stay=stay)
 
 
 class CommunityPage(ScrollArea):
@@ -1600,6 +1636,8 @@ class CommunityPage(ScrollArea):
 			return self._tasks_tab()
 		if key == TAB_SETTINGS:
 			settings = _SettingsTab(self._worker, self._community, self)
+			settings.members_requested.connect(partial(self._segments.setCurrentItem, TAB_MEMBERS))
+			settings.community_changed.connect(self._refresh)
 			self._settings_rows = settings.rows
 			self._settings_tail = settings.tail
 			return settings
@@ -1709,6 +1747,7 @@ class CommunityPage(ScrollArea):
 		rows = self._settings_rows
 		clear_layout(rows)
 		rows.addWidget(self._enabled_row())
+		rows.addWidget(self._telegram_row())
 		rows.addWidget(self._prefs_row())
 		rows.addWidget(self._recheck_row())
 		tail = self._settings_tail
@@ -1746,6 +1785,22 @@ class CommunityPage(ScrollArea):
 		return self._action_row(
 			"Активность", [switch], "Участвует в публикации и в опросе расписания"
 		)
+
+	def _telegram_row(self) -> QWidget:
+		"""Настройки самого сообщества в Telegram (ADR-0043) — отдельным экраном."""
+		action = PushButton("Изменить…", self)
+		action.setToolTip("Название, описание, фото, доступ, реакции, разрешения участников")
+		action.clicked.connect(self._on_open_telegram)
+		return self._action_row(
+			"Настройки в Telegram",
+			[action],
+			"То, что меняется в официальном клиенте, — без захода в него",
+		)
+
+	def _on_open_telegram(self) -> None:
+		settings = self._tabs.get(TAB_SETTINGS)
+		if isinstance(settings, _SettingsTab):
+			settings.open_telegram()
 
 	def _prefs_row(self) -> QWidget:
 		"""Настройки публикации: пресет видео и времена."""

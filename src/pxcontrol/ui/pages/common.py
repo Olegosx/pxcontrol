@@ -1132,6 +1132,38 @@ def ask_save_changes(parent: QWidget, text: str) -> SaveChoice:
 	return chosen[0] if chosen else SaveChoice.STAY
 
 
+def leave_with_question(
+	parent: QWidget,
+	hint: str,
+	*,
+	dirty: bool,
+	save: Callable[[Callable[[], None], Callable[[], None] | None], None],
+	discard: Callable[[], None],
+	then: Callable[[], None],
+	stay: Callable[[], None] | None = None,
+) -> None:
+	"""Уход с экрана правки: сразу — без правок, иначе по ответу человека.
+
+	Одно правило на все экраны с сохранением (``UnsavedChanges``):
+	«Сохранить» уводит только после ответа движка — ``save(then, stay)``
+	обязан позвать ``then`` при удаче и ``stay`` при отказе, иначе
+	человек ушёл бы без правок и без причины; «Не сохранять» — отбрасывает
+	правки и уводит; «Отмена» — остаётся (``stay`` возвращает на место то,
+	что уход успел сдвинуть: строку пути, вкладку).
+	"""
+	if not dirty:
+		then()
+		return
+	choice = ask_save_changes(parent, hint)
+	if choice is SaveChoice.SAVE:
+		save(then, stay)
+	elif choice is SaveChoice.DISCARD:
+		discard()
+		then()
+	elif stay is not None:
+		stay()
+
+
 def confirm_delete(parent: QWidget, text: str, accept_text: str = "Удалить") -> bool:
 	"""Спрашивает подтверждение необратимого действия."""
 	box = MessageBox("Подтверждение", text, parent.window())

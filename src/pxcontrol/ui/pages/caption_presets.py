@@ -68,13 +68,12 @@ from pxcontrol.ui.pages.common import (
 	DtoComboBox,
 	ErrorLabel,
 	FormDialog,
-	SaveChoice,
-	ask_save_changes,
 	bind,
 	clear_layout,
 	confirm_delete,
 	error_reporter,
 	exec_dialog,
+	leave_with_question,
 	list_button,
 	pick_file,
 	plural,
@@ -890,23 +889,16 @@ class PresetEditor(QWidget):
 		self.open(self._preset, self._pool, self._others)
 
 	def leave(self, then: Callable[[], None], *, stay: Callable[[], None] | None = None) -> None:
-		"""Уход с экрана: сразу — без правок, иначе по ответу человека.
-
-		«Сохранить» уводит только после ответа движка, «Не сохранять» —
-		отбрасывает правки и уводит, «Отмена» — остаётся (``stay`` —
-		что вернуть на место, например строку пути или вкладку).
-		"""
-		if not self._dirty:
-			then()
-			return
-		choice = ask_save_changes(self, SAVE_ON_LEAVE_HINT)
-		if choice is SaveChoice.SAVE:
-			self.save(then=then, failed=stay)
-		elif choice is SaveChoice.DISCARD:
-			self.discard()
-			then()
-		elif stay is not None:
-			stay()
+		"""Уход с экрана: сразу — без правок, иначе по ответу человека."""
+		leave_with_question(
+			self,
+			SAVE_ON_LEAVE_HINT,
+			dirty=self._dirty,
+			save=lambda done, failed: self.save(then=done, failed=failed),
+			discard=self.discard,
+			then=then,
+			stay=stay,
+		)
 
 	def _on_delete_preset(self) -> None:
 		preset = self._preset

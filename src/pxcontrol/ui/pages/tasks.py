@@ -119,9 +119,7 @@ from pxcontrol.ui.pages.common import (
 	ERROR_TEXT,
 	ErrorLabel,
 	FlowGrid,
-	SaveChoice,
 	WorkDialog,
-	ask_save_changes,
 	clear_layout,
 	confirm_delete,
 	elide_text,
@@ -130,6 +128,7 @@ from pxcontrol.ui.pages.common import (
 	font_px,
 	format_count,
 	format_local,
+	leave_with_question,
 	list_button,
 	noop,
 	plural,
@@ -2147,18 +2146,16 @@ class TasksPanel(QWidget):
 		отбрасывает правки и уводит, «Отмена» — остаётся (``stay`` —
 		что вернуть на место, например строку пути или вкладку).
 		"""
-		if not self.dirty:
-			then()
-			return
-		choice = ask_save_changes(self, SAVE_ON_LEAVE_HINT)
-		if choice is SaveChoice.SAVE:
+		leave_with_question(
+			self,
+			SAVE_ON_LEAVE_HINT,
+			dirty=self.dirty,
 			# не сохранилось — человек остаётся, как при «Отмене»
-			self._detail.save(then=then, failed=stay)
-		elif choice is SaveChoice.DISCARD:
-			self._detail.discard()
-			then()
-		elif stay is not None:
-			stay()
+			save=lambda done, failed: self._detail.save(then=done, failed=failed),
+			discard=self._detail.discard,
+			then=then,
+			stay=stay,
+		)
 
 	def _read_reaction_lists(self, kind: TaskKind) -> None:
 		"""Списки «Реакций» приходят из движка позже строки задачи."""
