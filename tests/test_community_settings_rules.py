@@ -6,13 +6,13 @@ import pytest
 
 from pxcontrol.engine.community_settings.catalog import (
 	CATALOG,
-	SIGNATURE_PROFILES,
 	SPECS,
 	applicable,
 	spec_of,
 )
 from pxcontrol.engine.community_settings.model import (
 	SECTION_TITLES,
+	SIGNATURE_PROFILES,
 	CommunitySettings,
 	PhotoValue,
 	ReactionsValue,
@@ -60,7 +60,7 @@ def snapshot(
 
 
 def test_catalog_is_consistent() -> None:
-	"""Ключи уникальны, у выбора есть варианты, у текста — предел, раздел подписан."""
+	"""Ключи уникальны, у выбора есть варианты, раздел подписан."""
 	assert len(SPECS) == len(CATALOG)
 	for spec in CATALOG:
 		assert spec.kinds, spec.key
@@ -68,8 +68,6 @@ def test_catalog_is_consistent() -> None:
 		if spec.kind is ValueKind.CHOICE:
 			assert spec.choices, spec.key
 			assert len({c.value for c in spec.choices}) == len(spec.choices), spec.key
-		if spec.kind is ValueKind.TEXT:
-			assert spec.max_length, spec.key
 
 
 def test_applicable_by_kind() -> None:
@@ -140,6 +138,14 @@ def test_telegram_conditions(
 	kind = next(iter(spec.kinds))
 	assert not availability(spec, snapshot(kind, **blocking), OWNER, ALL_KEYS).editable
 	assert availability(spec, snapshot(kind, **free), OWNER, ALL_KEYS).editable
+
+
+def test_antispam_needs_delete_right() -> None:
+	"""Антиспам открывает право «удалять сообщения» (живая проба 25.09.2026)."""
+	spec = SPECS["antispam"]
+	group = snapshot()
+	assert availability(spec, group, admin(delete_messages=True), ALL_KEYS).editable
+	assert not availability(spec, group, admin(ban_users=True, change_info=True), ALL_KEYS).editable
 
 
 def test_prehistory_blocked_by_forum_value() -> None:

@@ -103,6 +103,14 @@ class LinkedChat:
 	title: str | None = None
 
 
+#: Подписи авторов в канале — три состояния, а не два переключателя:
+#: ссылка на профиль без подписи не бывает, сервер сбрасывает её сам
+#: (живая проба 25.09.2026).
+SIGNATURE_OFF = "off"
+SIGNATURE_NAMES = "names"
+SIGNATURE_PROFILES = "profiles"
+
+
 #: Значение любой настройки. None — транспорт значения не сообщил.
 SettingValue = bool | str | int | MemberRights | ReactionsValue | PhotoValue | LinkedChat | None
 

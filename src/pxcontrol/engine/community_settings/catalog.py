@@ -12,9 +12,13 @@
 транспорта (``mtproto_settings`` и, если умеет бот, ``bot_settings``).
 Миграций не нужно: снимок в базе не хранится.
 
-Источники фактов: права — документация TDLib (права по методам),
-условия и допустимые значения — живая проба 25.09.2026
-(``_misc/tg_settings_probe.py``, результаты рядом).
+Источники фактов: права — документация TDLib (права по методам)
+и живая проба 25.09.2026 по одному праву за раз; условия и допустимые
+значения — та же проба (``_misc/tg_settings_probe.py``, итог —
+``_misc/tg_settings_probe_results.txt``). Реакции сервер принял
+в группе от администратора с любым правом, но каталог держит
+документированное «менять информацию»: для канала шире не проверено,
+а экран не должен обещать того, чего сервер может не принять.
 """
 
 from __future__ import annotations
@@ -23,6 +27,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from pxcontrol.engine.community_settings.model import (
+	SIGNATURE_NAMES,
+	SIGNATURE_OFF,
+	SIGNATURE_PROFILES,
 	Choice,
 	CommunitySettings,
 	SettingSection,
@@ -155,11 +162,7 @@ TTL_CHOICES: tuple[Choice, ...] = (
 	Choice(7776000, "3 месяца"),
 )
 
-#: Подписи авторов в канале. Три состояния, а не два переключателя:
-#: ссылка на профиль без подписи не бывает — сервер сбрасывает её сам.
-SIGNATURE_OFF = "off"
-SIGNATURE_NAMES = "names"
-SIGNATURE_PROFILES = "profiles"
+#: Подписи авторов в канале (значения — в модели, SIGNATURE_*).
 SIGNATURE_CHOICES: tuple[Choice, ...] = (
 	Choice(SIGNATURE_OFF, "не подписывать"),
 	Choice(SIGNATURE_NAMES, "подписывать именем автора"),
@@ -203,8 +206,9 @@ CATALOG: tuple[SettingSpec, ...] = (
 		ValueKind.TEXT,
 		_BOTH,
 		ExecutorAction.OWN,
+		# предела длины здесь нет: правила @имени проверяет сервер
+		# (USERNAME_INVALID), документация их не приводит
 		hint="Пусто — сообщество частное, вход по ссылке-приглашению.",
-		max_length=32,
 		blocker=_username_blocker,
 	),
 	SettingSpec(
@@ -327,7 +331,9 @@ CATALOG: tuple[SettingSpec, ...] = (
 		SettingSection.MEMBERS,
 		ValueKind.TOGGLE,
 		_GROUP,
-		ExecutorAction.RESTRICT_MEMBERS,
+		# живая проба: открывает право «удалять сообщения», и только оно;
+		# порог 200 участников из конфигурации сервер не соблюдает
+		ExecutorAction.DELETE_OTHERS,
 	),
 )
 
