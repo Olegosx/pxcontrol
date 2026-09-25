@@ -56,6 +56,9 @@ Pydantic не нужна, а неизменяемость защищает от 
 | `SchedulePlan`, `PlanKind` | `schedule_plan.py` | раскладка времени пакета отправки: стратегия и параметры (ADR-0015) |
 | `MaintenanceItemDto`, `ServiceReport`, `MembersReport`, `MaintenanceTarget` | `maintenance.py` | задание обслуживания, итоги по служебным записям и по участникам (ADR-0026) |
 | `FieldDto`, `FieldStyle`, `FieldEdit`, `CaptionLine` | `captions.py` | поле подписи со словарём, его оформление (решётки, несколько значений, имя, жирным) и правка; строка подписи к сборке |
+| `SettingSpec`, `Choice` | `community_settings/catalog.py` | запись каталога настроек сообщества: ключ, подпись, раздел, вид значения, виды сообщества, действие исполнителя, условие Telegram (ADR-0043) |
+| `CommunitySettings`, `SettingsContext`, `SettingChange`, `ChangeResult`, `ReactionsValue`, `PhotoValue`, `LinkedChat` | `community_settings/model.py` | снимок настроек (значения по ключам + факты о сообществе), изменение и его итог, значения особых видов |
+| `SettingsView`, `SettingsSaved` | `services/community_settings.py` | экран настроек (исполнитель, снимок, доступность) и итог сохранения |
 | `CaptionPresetDto`, `PresetFieldDto`, `CaptionPresetDraft`, `PresetFieldSpec` | `captions.py` | пресет подписи с составом и правилами разбора; черновик к сохранению одной записью (ADR-0042) |
 | `SourceRule`, `ReplaceStep`, `CaseMode` | `captions.py` | правило «взять значение из имени файла»: извлечение, цепочка замен, регистр, разделитель; JSON — колонка `caption_preset_fields.source_rule` |
 | `ValueDto` | `captions.py` | значение словаря поля (с привязкой к родительскому значению) |

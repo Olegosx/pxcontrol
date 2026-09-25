@@ -86,6 +86,15 @@
   `channelFull`, что и участники с онлайном (`userbot_community_stats`);
   крайние точки истории (последний пост, создание) —
   `userbot_history_marks`. Все три — фоновый приоритет дорожки.
+- **Настройки сообщества** (ADR-0043, [community-settings.md](community-settings.md)):
+  userbot — снимок одним `GetFullChannelRequest` плюс справочники сервера
+  (конфигурация приложения, стандартные реакции — один раз за запуск),
+  запись по одному изменению методом на ключ (`userbot_community_settings`,
+  `userbot_apply_setting`, `userbot_discussion_candidates`; таблицы —
+  `mtproto_settings`); бот — название, описание, фото и общие права
+  (`bot_community_settings`, `bot_apply_setting`; таблицы — `bot_settings`).
+  Приоритет — «человек ждёт ответа»; «ничего не изменилось» — успех,
+  отказы Telegram — понятным текстом (`REFUSALS`, `rpc_code`).
 - **Bot API** (`aiogram`, по токену на операцию, без постоянного
   соединения) — проверка токена (`getMe`), проверка сообщества и прав
   бота в нём (`getChat`/`getChatMember`) — **фактом, а не приговором**:

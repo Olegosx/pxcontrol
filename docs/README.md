@@ -40,6 +40,7 @@
 | [published.md](03-modules/published.md) | Опубликовано: лента вышедших постов, чтение страницами, состояние обещанных кнопок | 🟢 |
 | [video-processing.md](03-modules/video-processing.md) | Подготовка видео | 🟢 |
 | [captions.md](03-modules/captions.md) | Подписи к постам (пресеты, разбор имени файла) | 🟢 |
+| [community-settings.md](03-modules/community-settings.md) | Настройки сообщества в Telegram | 🟢 |
 | [tasks.md](03-modules/tasks.md) | Задачи сообщества: уборка в ленте и участниках, журнал запусков, расписание (ADR-0038) | 🟢 |
 | [content-sources.md](03-modules/content-sources.md) | Источники и парсинг | 🟡 |
 | [ai-generation.md](03-modules/ai-generation.md) | Генерация контента ИИ | 🟡 |
