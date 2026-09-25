@@ -33,10 +33,12 @@ from pxcontrol.engine.community_settings.model import (
 	SettingChange,
 )
 from pxcontrol.engine.telegram.bot_api import (
+	apply_community_setting,
 	check_community,
 	check_token,
 	edit_markup,
 	get_bot_events,
+	get_community_settings,
 	get_community_stats,
 	send_album,
 	send_media,
@@ -474,6 +476,24 @@ class TelegramGateway:
 			return info
 
 	# --- MTProto (userbot) -------------------------------------------------------
+
+	async def bot_community_settings(
+		self, bot: BotRef, chat_id: str, kind: CommunityKind
+	) -> CommunitySettings:
+		"""Снимок настроек сообщества глазами бота (ADR-0043).
+
+		Raises: см. :func:`bot_api.get_community_settings`.
+		"""
+		async with self._bot_slot(bot, TelegramPriority.INTERACTIVE) as token:
+			return await get_community_settings(token, chat_id, kind)
+
+	async def bot_apply_setting(self, bot: BotRef, chat_id: str, change: SettingChange) -> None:
+		"""Записывает одно изменение настройки через бота (ADR-0043).
+
+		Raises: см. :func:`bot_api.apply_community_setting`.
+		"""
+		async with self._bot_slot(bot, TelegramPriority.INTERACTIVE) as token:
+			await apply_community_setting(token, chat_id, change)
 
 	async def userbot_me(self, account_id: int) -> UserbotProfile:
 		"""Профиль владельца сессии аккаунта: @имя и имя (живой запрос).

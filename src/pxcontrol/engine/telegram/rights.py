@@ -486,6 +486,31 @@ def _bot_allows(source: Any, name: str) -> bool:
 	return getattr(source, name, None) is True
 
 
+def bot_default_permissions(permissions: Any) -> MemberRights:
+	"""Общие права сообщества по ответу Bot API (``chat.permissions``, ADR-0043).
+
+	Тот же разбор слоя, что у снимка прав бота; ``None`` (у каналов
+	общих прав нет) — не запрещено ничего.
+	"""
+	return MemberRights(
+		**{ours: _bot_allows(permissions, theirs) for ours, theirs in _BOT_MEMBER_NAMES.items()}
+	)
+
+
+def bot_permission_flags(allowed: MemberRights) -> dict[str, bool]:
+	"""Поля ``ChatPermissions`` Bot API для записи общих прав (ADR-0043).
+
+	Обратное к :func:`bot_default_permissions`. Стикеры, гифки, игры
+	и встроенные боты у Bot API — одно поле ``can_send_other_messages``:
+	оно разрешено, только если разрешены все четыре (разрешить больше,
+	чем человек оставил, нельзя).
+	"""
+	flags: dict[str, bool] = {}
+	for ours, theirs in _BOT_MEMBER_NAMES.items():
+		flags[theirs] = flags.get(theirs, True) and bool(getattr(allowed, ours))
+	return flags
+
+
 def bot_rights(member: Any, permissions: Any = None) -> ExecutorRights:
 	"""Снимок прав бота по ответу Bot API.
 

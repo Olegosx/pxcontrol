@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
 	from aiogram import Bot
 
+from pxcontrol.engine.community_settings.model import CommunitySettings, SettingChange
 from pxcontrol.engine.errors import EngineError
+from pxcontrol.engine.telegram.bot_settings import BOT_WRITERS, not_modified, read_bot_settings
 from pxcontrol.engine.telegram.markup import ButtonKind, PostMarkup
 from pxcontrol.engine.telegram.poll import PollDraft
 from pxcontrol.engine.telegram.refs import normalize_chat_ref, numeric_chat_id
@@ -768,6 +770,64 @@ async def get_community_stats(token: str, chat_id: str) -> CommunityStatsInfo:
 			online=None,
 			linked_chat_id=str(linked) if linked is not None else None,
 		)
+
+
+async def get_community_settings(
+	token: str, chat_id: str, kind: CommunityKind
+) -> CommunitySettings:
+	"""Снимок настроек сообщества глазами бота — то, что бот меняет (ADR-0043).
+
+	Raises:
+		InvalidBotTokenError: Токен отклонён Telegram.
+		TelegramFloodError: Флуд-лимит.
+		BotNotInCommunityError: Бота в сообществе нет.
+		BotError: Прочие отказы Telegram.
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors(
+			"Бот не видит сообщество — его могли исключить.",
+			"Telegram отклонил запрос настроек сообщества.",
+		),
+	):
+		chat = await bot.get_chat(_chat_id(chat_id))
+		return read_bot_settings(chat, kind)
+
+
+async def apply_community_setting(token: str, chat_id: str, change: SettingChange) -> None:
+	"""Записывает одно изменение настройки через бота (ADR-0043).
+
+	Правка тем же значением — успех: у Bot API это отказ «is not
+	modified», но цель правки достигнута.
+
+	Raises:
+		BotError: Настройку бот не меняет или Telegram отказал (с его
+			описанием причины).
+		InvalidBotTokenError: Токен отклонён Telegram.
+		TelegramFloodError: Флуд-лимит.
+		BotNotInCommunityError: Бота в сообществе нет.
+		ConnectionError: Нет связи с серверами Telegram.
+	"""
+	from aiogram.exceptions import TelegramBadRequest
+
+	writer = BOT_WRITERS.get(change.key)
+	if writer is None:
+		raise BotError(f"Настройку «{change.key}» бот не меняет — нужен userbot-публикатор.")
+	async with (
+		_bot_client(token) as bot,
+		_bot_errors(
+			"Бот не видит сообщество — его могли исключить.",
+			"Telegram отклонил изменение настройки",
+		),
+	):
+		try:
+			await writer(bot, _chat_id(chat_id), change.value)
+		except TelegramBadRequest as exc:
+			if not_modified(exc.message):
+				return
+			raise
+	logger.info("Бот изменил настройку «%s» сообщества %s.", change.key, chat_id)
 
 
 async def check_token(token: str) -> str:
